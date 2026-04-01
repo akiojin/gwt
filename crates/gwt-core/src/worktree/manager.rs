@@ -7,7 +7,7 @@ use tracing::{debug, error, info, instrument, warn};
 use super::{CleanupCandidate, Worktree, WorktreeLocation, WorktreePath, WorktreeStatus};
 use crate::{
     error::{GwtError, Result},
-    git::{get_main_repo_root, is_bare_repository, Branch, Remote, Repository},
+    git::{get_main_repo_root, Branch, Remote, Repository},
     logging::{log_flow_start, log_flow_success},
 };
 
@@ -31,25 +31,13 @@ impl WorktreeManager {
     /// to the main repository root to ensure worktrees are created at the
     /// correct location (e.g., /repo/.worktrees/ instead of /repo/.worktrees/branch/.worktrees/)
     ///
-    /// gwt-spec issue T404-T405: Auto-detects bare repositories and uses Sibling location
     #[instrument(skip_all)]
     pub fn new(repo_root: impl AsRef<Path>) -> Result<Self> {
         let repo_root = repo_root.as_ref().to_path_buf();
         // Resolve to main repo root in case we're inside a worktree
         let main_repo_root = get_main_repo_root(&repo_root);
         let repo = Repository::discover(&main_repo_root)?;
-
-        // gwt-spec issue: Detect bare repository and use appropriate location strategy
-        let location = if is_bare_repository(&main_repo_root) {
-            debug!(
-                category = "worktree",
-                repo = %main_repo_root.display(),
-                "Bare repository detected, using Sibling location"
-            );
-            WorktreeLocation::Sibling
-        } else {
-            WorktreeLocation::Subdir
-        };
+        let location = WorktreeLocation::Subdir;
 
         Ok(Self {
             repo_root: main_repo_root,
@@ -2026,207 +2014,6 @@ mod tests {
         );
     }
 
-    /// Create a bare test repository (gwt-spec issue T406)
-    /// Returns (TempDir, PathBuf, String) where:
-    /// - PathBuf is the bare repo path
-    /// - String is the default branch name (main/master depending on git config)
-    fn create_bare_test_repo() -> (TempDir, PathBuf, String) {
-        let temp = TempDir::new().unwrap();
-        // Create a source repo first
-        let source = temp.path().join("source");
-        std::fs::create_dir_all(&source).unwrap();
-
-        run_git_in(&source, &["init"]);
-        run_git_in(&source, &["config", "user.email", "test@test.com"]);
-        run_git_in(&source, &["config", "user.name", "Test"]);
-        std::fs::write(source.join("test.txt"), "hello").unwrap();
-        run_git_in(&source, &["add", "."]);
-        run_git_in(&source, &["commit", "-m", "initial"]);
-        let base_branch = git_stdout(&source, &["rev-parse", "--abbrev-ref", "HEAD"]);
-
-        // Clone as bare
-        let bare = temp.path().join("repo.git");
-        let output = crate::process::command("git")
-            .args([
-                "clone",
-                "--bare",
-                source.to_str().unwrap(),
-                bare.to_str().unwrap(),
-            ])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "Failed to create bare clone: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        (temp, bare, base_branch)
-    }
-
-    #[test]
-    fn test_bare_repo_uses_sibling_location() {
-        // gwt-spec issue T406: Bare repository should use Sibling location
-        let (_temp, bare_path, _base_branch) = create_bare_test_repo();
-
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-        assert_eq!(manager.location, WorktreeLocation::Sibling);
-    }
-
-    #[test]
-    fn test_bare_repo_worktree_sibling_path() {
-        // gwt-spec issue T406: Worktree should be created as sibling to bare repo
-        let (temp, bare_path, base_branch) = create_bare_test_repo();
-
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-        let wt = manager
-            .create_new_branch("feature/test", Some(&base_branch))
-            .unwrap();
-
-        // Worktree should be at sibling path: /temp/feature/test
-        let expected_path = temp.path().join("feature/test");
-        assert_eq!(
-            canonicalize_or_self(&wt.path),
-            canonicalize_or_self(&expected_path)
-        );
-        assert!(wt.path.exists());
-    }
-
-    #[test]
-    fn test_bare_repo_worktree_creates_subdirectory_structure() {
-        // gwt-spec issue FR-152: Slash-containing branches create subdirectory structure
-        // e.g., "feature/branch-name" creates feature/branch-name/ directory
-        let (temp, bare_path, base_branch) = create_bare_test_repo();
-
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-        let wt = manager
-            .create_new_branch("feature/my-feature", Some(&base_branch))
-            .unwrap();
-
-        // Verify worktree is at /temp/feature/my-feature
-        let expected_path = temp.path().join("feature").join("my-feature");
-        assert_eq!(
-            canonicalize_or_self(&wt.path),
-            canonicalize_or_self(&expected_path)
-        );
-
-        // Verify the feature/ subdirectory exists
-        let feature_dir = temp.path().join("feature");
-        assert!(
-            feature_dir.exists(),
-            "Parent directory 'feature/' should exist at {:?}",
-            feature_dir
-        );
-        assert!(
-            feature_dir.is_dir(),
-            "'feature/' should be a directory, not a file"
-        );
-
-        // Verify the worktree directory exists inside feature/
-        assert!(
-            wt.path.exists(),
-            "Worktree path should exist at {:?}",
-            wt.path
-        );
-        assert!(wt.path.is_dir(), "Worktree should be a directory");
-
-        // Verify worktree is NOT created flat at bare repo level
-        // i.e., /temp/feature-my-feature should NOT exist
-        let flat_path = temp.path().join("feature-my-feature");
-        assert!(
-            !flat_path.exists(),
-            "Worktree should NOT be created flat at {:?}",
-            flat_path
-        );
-
-        // Verify *.git directory still exists at expected location
-        assert!(bare_path.exists(), "Bare repo should still exist");
-    }
-
-    #[test]
-    fn test_bare_repo_create_for_branch_recovers_missing_registered_worktree_path() {
-        let (_temp, bare_path, base_branch) = create_bare_test_repo();
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-
-        let branch = "feature/auto-merge";
-        Branch::create(&bare_path, branch, &base_branch).unwrap();
-
-        let wt_path =
-            WorktreePath::generate_with_location(&bare_path, branch, WorktreeLocation::Sibling);
-        run_git_in(
-            &bare_path,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                wt_path.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-        std::fs::remove_dir_all(&wt_path).unwrap();
-
-        let wt = manager.create_for_branch(branch).unwrap();
-        assert_eq!(wt.branch.as_deref(), Some(branch));
-        assert!(wt.path.exists());
-    }
-
-    #[test]
-    fn test_bare_repo_worktree_bugfix_branch() {
-        // gwt-spec issue FR-152: Test bugfix/ prefix as well
-        let (temp, bare_path, base_branch) = create_bare_test_repo();
-
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-        let wt = manager
-            .create_new_branch("bugfix/fix-123", Some(&base_branch))
-            .unwrap();
-
-        // Verify worktree is at /temp/bugfix/fix-123
-        let expected_path = temp.path().join("bugfix").join("fix-123");
-        assert_eq!(
-            canonicalize_or_self(&wt.path),
-            canonicalize_or_self(&expected_path)
-        );
-
-        // Verify the bugfix/ subdirectory exists
-        let bugfix_dir = temp.path().join("bugfix");
-        assert!(
-            bugfix_dir.exists(),
-            "Parent directory 'bugfix/' should exist"
-        );
-        assert!(bugfix_dir.is_dir(), "'bugfix/' should be a directory");
-    }
-
-    #[test]
-    fn test_bare_repo_create_new_branch_from_remote_like_base_without_tracking_ref() {
-        let (_temp, bare_path, base_branch) = create_bare_test_repo();
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-        let remote_like_base = format!("origin/{}", base_branch);
-
-        let has_remote_tracking_ref = crate::process::git_command()
-            .args([
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/origin/{}", base_branch),
-            ])
-            .current_dir(&bare_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        assert!(
-            !has_remote_tracking_ref,
-            "bare clones should not require refs/remotes/origin/* to resolve base branches"
-        );
-
-        let expected = git_stdout(&bare_path, &["rev-parse", &base_branch]);
-        let wt = manager
-            .create_new_branch("feature/from-origin-base", Some(&remote_like_base))
-            .unwrap();
-        let actual = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
-        assert_eq!(actual, expected);
-    }
-
     #[test]
     fn test_normal_repo_uses_subdir_location() {
         // Non-bare repository should use Subdir location (default)
@@ -2234,115 +2021,6 @@ mod tests {
 
         let manager = WorktreeManager::new(temp.path()).unwrap();
         assert_eq!(manager.location, WorktreeLocation::Subdir);
-    }
-
-    /// Create a bare test repository with an extra branch on the remote that is
-    /// NOT yet fetched into the bare clone.
-    /// Returns (TempDir, PathBuf, String, String) where:
-    /// - PathBuf is the bare repo path
-    /// - first String is the default branch name
-    /// - second String is the extra branch name (exists only on remote, not fetched)
-    fn create_bare_repo_with_remote_branch() -> (TempDir, PathBuf, String, String) {
-        let temp = TempDir::new().unwrap();
-
-        // Create source repo (acts as origin)
-        let source = temp.path().join("source");
-        std::fs::create_dir_all(&source).unwrap();
-        run_git_in(&source, &["init", "--bare"]);
-
-        // Create a helper repo to push commits to the source
-        let helper = temp.path().join("helper");
-        std::fs::create_dir_all(&helper).unwrap();
-        run_git_in(&helper, &["init"]);
-        run_git_in(&helper, &["config", "user.email", "test@test.com"]);
-        run_git_in(&helper, &["config", "user.name", "Test"]);
-        std::fs::write(helper.join("test.txt"), "hello").unwrap();
-        run_git_in(&helper, &["add", "."]);
-        run_git_in(&helper, &["commit", "-m", "initial"]);
-        let base_branch = git_stdout(&helper, &["rev-parse", "--abbrev-ref", "HEAD"]);
-        run_git_in(
-            &helper,
-            &["remote", "add", "origin", source.to_str().unwrap()],
-        );
-        run_git_in(&helper, &["push", "-u", "origin", &base_branch]);
-
-        // Clone as bare — only default branch is in refs/heads/
-        let bare = temp.path().join("repo.git");
-        let output = crate::process::command("git")
-            .args([
-                "clone",
-                "--bare",
-                source.to_str().unwrap(),
-                bare.to_str().unwrap(),
-            ])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "Failed to create bare clone: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        // NOW push a new branch to source (origin) from helper — after the bare clone
-        let mut extra_branch = "feature/unfetched-remote".to_string();
-        if extra_branch == base_branch {
-            extra_branch = "feature/unfetched-remote-2".to_string();
-        }
-
-        run_git_in(&helper, &["checkout", "-b", extra_branch.as_str()]);
-        std::fs::write(helper.join("extra-branch.txt"), "extra branch content").unwrap();
-        run_git_in(&helper, &["add", "."]);
-        run_git_in(&helper, &["commit", "-m", "extra branch commit"]);
-        run_git_in(&helper, &["push", "origin", extra_branch.as_str()]);
-
-        // Verify extra branch is NOT in local refs/heads of the bare repo
-        let has_local = Branch::exists(&bare, &extra_branch).unwrap();
-        assert!(
-            !has_local,
-            "{} should not be in refs/heads/ of bare repo before fetch",
-            extra_branch
-        );
-
-        (temp, bare, base_branch, extra_branch)
-    }
-
-    #[test]
-    fn test_bare_repo_create_for_branch_from_unfetched_remote_branch() {
-        // gwt-spec issue: create_for_branch("origin/<extra-branch>") should succeed
-        // even when that branch is not yet fetched into refs/heads/
-        let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
-
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-        let remote_ref = format!("origin/{}", extra_branch);
-        let wt = manager.create_for_branch(&remote_ref).unwrap();
-
-        assert_eq!(wt.branch.as_deref(), Some(extra_branch.as_str()));
-        assert!(wt.path.exists());
-    }
-
-    #[test]
-    fn test_bare_repo_create_new_branch_from_unfetched_remote_base() {
-        // gwt-spec issue: create_new_branch with base "origin/<extra-branch>" should succeed
-        // even when that branch is not yet fetched into refs/heads/
-        let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
-
-        let manager = WorktreeManager::new(&bare_path).unwrap();
-        let remote_base = format!("origin/{}", extra_branch);
-        let wt = manager
-            .create_new_branch("feature/from-unfetched", Some(&remote_base))
-            .unwrap();
-
-        assert_eq!(wt.branch.as_deref(), Some("feature/from-unfetched"));
-        assert!(wt.path.exists());
-
-        // HEAD should point to the extra branch commit, not the default branch
-        let extra_branch_commit = {
-            // After the create, extra branch should now be fetched
-            git_stdout(&bare_path, &["rev-parse", &extra_branch])
-        };
-        let wt_head = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
-        assert_eq!(wt_head, extra_branch_commit);
     }
 
     #[test]

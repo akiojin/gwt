@@ -539,16 +539,8 @@ pub fn update(state: &mut BranchListState, msg: BranchesMessage) {
 
 /// Load branches from the repository at `repo_root`.
 pub fn load_branches(repo_root: &Path) -> Vec<BranchItem> {
-    use gwt_core::git::{detect_repo_type, RepoType};
-
-    let repo_type = detect_repo_type(repo_root);
     let local = Branch::list(repo_root).unwrap_or_default();
-
-    // Bare repos lack refs/remotes/; use git ls-remote instead.
-    let remote = match repo_type {
-        RepoType::Bare => Branch::list_remote_from_origin(repo_root).unwrap_or_default(),
-        _ => Branch::list_remote(repo_root).unwrap_or_default(),
-    };
+    let remote = Branch::list_remote(repo_root).unwrap_or_default();
 
     // Get tool usage map for agent info.
     let tool_map = gwt_core::config::get_last_tool_usage_map(repo_root);

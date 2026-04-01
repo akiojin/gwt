@@ -3,7 +3,6 @@
 //! App settings are stored in TOML, centered on `~/.gwt/config.toml`.
 
 mod agent_config;
-mod bare_project;
 mod claude_hook_events;
 mod claude_hooks;
 mod claude_plugins;
@@ -20,7 +19,6 @@ pub mod tools;
 mod ts_session;
 
 pub use agent_config::{AgentConfig, ClaudeAgentConfig, ClaudeAgentProvider, ClaudeGlmConfig};
-pub use bare_project::BareProjectConfig;
 pub use claude_hook_events::process_claude_hook_event;
 pub use claude_hooks::is_gwt_hooks_registered;
 pub use claude_plugins::{

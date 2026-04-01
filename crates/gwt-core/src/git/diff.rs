@@ -7,7 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{is_bare_repository, Repository};
+use super::Repository;
 use crate::error::{GwtError, Result};
 
 const DIFF_LINE_LIMIT: usize = 1000;
@@ -673,8 +673,8 @@ pub fn get_git_change_summary(
             details: e.to_string(),
         })?;
 
-    // Bare repositories require a worktree for stash operations. Retry with any existing worktree.
-    if !stash_output.status.success() && is_bare_repository(repo_path) {
+    // If stash list fails, retry with any existing worktree path.
+    if !stash_output.status.success() {
         if let Some(wt_path) = find_any_worktree_path(repo_path) {
             stash_exec_path = wt_path;
             if let Ok(o2) = crate::process::command("git")

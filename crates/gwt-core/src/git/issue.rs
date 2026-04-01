@@ -14,7 +14,7 @@ use std::{
 use super::{
     gh_cli::{gh_command, is_gh_available, run_gh_output_with_repair},
     remote::Remote,
-    repository::{find_bare_repo_in_dir, is_git_repo},
+    repository::is_git_repo,
 };
 
 // `gh issue list --json comments` returns at most this many comments per issue.
@@ -653,13 +653,11 @@ fn fetch_issue_comments_total_count(
 }
 
 pub fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
-    let candidate_repo = if is_git_repo(repo_path) {
-        Some(repo_path.to_path_buf())
-    } else {
-        find_bare_repo_in_dir(repo_path)
-    }?;
+    if !is_git_repo(repo_path) {
+        return None;
+    }
 
-    let remote = Remote::default(&candidate_repo).ok().flatten()?;
+    let remote = Remote::default(repo_path).ok().flatten()?;
     parse_repo_slug_from_remote_url(&remote.fetch_url)
         .or_else(|| parse_repo_slug_from_remote_url(&remote.push_url))
 }

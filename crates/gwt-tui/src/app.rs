@@ -981,16 +981,6 @@ pub fn update(model: &mut Model, msg: Message) {
             model.clone_wizard = None;
             model.overlay_mode = OverlayMode::None;
         }
-        Message::OpenMigrationDialog { source, target } => {
-            model.migration_dialog = Some(screens::migration_dialog::MigrationDialogState::new(
-                &source, &target,
-            ));
-            model.overlay_mode = OverlayMode::MigrationDialog;
-        }
-        Message::CloseMigrationDialog => {
-            model.migration_dialog = None;
-            model.overlay_mode = OverlayMode::None;
-        }
         Message::OpenSpecKitWizard => {
             model.speckit_wizard.open();
             model.overlay_mode = OverlayMode::SpecKitWizard;
@@ -1201,11 +1191,6 @@ pub fn view(model: &Model, frame: &mut Frame) {
         // Clone wizard
         if let Some(ref clone_wiz) = model.clone_wizard {
             screens::clone_wizard::render_clone_wizard(clone_wiz, buf, area);
-        }
-
-        // Migration dialog
-        if let Some(ref migration) = model.migration_dialog {
-            screens::migration_dialog::render_migration_dialog(migration, buf, area);
         }
 
         // SpecKit wizard

@@ -67,13 +67,6 @@ pub enum Message {
     OpenCloneWizard,
     /// Close the clone wizard
     CloseCloneWizard,
-    /// Open the migration dialog
-    OpenMigrationDialog {
-        source: String,
-        target: String,
-    },
-    /// Close the migration dialog
-    CloseMigrationDialog,
     /// Open the speckit wizard
     OpenSpecKitWizard,
     /// Close the speckit wizard
@@ -133,11 +126,6 @@ mod tests {
             Message::DismissError,
             Message::OpenCloneWizard,
             Message::CloseCloneWizard,
-            Message::OpenMigrationDialog {
-                source: "src".into(),
-                target: "tgt".into(),
-            },
-            Message::CloseMigrationDialog,
             Message::OpenSpecKitWizard,
             Message::CloseSpecKitWizard,
             Message::ConfirmAccepted,

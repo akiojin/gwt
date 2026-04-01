@@ -7,7 +7,6 @@ pub mod confirm;
 pub mod error;
 pub mod issues;
 pub mod logs;
-pub mod migration_dialog;
 pub mod settings;
 pub mod speckit_wizard;
 pub mod specs;

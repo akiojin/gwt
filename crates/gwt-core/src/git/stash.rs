@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{is_bare_repository, Repository};
+use super::Repository;
 use crate::error::{GwtError, Result};
 
 /// A stash entry with metadata
@@ -36,9 +36,8 @@ pub fn get_stash_list(repo_path: &Path) -> Result<Vec<StashEntry>> {
             details: e.to_string(),
         })?;
 
-    // Bare repositories require a worktree for stash operations. If we were given a bare repo,
-    // retry with any existing worktree to list stashes correctly.
-    if !output.status.success() && is_bare_repository(repo_path) {
+    // If stash list fails, retry with any existing worktree path.
+    if !output.status.success() {
         if let Some(wt_path) = find_any_worktree_path(repo_path) {
             exec_path = wt_path;
             output = crate::process::command("git")

@@ -1,27 +1,23 @@
-//! Worktree location types (gwt-spec issue)
+//! Worktree location types
 
 use serde::{Deserialize, Serialize};
 
-/// Worktree placement strategy (gwt-spec issue)
+/// Worktree placement strategy
 ///
 /// Determines where worktrees are created relative to the repository.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorktreeLocation {
-    /// Traditional: place worktrees under `.worktrees/` subdirectory
-    /// Default for backward compatibility
+    /// Place worktrees under `.worktrees/` subdirectory
     #[default]
     Subdir,
-    /// Bare-based: place worktrees as siblings to the bare repository
-    Sibling,
 }
 
 impl WorktreeLocation {
     /// Get a human-readable label
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Subdir => ".worktrees/ (traditional)",
-            Self::Sibling => "sibling (bare-based)",
+            Self::Subdir => ".worktrees/ (default)",
         }
     }
 }
@@ -40,9 +36,5 @@ mod tests {
         let subdir = WorktreeLocation::Subdir;
         let json = serde_json::to_string(&subdir).unwrap();
         assert_eq!(json, "\"subdir\"");
-
-        let sibling = WorktreeLocation::Sibling;
-        let json = serde_json::to_string(&sibling).unwrap();
-        assert_eq!(json, "\"sibling\"");
     }
 }

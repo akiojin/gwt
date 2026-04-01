@@ -1240,18 +1240,10 @@ fn migrate_stash(source: &Path, _target: &Path) -> Result<(), MigrationError> {
 }
 
 /// Create project config file (gwt-spec issue T905, FR-219)
-fn create_project_config(config: &MigrationConfig) -> Result<(), MigrationError> {
-    crate::config::BareProjectConfig {
-        bare_repo_name: config.bare_repo_name.clone(),
-        remote_url: None,
-        location: "sibling".to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-    }
-    .save(&config.target_root)
-    .map_err(|e| MigrationError::IoError {
-        path: config.target_root.join(".gwt").join("project.toml"),
-        reason: format!("Failed to write project config: {}", e),
-    })
+/// NOTE: BareProjectConfig was removed in SPEC-1787 (Bare abolition).
+/// This function is now a no-op but kept to avoid breaking the migration pipeline.
+fn create_project_config(_config: &MigrationConfig) -> Result<(), MigrationError> {
+    Ok(())
 }
 
 /// Preserve tracking relationships (gwt-spec issue T907, FR-221)

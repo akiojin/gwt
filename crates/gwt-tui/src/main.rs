@@ -20,18 +20,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Resolve the effective repository root from a given directory.
 ///
-/// - If `cwd` is already a git repo (Normal / Worktree / Bare), return it as-is.
-/// - If `cwd` is NonRepo or Empty, look for a `*.git` bare repo inside it
-///   via [`gwt_core::git::find_bare_repo_in_dir`] and return it if found.
-/// - Falls back to `cwd` when no repository can be detected.
+/// - If `cwd` is already a git repo (Normal / Worktree), return it as-is.
+/// - Falls back to `cwd` when no repository can be detected (NonRepo / Empty).
 fn resolve_repo_root(cwd: &std::path::Path) -> std::path::PathBuf {
-    use gwt_core::git::{detect_repo_type, find_bare_repo_in_dir, RepoType};
+    use gwt_core::git::{detect_repo_type, RepoType};
 
     match detect_repo_type(cwd) {
-        RepoType::Normal | RepoType::Worktree | RepoType::Bare => cwd.to_path_buf(),
-        RepoType::NonRepo | RepoType::Empty => {
-            find_bare_repo_in_dir(cwd).unwrap_or_else(|| cwd.to_path_buf())
-        }
+        RepoType::Normal | RepoType::Worktree => cwd.to_path_buf(),
+        RepoType::NonRepo | RepoType::Empty => cwd.to_path_buf(),
     }
 }
 
@@ -51,17 +47,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_repo_root_finds_bare_repo_in_parent() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let bare = temp.path().join("project.git");
-        std::process::Command::new("git")
-            .args(["init", "--bare", bare.to_str().unwrap()])
-            .output()
-            .unwrap();
-        assert_eq!(resolve_repo_root(temp.path()), bare);
-    }
-
-    #[test]
     fn resolve_repo_root_falls_back_to_cwd_when_no_repo() {
         let temp = tempfile::TempDir::new().unwrap();
         std::fs::write(temp.path().join("dummy"), "x").unwrap();
@@ -69,13 +54,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_repo_root_returns_bare_directly() {
+    fn resolve_repo_root_returns_cwd_for_empty_dir() {
         let temp = tempfile::TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        assert_eq!(resolve_repo_root(temp.path()), temp.path());
+        assert_eq!(resolve_repo_root(temp.path()), temp.path().to_path_buf());
     }
 }

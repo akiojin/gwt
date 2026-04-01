@@ -13,7 +13,6 @@ use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::error::ErrorQueue;
 use crate::screens::issues::IssuePanelState;
-use crate::screens::migration_dialog::MigrationDialogState;
 use crate::screens::speckit_wizard::SpecKitState;
 use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
@@ -156,7 +155,6 @@ pub enum OverlayMode {
     Confirm,
     Progress,
     CloneWizard,
-    MigrationDialog,
     SpecKitWizard,
 }
 
@@ -213,7 +211,6 @@ pub struct Model {
     pub confirm: Option<ConfirmState>,
     pub wizard: Option<WizardState>,
     pub clone_wizard: Option<CloneWizardState>,
-    pub migration_dialog: Option<MigrationDialogState>,
     pub speckit_wizard: SpecKitState,
     /// Pending Codex launch config waiting for hooks confirmation (SPEC-1786)
     pub pending_codex_launch: Option<crate::screens::wizard::WizardLaunchConfig>,
@@ -259,7 +256,6 @@ impl Model {
             confirm: None,
             wizard: None,
             clone_wizard: None,
-            migration_dialog: None,
             speckit_wizard: SpecKitState::new(),
             pending_codex_launch: None,
             branch_list_rx: None,
