@@ -2555,24 +2555,21 @@ mod tests {
     #[test]
     fn next_step_from_spec_quick_start_choose_different_goes_to_agent_select() {
         let history = vec![spec_quick_start_entry()];
-        let mut state =
-            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, history);
+        let mut state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, history);
         state.quick_start_index = state.quick_start_entries.len() * 2;
         assert_eq!(state.next_step(), WizardStep::AgentSelect);
     }
 
     #[test]
     fn next_step_from_spec_version_select_skips_execution_mode() {
-        let mut state =
-            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        let mut state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
         state.step = WizardStep::VersionSelect;
         assert_eq!(state.next_step(), WizardStep::SkipPermissions);
     }
 
     #[test]
     fn next_step_from_spec_collaboration_modes_skips_execution_mode() {
-        let mut state =
-            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        let mut state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
         state.step = WizardStep::CollaborationModes;
         assert_eq!(state.next_step(), WizardStep::SkipPermissions);
     }
@@ -2586,24 +2583,21 @@ mod tests {
     #[test]
     fn prev_step_from_spec_agent_select_with_quick_start_returns_quick_start() {
         let history = vec![spec_quick_start_entry()];
-        let mut state =
-            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, history);
+        let mut state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, history);
         state.step = WizardStep::AgentSelect;
         assert_eq!(state.prev_step(), Some(WizardStep::QuickStart));
     }
 
     #[test]
     fn prev_step_from_spec_skip_permissions_goes_to_version_select() {
-        let mut state =
-            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        let mut state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
         state.step = WizardStep::SkipPermissions;
         assert_eq!(state.prev_step(), Some(WizardStep::VersionSelect));
     }
 
     #[test]
     fn build_launch_config_from_spec() {
-        let mut state =
-            WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
+        let mut state = WizardState::open_for_spec("SPEC-100", "feature/SPEC-100", false, vec![]);
         state.step = WizardStep::SkipPermissions;
         let config = state.build_launch_config().unwrap();
         assert_eq!(config.branch_name, "feature/SPEC-100");
