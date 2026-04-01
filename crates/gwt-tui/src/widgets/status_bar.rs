@@ -2,7 +2,16 @@
 
 use ratatui::prelude::*;
 
-use crate::model::{ActiveLayer, ManagementTab, Model};
+use crate::model::{ActiveLayer, Model, SessionStatus, SessionTabType};
+
+/// Count running agent sessions.
+fn running_session_count(model: &Model) -> usize {
+    model
+        .session_tabs
+        .iter()
+        .filter(|t| t.tab_type == SessionTabType::Agent && matches!(t.status, SessionStatus::Running))
+        .count()
+}
 
 /// Render the status bar.
 pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
@@ -30,7 +39,12 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
         }
         ActiveLayer::Management => {
             let tab_name = model.management_tab.label();
-            format!(" {tab_name}")
+            let running = running_session_count(model);
+            if running > 0 {
+                format!(" {tab_name} | {running} running")
+            } else {
+                format!(" {tab_name}")
+            }
         }
     };
 
@@ -53,8 +67,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Model;
-    use ratatui::prelude::*;
+    use crate::model::{ManagementTab, Model};
     use std::path::PathBuf;
 
     fn test_model() -> Model {
@@ -139,6 +152,54 @@ mod tests {
         let text = buf_row_text(&buf, 0, 120);
         assert!(text.contains("Agent #1"), "Expected tab name in: {text:?}");
         assert!(text.contains("feature/test"), "Expected branch in: {text:?}");
+    }
+
+    #[test]
+    fn render_management_with_running_agents() {
+        let mut model = test_model();
+        use crate::model::{SessionTab, SessionTabType, SessionStatus};
+        use gwt_core::terminal::AgentColor;
+        model.session_tabs.push(SessionTab {
+            pane_id: "p1".into(),
+            name: "Agent #1".into(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Blue,
+            status: SessionStatus::Running,
+            branch: Some("feature/test".into()),
+            spec_id: None,
+        });
+        model.session_tabs.push(SessionTab {
+            pane_id: "p2".into(),
+            name: "Agent #2".into(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: None,
+            spec_id: None,
+        });
+        // Stay in management layer
+        model.active_layer = ActiveLayer::Management;
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        assert!(
+            text.contains("2 running"),
+            "Expected '2 running' in: {text:?}"
+        );
+    }
+
+    #[test]
+    fn render_management_no_running_agents() {
+        let model = test_model();
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text = buf_row_text(&buf, 0, 120);
+        assert!(
+            !text.contains("running"),
+            "Expected no 'running' in: {text:?}"
+        );
     }
 
     #[test]
