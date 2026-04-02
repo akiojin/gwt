@@ -182,6 +182,14 @@ pub struct BranchListUpdate {
     pub branches: Vec<String>,
 }
 
+#[derive(Debug)]
+pub struct ManagementDataUpdate {
+    pub issues: Vec<crate::screens::issues::IssueItem>,
+    pub specs: Vec<crate::screens::specs::SpecItem>,
+    pub versions: Vec<crate::screens::versions::VersionTag>,
+    pub logs: Vec<crate::screens::logs::LogEntry>,
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -231,6 +239,7 @@ pub struct Model {
 
     // Background channels (for async operations)
     pub branch_list_rx: Option<Receiver<BranchListUpdate>>,
+    pub management_data_rx: Option<Receiver<ManagementDataUpdate>>,
 
     // App lifecycle
     pub should_quit: bool,
@@ -284,6 +293,7 @@ impl Model {
             speckit_wizard: SpecKitState::new(),
             pending_codex_launch: None,
             branch_list_rx: None,
+            management_data_rx: None,
             should_quit: false,
             repo_root,
             terminal_rows: 24,
@@ -495,6 +505,14 @@ impl Model {
                 // Phase 2: apply branch list data to screens
             }
         }
+        if let Some(ref rx) = self.management_data_rx {
+            while let Ok(update) = rx.try_recv() {
+                self.issues_state.issues = update.issues;
+                self.specs_state.specs = update.specs;
+                self.versions_state.tags = update.versions;
+                self.logs_state.entries = update.logs;
+            }
+        }
 
         let mut session_status_updates = Vec::new();
         for pane in self.pane_manager.panes_mut() {
@@ -539,6 +557,8 @@ impl Model {
     pub fn sync_branch_session_counts(&mut self) {
         for branch in &mut self.branches_state.branches {
             branch.session_count = 0;
+            branch.running_session_count = 0;
+            branch.stopped_session_count = 0;
         }
 
         for tab in &self.session_tabs {
@@ -549,6 +569,12 @@ impl Model {
             for branch in &mut self.branches_state.branches {
                 if normalize_branch_name(&branch.name) == normalized_tab {
                     branch.session_count += 1;
+                    match tab.status {
+                        SessionStatus::Running => branch.running_session_count += 1,
+                        SessionStatus::Completed(_) | SessionStatus::Error(_) => {
+                            branch.stopped_session_count += 1
+                        }
+                    }
                 }
             }
         }
@@ -944,5 +970,108 @@ mod tests {
         assert_eq!(model.issues_state.issues.len(), 1);
         assert_eq!(model.issues_state.issues[0].number, 42);
         assert_eq!(model.issues_state.issues[0].title, "GitHub issue");
+    }
+
+    #[test]
+    fn sync_branch_session_counts_tracks_running_and_stopped_sessions() {
+        let mut model = test_model();
+        model.branches_state.branches = vec![crate::screens::branches::BranchItem {
+            name: "feature/demo".to_string(),
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/tmp/feature-demo".to_string()),
+            session_count: 0,
+            running_session_count: 0,
+            stopped_session_count: 0,
+            has_changes: false,
+            has_unpushed: false,
+            is_protected: false,
+            last_tool_usage: None,
+            last_tool_id: None,
+            pr_title: None,
+            pr_number: None,
+            pr_state: None,
+            safety_status: crate::screens::branches::SafetyStatus::Safe,
+            is_remote: false,
+            last_commit_timestamp: None,
+        }];
+        model.add_session(SessionTab {
+            pane_id: "pane-running".to_string(),
+            name: "running".to_string(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Green,
+            status: SessionStatus::Running,
+            branch: Some("feature/demo".to_string()),
+            spec_id: None,
+        });
+        model.add_session(SessionTab {
+            pane_id: "pane-done".to_string(),
+            name: "done".to_string(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Green,
+            status: SessionStatus::Completed(0),
+            branch: Some("feature/demo".to_string()),
+            spec_id: None,
+        });
+
+        model.sync_branch_session_counts();
+
+        let branch = &model.branches_state.branches[0];
+        assert_eq!(branch.session_count, 2);
+        assert_eq!(branch.running_session_count, 1);
+        assert_eq!(branch.stopped_session_count, 1);
+    }
+
+    #[test]
+    fn apply_background_updates_applies_management_data_preload() {
+        let mut model = test_model();
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.management_data_rx = Some(rx);
+
+        tx.send(ManagementDataUpdate {
+            issues: vec![crate::screens::issues::IssueItem {
+                number: 7,
+                title: "Loaded issue".to_string(),
+                state: "OPEN".to_string(),
+                labels: vec!["bug".to_string()],
+            }],
+            specs: vec![crate::screens::specs::SpecItem {
+                dir_name: "SPEC-7".to_string(),
+                id: "7".to_string(),
+                title: "Loaded spec".to_string(),
+                status: "open".to_string(),
+                phase: "draft".to_string(),
+                branches: vec![],
+            }],
+            versions: vec![crate::screens::versions::VersionTag {
+                id: "v1".to_string(),
+                label: "v1.0.0".to_string(),
+                range_from: None,
+                range_to: "v1.0.0".to_string(),
+                commit_count: 1,
+                summary_preview: "initial".to_string(),
+            }],
+            logs: vec![crate::screens::logs::LogEntry {
+                timestamp: "2026-04-02T00:00:00Z".to_string(),
+                level: "INFO".to_string(),
+                message: "loaded".to_string(),
+                target: "gwt".to_string(),
+                category: Some("ui".to_string()),
+                event: Some("preload".to_string()),
+                result: Some("success".to_string()),
+                workspace: Some("default".to_string()),
+                error_code: None,
+                error_detail: None,
+                extra: std::collections::BTreeMap::new(),
+            }],
+        })
+        .unwrap();
+
+        model.apply_background_updates();
+
+        assert_eq!(model.issues_state.issues.len(), 1);
+        assert_eq!(model.specs_state.specs.len(), 1);
+        assert_eq!(model.versions_state.tags.len(), 1);
+        assert_eq!(model.logs_state.entries.len(), 1);
     }
 }

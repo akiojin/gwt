@@ -3,6 +3,7 @@
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -173,6 +174,25 @@ fn open_branch_session_selector(
         ),
     );
     model.overlay_mode = OverlayMode::BranchSessionSelector;
+}
+
+fn spawn_management_data_preload(
+    repo_root: PathBuf,
+) -> mpsc::Receiver<crate::model::ManagementDataUpdate> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let issues = crate::screens::issues::load_issues(&repo_root);
+        let specs = crate::screens::specs::load_specs(&repo_root);
+        let versions = crate::screens::versions::load_tags(&repo_root);
+        let logs = crate::screens::logs::load_log_entries(&repo_root);
+        let _ = tx.send(crate::model::ManagementDataUpdate {
+            issues,
+            specs,
+            versions,
+            logs,
+        });
+    });
+    rx
 }
 
 fn wants_mouse_capture(model: &Model) -> bool {
@@ -2411,17 +2431,18 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             result = "start",
             workspace = "default",
         );
-        model.load_all_data();
+        model.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
+        model.settings_state.load_settings();
+        model.sync_branch_session_counts();
+        model.management_data_rx = Some(spawn_management_data_preload(repo_root.clone()));
         tracing::info!(
             message = "flow_success",
             category = "ui",
             event = "load_management_data",
             result = "success",
             workspace = "default",
-            logs = model.logs_state.entries.len(),
-            specs = model.specs_state.specs.len(),
-            issues = model.issues_state.issues.len(),
-            versions = model.versions_state.tags.len(),
+            branches = model.branches_state.branches.len(),
+            background_preload = true,
         );
         // Install develop branch protection hook if not already installed
         if !gwt_core::git::hooks::is_develop_guard_installed(&repo_root) {
@@ -2843,7 +2864,10 @@ mod tests {
     #[test]
     fn update_switch_management_tab() {
         let mut m = test_model();
-        update(&mut m, Message::SwitchManagementTab(ManagementTab::Profiles));
+        update(
+            &mut m,
+            Message::SwitchManagementTab(ManagementTab::Profiles),
+        );
         assert_eq!(m.management_tab, ManagementTab::Profiles);
         assert_eq!(m.active_layer, ActiveLayer::Management);
         assert_eq!(
@@ -2936,6 +2960,8 @@ mod tests {
             has_worktree: true,
             worktree_path: Some("/tmp/feature-demo".into()),
             has_changes: false,
+            running_session_count: 0,
+            stopped_session_count: 0,
             has_unpushed: false,
             is_protected: false,
             last_tool_usage: None,
@@ -2967,6 +2993,8 @@ mod tests {
             has_worktree: true,
             worktree_path: Some("/tmp/feature-demo".into()),
             has_changes: false,
+            running_session_count: 0,
+            stopped_session_count: 0,
             has_unpushed: false,
             is_protected: false,
             last_tool_usage: None,
@@ -3002,6 +3030,8 @@ mod tests {
             has_worktree: true,
             worktree_path: Some("/tmp/feature-demo".into()),
             has_changes: false,
+            running_session_count: 0,
+            stopped_session_count: 0,
             has_unpushed: false,
             is_protected: false,
             last_tool_usage: None,

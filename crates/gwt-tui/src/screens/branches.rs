@@ -58,6 +58,8 @@ pub struct BranchItem {
     pub has_worktree: bool,
     pub worktree_path: Option<String>,
     pub session_count: usize,
+    pub running_session_count: usize,
+    pub stopped_session_count: usize,
     pub has_changes: bool,
     pub has_unpushed: bool,
     pub is_protected: bool,
@@ -88,6 +90,8 @@ impl BranchItem {
             has_worktree: false,
             worktree_path: None,
             session_count: 0,
+            running_session_count: 0,
+            stopped_session_count: 0,
             has_changes: false,
             has_unpushed: branch.ahead > 0,
             is_protected,
@@ -776,6 +780,19 @@ fn render_branch_row(
         }),
     ));
 
+    if branch.running_session_count > 0 {
+        spans.push(Span::styled(
+            format!(" ●{}", branch.running_session_count),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    if branch.stopped_session_count > 0 {
+        spans.push(Span::styled(
+            format!(" ○{}", branch.stopped_session_count),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
     // PR info
     if let (Some(number), Some(ref pr_state)) = (branch.pr_number, &branch.pr_state) {
         let pr_color = match pr_state.as_str() {
@@ -854,6 +871,8 @@ mod tests {
             has_worktree: false,
             worktree_path: None,
             session_count: 0,
+            running_session_count: 0,
+            stopped_session_count: 0,
             has_changes: false,
             has_unpushed: false,
             is_protected: is_protected_branch(name, false),
@@ -1299,6 +1318,8 @@ mod tests {
         let mut state = BranchListState::new();
         let mut branch = make_branch("feature/demo", false);
         branch.session_count = 2;
+        branch.running_session_count = 1;
+        branch.stopped_session_count = 1;
         state.branches = vec![branch];
 
         let backend = TestBackend::new(80, 10);
@@ -1323,6 +1344,8 @@ mod tests {
             row_text.contains("s:2"),
             "expected session count in row, got: {row_text:?}"
         );
+        assert!(row_text.contains("●1"), "expected running summary in row");
+        assert!(row_text.contains("○1"), "expected stopped summary in row");
     }
 
     #[test]

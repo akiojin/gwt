@@ -63,6 +63,8 @@
 - Focused session can be maximized and restored
 - Maximize mode continues to use tab switching for other sessions
 - Management open/close preserves the last chosen session layout mode
+- Branch rows now show running/stopped session summaries in addition to total session count
+- Startup now loads `Issues / SPECs / Versions / Logs` through a native background thread while keeping `Branches` available immediately
 
 ### Next
 
