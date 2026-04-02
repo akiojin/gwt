@@ -250,7 +250,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-078: Versions tab — latest 10 semantic version tags with range label, commit count, changelog-derived summary preview, and Markdown detail view
 - FR-079: Session history saving (ToolSessionEntry) on agent/shell spawn
 - FR-083: Quit confirmation dialog when running agents exist (Ctrl+C×2)
-- FR-081: SPECs/Issues detail view — Enter to view `spec.md` or issue guidance, Esc to return, with Markdown rendering for headings/lists/code fences
+- FR-081: SPECs/Issues detail view — Enter to view `spec.md` or issue guidance, Esc to return, with Markdown rendering for headings/lists/code fences/tables
 - FR-082: Status bar shows running agent session count in management layer
 
 ### npm Distribution
