@@ -152,7 +152,7 @@ fn render_table_block(rows: &[&str], _start: usize) -> Vec<Line<'static>> {
         }
         for (j, cell) in cells.iter().enumerate() {
             if j < col_widths.len() {
-                col_widths[j] = col_widths[j].max(cell.len());
+                col_widths[j] = col_widths[j].max(strip_inline_markers(cell).len());
             }
         }
     }
@@ -196,11 +196,14 @@ fn render_table_block(rows: &[&str], _start: usize) -> Vec<Line<'static>> {
             if j > 0 {
                 spans.push(Span::styled(" │ ", sep_style));
             }
-            let text = cells.get(j).map(|s| s.as_str()).unwrap_or("");
-            spans.push(Span::styled(
-                format!("{:<width$}", text, width = w),
-                cell_style,
-            ));
+            let raw = cells.get(j).map(|s| s.as_str()).unwrap_or("");
+            let display_len = strip_inline_markers(raw).len();
+            let padding = w.saturating_sub(display_len);
+            let mut cell_spans = inline_spans(raw, cell_style);
+            if padding > 0 {
+                cell_spans.push(Span::styled(" ".repeat(padding), cell_style));
+            }
+            spans.extend(cell_spans);
         }
         lines.push(Line::from(spans));
     }
@@ -210,27 +213,79 @@ fn render_table_block(rows: &[&str], _start: usize) -> Vec<Line<'static>> {
 
 fn inline_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    let mut remainder = text;
-    let mut in_code = false;
+    let mut remainder: &str = text;
 
-    while let Some(idx) = remainder.find('`') {
-        let (head, tail) = remainder.split_at(idx);
-        if !head.is_empty() {
-            spans.push(Span::styled(
-                head.to_string(),
-                style_for_segment(base_style, in_code),
-            ));
+    while !remainder.is_empty() {
+        if remainder.starts_with("**") {
+            // Bold: find closing **
+            if let Some(end) = remainder[2..].find("**") {
+                let content = &remainder[2..2 + end];
+                spans.push(Span::styled(
+                    content.to_string(),
+                    base_style.add_modifier(Modifier::BOLD),
+                ));
+                remainder = &remainder[2 + end + 2..];
+                continue;
+            }
         }
 
-        remainder = &tail[1..];
-        in_code = !in_code;
-    }
+        if remainder.starts_with('`') {
+            // Inline code: find closing `
+            if let Some(end) = remainder[1..].find('`') {
+                let content = &remainder[1..1 + end];
+                spans.push(Span::styled(
+                    content.to_string(),
+                    base_style
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::Rgb(40, 40, 40)),
+                ));
+                remainder = &remainder[1 + end + 1..];
+                continue;
+            }
+        }
 
-    if !remainder.is_empty() {
+        if remainder.starts_with('*') && !remainder.starts_with("**") {
+            // Italic: find closing * (not preceded by another *)
+            if let Some(end) = remainder[1..].find('*') {
+                if end > 0 {
+                    let content = &remainder[1..1 + end];
+                    spans.push(Span::styled(
+                        content.to_string(),
+                        base_style.add_modifier(Modifier::ITALIC),
+                    ));
+                    remainder = &remainder[1 + end + 1..];
+                    continue;
+                }
+            }
+        }
+
+        // Plain text: consume until next openable marker or end.
+        // A marker is "openable" only if its closing pair exists.
+        let mut end = remainder.len();
+        for pos in 1..remainder.len() {
+            let tail = &remainder[pos..];
+            if tail.starts_with("**") && tail[2..].contains("**") {
+                end = pos;
+                break;
+            }
+            if tail.starts_with('`') && tail[1..].contains('`') {
+                end = pos;
+                break;
+            }
+            if tail.starts_with('*')
+                && !tail.starts_with("**")
+                && tail[1..].contains('*')
+            {
+                end = pos;
+                break;
+            }
+        }
         spans.push(Span::styled(
-            remainder.to_string(),
-            style_for_segment(base_style, in_code),
+            remainder[..end].to_string(),
+            base_style,
         ));
+        remainder = &remainder[end..];
     }
 
     if spans.is_empty() {
@@ -240,15 +295,42 @@ fn inline_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
     spans
 }
 
-fn style_for_segment(base_style: Style, in_code: bool) -> Style {
-    if in_code {
-        base_style
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-            .bg(Color::Rgb(40, 40, 40))
-    } else {
-        base_style
+/// Strip inline markers (`**`, `*`, `` ` ``) to get display-width text.
+fn strip_inline_markers(text: &str) -> String {
+    let mut result = String::new();
+    let mut remainder: &str = text;
+
+    while !remainder.is_empty() {
+        if remainder.starts_with("**") {
+            if let Some(end) = remainder[2..].find("**") {
+                result.push_str(&remainder[2..2 + end]);
+                remainder = &remainder[2 + end + 2..];
+                continue;
+            }
+        }
+        if remainder.starts_with('`') {
+            if let Some(end) = remainder[1..].find('`') {
+                result.push_str(&remainder[1..1 + end]);
+                remainder = &remainder[1 + end + 1..];
+                continue;
+            }
+        }
+        if remainder.starts_with('*') && !remainder.starts_with("**") {
+            if let Some(end) = remainder[1..].find('*') {
+                if end > 0 {
+                    result.push_str(&remainder[1..1 + end]);
+                    remainder = &remainder[1 + end + 1..];
+                    continue;
+                }
+            }
+        }
+        // Consume one char (handles unclosed markers as literals)
+        let ch_len = remainder.chars().next().map_or(0, |c| c.len_utf8());
+        result.push_str(&remainder[..ch_len]);
+        remainder = &remainder[ch_len..];
     }
+
+    result
 }
 
 fn is_thematic_break(line: &str) -> bool {
@@ -327,5 +409,70 @@ mod tests {
     fn parse_table_cells_splits_correctly() {
         let cells = super::parse_table_cells("| Name | Age | City |");
         assert_eq!(cells, vec!["Name", "Age", "City"]);
+    }
+
+    #[test]
+    fn inline_spans_bold() {
+        let spans = super::inline_spans("hello **world**", Style::default());
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "hello ");
+        assert_eq!(spans[1].content.as_ref(), "world");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn inline_spans_italic() {
+        let spans = super::inline_spans("hello *world*", Style::default());
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "hello ");
+        assert_eq!(spans[1].content.as_ref(), "world");
+        assert!(spans[1].style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn inline_spans_mixed() {
+        let spans = super::inline_spans("**bold** and `code`", Style::default());
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), "bold");
+        assert_eq!(spans[1].content.as_ref(), " and ");
+        assert_eq!(spans[2].content.as_ref(), "code");
+    }
+
+    #[test]
+    fn inline_spans_unclosed_bold() {
+        let spans = super::inline_spans("**unclosed", Style::default());
+        // No closing ** → treated as literal
+        assert_eq!(spans[0].content.as_ref(), "**unclosed");
+    }
+
+    #[test]
+    fn strip_inline_markers_removes_formatting() {
+        assert_eq!(super::strip_inline_markers("**bold**"), "bold");
+        assert_eq!(super::strip_inline_markers("*italic*"), "italic");
+        assert_eq!(super::strip_inline_markers("`code`"), "code");
+        assert_eq!(
+            super::strip_inline_markers("hello **world**"),
+            "hello world"
+        );
+        assert_eq!(super::strip_inline_markers("plain text"), "plain text");
+    }
+
+    #[test]
+    fn render_bullet_with_bold() {
+        let md = "- **bold item**";
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buf = Buffer::empty(area);
+
+        render_markdown(&mut buf, area, md, 0);
+
+        let row = line_text(&buf, area, 0);
+        assert!(
+            row.contains("bold item"),
+            "bullet should contain 'bold item' without **: {row}"
+        );
+        assert!(
+            !row.contains("**"),
+            "bullet should not contain '**': {row}"
+        );
     }
 }
