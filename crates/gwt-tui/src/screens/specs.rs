@@ -80,6 +80,7 @@ pub enum SpecsMessage {
     PrevSection,
     SearchStart,
     SearchInput(char),
+    SearchBackspace,
     SearchClear,
     Refresh,
     SetSpecs(Vec<SpecItem>),
@@ -136,6 +137,12 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         SpecsMessage::SearchInput(ch) => {
             if state.search_active {
                 state.search_query.push(ch);
+                state.clamp_selected();
+            }
+        }
+        SpecsMessage::SearchBackspace => {
+            if state.search_active {
+                state.search_query.pop();
                 state.clamp_selected();
             }
         }
@@ -209,7 +216,7 @@ fn render_list_view(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header: search bar
-            Constraint::Min(0),   // Spec list
+            Constraint::Min(0),    // Spec list
         ])
         .split(area);
 
@@ -315,7 +322,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .constraints([
             Constraint::Length(5), // Spec header
             Constraint::Length(3), // Section tabs
-            Constraint::Min(0),   // Section content
+            Constraint::Min(0),    // Section content
         ])
         .split(area);
 
@@ -324,19 +331,14 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         " {} - {}\n Phase: {} | Status: {}\n Press Enter to go back | Tab/Shift+Tab: sections",
         spec.id, spec.title, spec.phase, spec.status,
     );
-    let header_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Spec Detail");
+    let header_block = Block::default().borders(Borders::ALL).title("Spec Detail");
     let header = Paragraph::new(header_text)
         .block(header_block)
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
 
     // Section tabs
-    let section_titles: Vec<Line> = DETAIL_SECTIONS
-        .iter()
-        .map(|s| Line::from(*s))
-        .collect();
+    let section_titles: Vec<Line> = DETAIL_SECTIONS.iter().map(|s| Line::from(*s)).collect();
     let section_tabs = ratatui::widgets::Tabs::new(section_titles)
         .block(Block::default().borders(Borders::ALL).title("Sections"))
         .select(state.detail_section)
@@ -353,9 +355,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         "Content of {} for {}\n\n(File content would be loaded here)",
         section_name, spec.id,
     );
-    let content_block = Block::default()
-        .borders(Borders::ALL)
-        .title(section_name);
+    let content_block = Block::default().borders(Borders::ALL).title(section_name);
     let content = Paragraph::new(content_text)
         .block(content_block)
         .wrap(Wrap { trim: false })

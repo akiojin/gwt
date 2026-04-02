@@ -108,6 +108,13 @@ pub struct SessionTab {
     pub vt: VtState,
 }
 
+/// Buffered PTY input waiting to be written to the active session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPtyInput {
+    pub session_id: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Minimal vt100 screen state wrapper.
 #[derive(Debug, Clone)]
 pub struct VtState {
@@ -180,6 +187,8 @@ pub struct Model {
     pub(crate) confirm: ConfirmState,
     /// Voice input state.
     pub(crate) voice: VoiceInputState,
+    /// Buffered PTY input generated from forwarded key events.
+    pub(crate) pending_pty_inputs: VecDeque<PendingPtyInput>,
 }
 
 impl Model {
@@ -217,6 +226,7 @@ impl Model {
             port_select: None,
             confirm: ConfirmState::default(),
             voice: VoiceInputState::default(),
+            pending_pty_inputs: VecDeque::new(),
         }
     }
 
@@ -230,6 +240,11 @@ impl Model {
         self.sessions.get(self.active_session)
     }
 
+    /// Buffered PTY input awaiting delivery to sessions.
+    pub fn pending_pty_inputs(&self) -> &VecDeque<PendingPtyInput> {
+        &self.pending_pty_inputs
+    }
+
     /// Whether a wizard overlay is active.
     pub fn has_wizard(&self) -> bool {
         self.wizard.is_some()
@@ -238,6 +253,20 @@ impl Model {
     /// Whether the branches search is active.
     pub fn is_branches_search_active(&self) -> bool {
         self.branches.search_active
+    }
+
+    /// Current branches search query.
+    pub fn branches_search_query(&self) -> &str {
+        &self.branches.search_query
+    }
+
+    /// Filtered branch names in display order.
+    pub fn filtered_branch_names(&self) -> Vec<String> {
+        self.branches
+            .filtered_branches()
+            .into_iter()
+            .map(|branch| branch.name.clone())
+            .collect()
     }
 
     /// Save session state to a TOML file. Best-effort: errors are logged, not fatal.

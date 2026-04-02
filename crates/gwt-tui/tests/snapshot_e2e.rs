@@ -11,8 +11,9 @@ use gwt_tui::app;
 use gwt_tui::input::keybind::KeybindRegistry;
 use gwt_tui::message::Message;
 use gwt_tui::model::{ActiveLayer, ManagementTab, Model, SessionLayout};
-use ratatui::Terminal;
+use gwt_tui::screens::branches::{BranchCategory, BranchItem, BranchesMessage};
 use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 
 fn test_model() -> Model {
     Model::new(PathBuf::from("/tmp/test-repo"))
@@ -37,14 +38,30 @@ fn ctrl(ch: char) -> KeyEvent {
     }
 }
 
+fn backspace() -> KeyEvent {
+    press(KeyCode::Backspace)
+}
+
+#[derive(Debug, Clone)]
+enum DispatchStatus {
+    Consumed(Message),
+    Forwarded,
+}
+
 /// Simulate the full key input pipeline: keybind registry → app::update.
-/// Returns the Message that was dispatched (for assertion).
-fn send_key(model: &mut Model, keybinds: &mut KeybindRegistry, key: KeyEvent) -> Option<Message> {
-    let msg = keybinds
-        .process_key(key)
-        .unwrap_or(Message::KeyInput(key));
-    app::update(model, msg);
-    None
+/// Returns whether the keybind layer consumed the event or forwarded it.
+fn send_key(model: &mut Model, keybinds: &mut KeybindRegistry, key: KeyEvent) -> DispatchStatus {
+    let forwarded_key = key;
+    match keybinds.process_key(key) {
+        Some(msg) => {
+            app::update(model, msg.clone());
+            DispatchStatus::Consumed(msg)
+        }
+        None => {
+            app::update(model, Message::KeyInput(forwarded_key));
+            DispatchStatus::Forwarded
+        }
+    }
 }
 
 /// Render the current model state to a string for snapshot comparison.
@@ -75,6 +92,35 @@ fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
         output.push('\n');
     }
     output
+}
+
+fn sample_branches() -> Vec<BranchItem> {
+    vec![
+        BranchItem {
+            name: "main".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Main,
+        },
+        BranchItem {
+            name: "feature/api".to_string(),
+            is_head: false,
+            is_local: true,
+            category: BranchCategory::Feature,
+        },
+        BranchItem {
+            name: "feature/app-shell".to_string(),
+            is_head: false,
+            is_local: true,
+            category: BranchCategory::Feature,
+        },
+        BranchItem {
+            name: "origin/release/1.0".to_string(),
+            is_head: false,
+            is_local: false,
+            category: BranchCategory::Other,
+        },
+    ]
 }
 
 // ============================================================
@@ -322,13 +368,21 @@ fn e2e_ctrl_g_n_opens_wizard() {
 fn e2e_ctrl_c_double_tap_quits() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
+    model.active_layer = ActiveLayer::Main;
     assert!(!model.quit);
 
-    send_key(&mut model, &mut kb, ctrl('c'));
+    let first = send_key(&mut model, &mut kb, ctrl('c'));
+    assert!(matches!(first, DispatchStatus::Forwarded));
     assert!(!model.quit); // single tap: no quit
+    assert_eq!(model.pending_pty_inputs().len(), 1);
+    let forwarded = model.pending_pty_inputs().back().unwrap();
+    assert_eq!(forwarded.session_id, "shell-0");
+    assert_eq!(forwarded.bytes, vec![0x03]);
 
-    send_key(&mut model, &mut kb, ctrl('c'));
+    let second = send_key(&mut model, &mut kb, ctrl('c'));
+    assert!(matches!(second, DispatchStatus::Consumed(Message::Quit)));
     assert!(model.quit); // double tap: quit
+    assert_eq!(model.pending_pty_inputs().len(), 1);
 }
 
 #[test]
@@ -370,15 +424,35 @@ fn e2e_management_tab_switch_via_ctrl_g_i() {
 fn e2e_search_in_branches() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
 
     // Already in Management > Branches by default
 
     // Press '/' to start search
-    send_key(&mut model, &mut kb, press(KeyCode::Char('/')));
+    let search_start = send_key(&mut model, &mut kb, press(KeyCode::Char('/')));
+    assert!(matches!(search_start, DispatchStatus::Forwarded));
     assert!(model.is_branches_search_active());
 
-    // Type search query — but wait, in search mode chars should go to SearchInput
-    // This depends on whether route_key_to_management handles search_active state
+    let _ = send_key(&mut model, &mut kb, press(KeyCode::Char('a')));
+    let _ = send_key(&mut model, &mut kb, press(KeyCode::Char('p')));
+    let _ = send_key(&mut model, &mut kb, press(KeyCode::Char('i')));
+
+    assert_eq!(model.branches_search_query(), "api");
+    assert_eq!(
+        model.filtered_branch_names(),
+        vec!["feature/api".to_string()]
+    );
+
+    let _ = send_key(&mut model, &mut kb, backspace());
+
+    assert_eq!(model.branches_search_query(), "ap");
+    assert_eq!(
+        model.filtered_branch_names(),
+        vec!["feature/api".to_string(), "feature/app-shell".to_string(),]
+    );
 }
 
 #[test]

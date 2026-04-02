@@ -104,8 +104,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::KeyInput(key) => {
             if model.active_layer == ActiveLayer::Management {
                 route_key_to_management(model, key);
+            } else {
+                forward_key_to_active_session(model, key);
             }
-            // Phase 2: forward to active pane when Main layer
         }
         Message::MouseInput(_) => {
             // Phase 2: mouse routing
@@ -231,6 +232,17 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     // Tab-specific key routing
     match model.management_tab {
         ManagementTab::Branches => {
+            if model.branches.search_active {
+                let msg = match key.code {
+                    KeyCode::Backspace => Some(BranchesMessage::SearchBackspace),
+                    _ => search_input_char(&key).map(BranchesMessage::SearchInput),
+                };
+                if let Some(m) = msg {
+                    screens::branches::update(&mut model.branches, m);
+                    return;
+                }
+            }
+
             let msg = match key.code {
                 KeyCode::Char('j') | KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Char('k') | KeyCode::Up => Some(BranchesMessage::MoveUp),
@@ -247,6 +259,17 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Issues => {
+            if model.issues.search_active {
+                let msg = match key.code {
+                    KeyCode::Backspace => Some(IssuesMessage::SearchBackspace),
+                    _ => search_input_char(&key).map(IssuesMessage::SearchInput),
+                };
+                if let Some(m) = msg {
+                    screens::issues::update(&mut model.issues, m);
+                    return;
+                }
+            }
+
             let msg = match key.code {
                 KeyCode::Char('j') | KeyCode::Down => Some(IssuesMessage::MoveDown),
                 KeyCode::Char('k') | KeyCode::Up => Some(IssuesMessage::MoveUp),
@@ -261,6 +284,17 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Specs => {
+            if model.specs.search_active {
+                let msg = match key.code {
+                    KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
+                    _ => search_input_char(&key).map(SpecsMessage::SearchInput),
+                };
+                if let Some(m) = msg {
+                    screens::specs::update(&mut model.specs, m);
+                    return;
+                }
+            }
+
             let msg = match key.code {
                 KeyCode::Char('j') | KeyCode::Down => Some(SpecsMessage::MoveDown),
                 KeyCode::Char('k') | KeyCode::Up => Some(SpecsMessage::MoveUp),
@@ -296,9 +330,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
                     KeyCode::Tab => Some(SettingsMessage::NextCategory),
                     KeyCode::BackTab => Some(SettingsMessage::PrevCategory),
-                    KeyCode::Char('S')
-                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
-                    {
+                    KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         Some(SettingsMessage::Save)
                     }
                     _ => None,
@@ -370,6 +402,62 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 screens::profiles::update(&mut model.profiles, m);
             }
         }
+    }
+}
+
+fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char(ch) => Some(ch),
+        _ => None,
+    }
+}
+
+fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
+    let Some(bytes) = key_event_to_bytes(key) else {
+        return;
+    };
+    let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
+        return;
+    };
+
+    model
+        .pending_pty_inputs
+        .push_back(crate::model::PendingPtyInput { session_id, bytes });
+}
+
+fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
+    match key.code {
+        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            control_char_bytes(ch)
+        }
+        KeyCode::Char(ch) => Some(ch.to_string().into_bytes()),
+        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        _ => None,
+    }
+}
+
+fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
+    let ch = ch.to_ascii_lowercase();
+    match ch {
+        '@' | ' ' => Some(vec![0x00]),
+        'a'..='z' => Some(vec![(ch as u8) & 0x1f]),
+        '[' => Some(vec![0x1b]),
+        '\\' => Some(vec![0x1c]),
+        ']' => Some(vec![0x1d]),
+        '^' => Some(vec![0x1e]),
+        '_' => Some(vec![0x1f]),
+        _ => None,
     }
 }
 
@@ -587,10 +675,20 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
     use std::path::PathBuf;
 
     fn test_model() -> Model {
         Model::new(PathBuf::from("/tmp/test"))
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
     }
 
     #[test]
@@ -750,5 +848,46 @@ mod tests {
         let wizard = model.wizard.as_ref().unwrap();
         assert!(wizard.spec_context.is_none());
         assert!(wizard.branch_name.is_empty());
+    }
+
+    #[test]
+    fn update_key_input_in_main_layer_queues_pty_bytes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+
+        let forwarded = model.pending_pty_inputs().back().unwrap();
+        assert_eq!(forwarded.session_id, "shell-0");
+        assert_eq!(forwarded.bytes, vec![0x03]);
+    }
+
+    #[test]
+    fn route_key_to_management_routes_search_input_for_issues() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Issues;
+        model.issues.search_active = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('b'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('u'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert_eq!(model.issues.search_query, "b");
+    }
+
+    #[test]
+    fn route_key_to_management_routes_search_input_for_specs() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.search_active = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('s'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('p'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert_eq!(model.specs.search_query, "s");
     }
 }

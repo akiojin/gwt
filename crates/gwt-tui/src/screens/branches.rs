@@ -134,9 +134,7 @@ impl BranchesState {
                 ViewMode::Local => b.is_local,
                 ViewMode::Remote => !b.is_local,
             })
-            .filter(|b| {
-                query_lower.is_empty() || b.name.to_lowercase().contains(&query_lower)
-            })
+            .filter(|b| query_lower.is_empty() || b.name.to_lowercase().contains(&query_lower))
             .collect();
 
         match self.sort_mode {
@@ -171,6 +169,7 @@ pub enum BranchesMessage {
     ToggleView,
     SearchStart,
     SearchInput(char),
+    SearchBackspace,
     SearchClear,
     Refresh,
     SetBranches(Vec<BranchItem>),
@@ -206,6 +205,12 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 state.clamp_selected();
             }
         }
+        BranchesMessage::SearchBackspace => {
+            if state.search_active {
+                state.search_query.pop();
+                state.clamp_selected();
+            }
+        }
         BranchesMessage::SearchClear => {
             state.search_query.clear();
             state.search_active = false;
@@ -227,7 +232,7 @@ pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header: view/sort/search
-            Constraint::Min(0),   // Branch list
+            Constraint::Min(0),    // Branch list
         ])
         .split(area);
 
@@ -507,10 +512,7 @@ mod tests {
         assert_eq!(categorize_branch("main"), BranchCategory::Main);
         assert_eq!(categorize_branch("master"), BranchCategory::Main);
         assert_eq!(categorize_branch("develop"), BranchCategory::Develop);
-        assert_eq!(
-            categorize_branch("feature/login"),
-            BranchCategory::Feature
-        );
+        assert_eq!(categorize_branch("feature/login"), BranchCategory::Feature);
         assert_eq!(
             categorize_branch("origin/feature/x"),
             BranchCategory::Feature

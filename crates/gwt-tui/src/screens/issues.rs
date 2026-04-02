@@ -37,7 +37,9 @@ impl IssuesState {
             .filter(|i| {
                 query_lower.is_empty()
                     || i.title.to_lowercase().contains(&query_lower)
-                    || i.labels.iter().any(|l| l.to_lowercase().contains(&query_lower))
+                    || i.labels
+                        .iter()
+                        .any(|l| l.to_lowercase().contains(&query_lower))
                     || i.number.to_string().contains(&query_lower)
             })
             .collect()
@@ -64,6 +66,7 @@ pub enum IssuesMessage {
     ToggleDetail,
     SearchStart,
     SearchInput(char),
+    SearchBackspace,
     SearchClear,
     Refresh,
     SetIssues(Vec<IssueItem>),
@@ -91,6 +94,12 @@ pub fn update(state: &mut IssuesState, msg: IssuesMessage) {
         IssuesMessage::SearchInput(ch) => {
             if state.search_active {
                 state.search_query.push(ch);
+                state.clamp_selected();
+            }
+        }
+        IssuesMessage::SearchBackspace => {
+            if state.search_active {
+                state.search_query.pop();
                 state.clamp_selected();
             }
         }
@@ -124,7 +133,7 @@ fn render_list_view(state: &IssuesState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header: search bar
-            Constraint::Min(0),   // Issue list
+            Constraint::Min(0),    // Issue list
         ])
         .split(area);
 
@@ -219,7 +228,7 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5), // Issue header
-            Constraint::Min(0),   // Body
+            Constraint::Min(0),    // Body
         ])
         .split(area);
 
@@ -234,9 +243,7 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
         " #{} - {}\n State: {} | Labels: {}\n Press Enter to go back",
         issue.number, issue.title, issue.state, labels_str,
     );
-    let header_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Issue Detail");
+    let header_block = Block::default().borders(Borders::ALL).title("Issue Detail");
     let header = Paragraph::new(header_text)
         .block(header_block)
         .style(Style::default().fg(Color::Cyan));
