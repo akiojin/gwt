@@ -7,6 +7,8 @@ use crate::screens::git_view::GitViewState;
 use crate::screens::issues::IssuesState;
 use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
+use crate::screens::settings::SettingsState;
+use crate::screens::specs::SpecsState;
 
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,10 @@ pub struct Model {
     pub git_view: GitViewState,
     /// PR dashboard screen state.
     pub pr_dashboard: PrDashboardState,
+    /// Specs screen state.
+    pub specs: SpecsState,
+    /// Settings screen state.
+    pub settings: SettingsState,
 }
 
 impl Model {
@@ -179,6 +185,8 @@ impl Model {
             issues: IssuesState::default(),
             git_view: GitViewState::default(),
             pr_dashboard: PrDashboardState::default(),
+            specs: SpecsState::default(),
+            settings: SettingsState::default(),
         }
     }
 

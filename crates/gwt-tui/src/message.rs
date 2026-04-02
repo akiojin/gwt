@@ -8,6 +8,8 @@ use crate::screens::git_view::GitViewMessage;
 use crate::screens::issues::IssuesMessage;
 use crate::screens::pr_dashboard::PrDashboardMessage;
 use crate::screens::profiles::ProfilesMessage;
+use crate::screens::settings::SettingsMessage;
+use crate::screens::specs::SpecsMessage;
 
 /// Every possible action in the TUI.
 #[derive(Debug, Clone)]
@@ -54,6 +56,10 @@ pub enum Message {
     GitView(GitViewMessage),
     /// PR dashboard screen message.
     PrDashboard(PrDashboardMessage),
+    /// Specs screen message.
+    Specs(SpecsMessage),
+    /// Settings screen message.
+    Settings(SettingsMessage),
 }
 
 #[cfg(test)]
@@ -81,5 +87,7 @@ mod tests {
         let _ = Message::Issues(IssuesMessage::MoveUp);
         let _ = Message::GitView(GitViewMessage::MoveUp);
         let _ = Message::PrDashboard(PrDashboardMessage::MoveUp);
+        let _ = Message::Specs(SpecsMessage::MoveUp);
+        let _ = Message::Settings(SettingsMessage::MoveUp);
     }
 }
