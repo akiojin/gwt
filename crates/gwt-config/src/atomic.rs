@@ -12,7 +12,18 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let temp_path = path.with_extension("tmp");
+    // Use PID + timestamp to avoid collisions when multiple processes
+    // write to different targets in the same directory concurrently.
+    let suffix = format!(
+        "{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let temp_name = format!(".{}.tmp.{}", path.file_name().unwrap_or_default().to_string_lossy(), suffix);
+    let temp_path = path.with_file_name(temp_name);
 
     std::fs::write(&temp_path, content).map_err(|e| ConfigError::WriteError {
         reason: format!("failed to write temp file: {e}"),

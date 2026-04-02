@@ -1,5 +1,7 @@
 //! Pull Request status tracking via GitHub CLI
 
+use std::path::Path;
+
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +122,130 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
         ci_status,
         mergeable,
         review_status,
+    })
+}
+
+// ── Extended PR check report ──
+
+/// PR status check states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CiStatus {
+    Passing,
+    Failing,
+    Pending,
+    Unknown,
+}
+
+/// Merge readiness states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeStatus {
+    Ready,
+    Blocked,
+    Conflicts,
+    Unknown,
+}
+
+/// Review states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewStatus {
+    Approved,
+    ChangesRequested,
+    Pending,
+    Unknown,
+}
+
+/// Extended PR status report.
+#[derive(Debug, Clone)]
+pub struct PrCheckReport {
+    pub ci: CiStatus,
+    pub merge: MergeStatus,
+    pub review: ReviewStatus,
+    pub summary: String,
+}
+
+/// Generate an extended PR status report by inspecting the repository.
+///
+/// Runs `gh pr view` to gather CI, merge, and review states. Falls back
+/// to `Unknown` states when `gh` is unavailable or the repo has no open PR.
+pub fn pr_check_report(repo_path: &Path) -> Result<PrCheckReport> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            "--json",
+            "statusCheckRollup,mergeable,reviewDecision,state,title",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::Git(format!("gh pr view: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Ok(PrCheckReport {
+            ci: CiStatus::Unknown,
+            merge: MergeStatus::Unknown,
+            review: ReviewStatus::Unknown,
+            summary: format!("No open PR or gh error: {}", stderr.trim()),
+        });
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| GwtError::Other(format!("gh pr view JSON: {e}")))?;
+
+    let ci = match json.get("statusCheckRollup") {
+        Some(serde_json::Value::Array(checks)) => {
+            let all_pass = checks.iter().all(|c| {
+                c.get("conclusion")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == "SUCCESS" || s == "NEUTRAL" || s == "SKIPPED")
+            });
+            let any_fail = checks.iter().any(|c| {
+                c.get("conclusion")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == "FAILURE" || s == "CANCELLED" || s == "TIMED_OUT")
+            });
+            if checks.is_empty() {
+                CiStatus::Pending
+            } else if any_fail {
+                CiStatus::Failing
+            } else if all_pass {
+                CiStatus::Passing
+            } else {
+                CiStatus::Pending
+            }
+        }
+        _ => CiStatus::Unknown,
+    };
+
+    let merge = match json.get("mergeable").and_then(|v| v.as_str()) {
+        Some("MERGEABLE") => MergeStatus::Ready,
+        Some("CONFLICTING") => MergeStatus::Conflicts,
+        Some(_) => MergeStatus::Blocked,
+        None => MergeStatus::Unknown,
+    };
+
+    let review = match json.get("reviewDecision").and_then(|v| v.as_str()) {
+        Some("APPROVED") => ReviewStatus::Approved,
+        Some("CHANGES_REQUESTED") => ReviewStatus::ChangesRequested,
+        Some("REVIEW_REQUIRED") => ReviewStatus::Pending,
+        _ => ReviewStatus::Unknown,
+    };
+
+    let title = json
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(untitled)");
+
+    let summary = format!(
+        "PR: {} | CI: {:?} | Merge: {:?} | Review: {:?}",
+        title, ci, merge, review
+    );
+
+    Ok(PrCheckReport {
+        ci,
+        merge,
+        review,
+        summary,
     })
 }
 

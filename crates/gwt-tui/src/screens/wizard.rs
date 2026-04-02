@@ -1030,6 +1030,51 @@ mod tests {
     }
 
     #[test]
+    fn back_from_step2_goes_to_step1() {
+        let mut state = WizardState::default();
+        // Advance to step 2 (AgentSelect)
+        update(&mut state, WizardMessage::Select);
+        assert_eq!(state.step, WizardStep::AgentSelect);
+
+        // Back should return to step 1 (QuickStart)
+        update(&mut state, WizardMessage::Back);
+        assert_eq!(state.step, WizardStep::QuickStart);
+        assert!(!state.cancelled);
+    }
+
+    #[test]
+    fn cancel_from_step1_sets_cancelled() {
+        let mut state = WizardState::default();
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Cancel on QuickStart
+        update(&mut state, WizardMessage::Cancel);
+        assert!(state.cancelled);
+    }
+
+    #[test]
+    fn ai_suggest_empty_suggestions_falls_through() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        state.ai_suggest.loading = false;
+        state.ai_suggest.error = None;
+        state.ai_suggest.suggestions = Vec::new();
+
+        // With no suggestions, current_options should show placeholder
+        let options = state.current_options();
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0], "(no suggestions)");
+
+        // option_count should be 1 (from max(1))
+        assert_eq!(state.option_count(), 1);
+
+        // Select should advance to next step (no branch name stored since suggestions empty)
+        update(&mut state, WizardMessage::Select);
+        assert_eq!(state.step, WizardStep::IssueSelect);
+        assert!(state.branch_name.is_empty());
+    }
+
+    #[test]
     fn ai_suggest_render_suggestions_no_panic() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;

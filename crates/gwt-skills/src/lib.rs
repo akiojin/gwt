@@ -8,8 +8,7 @@ pub use hooks::{
     merge_hooks_safe, restore_from_backup,
 };
 pub use registry::{
-    BuiltinSkill, CiStatus, EmbeddedSkill, MergeStatus, PrCheckReport, RegistryError,
-    ReviewStatus, SkillRegistry, gwt_pr_check_report, register_builtins,
+    BuiltinSkill, EmbeddedSkill, RegistryError, SkillRegistry, register_builtins,
 };
 
 #[cfg(test)]

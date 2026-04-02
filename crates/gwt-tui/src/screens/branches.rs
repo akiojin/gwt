@@ -122,10 +122,12 @@ pub struct BranchesState {
 }
 
 impl BranchesState {
-    /// Return branches filtered by current view mode and search query.
+    /// Return branches filtered by current view mode and search query,
+    /// then sorted according to the active `sort_mode`.
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
         let query_lower = self.search_query.to_lowercase();
-        self.branches
+        let mut result: Vec<&BranchItem> = self
+            .branches
             .iter()
             .filter(|b| match self.view_mode {
                 ViewMode::All => true,
@@ -135,7 +137,15 @@ impl BranchesState {
             .filter(|b| {
                 query_lower.is_empty() || b.name.to_lowercase().contains(&query_lower)
             })
-            .collect()
+            .collect();
+
+        match self.sort_mode {
+            SortMode::Default => {} // insertion order
+            // Date has no dedicated field yet; fall back to alphabetical like Name.
+            SortMode::Name | SortMode::Date => result.sort_by(|a, b| a.name.cmp(&b.name)),
+        }
+
+        result
     }
 
     /// Get the currently selected branch (from filtered list).
@@ -538,6 +548,103 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn sort_name_returns_alphabetical_order() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches(); // main, develop, feature/login, origin/feature/api, hotfix/crash
+        state.sort_mode = SortMode::Name;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "develop",
+                "feature/login",
+                "hotfix/crash",
+                "main",
+                "origin/feature/api",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_date_returns_alphabetical_fallback() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.sort_mode = SortMode::Date;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        // Date falls back to alphabetical since no date field exists
+        assert_eq!(
+            names,
+            vec![
+                "develop",
+                "feature/login",
+                "hotfix/crash",
+                "main",
+                "origin/feature/api",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_default_preserves_insertion_order() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.sort_mode = SortMode::Default;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "main",
+                "develop",
+                "feature/login",
+                "origin/feature/api",
+                "hotfix/crash",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_then_navigate_selects_filtered_item() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+
+        // Search for "feature" — matches feature/login and origin/feature/api
+        update(&mut state, BranchesMessage::SearchStart);
+        update(&mut state, BranchesMessage::SearchInput('f'));
+        update(&mut state, BranchesMessage::SearchInput('e'));
+        update(&mut state, BranchesMessage::SearchInput('a'));
+        update(&mut state, BranchesMessage::SearchInput('t'));
+
+        let filtered = state.filtered_branches();
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(state.selected, 0);
+
+        // MoveDown should navigate within filtered list
+        update(&mut state, BranchesMessage::MoveDown);
+        assert_eq!(state.selected, 1);
+
+        let branch = state.selected_branch().unwrap();
+        assert_eq!(branch.name, "origin/feature/api");
+    }
+
+    #[test]
+    fn select_returns_correct_branch_after_sort() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.sort_mode = SortMode::Name;
+
+        // After sort by name: develop, feature/login, hotfix/crash, main, origin/feature/api
+        state.selected = 3;
+        let branch = state.selected_branch().unwrap();
+        assert_eq!(branch.name, "main");
     }
 
     #[test]
