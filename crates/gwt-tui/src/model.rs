@@ -13,7 +13,9 @@ use crate::screens::branches::BranchListState;
 use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::error::ErrorQueue;
+use crate::screens::git_view::GitViewState;
 use crate::screens::issues::IssuePanelState;
+use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::speckit_wizard::SpecKitState;
 use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
@@ -39,6 +41,8 @@ pub enum ManagementTab {
     Branches,
     Specs,
     Issues,
+    GitView,
+    PrDashboard,
     Profiles,
     Versions,
     Settings,
@@ -46,10 +50,12 @@ pub enum ManagementTab {
 }
 
 impl ManagementTab {
-    pub const ALL: [ManagementTab; 7] = [
+    pub const ALL: [ManagementTab; 9] = [
         ManagementTab::Branches,
         ManagementTab::Specs,
         ManagementTab::Issues,
+        ManagementTab::GitView,
+        ManagementTab::PrDashboard,
         ManagementTab::Profiles,
         ManagementTab::Settings,
         ManagementTab::Versions,
@@ -61,10 +67,12 @@ impl ManagementTab {
             ManagementTab::Branches => 0,
             ManagementTab::Specs => 1,
             ManagementTab::Issues => 2,
-            ManagementTab::Profiles => 3,
-            ManagementTab::Versions => 4,
-            ManagementTab::Settings => 5,
-            ManagementTab::Logs => 6,
+            ManagementTab::GitView => 3,
+            ManagementTab::PrDashboard => 4,
+            ManagementTab::Profiles => 5,
+            ManagementTab::Versions => 6,
+            ManagementTab::Settings => 7,
+            ManagementTab::Logs => 8,
         }
     }
 
@@ -73,6 +81,8 @@ impl ManagementTab {
             ManagementTab::Branches => "Branches",
             ManagementTab::Specs => "SPECs",
             ManagementTab::Issues => "Issues",
+            ManagementTab::GitView => "Git",
+            ManagementTab::PrDashboard => "PRs",
             ManagementTab::Profiles => "Profiles",
             ManagementTab::Versions => "Versions",
             ManagementTab::Settings => "Settings",
@@ -243,6 +253,8 @@ pub struct Model {
     // Screen states for management tabs
     pub branches_state: BranchListState,
     pub issues_state: IssuePanelState,
+    pub git_view_state: GitViewState,
+    pub pr_dashboard_state: PrDashboardState,
     pub specs_state: SpecsState,
     pub settings_state: SettingsState,
     pub logs_state: LogsState,
@@ -304,6 +316,8 @@ impl Model {
             management_tab: ManagementTab::Branches,
             branches_state: BranchListState::new(),
             issues_state: IssuePanelState::new(),
+            git_view_state: GitViewState::new(),
+            pr_dashboard_state: PrDashboardState::new(),
             specs_state: SpecsState::new(),
             settings_state: SettingsState::new(),
             logs_state: LogsState::new(),
@@ -981,17 +995,21 @@ mod tests {
         assert_eq!(ManagementTab::Branches.index(), 0);
         assert_eq!(ManagementTab::Specs.index(), 1);
         assert_eq!(ManagementTab::Issues.index(), 2);
-        assert_eq!(ManagementTab::Profiles.index(), 3);
-        assert_eq!(ManagementTab::Versions.index(), 4);
-        assert_eq!(ManagementTab::Settings.index(), 5);
-        assert_eq!(ManagementTab::Logs.index(), 6);
+        assert_eq!(ManagementTab::GitView.index(), 3);
+        assert_eq!(ManagementTab::PrDashboard.index(), 4);
+        assert_eq!(ManagementTab::Profiles.index(), 5);
+        assert_eq!(ManagementTab::Versions.index(), 6);
+        assert_eq!(ManagementTab::Settings.index(), 7);
+        assert_eq!(ManagementTab::Logs.index(), 8);
         assert_eq!(ManagementTab::ALL[1].label(), "SPECs");
         assert_eq!(ManagementTab::ALL[2].label(), "Issues");
-        assert_eq!(ManagementTab::ALL[3].label(), "Profiles");
-        assert_eq!(ManagementTab::ALL[4].label(), "Settings");
-        assert_eq!(ManagementTab::ALL[5].label(), "Versions");
-        assert_eq!(ManagementTab::ALL[6].label(), "Logs");
-        assert_eq!(ManagementTab::ALL.len(), 7);
+        assert_eq!(ManagementTab::ALL[3].label(), "Git");
+        assert_eq!(ManagementTab::ALL[4].label(), "PRs");
+        assert_eq!(ManagementTab::ALL[5].label(), "Profiles");
+        assert_eq!(ManagementTab::ALL[6].label(), "Settings");
+        assert_eq!(ManagementTab::ALL[7].label(), "Versions");
+        assert_eq!(ManagementTab::ALL[8].label(), "Logs");
+        assert_eq!(ManagementTab::ALL.len(), 9);
     }
 
     #[test]

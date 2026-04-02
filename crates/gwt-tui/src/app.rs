@@ -1054,7 +1054,9 @@ pub fn update(model: &mut Model, msg: Message) {
                     let next_tab = match model.management_tab {
                         ManagementTab::Branches => ManagementTab::Specs,
                         ManagementTab::Specs => ManagementTab::Issues,
-                        ManagementTab::Issues => ManagementTab::Profiles,
+                        ManagementTab::Issues => ManagementTab::GitView,
+                        ManagementTab::GitView => ManagementTab::PrDashboard,
+                        ManagementTab::PrDashboard => ManagementTab::Profiles,
                         ManagementTab::Profiles => ManagementTab::Settings,
                         ManagementTab::Settings => ManagementTab::Versions,
                         ManagementTab::Versions => ManagementTab::Logs,
@@ -1102,6 +1104,34 @@ pub fn update(model: &mut Model, msg: Message) {
                                 }
                             }
                             msg.map(Message::IssuesMsg)
+                        }
+                        ManagementTab::GitView => {
+                            let msg =
+                                crate::screens::git_view::handle_key(&model.git_view_state, &key);
+                            // Intercept ToggleExpand to lazy-load diff content
+                            if let Some(crate::screens::git_view::GitViewMessage::ToggleExpand) =
+                                &msg
+                            {
+                                let idx = model.git_view_state.selected;
+                                if idx < model.git_view_state.files.len()
+                                    && !model.git_view_state.is_expanded(idx)
+                                    && model.git_view_state.cached_diff(idx).is_none()
+                                {
+                                    let diff = crate::screens::git_view::load_diff_content(
+                                        &model.repo_root,
+                                        &model.git_view_state.files[idx],
+                                    );
+                                    model.git_view_state.cache_diff(idx, diff);
+                                }
+                            }
+                            msg.map(Message::GitViewMsg)
+                        }
+                        ManagementTab::PrDashboard => {
+                            crate::screens::pr_dashboard::handle_key(
+                                &model.pr_dashboard_state,
+                                &key,
+                            )
+                            .map(Message::PrDashboardMsg)
                         }
                         ManagementTab::Specs => {
                             if let Some(m) =
@@ -1497,6 +1527,43 @@ pub fn update(model: &mut Model, msg: Message) {
                 crate::screens::issues::update(&mut model.issues_state, other);
             }
         },
+        Message::GitViewMsg(msg) => match msg {
+            crate::screens::git_view::GitViewMessage::Refresh => {
+                crate::screens::git_view::update(
+                    &mut model.git_view_state,
+                    crate::screens::git_view::GitViewMessage::Refresh,
+                );
+                let (files, commits) =
+                    crate::screens::git_view::load_git_view(&model.repo_root);
+                crate::screens::git_view::update(
+                    &mut model.git_view_state,
+                    crate::screens::git_view::GitViewMessage::Loaded {
+                        files,
+                        commits,
+                        pr_url: None,
+                    },
+                );
+            }
+            other => {
+                crate::screens::git_view::update(&mut model.git_view_state, other);
+            }
+        },
+        Message::PrDashboardMsg(msg) => match msg {
+            crate::screens::pr_dashboard::PrDashboardMessage::Refresh => {
+                crate::screens::pr_dashboard::update(
+                    &mut model.pr_dashboard_state,
+                    crate::screens::pr_dashboard::PrDashboardMessage::Refresh,
+                );
+                // PR data is loaded async in production; for now mark as done
+                crate::screens::pr_dashboard::update(
+                    &mut model.pr_dashboard_state,
+                    crate::screens::pr_dashboard::PrDashboardMessage::Loaded(Vec::new()),
+                );
+            }
+            other => {
+                crate::screens::pr_dashboard::update(&mut model.pr_dashboard_state, other);
+            }
+        },
         Message::VersionsMsg(_) => {
             // Versions messages are handled inline via the key handler
         }
@@ -1596,6 +1663,16 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 }
                 ManagementTab::Issues => {
                     crate::screens::issues::render(&model.issues_state, buf, layout[2]);
+                }
+                ManagementTab::GitView => {
+                    crate::screens::git_view::render(&model.git_view_state, buf, layout[2]);
+                }
+                ManagementTab::PrDashboard => {
+                    crate::screens::pr_dashboard::render(
+                        &model.pr_dashboard_state,
+                        buf,
+                        layout[2],
+                    );
                 }
                 ManagementTab::Specs => {
                     crate::screens::specs::render(&model.specs_state, buf, layout[2]);
@@ -3962,6 +4039,18 @@ mod tests {
             Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
         );
         assert_eq!(m.management_tab, ManagementTab::Issues);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::GitView);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::PrDashboard);
 
         update(
             &mut m,
