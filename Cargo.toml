@@ -31,7 +31,7 @@ tar = "0.4"
 zip = "8.2"
 
 # Git operations
-gix = { version = "0.80", default-features = false, features = [
+gix = { version = "0.81", default-features = false, features = [
     "blocking-network-client",
     "worktree-mutation",
 ] }
