@@ -37,3 +37,44 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_atomic_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        write_atomic(&path, "key = \"value\"").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "key = \"value\"");
+    }
+
+    #[test]
+    fn write_atomic_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deep").join("config.toml");
+        write_atomic(&path, "data").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "data");
+    }
+
+    #[test]
+    fn write_atomic_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overwrite.toml");
+        write_atomic(&path, "first").unwrap();
+        write_atomic(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_sets_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perms.toml");
+        write_atomic(&path, "secret").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
