@@ -19,8 +19,8 @@ pub struct VersionTag {
 /// State for the versions screen.
 #[derive(Debug, Clone, Default)]
 pub struct VersionsState {
-    pub tags: Vec<VersionTag>,
-    pub selected: usize,
+    pub(crate) tags: Vec<VersionTag>,
+    pub(crate) selected: usize,
 }
 
 impl VersionsState {

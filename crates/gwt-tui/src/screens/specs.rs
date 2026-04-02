@@ -29,16 +29,16 @@ pub struct SpecItem {
 /// State for the specs screen.
 #[derive(Debug, Clone, Default)]
 pub struct SpecsState {
-    pub specs: Vec<SpecItem>,
-    pub selected: usize,
-    pub detail_view: bool,
-    pub detail_section: usize,
-    pub search_query: String,
-    pub search_active: bool,
+    pub(crate) specs: Vec<SpecItem>,
+    pub(crate) selected: usize,
+    pub(crate) detail_view: bool,
+    pub(crate) detail_section: usize,
+    pub(crate) search_query: String,
+    pub(crate) search_active: bool,
     /// Whether we are editing the phase field of the selected spec.
-    pub editing: bool,
+    pub(crate) editing: bool,
     /// Buffer for the phase field being edited.
-    pub edit_field: String,
+    pub(crate) edit_field: String,
 }
 
 impl SpecsState {

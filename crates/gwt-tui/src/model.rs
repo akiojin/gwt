@@ -135,51 +135,51 @@ pub struct Model {
     /// Which layer has focus.
     pub active_layer: ActiveLayer,
     /// All open session tabs.
-    pub sessions: Vec<SessionTab>,
+    pub(crate) sessions: Vec<SessionTab>,
     /// Index of the active session.
-    pub active_session: usize,
+    pub(crate) active_session: usize,
     /// Session layout mode.
     pub session_layout: SessionLayout,
     /// Active management tab.
     pub management_tab: ManagementTab,
     /// Error queue (shown as overlays).
-    pub error_queue: VecDeque<String>,
+    pub(crate) error_queue: VecDeque<String>,
     /// Whether the app should quit.
     pub quit: bool,
     /// Repository path.
-    pub repo_path: PathBuf,
+    pub(crate) repo_path: PathBuf,
     /// Terminal size.
-    pub terminal_size: (u16, u16),
+    pub(crate) terminal_size: (u16, u16),
     /// Branches screen state.
-    pub branches: BranchesState,
+    pub(crate) branches: BranchesState,
     /// Profiles screen state.
-    pub profiles: ProfilesState,
+    pub(crate) profiles: ProfilesState,
     /// Issues screen state.
-    pub issues: IssuesState,
+    pub(crate) issues: IssuesState,
     /// Git view screen state.
-    pub git_view: GitViewState,
+    pub(crate) git_view: GitViewState,
     /// PR dashboard screen state.
-    pub pr_dashboard: PrDashboardState,
+    pub(crate) pr_dashboard: PrDashboardState,
     /// Specs screen state.
-    pub specs: SpecsState,
+    pub(crate) specs: SpecsState,
     /// Settings screen state.
-    pub settings: SettingsState,
+    pub(crate) settings: SettingsState,
     /// Logs screen state.
-    pub logs: LogsState,
+    pub(crate) logs: LogsState,
     /// Versions screen state.
-    pub versions: VersionsState,
+    pub(crate) versions: VersionsState,
     /// Wizard overlay state (None when not active).
-    pub wizard: Option<WizardState>,
+    pub(crate) wizard: Option<WizardState>,
     /// Docker progress overlay state.
-    pub docker_progress: Option<DockerProgressState>,
+    pub(crate) docker_progress: Option<DockerProgressState>,
     /// Service selection overlay state.
-    pub service_select: Option<ServiceSelectState>,
+    pub(crate) service_select: Option<ServiceSelectState>,
     /// Port conflict resolution overlay state.
-    pub port_select: Option<PortSelectState>,
+    pub(crate) port_select: Option<PortSelectState>,
     /// Confirmation dialog state.
-    pub confirm: ConfirmState,
+    pub(crate) confirm: ConfirmState,
     /// Voice input state.
-    pub voice: VoiceInputState,
+    pub(crate) voice: VoiceInputState,
 }
 
 impl Model {

@@ -50,9 +50,9 @@ pub struct PrItem {
 /// State for the PR dashboard screen.
 #[derive(Debug, Clone, Default)]
 pub struct PrDashboardState {
-    pub prs: Vec<PrItem>,
-    pub selected: usize,
-    pub detail_view: bool,
+    pub(crate) prs: Vec<PrItem>,
+    pub(crate) selected: usize,
+    pub(crate) detail_view: bool,
 }
 
 impl PrDashboardState {

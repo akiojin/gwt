@@ -113,12 +113,12 @@ pub struct BranchItem {
 /// State for the branches screen.
 #[derive(Debug, Clone, Default)]
 pub struct BranchesState {
-    pub branches: Vec<BranchItem>,
-    pub selected: usize,
-    pub sort_mode: SortMode,
-    pub view_mode: ViewMode,
-    pub search_query: String,
-    pub search_active: bool,
+    pub(crate) branches: Vec<BranchItem>,
+    pub(crate) selected: usize,
+    pub(crate) sort_mode: SortMode,
+    pub(crate) view_mode: ViewMode,
+    pub(crate) search_query: String,
+    pub(crate) search_active: bool,
 }
 
 impl BranchesState {

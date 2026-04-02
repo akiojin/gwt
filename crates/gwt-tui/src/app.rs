@@ -8,7 +8,10 @@ use ratatui::{
     Frame,
 };
 
+use crossterm::event::{KeyCode, KeyModifiers};
+
 use crate::{
+    input::voice::VoiceInputMessage,
     message::Message,
     model::{ActiveLayer, ManagementTab, Model, SessionLayout, SessionTabType},
     screens,
@@ -86,8 +89,26 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::DismissError => {
             model.error_queue.pop_front();
         }
-        Message::KeyInput(_) | Message::MouseInput(_) | Message::Tick => {
-            // Phase 2: forward to active pane / tick logic
+        Message::Tick => {
+            // Forward tick to wizard (AI suggest spinner) when active
+            if let Some(ref mut wizard) = model.wizard {
+                if wizard.ai_suggest.loading {
+                    screens::wizard::update(wizard, screens::wizard::WizardMessage::Tick);
+                }
+            }
+            // Forward tick to voice input when recording/transcribing
+            if model.voice.is_active() {
+                crate::input::voice::update(&mut model.voice, VoiceInputMessage::Tick);
+            }
+        }
+        Message::KeyInput(key) => {
+            if model.active_layer == ActiveLayer::Management {
+                route_key_to_management(model, key);
+            }
+            // Phase 2: forward to active pane when Main layer
+        }
+        Message::MouseInput(_) => {
+            // Phase 2: mouse routing
         }
         Message::Branches(msg) => {
             screens::branches::update(&mut model.branches, msg);
@@ -168,6 +189,162 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::CloseWizard => {
             model.wizard = None;
+        }
+    }
+}
+
+/// Route a key event to the active management tab's screen message.
+fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
+    use screens::branches::BranchesMessage;
+    use screens::git_view::GitViewMessage;
+    use screens::issues::IssuesMessage;
+    use screens::logs::LogsMessage;
+    use screens::pr_dashboard::PrDashboardMessage;
+    use screens::profiles::ProfilesMessage;
+    use screens::settings::SettingsMessage;
+    use screens::specs::SpecsMessage;
+    use screens::versions::VersionsMessage;
+
+    match model.management_tab {
+        ManagementTab::Branches => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(BranchesMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(BranchesMessage::MoveUp),
+                KeyCode::Enter => Some(BranchesMessage::Select),
+                KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
+                KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
+                KeyCode::Char('/') => Some(BranchesMessage::SearchStart),
+                KeyCode::Char('r') => Some(BranchesMessage::Refresh),
+                KeyCode::Esc => Some(BranchesMessage::SearchClear),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::branches::update(&mut model.branches, m);
+            }
+        }
+        ManagementTab::Issues => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(IssuesMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(IssuesMessage::MoveUp),
+                KeyCode::Enter => Some(IssuesMessage::ToggleDetail),
+                KeyCode::Char('/') => Some(IssuesMessage::SearchStart),
+                KeyCode::Char('r') => Some(IssuesMessage::Refresh),
+                KeyCode::Esc => Some(IssuesMessage::SearchClear),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::issues::update(&mut model.issues, m);
+            }
+        }
+        ManagementTab::Specs => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(SpecsMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(SpecsMessage::MoveUp),
+                KeyCode::Enter => Some(SpecsMessage::ToggleDetail),
+                KeyCode::Tab => Some(SpecsMessage::NextSection),
+                KeyCode::BackTab => Some(SpecsMessage::PrevSection),
+                KeyCode::Char('/') => Some(SpecsMessage::SearchStart),
+                KeyCode::Char('r') => Some(SpecsMessage::Refresh),
+                KeyCode::Esc => Some(SpecsMessage::SearchClear),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::specs::update(&mut model.specs, m);
+            }
+        }
+        ManagementTab::Settings => {
+            if model.settings.editing {
+                let msg = match key.code {
+                    KeyCode::Enter => Some(SettingsMessage::EndEdit),
+                    KeyCode::Esc => Some(SettingsMessage::CancelEdit),
+                    KeyCode::Backspace => Some(SettingsMessage::Backspace),
+                    KeyCode::Char(ch) => Some(SettingsMessage::InputChar(ch)),
+                    _ => None,
+                };
+                if let Some(m) = msg {
+                    screens::settings::update(&mut model.settings, m);
+                }
+            } else {
+                let msg = match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => Some(SettingsMessage::MoveDown),
+                    KeyCode::Char('k') | KeyCode::Up => Some(SettingsMessage::MoveUp),
+                    KeyCode::Enter => Some(SettingsMessage::StartEdit),
+                    KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
+                    KeyCode::Tab => Some(SettingsMessage::NextCategory),
+                    KeyCode::BackTab => Some(SettingsMessage::PrevCategory),
+                    KeyCode::Char('S')
+                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                    {
+                        Some(SettingsMessage::Save)
+                    }
+                    _ => None,
+                };
+                if let Some(m) = msg {
+                    screens::settings::update(&mut model.settings, m);
+                }
+            }
+        }
+        ManagementTab::Logs => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(LogsMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(LogsMessage::MoveUp),
+                KeyCode::Enter => Some(LogsMessage::ToggleDetail),
+                KeyCode::Char('r') => Some(LogsMessage::Refresh),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::logs::update(&mut model.logs, m);
+            }
+        }
+        ManagementTab::Versions => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(VersionsMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(VersionsMessage::MoveUp),
+                KeyCode::Char('r') => Some(VersionsMessage::Refresh),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::versions::update(&mut model.versions, m);
+            }
+        }
+        ManagementTab::GitView => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(GitViewMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(GitViewMessage::MoveUp),
+                KeyCode::Enter => Some(GitViewMessage::ToggleExpand),
+                KeyCode::Char('r') => Some(GitViewMessage::Refresh),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::git_view::update(&mut model.git_view, m);
+            }
+        }
+        ManagementTab::PrDashboard => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(PrDashboardMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(PrDashboardMessage::MoveUp),
+                KeyCode::Enter => Some(PrDashboardMessage::ToggleDetail),
+                KeyCode::Char('r') => Some(PrDashboardMessage::Refresh),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::pr_dashboard::update(&mut model.pr_dashboard, m);
+            }
+        }
+        ManagementTab::Profiles => {
+            let msg = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(ProfilesMessage::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(ProfilesMessage::MoveUp),
+                KeyCode::Enter => Some(ProfilesMessage::ToggleActive),
+                KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
+                KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
+                KeyCode::Char('d') => Some(ProfilesMessage::StartDelete),
+                KeyCode::Esc => Some(ProfilesMessage::Cancel),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::profiles::update(&mut model.profiles, m);
+            }
         }
     }
 }

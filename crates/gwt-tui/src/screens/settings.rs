@@ -82,11 +82,13 @@ pub struct SettingField {
 /// State for the settings screen.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsState {
-    pub category: SettingsCategory,
-    pub fields: Vec<SettingField>,
-    pub selected: usize,
-    pub editing: bool,
-    pub edit_buffer: String,
+    pub(crate) category: SettingsCategory,
+    pub(crate) fields: Vec<SettingField>,
+    pub(crate) selected: usize,
+    pub(crate) editing: bool,
+    pub(crate) edit_buffer: String,
+    /// Last save error, if any.
+    pub(crate) save_error: Option<String>,
 }
 
 impl SettingsState {
@@ -256,6 +258,56 @@ fn toggle_bool_field(field: &mut SettingField) {
     }
 }
 
+/// Persist current settings fields to gwt-config's global config.
+///
+/// Reads the current global Settings, applies matching fields from the TUI state,
+/// and writes back. Returns an error string on failure.
+fn save_settings_to_config(state: &SettingsState) -> Result<(), String> {
+    use gwt_config::Settings;
+
+    Settings::update_global(|settings| {
+        for field in &state.fields {
+            match (state.category, field.label.as_str()) {
+                // General
+                (SettingsCategory::General, "Log level") => {
+                    settings.debug = field.value == "debug";
+                }
+                // Worktree
+                (SettingsCategory::Worktree, "Default path") => {
+                    if field.value.is_empty() || field.value == "~/.gwt/worktrees" {
+                        settings.worktree_root = None;
+                    } else {
+                        settings.worktree_root =
+                            Some(std::path::PathBuf::from(&field.value));
+                    }
+                }
+                // Agent
+                (SettingsCategory::Agent, "Default agent") => {
+                    if field.value.is_empty() {
+                        settings.agent.default_agent = None;
+                    } else {
+                        settings.agent.default_agent = Some(field.value.clone());
+                    }
+                }
+                // Voice
+                (SettingsCategory::Voice, "Enabled") => {
+                    settings.voice.enabled = field.value == "true";
+                }
+                (SettingsCategory::Voice, "Language") => {
+                    if field.value.is_empty() {
+                        settings.voice.language = None;
+                    } else {
+                        settings.voice.language = Some(field.value.clone());
+                    }
+                }
+                _ => {} // Other fields have no backend mapping yet
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("{e}"))
+}
+
 /// Update settings state in response to a message.
 pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
     match msg {
@@ -324,7 +376,11 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
             }
         }
         SettingsMessage::Save => {
-            // Signal to persist settings -- handled by caller
+            if let Err(e) = save_settings_to_config(state) {
+                state.save_error = Some(e);
+            } else {
+                state.save_error = None;
+            }
         }
     }
 }

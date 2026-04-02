@@ -21,11 +21,11 @@ pub struct IssueItem {
 /// State for the issues screen.
 #[derive(Debug, Clone, Default)]
 pub struct IssuesState {
-    pub issues: Vec<IssueItem>,
-    pub selected: usize,
-    pub detail_view: bool,
-    pub search_query: String,
-    pub search_active: bool,
+    pub(crate) issues: Vec<IssueItem>,
+    pub(crate) selected: usize,
+    pub(crate) detail_view: bool,
+    pub(crate) search_query: String,
+    pub(crate) search_active: bool,
 }
 
 impl IssuesState {

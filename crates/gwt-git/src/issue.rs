@@ -68,8 +68,30 @@ impl IssueCache {
     }
 
     fn cache_path(&self, owner: &str, repo: &str) -> PathBuf {
-        self.cache_dir.join(format!("{owner}-{repo}.json"))
+        self.cache_dir.join(cache_filename(owner, repo))
     }
+}
+
+/// Sanitize a string for safe use in filenames by replacing unsafe characters.
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Build a safe cache filename from owner and repo.
+fn cache_filename(owner: &str, repo: &str) -> String {
+    format!(
+        "{}_{}_issues.json",
+        sanitize_filename(owner),
+        sanitize_filename(repo)
+    )
 }
 
 /// Fetch open issues from GitHub via `gh issue list --json`.
@@ -214,5 +236,63 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].number, 1);
         assert_eq!(loaded[0].title, "Test");
+    }
+
+    #[test]
+    fn sanitize_filename_replaces_unsafe_chars() {
+        assert_eq!(sanitize_filename("normal-name_1"), "normal-name_1");
+        // "../etc" -> '.', '.', '/' are all non-alphanumeric -> "___etc"
+        assert_eq!(sanitize_filename("../etc"), "___etc");
+        // "../../passwd" -> '.', '.', '/', '.', '.', '/' -> "______passwd"
+        assert_eq!(sanitize_filename("../../passwd"), "______passwd");
+        assert_eq!(sanitize_filename("a/b\\c"), "a_b_c");
+        assert_eq!(sanitize_filename(""), "");
+    }
+
+    #[test]
+    fn cache_filename_produces_safe_names() {
+        assert_eq!(
+            cache_filename("owner", "repo"),
+            "owner_repo_issues.json"
+        );
+        assert_eq!(
+            cache_filename("../etc", "../../passwd"),
+            "___etc_______passwd_issues.json"
+        );
+        assert_eq!(
+            cache_filename("foo/bar", "baz\\qux"),
+            "foo_bar_baz_qux_issues.json"
+        );
+    }
+
+    #[test]
+    fn cache_path_traversal_is_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = IssueCache::with_dir(tmp.path()).unwrap();
+
+        let issues = vec![Issue {
+            number: 1,
+            title: "Test".into(),
+            state: "OPEN".into(),
+            labels: vec![],
+            assignee: None,
+            body: None,
+            url: "https://example.com".into(),
+        }];
+
+        // Malicious owner/repo should not escape cache directory
+        cache.write("../etc", "../../passwd", &issues).unwrap();
+
+        // File should be inside the cache dir, not outside
+        let filename = cache_filename("../etc", "../../passwd");
+        let expected = tmp.path().join(&filename);
+        assert!(expected.exists(), "cache file should exist at: {}", expected.display());
+
+        // Verify it is indeed within the cache directory
+        assert!(expected.starts_with(tmp.path()));
+
+        // Should be readable back
+        let loaded = cache.read("../etc", "../../passwd").unwrap().unwrap();
+        assert_eq!(loaded.len(), 1);
     }
 }

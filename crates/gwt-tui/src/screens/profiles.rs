@@ -30,13 +30,13 @@ pub struct ProfileItem {
 /// State for the profiles screen.
 #[derive(Debug, Clone, Default)]
 pub struct ProfilesState {
-    pub profiles: Vec<ProfileItem>,
-    pub selected: usize,
-    pub mode: ProfileMode,
-    pub input_name: String,
-    pub input_description: String,
+    pub(crate) profiles: Vec<ProfileItem>,
+    pub(crate) selected: usize,
+    pub(crate) mode: ProfileMode,
+    pub(crate) input_name: String,
+    pub(crate) input_description: String,
     /// 0 = name field, 1 = description field
-    pub active_field: usize,
+    pub(crate) active_field: usize,
 }
 
 impl ProfilesState {

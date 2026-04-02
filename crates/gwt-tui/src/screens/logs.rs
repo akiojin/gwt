@@ -87,10 +87,10 @@ impl LogEntry {
 /// State for the logs screen.
 #[derive(Debug, Clone, Default)]
 pub struct LogsState {
-    pub entries: Vec<LogEntry>,
-    pub selected: usize,
-    pub filter_level: FilterLevel,
-    pub detail_view: bool,
+    pub(crate) entries: Vec<LogEntry>,
+    pub(crate) selected: usize,
+    pub(crate) filter_level: FilterLevel,
+    pub(crate) detail_view: bool,
 }
 
 impl LogsState {

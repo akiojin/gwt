@@ -58,10 +58,10 @@ pub struct GitCommitItem {
 /// State for the git view screen.
 #[derive(Debug, Clone, Default)]
 pub struct GitViewState {
-    pub files: Vec<GitFileItem>,
-    pub selected: usize,
-    pub expanded: HashSet<usize>,
-    pub commits: Vec<GitCommitItem>,
+    pub(crate) files: Vec<GitFileItem>,
+    pub(crate) selected: usize,
+    pub(crate) expanded: HashSet<usize>,
+    pub(crate) commits: Vec<GitCommitItem>,
 }
 
 impl GitViewState {
