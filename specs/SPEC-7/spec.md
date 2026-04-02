@@ -86,6 +86,77 @@ As a developer, I want to configure voice input settings so that I can customize
 - **NFR-003**: Settings changes take effect without requiring application restart (where technically feasible).
 - **NFR-004**: All settings UI text in English only.
 
+## Implementation Details
+
+### Config File Schema (`~/.gwt/config.toml`)
+
+```toml
+# General
+[general]
+protected_branches = ["main", "develop"]
+default_base_branch = "develop"
+worktree_root = "~/.gwt/worktrees"
+debug = false
+profiling = false
+
+# Agent defaults
+[agent]
+default_agent = "claude"
+auto_install_deps = false
+
+[agent.paths]
+claude = "/usr/local/bin/claude"
+codex = ""
+gemini = ""
+
+# Custom agents
+[tools.customCodingAgents.my-agent]
+id = "my-agent"
+displayName = "My Agent"
+agentType = "command"
+command = "my-agent-cli"
+defaultArgs = []
+[tools.customCodingAgents.my-agent.modeArgs]
+normal = []
+continue = ["--continue"]
+resume = ["--resume"]
+[tools.customCodingAgents.my-agent.models]
+default = { id = "default", label = "Default", arg = "" }
+
+# Profiles
+[[profiles]]
+name = "default"
+description = "Default profile"
+active = true
+[profiles.env]
+MY_VAR = "value"
+[profiles.disabled_env]
+UNWANTED_VAR = true
+
+# AI settings
+[ai]
+endpoint = "https://api.openai.com/v1"
+api_key = ""
+model = "gpt-4o"
+language = "en"
+summary_enabled = false
+
+# Voice settings
+[voice]
+model_path = ""
+hotkey = "Ctrl+G,v"
+input_device = "system_default"
+language = "auto"
+enabled = false
+```
+
+### Config File Priority Order
+
+1. CLI flags (highest)
+2. Environment variables
+3. `~/.gwt/config.toml`
+4. Built-in defaults (lowest)
+
 ## Success Criteria
 
 - **SC-001**: All 6 existing settings categories continue to function correctly.

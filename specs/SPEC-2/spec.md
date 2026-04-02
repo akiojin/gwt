@@ -113,6 +113,59 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **NFR-004**: Split grid layout recalculates within one frame on session add/remove.
 - **NFR-005**: Session persistence file size remains under 100KB for typical usage.
 
+## Implementation Details
+
+### Complete Keybinding Map
+
+| Keybinding | Action | Context |
+|------------|--------|---------|
+| `Ctrl+G, g` | Toggle Main/Management layer | Global |
+| `Ctrl+G, ]` | Next session | Main layer |
+| `Ctrl+G, [` | Previous session | Main layer |
+| `Ctrl+G, 1-9` | Switch to session N | Main layer |
+| `Ctrl+G, z` | Toggle Tab/Grid layout | Main layer |
+| `Ctrl+G, c` | New shell session | Global |
+| `Ctrl+G, x` | Close current session | Main layer |
+| `Ctrl+G, ?` | Show help overlay | Global |
+| `Ctrl+G, n` | Open agent launch wizard | Global |
+| `Ctrl+G, v` | Voice input (hold to record) | Main layer |
+| `Ctrl+G, p` | Paste file paths from clipboard | Main layer |
+| `Ctrl+C, Ctrl+C` | Quit (double-tap) | Global |
+| `Esc` | Close overlay / go back | Overlays |
+| `Enter` | Select / Confirm | Lists, dialogs |
+| `Up/k, Down/j` | Navigate list | Management tabs |
+| `PageUp/PageDown` | Page scroll | Lists, terminal |
+| `/` | Search / Filter | Management tabs |
+| `Tab` | Next field / section | Forms, wizards |
+
+### Ctrl+G Prefix State Machine
+
+```
+Idle ─[Ctrl+G]─→ PrefixActive
+PrefixActive ─[bound key]─→ Execute action → Idle
+PrefixActive ─[Ctrl+G]─→ Toggle management → Idle
+PrefixActive ─[Esc or 2s timeout]─→ Cancel → Idle
+PrefixActive ─[unbound key]─→ Ignore → Idle
+```
+
+### Session Persistence Schema
+
+Persisted to `~/.gwt/sessions/{base64_worktree_path}.toml`:
+
+```toml
+display_mode = "tab"  # "tab" | "grid"
+management_visible = true
+active_management_tab = "branches"
+active_session = 0
+
+[[sessions]]
+pane_id = "uuid"
+tab_type = "shell"  # "shell" | "agent"
+working_dir = "/path/to/dir"
+branch = "feature/foo"
+agent_id = "claude"  # only for agent type
+```
+
 ## Success Criteria
 
 - **SC-001**: Tab and split mode toggle works correctly for 1-9 sessions.

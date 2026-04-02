@@ -104,6 +104,129 @@ As a developer, I want to convert an existing session to a different agent type 
 - **NFR-004**: Quick Start history is bounded to 100 entries per branch to limit file size.
 - **NFR-005**: Custom agent configuration changes are persisted immediately (no explicit save step).
 
+## Implementation Details
+
+### Agent-Specific Environment Variables
+
+#### Claude Code
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | Enable agent teams |
+| `CLAUDE_CODE_NO_FLICKER` | `1` | Disable TUI flicker |
+| `DISABLE_TELEMETRY` | `1` | Disable Statsig metrics |
+| `DISABLE_ERROR_REPORTING` | `1` | Disable Sentry error reporting |
+| `DISABLE_FEEDBACK_COMMAND` | `1` | Disable feedback command |
+| `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY` | `1` | Disable session surveys |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` | Disable all non-essential traffic |
+| `IS_SANDBOX` | `1` | Sandbox mode (Unix/macOS only) |
+
+#### Codex
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `OPENAI_API_KEY` | (from config) | Authentication |
+
+#### Gemini
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `GOOGLE_API_KEY` or `GEMINI_API_KEY` | (from config) | Authentication |
+
+#### Common (All Agents)
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `GWT_PROJECT_ROOT` | repo root path | Repository root for agent context |
+| `TERM` | `xterm-256color` | Terminal type |
+| `COLORTERM` | `truecolor` | Color support |
+| Profile env vars | (from profile) | User-defined environment overrides |
+
+### Agent CLI Flags
+
+#### Claude Code
+
+| Flag | Description |
+|------|-------------|
+| `--print` | Non-interactive mode |
+| `--dangerously-skip-permissions` | Skip permission prompts (if configured) |
+| `--model <model>` | Model selection |
+| `--allowedTools <tools>` | Allowed tool list |
+
+#### Codex
+
+| Flag | Description |
+|------|-------------|
+| `--model <model>` | Default: `gpt-5.2-codex` |
+| `-c model_reasoning_effort=<level>` | Reasoning level: low/medium/high |
+| `--dangerously-bypass-approvals-and-sandbox` | Skip permissions (v0.80.0+) |
+| `--yolo` | Skip permissions (v0.79.x) |
+| `--enable web_search` | Enable web search (v0.90.0+) |
+| `--enable collaboration_modes` | Enable collaboration (v0.91.0+) |
+| `-c shell_environment_policy=inherit` | Shell policy |
+
+#### Gemini
+
+| Flag | Description |
+|------|-------------|
+| `--non-interactive` | Non-interactive mode |
+
+### Session File Schema (`~/.gwt/sessions/{base64_path}.toml`)
+
+```toml
+[session]
+id = "uuid-v4"
+worktree_path = "/absolute/path"
+branch = "feature/foo"
+agent = "claude"  # agent identifier
+agent_label = "Claude Code"
+agent_session_id = "session-xxx"  # for resume
+tool_version = "1.0.0"
+model = "claude-sonnet-4-5"
+created_at = "2026-01-01T00:00:00Z"
+updated_at = "2026-01-01T00:00:00Z"
+last_activity_at = "2026-01-01T00:00:00Z"
+status = "running"  # unknown | running | waiting_input | stopped
+display_name = "My Session"
+```
+
+- File path: Base64 URL-safe no-pad encoding of worktree path
+- Idle timeout: 60 seconds → status changes to `stopped`
+
+### Custom Agent Schema (`~/.gwt/config.toml`)
+
+```toml
+[tools.customCodingAgents.my-agent]
+id = "my-agent"
+displayName = "My Agent"
+agentType = "command"  # command | path | bunx
+command = "my-agent-cli"
+defaultArgs = ["--flag"]
+
+[tools.customCodingAgents.my-agent.modeArgs]
+normal = []
+continue = ["--continue"]
+resume = ["--resume"]
+
+[tools.customCodingAgents.my-agent.models]
+default = { id = "default", label = "Default", arg = "" }
+```
+
+### Version Cache Schema (`~/.gwt/cache/agent-versions.json`)
+
+```json
+{
+  "claude": {
+    "versions": ["1.0.54", "1.0.53", ...],
+    "fetched_at": "2026-01-01T00:00:00Z"
+  },
+  "codex": { ... }
+}
+```
+
+- TTL: 24 hours from `fetched_at`
+- Max 10 versions per agent
+
 ## Success Criteria
 
 - **SC-001**: All known agents (Claude Code, Codex, Gemini, OpenCode, Copilot) are correctly detected when installed.

@@ -100,6 +100,62 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - **NFR-004**: Binary download via postinstall completes within 60 seconds on a typical connection.
 - **NFR-005**: Docker Progress screen updates in real-time (at least 1 update per second during build).
 
+## Implementation Details
+
+### hooks.json Schema
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/gwt-hook pre-tool $TOOL_NAME",
+            "// gwt-managed": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [...],
+    "UserPromptSubmit": [...],
+    "Notification": [...],
+    "Stop": [...]
+  }
+}
+```
+
+- gwt-managed hooks identified by `"// gwt-managed": true` comment field
+- Merge logic: preserve all user hooks (without gwt-managed marker), update gwt-managed hooks
+- On corruption: backup to `hooks.json.bak`, write fresh managed hooks
+
+### Hooks Events
+
+| Event | Description |
+|-------|-------------|
+| `PreToolUse` | Before agent executes a tool |
+| `PostToolUse` | After agent executes a tool |
+| `UserPromptSubmit` | When user submits a prompt |
+| `Notification` | On notification event |
+| `Stop` | When agent session stops |
+
+### npm/bunx Distribution
+
+```json
+{
+  "name": "gwt",
+  "bin": { "gwt": "bin/gwt" },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  }
+}
+```
+
+- `postinstall.js`: detects OS/arch, downloads binary from GitHub Release, places in `bin/`
+- Supported: macOS arm64/x86_64, Linux x86_64, Windows x86_64
+
 ## Success Criteria
 
 - **SC-001**: GitHub Release produces downloadable binaries for all 4 target platforms.
