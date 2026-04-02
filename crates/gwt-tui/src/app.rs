@@ -923,6 +923,25 @@ fn wizard_version_cache_path() -> PathBuf {
 }
 
 fn schedule_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<AgentId>) {
+    schedule_wizard_version_cache_refresh_with(
+        cache_path,
+        refresh_targets,
+        |task| {
+            let _ = thread::spawn(task);
+        },
+        run_wizard_version_cache_refresh,
+    );
+}
+
+fn schedule_wizard_version_cache_refresh_with<Spawn, Refresh>(
+    cache_path: PathBuf,
+    refresh_targets: Vec<AgentId>,
+    spawn_task: Spawn,
+    refresh_cache: Refresh,
+) where
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>),
+    Refresh: FnOnce(PathBuf, Vec<AgentId>) + Send + 'static,
+{
     if refresh_targets.is_empty() {
         return;
     }
@@ -934,34 +953,37 @@ fn schedule_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: V
         return;
     }
 
-    let _ = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-
-        if let Ok(runtime) = runtime {
-            runtime.block_on(async move {
-                let mut cache = VersionCache::load(&cache_path);
-                let mut changed = false;
-
-                for agent_id in refresh_targets {
-                    if !cache.needs_refresh(&agent_id) {
-                        continue;
-                    }
-
-                    if let Ok(Some(_versions)) = cache.refresh(&agent_id).await {
-                        changed = true;
-                    }
-                }
-
-                if changed {
-                    let _ = cache.save(&cache_path);
-                }
-            });
-        }
-
+    spawn_task(Box::new(move || {
+        refresh_cache(cache_path, refresh_targets);
         WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
-    });
+    }));
+}
+
+fn run_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<AgentId>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+
+    if let Ok(runtime) = runtime {
+        runtime.block_on(async move {
+            let mut cache = VersionCache::load(&cache_path);
+            let mut changed = false;
+
+            for agent_id in refresh_targets {
+                if !cache.needs_refresh(&agent_id) {
+                    continue;
+                }
+
+                if let Ok(Some(_versions)) = cache.refresh(&agent_id).await {
+                    changed = true;
+                }
+            }
+
+            if changed {
+                let _ = cache.save(&cache_path);
+            }
+        });
+    }
 }
 
 fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
@@ -1533,6 +1555,36 @@ mod tests {
         let (scheduled_path, targets) = scheduled.into_inner().unwrap();
         assert_eq!(scheduled_path, cache_path);
         assert_eq!(targets, vec![AgentId::Gemini]);
+    }
+
+    #[test]
+    fn schedule_wizard_version_cache_refresh_with_defers_refresh_until_spawned_task_runs() {
+        WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+        let refreshed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refreshed_flag = refreshed.clone();
+
+        schedule_wizard_version_cache_refresh_with(
+            PathBuf::from("/tmp/agent-versions.json"),
+            vec![AgentId::ClaudeCode],
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+            move |_, _| {
+                refreshed_flag.store(true, Ordering::Release);
+            },
+        );
+
+        assert!(!refreshed.load(Ordering::Acquire));
+        assert!(spawned.borrow().is_some());
+        assert!(WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.load(Ordering::Acquire));
+
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+
+        assert!(refreshed.load(Ordering::Acquire));
+        assert!(!WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.load(Ordering::Acquire));
     }
 
     #[test]
