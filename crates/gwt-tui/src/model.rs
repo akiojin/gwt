@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::input::voice::VoiceInputState;
 use crate::screens::branches::BranchesState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::git_view::GitViewState;
@@ -169,6 +170,8 @@ pub struct Model {
     pub wizard: Option<WizardState>,
     /// Confirmation dialog state.
     pub confirm: ConfirmState,
+    /// Voice input state.
+    pub voice: VoiceInputState,
 }
 
 impl Model {
@@ -203,6 +206,7 @@ impl Model {
             versions: VersionsState::default(),
             wizard: None,
             confirm: ConfirmState::default(),
+            voice: VoiceInputState::default(),
         }
     }
 

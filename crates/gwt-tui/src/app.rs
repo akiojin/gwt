@@ -136,6 +136,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Confirm(msg) => {
             screens::confirm::update(&mut model.confirm, msg);
         }
+        Message::Voice(msg) => {
+            crate::input::voice::update(&mut model.voice, msg);
+        }
         Message::OpenWizard => {
             model.wizard = Some(crate::screens::wizard::WizardState::default());
         }

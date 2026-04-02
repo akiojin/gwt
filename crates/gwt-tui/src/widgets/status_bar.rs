@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::input::voice;
 use crate::model::{ActiveLayer, Model, SessionLayout};
 
 /// Render the status bar.
@@ -27,7 +28,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         ActiveLayer::Management => "Mgmt",
     };
 
-    let status = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" {layout_icon} {session_name} "),
             Style::default().fg(Color::White),
@@ -38,12 +39,28 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" {} ", model.repo_path.display()),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(" Ctrl+G,? Help ", Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+
+    // Voice indicator (when active)
+    if let Some(indicator) = voice::render_indicator(&model.voice) {
+        spans.push(Span::styled(
+            format!(" {indicator} "),
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    spans.push(Span::styled(
+        format!(" {} ", model.repo_path.display()),
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::styled(
+        " Ctrl+G,? Help ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let status = Line::from(spans);
 
     let bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(bar, area);

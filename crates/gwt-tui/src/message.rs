@@ -3,6 +3,7 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::model::ManagementTab;
+use crate::input::voice::VoiceInputMessage;
 use crate::screens::branches::BranchesMessage;
 use crate::screens::confirm::ConfirmMessage;
 use crate::screens::git_view::GitViewMessage;
@@ -72,6 +73,8 @@ pub enum Message {
     Wizard(WizardMessage),
     /// Confirmation dialog message.
     Confirm(ConfirmMessage),
+    /// Voice input message.
+    Voice(VoiceInputMessage),
     /// Open the wizard overlay.
     OpenWizard,
     /// Close the wizard overlay.
@@ -109,6 +112,7 @@ mod tests {
         let _ = Message::Versions(VersionsMessage::MoveUp);
         let _ = Message::Wizard(WizardMessage::MoveUp);
         let _ = Message::Confirm(ConfirmMessage::Toggle);
+        let _ = Message::Voice(VoiceInputMessage::StartRecording);
         let _ = Message::OpenWizard;
         let _ = Message::CloseWizard;
     }

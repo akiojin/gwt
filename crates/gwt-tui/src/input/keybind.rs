@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::input::voice::VoiceInputMessage;
 use crate::message::Message;
 use crate::model::ManagementTab;
 
@@ -88,6 +89,10 @@ impl KeybindRegistry {
                 description: "Quit".into(),
             },
             Keybinding {
+                keys: "Ctrl+G, v".into(),
+                description: "Start voice input".into(),
+            },
+            Keybinding {
                 keys: "Ctrl+G, ?".into(),
                 description: "Show help".into(),
             },
@@ -136,6 +141,9 @@ impl KeybindRegistry {
                     KeyCode::Char(n) if n.is_ascii_digit() && n != '0' => {
                         let idx = (n as usize) - ('1' as usize);
                         Some(Message::SwitchSession(idx))
+                    }
+                    KeyCode::Char('v') => {
+                        Some(Message::Voice(VoiceInputMessage::StartRecording))
                     }
                     KeyCode::Char('b') => {
                         Some(Message::SwitchManagementTab(ManagementTab::Branches))
