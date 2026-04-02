@@ -2723,10 +2723,37 @@ mod tests {
     use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
     use gwt_core::terminal::AgentColor;
     use std::collections::{BTreeMap, HashMap};
+    use std::ffi::OsString;
     use std::path::Path;
+    use std::sync::Mutex;
     use std::sync::mpsc;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn test_model() -> Model {
         let mut m = Model::new(PathBuf::from("/tmp/test"));
@@ -3201,6 +3228,109 @@ mod tests {
         assert!(m.branch_session_selector.is_some(), "expected selector");
         assert!(m.wizard.is_none());
         assert_eq!(m.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn selector_add_session_uses_quick_start_history() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("HOME", home.path());
+        let repo = create_test_repo();
+
+        let entry = gwt_core::config::ToolSessionEntry {
+            branch: "feature/demo".to_string(),
+            worktree_path: Some("/tmp/feature-demo".to_string()),
+            tool_id: "codex-cli".to_string(),
+            tool_label: "Codex".to_string(),
+            session_id: Some("sess-123".to_string()),
+            mode: Some("Normal".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_level: Some("high".to_string()),
+            skip_permissions: Some(true),
+            tool_version: Some("1.2.3".to_string()),
+            collaboration_modes: Some(false),
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp: 1_800_000_000_000,
+        };
+        gwt_core::config::save_session_entry(repo.path(), entry).unwrap();
+
+        let mut m = Model::new(repo.path().to_path_buf());
+        m.active_layer = ActiveLayer::Management;
+        m.branch_session_selector = Some(
+            crate::screens::branch_session_selector::BranchSessionSelectorState::new(
+                "feature/demo",
+                Some("/tmp/feature-demo".to_string()),
+                vec![crate::screens::branch_session_selector::BranchSessionOption {
+                    label: "Add session".to_string(),
+                    choice:
+                        crate::screens::branch_session_selector::BranchSessionSelectorChoice::AddSession,
+                }],
+            ),
+        );
+
+        update(&mut m, Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)));
+
+        let wizard = m.wizard.expect("wizard should open");
+        assert!(wizard.has_quick_start);
+        assert_eq!(wizard.quick_start_entries.len(), 1);
+        assert_eq!(wizard.quick_start_entries[0].session_id.as_deref(), Some("sess-123"));
+    }
+
+    #[test]
+    fn selector_full_wizard_skips_quick_start_history() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set("HOME", home.path());
+        let repo = create_test_repo();
+
+        let entry = gwt_core::config::ToolSessionEntry {
+            branch: "feature/demo".to_string(),
+            worktree_path: Some("/tmp/feature-demo".to_string()),
+            tool_id: "codex-cli".to_string(),
+            tool_label: "Codex".to_string(),
+            session_id: Some("sess-123".to_string()),
+            mode: Some("Normal".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_level: Some("high".to_string()),
+            skip_permissions: Some(true),
+            tool_version: Some("1.2.3".to_string()),
+            collaboration_modes: Some(false),
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp: 1_800_000_000_000,
+        };
+        gwt_core::config::save_session_entry(repo.path(), entry).unwrap();
+
+        let mut m = Model::new(repo.path().to_path_buf());
+        m.active_layer = ActiveLayer::Management;
+        m.branch_session_selector = Some(
+            crate::screens::branch_session_selector::BranchSessionSelectorState::new(
+                "feature/demo",
+                Some("/tmp/feature-demo".to_string()),
+                vec![crate::screens::branch_session_selector::BranchSessionOption {
+                    label: "Full wizard".to_string(),
+                    choice:
+                        crate::screens::branch_session_selector::BranchSessionSelectorChoice::FullWizard,
+                }],
+            ),
+        );
+
+        update(&mut m, Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)));
+
+        let wizard = m.wizard.expect("wizard should open");
+        assert!(!wizard.has_quick_start);
+        assert!(wizard.quick_start_entries.is_empty());
     }
 
     #[test]

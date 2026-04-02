@@ -42,6 +42,7 @@
 - Branches now reflects per-branch open session counts
 - Enter on a branch with one matching session jumps straight into that session
 - Enter on a branch with multiple matching sessions opens a selector instead of guessing
+- Selector-driven `Add session` now keeps Quick Start history, while `Full wizard` explicitly skips it
 
 ### Next
 

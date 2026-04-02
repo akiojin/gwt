@@ -36,8 +36,8 @@
 
 ## Phase 4: Launch Flow Integration
 
-- [ ] T400: branch enter selector と `Quick Start` の接続方針をテストで固定する
-- [ ] T401: `既存へ入る / 追加起動 / フルWizard` を実装する
+- [x] T400: branch enter selector と `Quick Start` の接続方針をテストで固定する
+- [x] T401: `既存へ入る / 追加起動 / フルWizard` を実装する
 - [ ] T402: hooks confirm (`SPEC-1786`) を新 launch flow に再接続する
 - [ ] T403: skill registration と session persistence を新 launch flow に再接続する
 
