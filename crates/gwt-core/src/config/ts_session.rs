@@ -494,7 +494,26 @@ pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionE
 /// Get session history entries for a specific branch, grouped by tool (FR-050)
 /// Returns the latest entry for each tool that was used on this branch
 /// This is used for the Quick Start feature
-pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessionEntry> {
+fn worktree_path_matches(expected_worktree_path: Option<&Path>, entry_path: Option<&str>) -> bool {
+    let Some(expected_worktree_path) = expected_worktree_path else {
+        return true;
+    };
+    let Some(entry_path) = entry_path else {
+        return false;
+    };
+
+    let expected_canon = dunce::canonicalize(expected_worktree_path)
+        .unwrap_or_else(|_| expected_worktree_path.to_path_buf());
+    let entry_path = Path::new(entry_path);
+    let entry_canon = dunce::canonicalize(entry_path).unwrap_or_else(|_| entry_path.to_path_buf());
+    entry_canon == expected_canon
+}
+
+fn get_branch_tool_history_inner(
+    repo_root: &Path,
+    branch: &str,
+    expected_worktree_path: Option<&Path>,
+) -> Vec<ToolSessionEntry> {
     let main_root = crate::git::get_main_repo_root(repo_root);
     let session = match load_ts_session(&main_root) {
         Some(s) => s,
@@ -518,7 +537,9 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
     } = session;
 
     for entry in history {
-        if entry.branch == branch {
+        if entry.branch == branch
+            && worktree_path_matches(expected_worktree_path, entry.worktree_path.as_deref())
+        {
             let mut entry = entry;
             let canonical_id = canonical_tool_id(&entry.tool_id);
             if canonical_id != entry.tool_id {
@@ -552,7 +573,9 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
 
     if tool_map.is_empty() {
         if let Some(last_branch_name) = last_branch {
-            if last_branch_name == branch {
+            if last_branch_name == branch
+                && worktree_path_matches(expected_worktree_path, last_worktree_path.as_deref())
+            {
                 let fallback_tool_id = canonical_tool_id(&last_used_tool.unwrap_or_default());
                 let label = tool_label
                     .or_else(|| {
@@ -594,6 +617,23 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     entries
+}
+
+pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessionEntry> {
+    get_branch_tool_history_inner(repo_root, branch, None)
+}
+
+/// Get session history entries for a specific branch, optionally restricted to
+/// a concrete worktree path.
+///
+/// This is used by TUI Quick Start / Resume flows to avoid reusing stale
+/// session metadata captured before the branch->worktree mapping was corrected.
+pub fn get_branch_tool_history_for_worktree(
+    repo_root: &Path,
+    branch: &str,
+    expected_worktree_path: Option<&Path>,
+) -> Vec<ToolSessionEntry> {
+    get_branch_tool_history_inner(repo_root, branch, expected_worktree_path)
 }
 
 #[cfg(test)]
@@ -813,6 +853,91 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].tool_id, "claude-code");
         assert_eq!(entries[0].skip_permissions, Some(true));
+    }
+
+    #[test]
+    fn test_get_branch_tool_history_for_worktree_filters_stale_resume_entries() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let repo_root = temp.path().join("sample-repo");
+        let develop_wt = repo_root.join("develop");
+        let feature_wt = repo_root.join("feature").join("feature-1776");
+        std::fs::create_dir_all(&develop_wt).unwrap();
+        std::fs::create_dir_all(&feature_wt).unwrap();
+
+        let session = TsSessionData {
+            last_worktree_path: None,
+            last_branch: None,
+            last_used_tool: None,
+            last_session_id: None,
+            tool_label: None,
+            tool_version: None,
+            model: None,
+            timestamp: 1_700_000_000_000,
+            repository_root: repo_root.to_string_lossy().to_string(),
+            history: vec![
+                ToolSessionEntry {
+                    branch: "develop".to_string(),
+                    worktree_path: Some(feature_wt.to_string_lossy().to_string()),
+                    tool_id: "claude-code".to_string(),
+                    tool_label: "Claude Code".to_string(),
+                    session_id: Some("wrong-session".to_string()),
+                    mode: Some("Resume".to_string()),
+                    model: None,
+                    reasoning_level: None,
+                    skip_permissions: None,
+                    tool_version: Some("latest".to_string()),
+                    collaboration_modes: None,
+                    docker_service: None,
+                    docker_force_host: None,
+                    docker_recreate: None,
+                    docker_build: None,
+                    docker_keep: None,
+                    docker_container_name: None,
+                    docker_compose_args: None,
+                    timestamp: 2_000,
+                },
+                ToolSessionEntry {
+                    branch: "develop".to_string(),
+                    worktree_path: Some(develop_wt.to_string_lossy().to_string()),
+                    tool_id: "claude-code".to_string(),
+                    tool_label: "Claude Code".to_string(),
+                    session_id: Some("right-session".to_string()),
+                    mode: Some("Resume".to_string()),
+                    model: None,
+                    reasoning_level: None,
+                    skip_permissions: None,
+                    tool_version: Some("latest".to_string()),
+                    collaboration_modes: None,
+                    docker_service: None,
+                    docker_force_host: None,
+                    docker_recreate: None,
+                    docker_build: None,
+                    docker_keep: None,
+                    docker_container_name: None,
+                    docker_compose_args: None,
+                    timestamp: 1_000,
+                },
+            ],
+        };
+
+        let session_path = get_ts_session_path(&repo_root);
+        if let Some(parent) = session_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let content = toml::to_string_pretty(&session).unwrap();
+        std::fs::write(&session_path, content).unwrap();
+
+        let entries =
+            get_branch_tool_history_for_worktree(&repo_root, "develop", Some(&develop_wt));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id.as_deref(), Some("right-session"));
+        assert_eq!(
+            entries[0].worktree_path.as_deref(),
+            Some(develop_wt.to_string_lossy().as_ref())
+        );
     }
 
     #[test]

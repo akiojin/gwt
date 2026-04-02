@@ -38,6 +38,7 @@
 2. **Given** 管理画面の Branches タブ、**When** ブランチを選択して worktree 作成を実行する、**Then** worktree が作成され Agent タブに反映される
 3. **Given** 管理画面を表示中、**When** ESC または Ctrl+G を押す、**Then** メイン画面に戻る
 4. **Given** Branch Wizard を選択済み branch から開いて `Create new branch` を選ぶ、**When** Agent を launch する、**Then** 新規 branch は選択済み base branch から materialize され、PTY は current repo root ではなく新しい worktree で開始される
+5. **Given** selected branch の Quick Start 履歴に branch 名は同じだが別 worktree path の stale resume entry がある、**When** Enter 既定で起動する、**Then** その stale entry は無視され、誤った worktree の session を resume しない
 
 ### User Story 3 - セッション状態の復元
 

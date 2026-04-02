@@ -53,8 +53,9 @@ pub use skill_registration::{
 };
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
-    get_branch_tool_history, get_last_tool_usage_map, get_ts_session_path,
-    get_ts_session_toml_path, load_ts_session, save_session_entry, ToolSessionEntry, TsSessionData,
+    get_branch_tool_history, get_branch_tool_history_for_worktree, get_last_tool_usage_map,
+    get_ts_session_path, get_ts_session_toml_path, load_ts_session, save_session_entry,
+    ToolSessionEntry, TsSessionData,
 };
 
 #[cfg(test)]

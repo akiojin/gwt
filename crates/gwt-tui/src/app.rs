@@ -1044,14 +1044,15 @@ pub fn update(model: &mut Model, msg: Message) {
             use crate::screens::branches::BranchesMessage;
             // Intercept Enter to open Wizard with selected branch
             if matches!(msg, BranchesMessage::Enter) {
-                let branch = model
-                    .branches_state
-                    .selected_branch_name()
-                    .unwrap_or_default();
-                if !branch.is_empty() {
-                    let history = load_quick_start_history(&model.repo_root, &branch);
+                if let Some(branch) = model.branches_state.selected_branch().cloned() {
+                    let history = load_quick_start_history(
+                        &model.repo_root,
+                        &branch.name,
+                        branch.worktree_path.as_deref().map(Path::new),
+                    );
                     model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
-                        &branch, history,
+                        &branch.name,
+                        history,
                     ));
                 }
                 sync_active_terminal_history(model);
@@ -2005,8 +2006,13 @@ fn spawn_agent_session(
 fn load_quick_start_history(
     repo_root: &std::path::Path,
     branch: &str,
+    expected_worktree_path: Option<&std::path::Path>,
 ) -> Vec<crate::screens::wizard::QuickStartEntry> {
-    let history = gwt_core::config::get_branch_tool_history(repo_root, branch);
+    let history = gwt_core::config::get_branch_tool_history_for_worktree(
+        repo_root,
+        branch,
+        expected_worktree_path,
+    );
     // Find the first entry (newest) that has a session_id
     let entry = history.into_iter().find(|e| e.session_id.is_some());
     match entry {
