@@ -195,6 +195,17 @@ fn spawn_management_data_preload(
     rx
 }
 
+fn spawn_branch_list_enrichment(
+    repo_root: PathBuf,
+) -> mpsc::Receiver<crate::model::BranchListUpdate> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let branches = crate::screens::branches::load_branches_enriched(&repo_root);
+        let _ = tx.send(crate::model::BranchListUpdate { branches });
+    });
+    rx
+}
+
 fn wants_mouse_capture(model: &Model) -> bool {
     model.active_layer == ActiveLayer::Management
         || (model.active_layer == ActiveLayer::Main && !model.session_tabs.is_empty())
@@ -1316,6 +1327,14 @@ pub fn update(model: &mut Model, msg: Message) {
                 sync_active_terminal_history(model);
                 return;
             }
+            if matches!(msg, BranchesMessage::Refresh) {
+                model.branches_state.loading = true;
+                model.branches_state.branches = crate::screens::branches::load_branches(&model.repo_root);
+                model.sync_branch_session_counts();
+                model.branch_list_rx = Some(spawn_branch_list_enrichment(model.repo_root.clone()));
+                sync_active_terminal_history(model);
+                return;
+            }
             crate::screens::branches::update(&mut model.branches_state, msg);
         }
         Message::IssuesMsg(msg) => match msg {
@@ -2431,6 +2450,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         model.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
         model.settings_state.load_settings();
         model.sync_branch_session_counts();
+        model.branch_list_rx = Some(spawn_branch_list_enrichment(repo_root.clone()));
         model.management_data_rx = Some(spawn_management_data_preload(repo_root.clone()));
         tracing::info!(
             message = "flow_success",

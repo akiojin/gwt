@@ -179,7 +179,7 @@ pub use crate::screens::wizard::WizardState;
 
 #[derive(Debug)]
 pub struct BranchListUpdate {
-    pub branches: Vec<String>,
+    pub branches: Vec<crate::screens::branches::BranchItem>,
 }
 
 #[derive(Debug)]
@@ -500,18 +500,28 @@ impl Model {
 
         self.tick_count += 1;
         // Poll branch list updates
+        let mut branch_updates = Vec::new();
         if let Some(ref rx) = self.branch_list_rx {
-            while let Ok(_update) = rx.try_recv() {
-                // Phase 2: apply branch list data to screens
+            while let Ok(update) = rx.try_recv() {
+                branch_updates.push(update);
             }
         }
+        for update in branch_updates {
+            self.branches_state.set_branches(update.branches);
+            self.sync_branch_session_counts();
+        }
+
+        let mut management_updates = Vec::new();
         if let Some(ref rx) = self.management_data_rx {
             while let Ok(update) = rx.try_recv() {
-                self.issues_state.issues = update.issues;
-                self.specs_state.specs = update.specs;
-                self.versions_state.tags = update.versions;
-                self.logs_state.entries = update.logs;
+                management_updates.push(update);
             }
+        }
+        for update in management_updates {
+            self.issues_state.issues = update.issues;
+            self.specs_state.specs = update.specs;
+            self.versions_state.tags = update.versions;
+            self.logs_state.entries = update.logs;
         }
 
         let mut session_status_updates = Vec::new();
@@ -1074,5 +1084,46 @@ mod tests {
         assert_eq!(model.specs_state.specs.len(), 1);
         assert_eq!(model.versions_state.tags.len(), 1);
         assert_eq!(model.logs_state.entries.len(), 1);
+    }
+
+    #[test]
+    fn apply_background_updates_applies_branch_list_enrichment() {
+        let mut model = test_model();
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.branch_list_rx = Some(rx);
+
+        tx.send(BranchListUpdate {
+            branches: vec![crate::screens::branches::BranchItem {
+                name: "feature/demo".to_string(),
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/tmp/demo".to_string()),
+                session_count: 0,
+                running_session_count: 0,
+                stopped_session_count: 0,
+                worktree_indicator: 'w',
+                has_changes: false,
+                has_unpushed: true,
+                is_protected: false,
+                last_tool_usage: None,
+                last_tool_id: None,
+                pr_title: Some("Demo PR".to_string()),
+                pr_number: Some(7),
+                pr_state: Some("open".to_string()),
+                safety_status: crate::screens::branches::SafetyStatus::Warning,
+                is_remote: false,
+                last_commit_timestamp: None,
+            }],
+        })
+        .unwrap();
+
+        model.apply_background_updates();
+
+        assert_eq!(model.branches_state.branches.len(), 1);
+        let branch = &model.branches_state.branches[0];
+        assert_eq!(branch.pr_number, Some(7));
+        assert_eq!(branch.pr_title.as_deref(), Some("Demo PR"));
+        assert_eq!(branch.safety_status, crate::screens::branches::SafetyStatus::Warning);
+        assert_eq!(branch.worktree_indicator, 'w');
     }
 }
