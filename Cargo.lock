@@ -2416,6 +2416,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-docker"
+version = "8.17.2"
+dependencies = [
+ "gwt-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "gwt-tauri"
 version = "8.17.2"
 dependencies = [
