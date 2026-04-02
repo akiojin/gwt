@@ -260,17 +260,13 @@ fn toggle_bool_field(field: &mut SettingField) {
 pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
     match msg {
         SettingsMessage::MoveUp => {
-            if !state.editing && !state.fields.is_empty() {
-                state.selected = if state.selected == 0 {
-                    state.fields.len() - 1
-                } else {
-                    state.selected - 1
-                };
+            if !state.editing {
+                super::move_up(&mut state.selected, state.fields.len());
             }
         }
         SettingsMessage::MoveDown => {
-            if !state.editing && !state.fields.is_empty() {
-                state.selected = (state.selected + 1) % state.fields.len();
+            if !state.editing {
+                super::move_down(&mut state.selected, state.fields.len());
             }
         }
         SettingsMessage::NextCategory => {

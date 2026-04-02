@@ -94,6 +94,8 @@ pub struct AISuggestState {
     pub loading: bool,
     /// Error message if AI suggestion failed.
     pub error: Option<String>,
+    /// Tick counter for spinner animation (incremented on WizardMessage::Tick).
+    pub tick_counter: usize,
 }
 
 /// An agent option discovered on the system.
@@ -180,12 +182,23 @@ impl WizardState {
         }
     }
 
+    /// Static option labels for the current step.
+    pub fn current_static_options(&self) -> Vec<&'static str> {
+        match self.step {
+            WizardStep::QuickStart => vec!["New Agent", "From Template"],
+            WizardStep::ModelSelect => vec!["claude-sonnet-4", "claude-opus-4", "gpt-4.1"],
+            WizardStep::ReasoningLevel => vec!["Low", "Medium", "High"],
+            WizardStep::ExecutionMode => vec!["Autonomous", "Interactive"],
+            WizardStep::BranchTypeSelect => vec!["feature/", "fix/", "custom"],
+            WizardStep::SkipPermissions => vec!["Yes", "No"],
+            WizardStep::Confirm => vec!["Launch", "Cancel"],
+            _ => vec![],
+        }
+    }
+
     /// Options as string labels for the current step.
     pub fn current_options(&self) -> Vec<String> {
         match self.step {
-            WizardStep::QuickStart => {
-                vec!["New Agent".to_string(), "From Template".to_string()]
-            }
             WizardStep::AgentSelect => {
                 if self.detected_agents.is_empty() {
                     vec!["(no agents detected)".to_string()]
@@ -199,23 +212,6 @@ impl WizardState {
                         .collect()
                 }
             }
-            WizardStep::ModelSelect => vec![
-                "claude-sonnet-4".to_string(),
-                "claude-opus-4".to_string(),
-                "gpt-4.1".to_string(),
-            ],
-            WizardStep::ReasoningLevel => {
-                vec!["Low".to_string(), "Medium".to_string(), "High".to_string()]
-            }
-            WizardStep::ExecutionMode => {
-                vec!["Autonomous".to_string(), "Interactive".to_string()]
-            }
-            WizardStep::BranchTypeSelect => vec![
-                "feature/".to_string(),
-                "fix/".to_string(),
-                "custom".to_string(),
-            ],
-            WizardStep::BranchNameInput => vec![],
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     vec![]
@@ -225,9 +221,8 @@ impl WizardState {
                     self.ai_suggest.suggestions.clone()
                 }
             }
-            WizardStep::IssueSelect => vec![],
-            WizardStep::SkipPermissions => vec!["Yes".to_string(), "No".to_string()],
-            WizardStep::Confirm => vec!["Launch".to_string(), "Cancel".to_string()],
+            WizardStep::BranchNameInput | WizardStep::IssueSelect => vec![],
+            _ => self.current_static_options().into_iter().map(String::from).collect(),
         }
     }
 }
@@ -251,6 +246,8 @@ pub enum WizardMessage {
     EditSelectedSuggestion,
     /// Skip AI suggestions and go to manual input.
     SkipToManualInput,
+    /// Tick for spinner animation.
+    Tick,
 }
 
 /// Update wizard state in response to a message.
@@ -258,19 +255,11 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
     match msg {
         WizardMessage::MoveUp => {
             let count = state.option_count();
-            if count > 0 {
-                state.selected = if state.selected == 0 {
-                    count - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, count);
         }
         WizardMessage::MoveDown => {
             let count = state.option_count();
-            if count > 0 {
-                state.selected = (state.selected + 1) % count;
-            }
+            super::move_down(&mut state.selected, count);
         }
         WizardMessage::Select => {
             // Store selection for current step, then advance
@@ -284,6 +273,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                         suggestions: Vec::new(),
                         loading: true,
                         error: None,
+                        tick_counter: 0,
                     };
                 }
             } else {
@@ -355,6 +345,9 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 state.selected = 0;
             }
         }
+        WizardMessage::Tick => {
+            state.ai_suggest.tick_counter = state.ai_suggest.tick_counter.wrapping_add(1);
+        }
     }
 }
 
@@ -402,11 +395,9 @@ fn apply_selection(state: &mut WizardState) {
 /// Render the wizard overlay.
 pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Centered modal — 60% width, 70% height
-    let width = (area.width * 60 / 100).max(40).min(area.width);
-    let height = (area.height * 70 / 100).max(12).min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let overlay = Rect::new(x, y, width, height);
+    let width = (area.width * 60 / 100).max(40);
+    let height = (area.height * 70 / 100).max(12);
+    let overlay = super::centered_rect(width, height, area);
 
     // Clear the area behind the overlay
     frame.render_widget(Clear, overlay);
@@ -504,14 +495,7 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, opt)| {
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
             let marker = if idx == state.selected {
                 "> "
             } else {
@@ -541,12 +525,7 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     if state.ai_suggest.loading {
         let spinner_chars = ['\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}'];
-        let tick = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            / 200) as usize;
-        let ch = spinner_chars[tick % spinner_chars.len()];
+        let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
         let text = Paragraph::new(format!(" {} Generating branch name suggestions...", ch))
             .block(block)
             .style(Style::default().fg(Color::Yellow));
@@ -600,14 +579,7 @@ fn render_confirm_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, opt)| {
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
             ListItem::new(Line::from(Span::styled(format!("  {opt}"), style)))
         })
         .collect();

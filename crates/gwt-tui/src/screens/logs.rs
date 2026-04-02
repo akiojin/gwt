@@ -118,11 +118,7 @@ impl LogsState {
     /// Clamp selected index to filtered length.
     fn clamp_selected(&mut self) {
         let len = self.filtered_entries().len();
-        if len == 0 {
-            self.selected = 0;
-        } else if self.selected >= len {
-            self.selected = len - 1;
-        }
+        super::clamp_index(&mut self.selected, len);
     }
 }
 
@@ -142,19 +138,11 @@ pub fn update(state: &mut LogsState, msg: LogsMessage) {
     match msg {
         LogsMessage::MoveUp => {
             let len = state.filtered_entries().len();
-            if len > 0 {
-                state.selected = if state.selected == 0 {
-                    len - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, len);
         }
         LogsMessage::MoveDown => {
             let len = state.filtered_entries().len();
-            if len > 0 {
-                state.selected = (state.selected + 1) % len;
-            }
+            super::move_down(&mut state.selected, len);
         }
         LogsMessage::ToggleDetail => {
             state.detail_view = !state.detail_view;
@@ -234,14 +222,7 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, entry)| {
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
 
             let line = Line::from(vec![
                 Span::styled(

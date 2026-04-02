@@ -31,11 +31,7 @@ impl VersionsState {
 
     /// Clamp selected index to list length.
     fn clamp_selected(&mut self) {
-        if self.tags.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.tags.len() {
-            self.selected = self.tags.len() - 1;
-        }
+        super::clamp_index(&mut self.selected, self.tags.len());
     }
 }
 
@@ -52,18 +48,10 @@ pub enum VersionsMessage {
 pub fn update(state: &mut VersionsState, msg: VersionsMessage) {
     match msg {
         VersionsMessage::MoveUp => {
-            if !state.tags.is_empty() {
-                state.selected = if state.selected == 0 {
-                    state.tags.len() - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, state.tags.len());
         }
         VersionsMessage::MoveDown => {
-            if !state.tags.is_empty() {
-                state.selected = (state.selected + 1) % state.tags.len();
-            }
+            super::move_down(&mut state.selected, state.tags.len());
         }
         VersionsMessage::Refresh => {
             // Signal to reload tags — handled by caller
@@ -105,14 +93,7 @@ fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, tag)| {
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
 
             let line = Line::from(vec![
                 Span::styled(

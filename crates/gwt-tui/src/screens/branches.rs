@@ -147,11 +147,7 @@ impl BranchesState {
     /// Clamp selected index to filtered length.
     fn clamp_selected(&mut self) {
         let len = self.filtered_branches().len();
-        if len == 0 {
-            self.selected = 0;
-        } else if self.selected >= len {
-            self.selected = len - 1;
-        }
+        super::clamp_index(&mut self.selected, len);
     }
 }
 
@@ -175,19 +171,11 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     match msg {
         BranchesMessage::MoveUp => {
             let len = state.filtered_branches().len();
-            if len > 0 {
-                state.selected = if state.selected == 0 {
-                    len - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, len);
         }
         BranchesMessage::MoveDown => {
             let len = state.filtered_branches().len();
-            if len > 0 {
-                state.selected = (state.selected + 1) % len;
-            }
+            super::move_down(&mut state.selected, len);
         }
         BranchesMessage::Select => {
             // Selection action — handled by caller via selected_branch()
@@ -269,16 +257,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_branches();
 
     if filtered.is_empty() {
-        let block = Block::default().borders(Borders::ALL);
-        let msg = if state.branches.is_empty() {
-            "No branches loaded"
-        } else {
-            "No matching branches"
-        };
-        let paragraph = Paragraph::new(msg)
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(paragraph, area);
+        super::render_empty_list(frame, area, !state.branches.is_empty(), "branches");
         return;
     }
 
@@ -301,14 +280,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         let head_indicator = if branch.is_head { "* " } else { "  " };
         let locality = if branch.is_local { "L" } else { "R" };
 
-        let style = if idx == state.selected {
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
+        let style = super::list_item_style(idx == state.selected);
 
         let line = Line::from(vec![
             Span::styled(

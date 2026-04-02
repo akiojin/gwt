@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
@@ -52,11 +52,7 @@ impl IssuesState {
     /// Clamp selected index to filtered length.
     fn clamp_selected(&mut self) {
         let len = self.filtered_issues().len();
-        if len == 0 {
-            self.selected = 0;
-        } else if self.selected >= len {
-            self.selected = len - 1;
-        }
+        super::clamp_index(&mut self.selected, len);
     }
 }
 
@@ -78,19 +74,11 @@ pub fn update(state: &mut IssuesState, msg: IssuesMessage) {
     match msg {
         IssuesMessage::MoveUp => {
             let len = state.filtered_issues().len();
-            if len > 0 {
-                state.selected = if state.selected == 0 {
-                    len - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, len);
         }
         IssuesMessage::MoveDown => {
             let len = state.filtered_issues().len();
-            if len > 0 {
-                state.selected = (state.selected + 1) % len;
-            }
+            super::move_down(&mut state.selected, len);
         }
         IssuesMessage::ToggleDetail => {
             if !state.filtered_issues().is_empty() {
@@ -170,16 +158,7 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_issues();
 
     if filtered.is_empty() {
-        let block = Block::default().borders(Borders::ALL);
-        let msg = if state.issues.is_empty() {
-            "No issues loaded"
-        } else {
-            "No matching issues"
-        };
-        let paragraph = Paragraph::new(msg)
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(paragraph, area);
+        super::render_empty_list(frame, area, !state.issues.is_empty(), "issues");
         return;
     }
 
@@ -193,14 +172,7 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
                 _ => Color::DarkGray,
             };
 
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
 
             let labels_str = if issue.labels.is_empty() {
                 String::new()

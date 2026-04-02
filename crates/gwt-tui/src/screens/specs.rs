@@ -66,11 +66,7 @@ impl SpecsState {
     /// Clamp selected index to filtered length.
     fn clamp_selected(&mut self) {
         let len = self.filtered_specs().len();
-        if len == 0 {
-            self.selected = 0;
-        } else if self.selected >= len {
-            self.selected = len - 1;
-        }
+        super::clamp_index(&mut self.selected, len);
     }
 }
 
@@ -106,19 +102,11 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
     match msg {
         SpecsMessage::MoveUp => {
             let len = state.filtered_specs().len();
-            if len > 0 {
-                state.selected = if state.selected == 0 {
-                    len - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, len);
         }
         SpecsMessage::MoveDown => {
             let len = state.filtered_specs().len();
-            if len > 0 {
-                state.selected = (state.selected + 1) % len;
-            }
+            super::move_down(&mut state.selected, len);
         }
         SpecsMessage::ToggleDetail => {
             if !state.filtered_specs().is_empty() {
@@ -255,16 +243,7 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_specs();
 
     if filtered.is_empty() {
-        let block = Block::default().borders(Borders::ALL);
-        let msg = if state.specs.is_empty() {
-            "No specs loaded"
-        } else {
-            "No matching specs"
-        };
-        let paragraph = Paragraph::new(msg)
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(paragraph, area);
+        super::render_empty_list(frame, area, !state.specs.is_empty(), "specs");
         return;
     }
 
@@ -280,14 +259,7 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
                 _ => Color::DarkGray,
             };
 
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
 
             let is_editing = idx == state.selected && state.editing;
 

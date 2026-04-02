@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
@@ -63,11 +63,7 @@ impl PrDashboardState {
 
     /// Clamp selected index to list length.
     fn clamp_selected(&mut self) {
-        if self.prs.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.prs.len() {
-            self.selected = self.prs.len() - 1;
-        }
+        super::clamp_index(&mut self.selected, self.prs.len());
     }
 }
 
@@ -85,18 +81,10 @@ pub enum PrDashboardMessage {
 pub fn update(state: &mut PrDashboardState, msg: PrDashboardMessage) {
     match msg {
         PrDashboardMessage::MoveUp => {
-            if !state.prs.is_empty() {
-                state.selected = if state.selected == 0 {
-                    state.prs.len() - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, state.prs.len());
         }
         PrDashboardMessage::MoveDown => {
-            if !state.prs.is_empty() {
-                state.selected = (state.selected + 1) % state.prs.len();
-            }
+            super::move_down(&mut state.selected, state.prs.len());
         }
         PrDashboardMessage::ToggleDetail => {
             if !state.prs.is_empty() {
@@ -141,14 +129,7 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, pr)| {
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
 
             let ci_color = match pr.ci_status.as_str() {
                 "pass" | "success" => Color::Green,

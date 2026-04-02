@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
@@ -47,11 +47,7 @@ impl ProfilesState {
 
     /// Clamp selected index to list length.
     fn clamp_selected(&mut self) {
-        if self.profiles.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.profiles.len() {
-            self.selected = self.profiles.len() - 1;
-        }
+        super::clamp_index(&mut self.selected, self.profiles.len());
     }
 
     /// Clear form input fields.
@@ -82,17 +78,13 @@ pub enum ProfilesMessage {
 pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
     match msg {
         ProfilesMessage::MoveUp => {
-            if state.mode == ProfileMode::List && !state.profiles.is_empty() {
-                state.selected = if state.selected == 0 {
-                    state.profiles.len() - 1
-                } else {
-                    state.selected - 1
-                };
+            if state.mode == ProfileMode::List {
+                super::move_up(&mut state.selected, state.profiles.len());
             }
         }
         ProfilesMessage::MoveDown => {
-            if state.mode == ProfileMode::List && !state.profiles.is_empty() {
-                state.selected = (state.selected + 1) % state.profiles.len();
+            if state.mode == ProfileMode::List {
+                super::move_down(&mut state.selected, state.profiles.len());
             }
         }
         ProfilesMessage::ToggleActive => {
@@ -213,14 +205,7 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         .map(|(idx, profile)| {
             let active_marker = if profile.active { "[*] " } else { "[ ] " };
 
-            let style = if idx == state.selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let style = super::list_item_style(idx == state.selected);
 
             let line = Line::from(vec![
                 Span::styled(

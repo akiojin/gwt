@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
@@ -77,11 +77,7 @@ impl GitViewState {
 
     /// Clamp selected index to files length.
     fn clamp_selected(&mut self) {
-        if self.files.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.files.len() {
-            self.selected = self.files.len() - 1;
-        }
+        super::clamp_index(&mut self.selected, self.files.len());
     }
 }
 
@@ -100,18 +96,10 @@ pub enum GitViewMessage {
 pub fn update(state: &mut GitViewState, msg: GitViewMessage) {
     match msg {
         GitViewMessage::MoveUp => {
-            if !state.files.is_empty() {
-                state.selected = if state.selected == 0 {
-                    state.files.len() - 1
-                } else {
-                    state.selected - 1
-                };
-            }
+            super::move_up(&mut state.selected, state.files.len());
         }
         GitViewMessage::MoveDown => {
-            if !state.files.is_empty() {
-                state.selected = (state.selected + 1) % state.files.len();
-            }
+            super::move_down(&mut state.selected, state.files.len());
         }
         GitViewMessage::ToggleExpand => {
             if !state.files.is_empty() {
@@ -168,14 +156,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
 
     for (idx, file) in state.files.iter().enumerate() {
-        let style = if idx == state.selected {
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
+        let style = super::list_item_style(idx == state.selected);
 
         let expand_marker = if state.is_expanded(idx) {
             "v "

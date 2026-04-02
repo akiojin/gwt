@@ -84,11 +84,7 @@ pub fn render(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     }
 
     // Centered dialog — fixed size
-    let width = 40_u16.min(area.width);
-    let height = 7_u16.min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog = Rect::new(x, y, width, height);
+    let dialog = super::centered_rect(40, 7, area);
 
     frame.render_widget(Clear, dialog);
 

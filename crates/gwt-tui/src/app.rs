@@ -22,20 +22,13 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::ToggleLayer => {
             model.active_layer = match model.active_layer {
-                ActiveLayer::Main => {
-                    model.management_visible = true;
-                    ActiveLayer::Management
-                }
-                ActiveLayer::Management => {
-                    model.management_visible = false;
-                    ActiveLayer::Main
-                }
+                ActiveLayer::Main => ActiveLayer::Management,
+                ActiveLayer::Management => ActiveLayer::Main,
             };
         }
         Message::SwitchManagementTab(tab) => {
             model.management_tab = tab;
             model.active_layer = ActiveLayer::Management;
-            model.management_visible = true;
         }
         Message::NextSession => {
             if !model.sessions.is_empty() {
@@ -88,12 +81,10 @@ pub fn update(model: &mut Model, msg: Message) {
             // Phase 2: feed data into vt100 parser for the matching pane
         }
         Message::PushError(err) => {
-            model.error_queue.push(err);
+            model.error_queue.push_back(err);
         }
         Message::DismissError => {
-            if !model.error_queue.is_empty() {
-                model.error_queue.remove(0);
-            }
+            model.error_queue.pop_front();
         }
         Message::KeyInput(_) | Message::MouseInput(_) | Message::Tick => {
             // Phase 2: forward to active pane / tick logic
@@ -185,7 +176,7 @@ pub fn update(model: &mut Model, msg: Message) {
 pub fn view(model: &Model, frame: &mut Frame) {
     let size = frame.area();
 
-    if model.management_visible {
+    if model.active_layer == ActiveLayer::Management {
         // Split: left = management panel, right = sessions
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -401,15 +392,12 @@ mod tests {
     fn update_toggle_layer() {
         let mut model = test_model();
         assert_eq!(model.active_layer, ActiveLayer::Main);
-        assert!(!model.management_visible);
 
         update(&mut model, Message::ToggleLayer);
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert!(model.management_visible);
 
         update(&mut model, Message::ToggleLayer);
         assert_eq!(model.active_layer, ActiveLayer::Main);
-        assert!(!model.management_visible);
     }
 
     #[test]
@@ -421,7 +409,6 @@ mod tests {
         );
         assert_eq!(model.management_tab, ManagementTab::Settings);
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert!(model.management_visible);
     }
 
     #[test]
@@ -520,7 +507,7 @@ mod tests {
 
         update(&mut model, Message::DismissError);
         assert_eq!(model.error_queue.len(), 1);
-        assert_eq!(model.error_queue[0], "e2");
+        assert_eq!(model.error_queue.front().unwrap(), "e2");
     }
 
     #[test]

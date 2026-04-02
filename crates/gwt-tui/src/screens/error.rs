@@ -1,5 +1,7 @@
 //! Error overlay screen — shows errors from the model's error_queue.
 
+use std::collections::VecDeque;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -18,8 +20,8 @@ pub enum ErrorMessage {
 ///
 /// Takes the error_queue from the model directly.
 /// Shows the first (oldest) error with a dismiss hint.
-pub fn render(error_queue: &[String], frame: &mut Frame, area: Rect) {
-    let err = match error_queue.first() {
+pub fn render(error_queue: &VecDeque<String>, frame: &mut Frame, area: Rect) {
+    let err = match error_queue.front() {
         Some(e) => e,
         None => return, // Nothing to show
     };
@@ -27,11 +29,8 @@ pub fn render(error_queue: &[String], frame: &mut Frame, area: Rect) {
     let queue_count = error_queue.len();
 
     // Centered overlay
-    let width = (area.width * 60 / 100).max(40).min(area.width);
-    let height = 7_u16.min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let overlay = Rect::new(x, y, width, height);
+    let width = (area.width * 60 / 100).max(40);
+    let overlay = super::centered_rect(width, 7, area);
 
     frame.render_widget(Clear, overlay);
 
@@ -74,7 +73,7 @@ mod tests {
 
     #[test]
     fn render_with_error_does_not_panic() {
-        let errors = vec!["Something went wrong".to_string()];
+        let errors: VecDeque<String> = vec!["Something went wrong".to_string()].into();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -93,7 +92,7 @@ mod tests {
 
     #[test]
     fn render_empty_queue_is_noop() {
-        let errors: Vec<String> = vec![];
+        let errors: VecDeque<String> = VecDeque::new();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -113,11 +112,12 @@ mod tests {
 
     #[test]
     fn render_multiple_errors_shows_count() {
-        let errors = vec![
+        let errors: VecDeque<String> = vec![
             "Error 1".to_string(),
             "Error 2".to_string(),
             "Error 3".to_string(),
-        ];
+        ]
+        .into();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn render_single_error_no_count() {
-        let errors = vec!["Only one".to_string()];
+        let errors: VecDeque<String> = vec!["Only one".to_string()].into();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal

@@ -1,5 +1,6 @@
 //! Model — central application state for the Elm Architecture.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use crate::input::voice::VoiceInputState;
@@ -141,10 +142,8 @@ pub struct Model {
     pub session_layout: SessionLayout,
     /// Active management tab.
     pub management_tab: ManagementTab,
-    /// Whether the management panel is visible.
-    pub management_visible: bool,
     /// Error queue (shown as overlays).
-    pub error_queue: Vec<String>,
+    pub error_queue: VecDeque<String>,
     /// Whether the app should quit.
     pub quit: bool,
     /// Repository path.
@@ -199,8 +198,7 @@ impl Model {
             active_session: 0,
             session_layout: SessionLayout::Tab,
             management_tab: ManagementTab::Branches,
-            management_visible: false,
-            error_queue: Vec::new(),
+            error_queue: VecDeque::new(),
             quit: false,
             repo_path,
             terminal_size: (80, 24),
@@ -238,9 +236,10 @@ impl Model {
             SessionLayout::Tab => "tab",
             SessionLayout::Grid => "grid",
         };
+        let management_visible = self.active_layer == ActiveLayer::Management;
         let content = format!(
             "display_mode = \"{}\"\nmanagement_visible = {}\nactive_management_tab = \"{}\"\nsession_count = {}\n",
-            display_mode, self.management_visible, self.management_tab.label(), self.sessions.len(),
+            display_mode, management_visible, self.management_tab.label(), self.sessions.len(),
         );
         std::fs::write(path, content).map_err(|e| e.to_string())
     }
@@ -298,7 +297,6 @@ mod tests {
         assert_eq!(model.active_session, 0);
         assert_eq!(model.session_layout, SessionLayout::Tab);
         assert_eq!(model.management_tab, ManagementTab::Branches);
-        assert!(!model.management_visible);
         assert!(model.error_queue.is_empty());
         assert!(!model.quit);
     }
@@ -363,7 +361,7 @@ mod tests {
 
         let mut model = Model::new(PathBuf::from("/tmp/repo"));
         model.session_layout = SessionLayout::Grid;
-        model.management_visible = true;
+        model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Settings;
         model.save_session_state(&path).unwrap();
 
