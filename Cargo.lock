@@ -2416,6 +2416,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-git"
+version = "8.17.2"
+dependencies = [
+ "dirs",
+ "gwt-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "gwt-tauri"
 version = "8.17.2"
 dependencies = [
