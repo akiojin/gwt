@@ -1,0 +1,25 @@
+[package]
+name = "gwt-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Terminal UI for Git Worktree Manager"
+publish = false
+
+[[bin]]
+name = "gwt-tui"
+path = "src/main.rs"
+
+[dependencies]
+gwt-core = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { workspace = true }
+vt100 = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile.workspace = true
