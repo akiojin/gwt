@@ -2,9 +2,11 @@
 resolver = "2"
 members = [
     "crates/gwt-core",
-    "crates/gwt-tauri",
 ]
 default-members = [
+    "crates/gwt-core",
+]
+exclude = [
     "crates/gwt-tauri",
 ]
 

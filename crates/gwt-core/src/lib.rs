@@ -1,22 +1,11 @@
-//! gwt-core: Core library for Git Worktree Manager
+//! gwt-core: Thin foundational crate for the gwt ecosystem.
 //!
-//! This crate provides the core functionality for managing Git worktrees,
-//! including Git operations, configuration management, logging, file locking,
-//! and AI agent integration.
+//! Provides shared error types, filesystem path utilities, and process
+//! execution helpers. No business logic lives here — domain crates
+//! (gwt-git, gwt-agent, etc.) build on top of these primitives.
 
-pub mod agent;
-pub mod ai;
-pub mod config;
-pub mod docker;
 pub mod error;
-pub mod git;
-pub mod lock;
-pub mod logging;
-pub mod migration;
+pub mod paths;
 pub mod process;
-pub mod system_info;
-pub mod terminal;
-pub mod update;
-pub mod worktree;
 
-pub use error::{ErrorSeverity, GwtError, Result, StructuredError};
+pub use error::{GwtError, Result};
