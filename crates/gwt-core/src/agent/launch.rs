@@ -312,6 +312,9 @@ impl AgentLaunchBuilder {
         // Append user-supplied extra arguments
         args.extend(self.extra_args.iter().cloned());
 
+        // Worktree auto-creation
+        let final_working_dir = self.resolve_working_dir();
+
         // Agent-specific environment variables
         if self.agent_id == "claude" {
             env_vars
@@ -325,9 +328,10 @@ impl AgentLaunchBuilder {
             );
         }
         ensure_terminal_env_defaults(&mut env_vars);
-
-        // Worktree auto-creation
-        let final_working_dir = self.resolve_working_dir();
+        env_vars.insert(
+            "PWD".to_string(),
+            final_working_dir.to_string_lossy().to_string(),
+        );
 
         Ok(BuiltinLaunchConfig {
             command,
@@ -868,6 +872,23 @@ mod tests {
             .expect("build should succeed");
         // env_var overrides should win over os_env
         assert_eq!(config.env_vars.get("MY_KEY").unwrap(), "from_override");
+    }
+
+    #[test]
+    fn test_agent_launch_builder_overrides_pwd_with_final_working_dir() {
+        let mut os_env = HashMap::new();
+        os_env.insert("PWD".to_string(), "/tmp/original".to_string());
+
+        let config = AgentLaunchBuilder::new("claude", "/tmp/final")
+            .with_os_env(os_env)
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(config.working_dir, PathBuf::from("/tmp/final"));
+        assert_eq!(
+            config.env_vars.get("PWD").map(String::as_str),
+            Some("/tmp/final")
+        );
     }
 
     #[test]

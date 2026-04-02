@@ -22,6 +22,7 @@
 - [x] T204 [US2] Render selected branch detail in a full-window layout without left/right split panes
 - [x] T205 [US2] Preserve selected base branch through the wizard `Create new branch` flow and launch agents in the materialized new-branch worktree
 - [x] T206 [US2] Ignore stale Quick Start resume entries whose persisted worktree path does not match the selected branch worktree
+- [x] T207 [US2] Override inherited `PWD` with the resolved worktree path so child CLIs do not display the parent worktree path
 
 ## Phase 4: User Story 3 - Agent Canvas owns execution relationships
 

@@ -39,6 +39,7 @@
 3. **Given** 管理画面を表示中、**When** ESC または Ctrl+G を押す、**Then** メイン画面に戻る
 4. **Given** Branch Wizard を選択済み branch から開いて `Create new branch` を選ぶ、**When** Agent を launch する、**Then** 新規 branch は選択済み base branch から materialize され、PTY は current repo root ではなく新しい worktree で開始される
 5. **Given** selected branch の Quick Start 履歴に branch 名は同じだが別 worktree path の stale resume entry がある、**When** Enter 既定で起動する、**Then** その stale entry は無視され、誤った worktree の session を resume しない
+6. **Given** gwt 自身は別 worktree を current directory にして起動されている、**When** 他の branch/worktree へ Agent を launch する、**Then** 子プロセスの launch env (`PWD`) も resolved worktree path に更新され、CLI ヘッダが親の古い path を表示しない
 
 ### User Story 3 - セッション状態の復元
 
@@ -62,7 +63,7 @@
 - **FR-007**: セッション状態（タブ構成、アクティブタブ）を `~/.gwt/sessions/` に保存・復元する
 - **FR-008**: タブの並び替え・クローズが可能
 - **FR-009**: 管理画面の各タブはターミナル全体を使って表示する
-- **FR-010**: Branch Wizard の launch flow は resolved worktree path を一度決定し、Codex hook 判定・PTY の cwd・session history / session-id detection で同じ path を使わなければならない
+- **FR-010**: Branch Wizard の launch flow は resolved worktree path を一度決定し、Codex hook 判定・PTY の cwd・launch env (`PWD`)・session history / session-id detection で同じ path を使わなければならない
 
 ## Non-Functional Requirements
 
