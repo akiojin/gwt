@@ -3,67 +3,8 @@ name = "gwt-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
-authors.workspace = true
-description = "Core library for Git Worktree Manager"
-publish = false  # Distributed via GitHub Release only
 
 [dependencies]
-thiserror.workspace = true
-gix.workspace = true
-tokio.workspace = true
-serde.workspace = true
-toml.workspace = true
-serde_json.workspace = true
-serde_yaml.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-tracing-appender.workspace = true
-tracing-chrome.workspace = true
-fs2.workspace = true
-directories.workspace = true
-chrono.workspace = true
-uuid.workspace = true
-libc.workspace = true
-async-trait = "0.1"
-which = "8"
-base64 = "0.22"
+thiserror = { workspace = true }
 dirs = "6"
-dunce.workspace = true
-sha2.workspace = true
-reqwest.workspace = true
-walkdir = "2"
-portable-pty.workspace = true
-semver.workspace = true
-flate2.workspace = true
-tar.workspace = true
-zip.workspace = true
-sysinfo.workspace = true
-notify.workspace = true
-notify-debouncer-mini.workspace = true
-
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-nvml-wrapper = { workspace = true, optional = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-wmi = "0.18"
-
-[features]
-nvidia-gpu = ["dep:nvml-wrapper"]
-
-[dev-dependencies]
-tempfile.workspace = true
-criterion.workspace = true
-serial_test = "3"
-
-[[bench]]
-name = "git_ops"
-harness = false
-
-[[bench]]
-name = "worktree_ops"
-harness = false
-
-[[bench]]
-name = "config_load"
-harness = false
+which = "8"
