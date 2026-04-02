@@ -1,183 +1,113 @@
-# Implementation Plan: SPEC-1776 — gwt-tui 完全再構築
+# Plan: SPEC-1776 — 旧TUI UX を基準にした ratatui TUI 再設計
 
 ## Summary
 
-gwt-tauri (Tauri v2 + Svelte 5 GUI) を gwt-tui (ratatui TUI) に置換する。以前の gwt-cli TUI (38,415行) のアーキテクチャ (Elm Architecture) と全機能を移植し、tmux 依存を内蔵 PTY + vt100 に置換する。
+`SPEC-1776` は「旧TUIの UX を現行 backend 上で再構成する親 SPEC」として扱う。単純な `gwt-cli` 復元は採らず、`gwt-core` の `native PTY`、hooks、SPEC/Issue integration を再利用しながら、`branch list` 中心の UX、常設マルチモード、管理画面タブ、`Profiles = Env profiles` を再設計する。
 
-## Technical Context
+## Cross-Spec Inventory
 
-### 参照コードベース
-- **gwt-cli** (commit `becf0aab`): 38,415行の ratatui TUI アプリケーション
-  - `tui/app.rs` (10,898行): Elm Architecture コア、16画面、48状態オブジェクト
-  - `tui/screens/wizard.rs` (5,325行): 15ステップ起動ウィザード
-  - `tui/screens/branch_list.rs` (3,990行): ブランチ一覧 + PR/エージェント状態
-  - `tui/screens/settings.rs` (2,261行): 設定画面（7カテゴリ）
-  - その他 20+ 画面モジュール
+| Concern | Canonical SPEC | Plan での扱い |
+|---|---|---|
+| Parent UX / migration sequencing | `SPEC-1776` | 比較マトリクス、初回完成条件、child sync 順序を持つ |
+| Terminal emulation | `SPEC-1541` | `native PTY + vt100` を維持し、scrollback / selection / resize 契約を流用 |
+| Interaction policy | `SPEC-1770` | `Enter`、管理画面トグル、grid/maximize 操作へ再配線 |
+| Workspace shell | `SPEC-1654` | `tab-first` 記述を `branch-first + permanent multi-mode` に同期する follow-up を切る |
+| SPECs tab | `SPEC-1777` | tab form 維持。一覧・詳細・launch entry の親遷移だけ合わせる |
+| Quick Start | `SPEC-1782` | Branches 起点の再開導線を維持し、multi-session selector に接続する |
+| Hooks merge | `SPEC-1786` | launch flow の child 契約として接続 |
+| SPEC workflow / storage | `SPEC-1579` | local artifact 正本を維持 |
+| Workspace initialization | `SPEC-1787` | Branches / SPEC-first 導線との整合を確認 |
+| Issue linkage / cache | `SPEC-1714` | Branch row / Issues detail の source of truth として再利用 |
+| Profiles persistence | `SPEC-1542`, `SPEC-1656` | env profile 保存形を再利用 |
 
-### 新規要素（gwt-cli にはなかったもの）
-- **内蔵 PTY + vt100 レンダリング**: tmux 不要。renderer.rs (VT100→ratatui変換)
-- **2層タブ構造**: メイン画面 (Agent/Shell) + 管理画面 (Branches/SPECs/Issues/Versions/Settings/Logs)
-- **Ctrl+G プレフィックスキー**: tmux の Ctrl+B 相当
+## Design Decisions
 
-### 維持する現行 gwt-tui コード
-- `renderer.rs`: VT100 → ratatui Cell 変換
-- `event.rs`: EventLoop (crossterm + PTY channel + tick)
-- `input/keybind.rs`: Ctrl+G プレフィックス状態機械
-- `Cargo.toml`: 依存関係
+- 旧TUIの価値は `branch list` を中心に置いた情報設計と操作意味にある
+- `tmux` の実装は捨てるが、複数セッション運用の価値は `permanent multi-mode` に置換する
+- Session surface は通常時 `equal grid`、集中時 `maximize + tab switch`
+- 管理画面は `tabbed management workspace` を採用し、初回は `Branches / SPECs / Issues / Profiles` に絞る
+- `Profiles` は環境変数プロファイル専用とし、一般設定は後続 `Settings` フェーズへ回す
+- `AI summary`、`Logs`、`Versions`、`Settings` は後続フェーズ
 
-### gwt-core の活用
-- `config::Settings`, `ProfilesConfig`, `AgentConfig` — 設定ロード
-- `agent::AgentManager` — エージェント検出
-- `agent::launch::AgentLaunchBuilder` — 起動パラメータ構築
-- `agent::session_watcher` — リアルタイム状態更新
-- `agent::session_store` — セッション永続化
-- `agent::codex::codex_default_args()` — Codex 引数構築
-- `worktree::WorktreeManager` — ワークツリー管理
-- `docker::*` — Docker 検出/管理
-- `git::Repository` — Git 操作
-- `ai::*` — AI サマリー/クライアント
-- `logging::init_logger()` — ログ初期化
-- `terminal::PaneManager` — PTY ペイン管理
+## Architecture Direction
 
-## Architecture
+### gwt-core reuse
 
-### Elm Architecture (Model/View/Update)
+- `terminal::*`
+- `agent::launch`
+- `session_store` / `session_watcher`
+- `config::skill_registration`
+- `git::issue` / `git::issue_spec` / `git::local_spec`
+- `ProfilesConfig` と関連 persistence
 
-```text
-Model: 全アプリ状態を保持する構造体
-  ├── active_layer: MainScreen | ManagementScreen
-  ├── session_tabs: Vec<SessionTab>      // Agent/Shell タブ
-  ├── management_tab: ManagementTab      // Branches/SPECs/Issues/Versions/Settings/Logs
-  ├── wizard: Option<WizardState>        // オーバーレイ
-  ├── error_queue: ErrorQueue            // エラースタック
-  ├── progress: Option<ProgressState>    // 起動プログレス
-  └── pane_manager: PaneManager          // PTY 管理
+### gwt-tui redesign targets
 
-View: Model → Frame 描画
-  ├── メイン画面: タブバー + PTY ターミナル + ステータスバー
-  ├── 管理画面: タブバー + Branches/SPECs/Issues/Versions/Settings/Logs + ステータスバー
-  └── オーバーレイ: Wizard / Progress / Error / Confirm
+- `branch list` を中心にした entry surface
+- `1ブランチ = Nセッション` を扱う selector と session index
+- `equal grid / maximize` を持つ session workspace
+- `tabbed management workspace`
+- `Profiles` 独立タブ
 
-Update: Message → Model 変更
-  ├── Key/Mouse/Resize イベント → Message 変換
-  ├── PTY 出力 → vt100 パーサー更新
-  ├── Tick (250ms) → バックグラウンド結果ポーリング
-  └── バックグラウンドチャネル → 状態更新
-```
+## Phased Implementation
 
-### Event Loop
+### Phase 0: Parent Spec Reset
 
-```text
-loop {
-  terminal.draw(|f| model.view(f));
+- `SPEC-1776` の spec / plan / tasks / research / data-model / quickstart を新前提へ更新
+- `旧TUI / 現行 gwt-tui / 現行 gwt-core / 新目標` の比較マトリクスを作る
+- child SPEC へ波及する更新箇所を inventory 化する
 
-  if event::poll(100ms) {
-    match event::read() {
-      Key(key) → model.update(handle_key(key))
-      Mouse(mouse) → model.update(handle_mouse(mouse))
-      Resize(w,h) → model.update(Resize(w,h))
-    }
-  }
+### Phase 1: Branch-First Shell Model
 
-  // PTY output
-  while let Ok((id, data)) = pty_rx.try_recv() {
-    model.handle_pty_output(id, data);
-  }
+- `Branches` を唯一の primary entry に戻す
+- ブランチ行の session count 表示を追加する
+- `Enter` を `no session / one session / many sessions` の 3 分岐へ作り直す
+- `hidden pane` なしの session index を作る
 
-  // Tick (250ms)
-  if tick_elapsed {
-    model.update(Tick);
-    model.apply_background_updates();
-  }
+### Phase 2: Permanent Multi-Mode Session Workspace
 
-  if model.should_quit { break; }
-}
-```
+- `equal grid` を通常レイアウトにする
+- `4件以上` を前提に layout rules を作る
+- focus session の maximize toggle を作る
+- maximize 時の tab switch を作る
+- 管理画面開閉と layout restore を接続する
 
-## File Structure
+### Phase 3: Management Workspace Core
 
-```text
-crates/gwt-tui/src/
-  main.rs                    — エントリーポイント + ログ初期化
-  app.rs                     — Elm Architecture コア (Model/View/Update/EventLoop)
-  model.rs                   — Model 構造体定義
-  message.rs                 — Message enum 定義
-  renderer.rs                — VT100→ratatui変換（維持）
-  event.rs                   — イベントループ（維持）
-  input/
-    keybind.rs               — Ctrl+G プレフィックス（維持）
-    voice.rs                 — whisper-rs 統合
-  screens/
-    mod.rs                   — Screen enum + 共通型
-    branches.rs              — Branches タブ（gwt-cli branch_list.rs 移植）
-    issues.rs                — Issues/SPECs タブ
-    settings.rs              — Settings タブ（gwt-cli settings.rs 移植）
-    logs.rs                  — Logs タブ（gwt-cli logs.rs 移植）
-    agent_pane.rs            — Agent/Shell PTY ターミナル
-    wizard.rs                — 起動ウィザード（gwt-cli wizard.rs 移植）
-    git_view.rs              — Git View サブビュー
-    clone_wizard.rs          — Clone ウィザード
-    speckit_wizard.rs        — SpecKit ウィザード
-    error.rs                 — エラー画面
-    confirm.rs               — 確認ダイアログ
-    environment.rs           — 環境変数編集
-    profiles.rs              — プロファイル管理
-    docker_progress.rs       — Docker 進捗
-    service_select.rs        — Docker サービス選択
-    port_select.rs           — Docker ポート選択
-    migration_dialog.rs      — bare リポジトリ移行
-  widgets/
-    mod.rs
-    progress_modal.rs        — プログレスモーダル
-    tab_bar.rs               — メイン/管理画面タブバー
-    status_bar.rs            — ステータスバー
-    terminal_view.rs         — PTY ターミナル描画
-  config/
-    launch_defaults.rs       — 起動設定の永続化
+- `Branches / SPECs / Issues / Profiles` の 4 タブへ整理する
+- `SPECs / Issues` は一覧・詳細・launch entry を維持する
+- `Profiles` は env profile 管理に絞る
 
-## Phased Implementation (5-8 並列エージェント)
+### Phase 4: Launch Flow Integration
 
-### Phase 1: Core Architecture
-- app.rs + model.rs + message.rs: Elm Architecture コア
-- 2層タブ構造、画面遷移、イベントループ
-- PTY 統合（renderer.rs, event.rs を活用）
+- multi-session aware な branch enter flow を作る
+- `既存へ入る / 追加起動 / フルWizard` selector を作る
+- `Quick Start` を新しい selector と両立させる
+- hooks confirm と skill registration を launch path へ再接続する
 
-### Phase 2: Management Screens (並列)
-- screens/branches.rs: ブランチ一覧 + Git View + Quick Start + Safety Level
-- screens/settings.rs: 設定 + プロファイル + 環境変数 + カスタムエージェント
-- screens/issues.rs: Issues/SPECs タブ
-- screens/logs.rs: ログビューア
+### Phase 5: Child SPEC Synchronization
 
-### Phase 3: Wizard + Agent Launch (並列)
-- screens/wizard.rs: 15ステップウィザード完全移植
-- screens/agent_pane.rs: PTY ターミナルエミュレーター
-- widgets/progress_modal.rs: 6段階起動プログレス
+- `SPEC-1654` を新 shell model に合わせる
+- `SPEC-1770` を新 shortcut / layout policy に合わせる
+- `SPEC-1777` を management tabs と launch entry に同期する
+- `SPEC-1782` を `1ブランチ = Nセッション` 前提へ同期する
+- 必要に応じて `SPEC-1542` / `SPEC-1656` の profile wording を見直す
 
-### Phase 4: Additional Features (並列)
-- Docker 対応 (Compose + DevContainer)
-- Clone/Migration/SpecKit ウィザード
-- ボイス入力 (whisper-rs)
-- ファイルペースト
-- Assistant Mode
+### Deferred Phase
 
-### Phase 5: Polish
-- パフォーマンス最適化
-- マウス完全対応
-- エラーハンドリング (ErrorQueue + モーダル + ステータスバー)
-- スキル登録の自動注入
-- npm 配布
+- `Settings`
+- `Logs`
+- `Versions`
+- `AI summary`
+- custom agent UI refresh
 
-## SPEC 更新
+## Verification Baseline
 
-162 SPEC 全てに gwt-tui 移行の注釈を追加:
-- 10 SPEC: deprecated (GUI固有)
-- 5 SPEC: TUI 向けに更新
-- 15 SPEC: バックエンドのみ（変更不要）
-- 132 SPEC: 完了済み（注釈のみ）
-
-## Verification
-
-- `cargo build -p gwt-tui && cargo test -p gwt-tui && cargo clippy -p gwt-tui -- -D warnings`
-- `cargo test -p gwt-core`
-- 手動: gwt 起動 → Branches タブ → Wizard → Agent タブ → 管理画面トグル
-- 全 SC-001〜SC-011 の達成確認
+- artifact update: `markdownlint` と diff review
+- implementation start gate:
+  - comparison matrix が揃っている
+  - child sync list が揃っている
+  - `Branches / Session / Wizard / SPECs / Issues / Profiles` の受け入れ条件が tasks に落ちている
+- code verification when implementation starts:
+  - `cargo test -p gwt-core -p gwt-tui`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - Branches → Session → Wizard → SPECs/Issues → Profiles の manual walkthrough

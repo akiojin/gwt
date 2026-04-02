@@ -1,284 +1,143 @@
-> **Canonical Boundary**: `SPEC-1776` は TUI 移行の親 SPEC である。terminal emulation は `SPEC-1541`、workspace shell は `SPEC-1654`、interaction は `SPEC-1770` へ委譲する。
+> **Canonical Boundary**: `SPEC-1776` は TUI 再設計の親 SPEC である。`branch list` 中心の UX 方針、常設マルチモード、管理画面の情報設計、各 child SPEC の統合優先順位だけを定義する。terminal emulation は `SPEC-1541`、interaction policy は `SPEC-1770`、workspace shell は `SPEC-1654`、SPEC workflow は `SPEC-1579`、workspace initialization は `SPEC-1787`、Quick Start は `SPEC-1782`、Issue linkage/cache は `SPEC-1714`、Codex hooks merge は `SPEC-1786`、Profiles persistence は `SPEC-1542` / `SPEC-1656` を正本とする。
 
-# Tauri GUI から ratatui TUI への移行
+# 旧TUI UX を基準にした ratatui TUI 再設計
 
 ## Background
 
-gwt is a SPEC-driven agent management tool that launches coding agents (Claude Code, Codex, Gemini) against SPECs with git worktrees providing isolated workspaces. The current frontend is a Tauri v2 + Svelte 5 desktop GUI introduced in v7.0.0. Prior to the GUI, gwt had a ratatui-based TUI (gwt-cli, 38,415 lines) that was removed in commit bd74257d.
+gwt の現行 `gwt-tui` は `native PTY`、hooks、SPEC/Issue integration、session persistence などの backend はすでに持っている。一方で UX は、`v6.30.3` の旧TUIと比べて、以下の点で使い勝手が下がっている。
 
-This SPEC replaces the GUI with a new ratatui-based TUI (gwt-tui), migrating the full feature set from both the previous gwt-cli TUI and the current gwt-tauri GUI. The architecture uses Elm Architecture (Model/View/Update) from gwt-cli, with tmux dependency replaced by native PTY + vt100 terminal emulation.
+- 運用の中心が `branch list` ではなく `tab/session surface` に寄りすぎている
+- 起動中セッションの見え方が散り、旧TUIのような一目で把握できる感覚が薄い
+- `tmux` multi-mode が担っていた複数セッション運用の価値が、`native PTY` 時代の UX に再設計されていない
+- 管理画面の情報は tab 形式で整理したいが、初回完成条件と後続機能の境界が曖昧
 
-Design document: `docs/superpowers/specs/2026-03-27-tui-migration-design.md`
-Reference code: `crates/gwt-cli/` at commit `becf0aab` (38,415 lines)
+この SPEC は `SPEC-1776` を「全部入り移行仕様」から親 SPEC へ戻し、全関連 SPEC の正本を尊重したうえで、新しい TUI の UX 方針と初回完成条件を定義する。
 
-## UI Design
+## Cross-Spec Scope
 
-### 2-Layer Tab Structure
+| Concern | Canonical SPEC | `SPEC-1776` の役割 |
+|---|---|---|
+| Parent UX / migration direction | `SPEC-1776` | 旧TUI基準の再設計方針と優先順位を決める |
+| Terminal emulation | `SPEC-1541` | `native PTY + vt100` を前提に採用し、詳細契約は委譲する |
+| Mouse / keyboard interaction | `SPEC-1770` | 新しい layout / Enter flow に合わせて interaction policy の親条件を渡す |
+| Workspace shell / session lifecycle | `SPEC-1654` | `branch list` 中心 + 常設マルチモードへ再編する親方針を渡す |
+| SPECs tab | `SPEC-1777` | parent navigation と launch entry を合わせる |
+| Quick Start | `SPEC-1782` | Branches 起点の Quick Start を維持し、新しい Enter flow に接続する |
+| Hooks merge | `SPEC-1786` | Codex hooks confirm / embed flow を parent launch flow に組み込む |
+| SPEC workflow / storage | `SPEC-1579` | local SPEC artifact を正本として扱う前提を維持する |
+| Workspace initialization | `SPEC-1787` | 初期導線や SPEC-first workflow の責務を再確認する |
+| Issue linkage / cache | `SPEC-1714` | Branches / Issues で同じ linkage source を使う |
+| Profiles persistence | `SPEC-1542`, `SPEC-1656` | `Profiles = Env profiles` の保存契約を再利用する |
 
-**メイン画面** (通常時): Agent/Shell セッションのタブのみが表示される。各タブはPTYターミナルエミュレーターとして機能し、全キー入力がPTYに転送される（Ctrl+Gプレフィックス操作を除く）。
+## Product Direction
 
-```
-[claude: feat/x] [codex: fix/y] [shell] [+]
-─────────────────────────────────────────────
-> Analyzing codebase...
-> Modified: src/auth.rs
-─────────────────────────────────────────────
-W1 | claude | feat/x | running | SPEC-42
-```
-
-**管理画面** (Ctrl+G, Ctrl+G でトグル): Branches / SPECs / Issues / Versions / Settings / Logs の6タブ。ブランチ一覧がデフォルト表示。
-
-```
-[Branches] [SPECs] [Issues] [Versions] [Settings] [Logs]
-─────────────────────────────────────────────
-  main              -   ○  #42 open
-* feat/x   Claude   *   ●  #38 merged
-  fix/y    Codex    *   ○
-  develop           -   ○
-─────────────────────────────────────────────
-Ctrl+G,Ctrl+G でメインに戻る
-```
-
-### Wizard (エージェント起動ウィザード)
-
-管理画面上のオーバーレイポップアップとして表示。gwt-cli の15ステップウィザードを移植（一部変更あり）。
-
-### Quick Start
-
-ブランチに対して過去にエージェントを起動し、session_id が保存されている場合のみ表示される。直近ではなく session_id がある最新のツールを探索して 1 ツールのみ表示。フラット 3 項目 UI:
-
-```
-Quick Start — Claude Code (opus)
-
-> Resume session (abc123...)
-  Start new session
-  Choose different settings
-```
-
-- **Resume**: `--resume <id>` で全設定（agent, model, version, skip_permissions, reasoning_level, fast_mode, collaboration_modes）を復元してワンクリック起動
-- **Start New**: 全設定を復元して Normal モード（新規セッション）でワンクリック起動
-- **Choose Different**: フルウィザードへ進む（BranchAction から開始）
-- session_id がない場合: Quick Start ステップをスキップ
+- 旧TUIの価値は `コード` ではなく `UX` にある。したがって `gwt-cli` を単純に戻すのではなく、現行 `gwt-core` 上で旧TUIの使いやすさを再構成する
+- `tmux` 依存は廃止する。ただし、旧TUIの multi-mode が持っていた「複数セッションを走らせて、すぐ切り替えられる」価値は維持する
+- 管理画面は旧TUIへ戻さず、現行TUIの `tabbed management workspace` を採用する
+- `Profiles` は一般的な個人設定ではなく `Env profiles` とする。主責務は環境変数セットの作成・編集・削除・切替である
+- 旧TUIにあった `AI summary` は今回は後続とし、初回完成条件から外す
 
 ## User Stories
 
-### US1 - Launch gwt as terminal TUI (P1)
+### US1 - Branch list を中心に運用したい (P0)
 
-As a developer, I want to launch gwt from my shell and have it display a ratatui TUI with agent/shell tabs, so that I can manage all coding agents from a single interface.
+As a developer, I want the main entry point of gwt to feel like the old TUI branch list again, so that I can understand branch state and active work without first navigating tabs.
 
-### US2 - Manage agent/shell sessions as tabs (P1)
+### US2 - tmux なしで複数セッションを常時運用したい (P0)
 
-As a developer, I want to create, switch between, and close agent and shell tabs within gwt, so that I can run multiple agents simultaneously. Same branch can have multiple agents.
+As a developer, I want to keep multiple agent or shell sessions alive without tmux, so that I can monitor and switch across them in a single permanent multi-session workspace.
 
-### US3 - Launch agents via wizard (P1)
+### US3 - 1ブランチに複数セッションを持ちたい (P0)
 
-As a developer, I want to launch agents through a full wizard (15 steps: QuickStart → AgentSelect → ModelSelect → VersionSelect → BranchAction → ExecutionMode → SkipPermissions → Docker → Launch), so that I have full control over launch parameters.
+As a developer, I want a single branch to host multiple sessions, so that I can run several agents on the same work item while still entering from the branch list.
 
-### US4 - Toggle management panel (P1)
+### US4 - 管理画面はタブ形式で整理したい (P0)
 
-As a developer, I want to toggle a management panel (Ctrl+G,Ctrl+G) with Branches/SPECs/Issues/Versions/Settings/Logs tabs, so that I can manage branches, view specs and issues, inspect version history, and configure settings without leaving gwt.
+As a developer, I want Branches / SPECs / Issues / Profiles to remain separate tabs in the management workspace, so that navigation stays structured while the session surface stays execution-focused.
 
-### US5 - Branch management with agent status (P1)
+### US5 - 現行 integration を落としたくない (P0)
 
-As a developer, I want to see all branches with PR status, agent status, safety level, and Quick Start (previous settings recall), so that I can quickly resume work on any branch.
-
-### US6 - Settings management (P1)
-
-As a developer, I want to edit global settings, profiles, environment variables, AI settings, and custom agent definitions within the Settings tab.
-
-### US7 - Docker container support (P2)
-
-As a developer, I want gwt to detect docker-compose.yml/DevContainer configs and launch agents inside containers, with service selection, port conflict detection, and volume mounting.
-
-### US8 - Issue / SPEC management (P2)
-
-As a developer, I want to browse local SPECs in the `SPECs` tab and GitHub Issues in the
-`Issues` tab, with search and clear boundaries, and launch agents linked to issues
-(auto-branch creation).
-
-### US9 - Session conversion (P2)
-
-As a developer, I want to convert a session from one agent to another (e.g., Claude → Codex), continuing the same task with a different tool.
-
-### US10 - AI branch naming (P2)
-
-As a developer, I want AI to suggest branch names based on a task description (e.g., "add authentication" → "feat/add-authentication").
-
-### US11 - Clone/Migration wizards (P2)
-
-As a developer, I want to clone new repositories and migrate to bare repositories from within gwt.
-
-### US12 - SpecKit wizard (P2)
-
-As a developer, I want to create and manage SPEC files through a TUI wizard.
-
-### US13 - Voice input (P3)
-
-As a developer, I want to use whisper-rs for local voice recognition, converting speech to text and injecting it into the active PTY.
-
-### US14 - File paste from clipboard (P3)
-
-As a developer, I want to paste files from clipboard to the agent via a dedicated shortcut, sending the file path or content.
+As a developer, I want the rebuilt TUI to keep native PTY, hooks, SPEC integration, Issue integration, and Quick Start, so that the redesign does not regress current gwt capabilities.
 
 ## Acceptance Scenarios
 
-1. gwt 起動 → 管理画面の Branches タブが表示される
-2. Branches で Enter → Wizard オーバーレイが開く
-3. Wizard で Launch → Agent タブが作成され、メイン画面に自動遷移
-4. Agent タブでキー入力 → PTY に転送される
-5. Agent/Shell タブへテキストをペースト → 改行を含む payload 全体が PTY に転送される
-6. Ctrl+G, Ctrl+G → 管理画面 ↔ メイン画面をトグル
-7. Ctrl+G, ] / [ → エージェントタブの切替
-8. Ctrl+G, c → 新しいシェルタブが作成される
-9. Agent/Shell タブ通常モードで PgUp/PgDn/Home/End/トラックパッド・ホイール → transcript-backed viewport をスクロールできる
-10. スクロール中に新しい PTY 出力が届いても viewport は勝手に最下端へ戻らない
-11. Agent/Shell タブ通常モードでドラッグ選択 → マウスボタンを離すとシステムクリップボードへコピーされる
-12. End または最下端まで戻る操作で live follow に復帰する
-13. 履歴表示中に PTY へ送るキー入力または paste が発生したら、viewport は即座に live follow に戻り、その入力結果が見える
-14. Ctrl+G, x → アクティブタブが閉じる（ワークツリーの安全チェック付き）
-15. Ctrl+C ダブルタップ → 実行中セッションがある場合は確認ダイアログ表示
-16. 確認ダイアログで Enter(確定)/Esc(キャンセル)/Left-Right(選択切替)
-17. ターミナルリサイズ → 全ペイン + タブバーがリサイズされる
-18. エージェントまたはシェルのプロセスが終了 → 対応するタブは completed/error 状態のまま残り、ユーザーが手動で閉じられる
-19. Branches タブでブランチの Quick Start → 前回設定でワンクリック起動
-20. 同じブランチで複数エージェントを起動可能
-21. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
-22. 管理画面内で Tab キーで Branches/SPECs/Issues/Versions/Settings/Logs を切替
-23. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
-24. SPECs タブで Enter → `spec / plan / tasks / research / data-model / quickstart / checklists / contracts` を section 切替で表示、Esc で戻る
-25. Issues タブで Enter → GitHub Issue detail を表示し、取得失敗時は fallback guidance を表示する
-26. Versions タブで最新 10 件の git version tags を表示し、range / commit count / summary preview を一覧表示、Enter で Markdown 詳細を開ける
-27. SPECs / Issues の詳細ビューでは、それぞれの正本に基づく Markdown が見出し・箇条書き・コードブロック付きで表示される
-28. Logs タブでは category / event / result / workspace / error_code を含む構造化ログを検索・詳細表示できる
-29. 管理画面のステータスバーに実行中セッション数を表示
-30. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
-31. エージェント起動中 → 6段階プログレスモーダル + キャンセルボタン
-32. Branches タブでは `origin` のような remote HEAD alias をブランチとして表示しない
-33. Agent/Shell PTY 通常モードでは live parser の保持量を超えた古い出力も session-scoped file-backed transcript から辿れる
+1. gwt 起動時、最初に見える主要画面は `Branches` である
+2. ブランチ一覧の各行には、そのブランチ上の起動中セッション件数が表示される
+3. セッションが存在しないブランチで `Enter` すると `Wizard` が開く
+4. セッションが 1 件だけ存在するブランチで `Enter` すると、そのセッションへ直接入る
+5. セッションが複数存在するブランチで `Enter` すると、`既存へ入る / 追加起動 / フルWizard` を選べる
+6. セッション領域は `4件以上` を前提に均等グリッドで表示できる
+7. フォーカス中セッションを最大化でき、再度トグルで均等グリッドへ戻れる
+8. 最大化時はタブ切替で他セッションへ移動できる
+9. 管理画面を開閉しても、セッション領域は直前レイアウトへ戻る
+10. `SPECs` と `Issues` はどちらも一覧・詳細・起動導線まで初回から使える
+11. `Profiles` では env profile の作成・編集・削除・切替と、OS 環境変数参照・置換ができる
+12. `Quick Start`、hooks confirm、skill registration、native PTY は引き続き動作する
 
 ## Edge Cases
 
-- Terminal size below 80x24: display warning
-- Agent/Shell PTY exit or crash: the corresponding tab remains visible with completed/error state so the final transcript and error output can be inspected before manual close
-- Main PTY normal mode: mouse capture stays enabled so gwt owns scroll / drag selection / clipboard copy; terminal-native selection is intentionally not used
-- PTY output arriving while the viewport is scrolled away from the bottom: parser keeps ingesting bytes, but the visible viewport stays fixed until the user returns to live follow
-- Key input or paste while scrolled back: the viewport immediately snaps to live follow before the PTY input is forwarded
-- Agent / Shell session files are not a scrollback source; pane transcript must remain available while the session tab is alive even when no agent session file exists
-- Session transcript is temporary: pane close or gwt shutdown may discard it without affecting session-file based resume
-- Worktree creation failure: error shown in modal, tab not created
-- GitHub API unreachable: PR/Issue panels show offline state, background retry
-- Ctrl+G: prefix key must never be forwarded to PTY
-- Ctrl+C on agent tab: always forward to PTY (never quit gwt)
-- Ctrl+C double-tap on shell tab: quit gwt (with confirmation if agents running)
-- Multiple agents on same branch: allowed, each gets unique pane_id
-- Long-running gwt: scrollback remains file-based (not memory) while each session is alive, parser memory stays bounded
+- 1 ブランチに多数のセッションがある場合でも、ブランチ一覧は件数表示だけに留めて横幅を圧迫しない
+- セッション数が 4 を超える場合でも、均等グリッドから最大化へ切り替えて文脈を失わずに操作できる
+- 管理画面を開いたままでも、起動中セッションが落ちず、閉じたときに直前レイアウトへ戻る
+- Quick Start が有効なブランチで追加起動した場合でも、既存セッション選択と新規起動が競合しない
+- `Profiles` で OS 環境変数を参照する値が存在しない場合、欠落が分かる形で編集できる
+- child SPEC が detail contract を持つ機能は、親 SPEC の UI 方針変更で勝手に上書きしない
 
 ## Functional Requirements
 
-### Core UI
+### Parent Governance
 
-- FR-001: gwt-tui crate using ratatui + crossterm, Elm Architecture (Model/View/Update)
-- FR-002: 2-layer tab structure: メイン画面 (Agent/Shell tabs) + 管理画面 (Branches/SPECs/Issues/Versions/Settings/Logs tabs)
-- FR-003: Ctrl+G,Ctrl+G トグルで メイン ↔ 管理画面 切替
-- FR-004: Ctrl+G prefix key system (2s timeout) for all management operations
-- FR-005: VT100 emulator buffer to ratatui Cell conversion (renderer)
-- FR-006: Full PTY terminal rendering with ANSI color and attribute support
-- FR-007: Status bar showing current tab info, branch, SPEC association, agent state
+- FR-001: `SPEC-1776` は parent UX spec として振る舞い、detail contract は child SPEC に委譲する
+- FR-002: 実装前に `旧TUI / 現行 gwt-tui / 現行 gwt-core / 新目標` の比較マトリクスを持つ
+- FR-003: child SPEC の正本境界を壊す変更は、該当 child SPEC の同期タスクとして扱う
 
-### Agent/Shell Sessions
+### Branches and Session Workspace
 
-- FR-010: Agent tab = full PTY terminal emulator (all keys and pasted text forwarded except Ctrl+G); normal mode keeps mouse capture enabled so gwt controls scrollback and drag-copy behavior
-- FR-011: Shell tab = plain shell PTY (same as agent but shell command)
-- FR-012: Tab creation via Branches Enter (wizard for selected branch) or Ctrl+G,c (shell)
-- FR-013: Tab switching via Ctrl+G,]/[ and Ctrl+G,1-9
-- FR-014: Tab close via Ctrl+G,x with safety confirmation
-- FR-015: Automatic worktree creation on agent launch and cleanup on close
-- FR-016: Session termination polling via PTY process monitoring, updating session state to completed/error while keeping the tab open until the user closes it
-- FR-017: Active Agent/Shell tab exposes a transcript-backed terminal viewport in normal mode without requiring a separate copy mode
-- FR-018: Active Agent/Shell terminal viewport supports PgUp/PgDn/Home/End plus mouse wheel and trackpad scroll across both live parser history and the session-scoped file-backed pane transcript while the viewport is scrolled away from the live tail
-- FR-019: Active Agent/Shell terminal viewport supports drag selection in normal mode and copies the selected text to the system clipboard on release; `End` or returning to the bottom restores live follow
-- FR-019a: Any PTY-bound key input or paste in an Agent/Shell tab immediately restores live follow before forwarding the input, so the resulting output is visible without an extra navigation step
+- FR-010: `Branches` は常に第一入口である
+- FR-011: ブランチ一覧の各行は `セッション件数のみ` を表示する
+- FR-012: `1ブランチ = Nセッション` を許可する
+- FR-013: セッションが無いブランチの `Enter` は `Wizard` を開く
+- FR-014: セッションが 1 件だけあるブランチの `Enter` は、そのセッションを開く
+- FR-015: セッションが複数あるブランチの `Enter` は `既存へ入る / 追加起動 / フルWizard` を提示する
+- FR-016: セッション領域は `常設マルチモード` とし、`4件以上` を前提に均等グリッドを扱う
+- FR-017: フォーカス中セッションはキーボード中心で最大化トグルできる
+- FR-018: 最大化時はタブ切替でセッション間を移動できる
+- FR-019: `hidden pane` 概念は廃止し、表示制御は `均等グリッド / 最大化` で扱う
+- FR-019a: 管理画面を閉じたとき、セッション領域は直前レイアウトへ復帰する
 
-### Wizard (Agent Launch)
+### Management Workspace
 
-- FR-020: 15-step wizard as overlay popup (gwt-cli wizard.rs complete migration)
-- FR-021: Steps: QuickStart → BranchAction → AgentSelect → ModelSelect → ReasoningLevel → VersionSelect → CollaborationModes → ExecutionMode → ConvertAgentSelect → ConvertSessionSelect → SkipPermissions (with Codex fast mode option) → BranchTypeSelect → IssueSelect → AIBranchSuggest → BranchNameInput
-- FR-022: Quick Start — recall previous launch settings per branch (FR-050)
-- FR-023: Session modes: Normal, Continue, Resume, Convert
-- FR-024: Agent version detection via which + npm registry fallback (bunx/npx)
-- FR-025: Custom agent support (SPEC-71f2742d)
-- FR-026: Docker detection and service/port selection
-- FR-027: AI branch name suggestion (SPEC-1ad9c07d)
-- FR-028: GitHub Issue linked branch creation (SPEC-e4798383)
-- FR-029: 6-stage progress modal with cancellation (fetch → validate → worktree → skills → deps → launch)
+- FR-020: 管理画面は `tabbed management workspace` とする
+- FR-021: 初回完成条件の管理画面タブは `Branches / SPECs / Issues / Profiles` とする
+- FR-022: `Settings / Logs / Versions` は後続フェーズへ回す
 
-### Management Panel — Branches Tab
+### Integrations to Preserve
 
-- FR-030: Branch list with PR status, agent status, safety level, divergence
-- FR-031: View modes: All, Local, Remote
-- FR-032: Sort modes: Default, Name, Updated
-- FR-033: Filter/search by branch name
-- FR-034: Multi-select for batch operations
-- FR-035: Git View sub-view (diff, commits, working tree status)
-- FR-036: Branch delete with safety level check (Safe/Warning/Danger/Disabled)
-- FR-037: Worktree create/delete operations
+- FR-030: terminal emulation は `SPEC-1541` の契約を維持する
+- FR-031: keyboard / mouse interaction は `SPEC-1770` の契約を維持しつつ、新 layout に同期する
+- FR-032: Branches 起点の Quick Start は `SPEC-1782` に従って維持する
+- FR-033: Issue linkage と exact cache は `SPEC-1714` の source of truth を使う
+- FR-034: local SPEC artifact の正本は `SPEC-1579` / `SPEC-1787` に従う
+- FR-035: Codex hooks confirm / merge flow は `SPEC-1786` に従う
+- FR-036: 現行 `native PTY`、hooks、skill registration は削除しない
 
-### Management Panel — Issues Tab
+### Profiles
 
-- FR-040: `Issues` タブは GitHub Issues のみを一覧表示し、local SPEC は `SPECs` タブだけで扱う
-- FR-041: Issue → branch creation → agent launch flow
+- FR-040: `Profiles` は `Env profiles` を意味する
+- FR-041: `Profiles` タブは env profile の作成・編集・削除・切替を提供する
+- FR-042: `Profiles` は旧TUI相当の `OS環境変数参照・置換` を提供する
+- FR-043: persistence contract は `SPEC-1542` / `SPEC-1656` に従う
 
-### Management Panel — Settings Tab
+### Deferred Scope
 
-- FR-050: Global settings editor (gwt-cli settings.rs migration)
-- FR-051: Profile management (create/edit/delete/switch)
-- FR-052: Environment variable editor per profile (KEY=VALUE)
-- FR-053: AI settings (endpoint, API key, model)
-- FR-054: Custom coding agent registration (SPEC-71f2742d)
-
-### Management Panel — Logs Tab
-
-- FR-060: Log viewer for `~/.gwt/logs/{workspace}/gwt.jsonl.*` with structured fields (`category`, `event`, `result`, `workspace`, `error_code`) and searchable detail view
-- FR-061: init_logger() call on startup
-
-### Additional Features
-
-- FR-070: Clone Wizard (clone new repositories)
-- FR-071: Migration Dialog (bare repository migration)
-- FR-072: SpecKit Wizard (SPEC file management)
-- FR-073: Skill registration auto-execution on startup (CLAUDE.md/AGENTS.md/GEMINI.md)
-- FR-074: Voice input via whisper-rs (native audio capture + transcription)
-- FR-075: File paste from clipboard (dedicated shortcut, OS-native API)
-- FR-076: Mouse support for management panels (click selection, scroll) and normal-mode PTY viewport interactions
-- FR-077: Error handling: ErrorQueue + modal (critical) + status bar (minor)
-- FR-078: Versions tab — latest 10 semantic version tags with range label, commit count, changelog-derived summary preview, and Markdown detail view
-- FR-079: Session history saving (ToolSessionEntry) on agent/shell spawn
-- FR-083: Quit confirmation dialog when running agents exist (Ctrl+C×2)
-- FR-081: `SPECs` detail view は local SPEC artifact 群を section 切替で表示し、`Issues` detail view は GitHub Issue detail を個別に表示する。どちらも Esc で戻れ、Markdown の headings/lists/code fences/tables を描画する
-- FR-082: Status bar shows running agent session count in management layer
-
-### npm Distribution
-
-- FR-080: npm package publication maintained (postinstall binary download from GitHub Releases)
-
-## Non-Functional Requirements
-
-- NFR-001: Rendering optimized with frame rate limiting, dirty flags, differential updates
-- NFR-002: Memory usage bounded (scrollback stays file-based via gwt-core ScrollbackFile and is cleaned up when the session ends)
-- NFR-003: Cross-platform support (macOS, Linux, Windows) via crossterm
-- NFR-004: Startup time under 500ms to first interactive frame
-- NFR-005: gwt-core API changes limited to new modules (no breaking changes)
+- FR-050: `AI summary` は今回は実装対象外とする
+- FR-051: `Settings / Logs / Versions` は parent comparison matrix に載せるが、初回完成条件には含めない
+- FR-052: custom agent UI の再設計は `Settings` 復帰フェーズで扱う
 
 ## Success Criteria
 
-- SC-001: gwt launches as TUI, displays Branches tab on startup
-- SC-002: Users can launch agents via full 15-step wizard with all parameters
-- SC-003: Agent tabs are full PTY terminal emulators with ANSI color support
-- SC-004: Ctrl+G,Ctrl+G toggles between メイン and 管理画面
-- SC-005: All gwt-cli screens migrated (Branches, Issues, SPECs, Settings, Logs, Wizard, etc.)
-- SC-006: Docker compose/DevContainer support functional
-- SC-007: All existing gwt-core tests pass without modification
-- SC-008: gwt-tui has >80% test coverage on core modules
-- SC-009: gwt-tauri and gwt-gui fully removed from repository
-- SC-010: CI/release pipeline updated for TUI binary + npm distribution
-- SC-011: gwt-core Settings/ProfilesConfig/AgentConfig fully utilized by gwt-tui
+- SC-001: 旧TUIに近い `branch list` 中心の運用感が戻る
+- SC-002: `tmux` なしで複数セッションを同時運用できる
+- SC-003: `SPECs / Issues / Profiles` の初回必須タブが独立して成立する
+- SC-004: `native PTY`、Quick Start、hooks、SPEC/Issue integration が維持される
+- SC-005: parent / child SPEC の責務境界が明確で、`SPEC-1776` が他仕様を上書きしない

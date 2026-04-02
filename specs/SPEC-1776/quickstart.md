@@ -1,71 +1,46 @@
-# Quickstart: SPEC-1776 — TUI Migration
+# Quickstart: SPEC-1776 — Parent UX Validation
 
-## Minimum Validation Flow
+## Parent Artifact Validation
 
-### Phase 0 (Scaffold)
+- `SPEC-1776/spec.md` が parent UX spec になっていること
+- `research.md` に cross-spec comparison matrix があること
+- `tasks.md` に child sync task が存在すること
 
-```bash
-# Build the new crate
-cargo build -p gwt-tui
+## Manual Validation Flow for the Rebuild
 
-# Run it — should show blank ratatui screen, quit with q
-cargo run -p gwt-tui
-```
+### Branch-First Entry
 
-### Phase 1 (Minimal TUI)
+- `cargo run -p gwt-tui`
+- 起動直後に `Branches` が primary entry として見える
+- ブランチ行に起動中セッション件数が表示される
 
-```bash
-# Run gwt-tui — should open with a shell tab
-cargo run -p gwt-tui
+### Enter Flow
 
-# Inside TUI:
-# - Type shell commands, verify output renders with colors
-# - Paste multi-line text, verify the full payload reaches the PTY
-# - Ctrl+G, c → opens new shell tab
-# - Ctrl+G, ] → switch to next tab
-# - Ctrl+G, [ → switch to previous tab
-# - In normal mode: wheel / trackpad / PgUp / PgDn / Home scroll transcript history
-# - In normal mode: drag to copy selection, release to copy
-# - Scrolling back to the bottom returns to live follow
-# - If you type or paste while scrolled back, the viewport jumps to live output first
-# - Ctrl+G, x → close tab
-# - Ctrl+C twice → quit
-```
+- セッションが無いブランチで `Enter` すると `Wizard` が開く
+- セッションが 1 件だけあるブランチで `Enter` すると、そのセッションへ入る
+- セッションが複数あるブランチで `Enter` すると selector が開き、`既存へ入る / 追加起動 / フルWizard` を選べる
 
-### Phase 2 (Agent + Management)
+### Permanent Multi-Mode
 
-```bash
-cargo run -p gwt-tui
+- 4 件以上のセッションを起動し、通常時は均等グリッドで見える
+- フォーカス中セッションを最大化できる
+- 最大化時にタブで他セッションへ移動できる
+- 管理画面を開閉しても、セッション領域は直前レイアウトへ戻る
 
-# Inside TUI:
-# - Select a branch in Branches and press Enter → agent launch dialog
-# - Select Claude Code, choose options → agent starts in new tab
-# - Ctrl+G → management panel visible
-# - Arrow keys to navigate agents
-# - k → kill agent
-# - Enter → switch to agent tab
-# - Ctrl+G → dismiss panel
-```
+### Management Tabs
 
-### Phase 3 (Split Panes)
+- 管理画面は `Branches / SPECs / Issues / Profiles` の 4 タブを持つ
+- `SPECs` と `Issues` は一覧・詳細・launch entry まで使える
+- `Profiles` で env profile を作成・編集・削除・切替できる
+- `Profiles` で OS 環境変数参照・置換が使える
 
-```bash
-# Inside TUI with 2+ tabs:
-# - Ctrl+G, v → vertical split (side by side)
-# - Ctrl+G, h → horizontal split (top/bottom)
-# - Both panes render independently
-# - Resize terminal window → panes adjust
-```
+### Integration Safety
 
-### Running Tests
+- `Quick Start` が Branches flow から使える
+- hooks confirm と skill registration が launch flow に残る
+- `native PTY` の terminal behavior が維持される
 
-```bash
-# Unit tests
-cargo test -p gwt-tui
+## Verification Commands
 
-# Ensure gwt-core tests still pass
-cargo test -p gwt-core
-
-# Lint
-cargo clippy -p gwt-tui --all-targets --all-features -- -D warnings
-```
+- `cargo test -p gwt-core -p gwt-tui`
+- `cargo clippy --all-targets --all-features -- -D warnings`

@@ -1,66 +1,54 @@
-# Research: SPEC-1776 — TUI Migration
+# Research: SPEC-1776 — Cross-Spec Comparison Matrix
 
-## VT100 to ratatui Rendering
+## Purpose
 
-### Proven Pattern (v6.x)
+`SPEC-1776` は単独で全機能を上書きしない。親 SPEC として、旧TUI、現行 `gwt-tui`、現行 `gwt-core`、関連 child SPEC を横断して比較し、新しい TUI の優先順位だけを定義する。
 
-The pre-v7.0.0 TUI used `vt100` crate + `ratatui` with a renderer that converts vt100::Screen cells to ratatui Buffer cells. Key mappings:
+## Comparison Matrix
 
-- `vt100::Color` → `ratatui::style::Color`
-  - Named colors map 1:1 (Red→Red, etc.)
-  - Indexed (0-255) → `Color::Indexed(n)`
-  - RGB → `Color::Rgb(r,g,b)`
-- Cell attributes: bold, italic, underline, inverse map directly to `ratatui::style::Modifier`
-- Cursor position from vt100::Screen → set cursor in ratatui Frame
+| Concern | 旧TUI (`v6.30.3`) | 現行 `gwt-tui` | 現行 `gwt-core` | 新目標 |
+|---|---|---|---|---|
+| Primary entry | `branch list` 中心 | session/tab surface が強い | Git / launch data は再利用可能 | `Branches` を primary entry に戻す |
+| Session multiplicity | 基本 `1ブランチ = 1セッション` | 同一ブランチ複数セッション可 | session persistence あり | `1ブランチ = Nセッション` を正式化 |
+| Session layout | `tmux` pane / focus | tab + single-pane寄り | `native PTY` / scrollback あり | `equal grid` + `maximize` |
+| Session visibility from branch rows | 行内で起動中 agent が見える | 情報はあるが UX が散る | branch/session linkage は利用可 | 各行は `session count` のみに絞る |
+| Enter behavior | focus / show hidden / wizard | tab 前提 | launch primitives あり | `no / one / many` の 3 分岐 |
+| Hidden pane concept | あり | なし | 不要 | 廃止 |
+| Management workspace | 旧TUIは tab ではない | tabbed management | data loaders あり | tabbed management を採用 |
+| Initial management tabs | 旧TUIは統合的 | Branches / SPECs / Issues / Versions / Settings / Logs | backend support は広い | 初回は `Branches / SPECs / Issues / Profiles` |
+| Terminal basis | `tmux` + terminal | `native PTY` + `vt100` | `terminal::*` 完備 | 現行 terminal 基盤を維持 |
+| Quick Start | あり | child 実装あり | session store / detect あり | Branches flow に接続維持 |
+| SPECs tab | 旧TUIには直接対応薄い | local artifact viewer あり | local SPEC loader あり | tab 維持、parent navigation に同期 |
+| Issues tab | GitHub Issue 導線あり | GitHub Issue detail あり | issue cache / linkage あり | tab 維持、launch entry 維持 |
+| Profiles | Settings 内の env 管理 | Settings 内に存在 | persistence あり | `Profiles = Env profiles` として独立タブ化 |
+| Settings | 強い設定面あり | 実装済み | persistence あり | 後続 |
+| Logs | 旧TUIに存在 | 実装済み | log reader あり | 後続 |
+| Versions | 旧TUIには薄い | 実装済み | git metadata あり | 後続 |
+| AI summary | 旧TUIに存在 | 現行でも文脈あり | summary infrastructure あり | 後続 |
 
-### Performance Consideration
+## Why Not Revert gwt-cli
 
-- vt100 crate processes raw bytes efficiently
-- Rendering should diff previous frame (ratatui handles this internally via double-buffering)
-- Target: <16ms per frame at 120x40 terminal (trivially achievable)
+- 旧TUIコードは `tmux` multi-mode に深く結合している
+- 現行 `gwt-core` は `terminal::*` と `session_store` / `session_watcher` に置換済み
+- 単純リバートでは backend contract が崩れ、戻したあとに再度 large refactor が必要になる
+- したがって、`旧TUIの UX` を抽出し、現行 backend の上で再構成するほうが筋が良い
 
-## Ctrl+G Prefix Key Design
+## Cross-Spec Follow-Ups
 
-### State Machine
+| SPEC | Needed Sync |
+|---|---|
+| `SPEC-1654` | shell/session model を `tab-first` から `branch-first + permanent multi-mode` へ修正 |
+| `SPEC-1770` | `Enter`、management toggle、grid/maximize 操作ポリシーを同期 |
+| `SPEC-1777` | SPECs tab の parent navigation と launch entry を同期 |
+| `SPEC-1782` | `1ブランチ = Nセッション` 前提へ Quick Start 導線を同期 |
+| `SPEC-1542`, `SPEC-1656` | `Profiles = Env profiles` wording を必要なら明示 |
 
-```text
-Idle → [Ctrl+G pressed] → PrefixActive
-PrefixActive → [c/m/x/?/1-9/[/]] → Execute action → Idle
-PrefixActive → [Ctrl+G again] → Toggle management panel → Idle
-PrefixActive → [Escape or timeout 2s] → Cancel → Idle
-PrefixActive → [any other key] → Ignore → Idle
-```
+## Accepted Product Decisions
 
-Agent launch is no longer bound to a prefix shortcut; it starts from the selected branch with `Enter`.
-
-### Why Ctrl+G
-
-- Not used by most terminal programs (Ctrl+A=tmux, Ctrl+B=tmux alt, Ctrl+G=bell in some)
-- Bell character (0x07) is rare in modern terminal workflows
-- Established in gwt v6.x TUI
-
-## Split Layout Data Structure
-
-Binary tree where leaves are pane IDs and internal nodes are split directions:
-
-```rust
-enum LayoutNode {
-    Leaf(String),  // pane_id
-    Split {
-        direction: Direction,  // Horizontal | Vertical
-        ratio: f64,            // 0.0..1.0, position of split
-        first: Box<LayoutNode>,
-        second: Box<LayoutNode>,
-    },
-}
-```
-
-## Business Logic to Extract from gwt-tauri
-
-| Source (gwt-tauri) | Target (gwt-core) | Description |
-|-|-|-|
-| commands/terminal.rs launch_agent() | agent/launch.rs | Agent launch parameter construction |
-| commands/terminal.rs session watcher | agent/session_watcher.rs | Session completion monitoring |
-| state.rs PR cache polling | git/pr_status.rs | PR/CI status polling |
-| state.rs AI summary trigger | ai/summary_trigger.rs | Periodic summary generation |
-| commands/voice.rs | voice/runtime.rs | Voice input runtime management |
+- 旧TUIの使いやすさは `branch list` と操作意味にある
+- `tmux` は不要
+- 新しい唯一の運用モデルは `permanent multi-mode`
+- session workspace は `equal grid` を通常形、`maximize + tabs` を集中形にする
+- 管理画面は `tabbed management workspace`
+- 初回完成条件は `Branches / SPECs / Issues / Profiles`
+- `AI summary` は後続
