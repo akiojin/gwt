@@ -1,81 +1,51 @@
-> **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC requires adaptation for the gwt-tui migration. GUI-specific references (gwt-tauri, Svelte, xterm.js) should be read as gwt-tui equivalents. See SPEC-1776 for the migration plan.
+# エージェント検出・起動・ライフサイクル
 
-### 背景
-AIエージェントの検出・起動・ライフサイクル・バージョン管理を行う。複数エージェント（Claude Code, Codex, Gemini, OpenCode, Copilot）に対応。エージェント異常はAssistant Modeの監視対象。Studio時代の #1545（エージェント管理・セッション）の機能概念を現行スタックで再定義。
+> **Canonical Boundary**: 本 SPEC はビルトインエージェントの catalog / detection / version / launch contract を扱う。Assistant 送信制御は `SPEC-1636`、Custom Agent 登録は `SPEC-1779` が担当する。
 
-### ユーザーシナリオとテスト
+## Background
 
-**S1: エージェント自動検出**
-- Given: Claude Codeがシステムにインストール済み
-- When: プロジェクトを開く
-- Then: Claude Codeが検出され利用可能として表示される
+- gwt は Claude Code / Codex / Gemini / OpenCode / Copilot を launch target として扱う。
+- 既存の SPEC-1646 は Assistant Mode 監視や UI 全体まで含み、`SPEC-1636` と `SPEC-1779` と責務が重なっている。
+- 本 SPEC はビルトインエージェントの検出、利用可能バージョン、起動引数契約に範囲を絞る。
 
-**S2: エージェント起動**
-- Given: エージェントが検出済み
-- When: エージェント起動操作を行う
-- Then: PTYセッション内でエージェントが起動する
+## User Stories
 
-**S3: バージョン管理**
-- Given: エージェントが検出済み
-- When: バージョン情報を表示
-- Then: 現在のバージョンと最新バージョンが表示される
+### US-1: 利用可能なエージェントを検出する
 
-**S4: 異常検出**
-- Given: エージェントが実行中
-- When: エージェントがスタックまたはアイドル状態になる
-- Then: Assistant Modeが異常を検出し通知する
+開発者として、ローカル環境で利用可能なエージェントとバージョンを一覧で把握したい。
 
-**S5: 複数エージェント切替**
-- Given: 複数エージェントが検出済み
-- When: エージェント切替操作を行う
-- Then: 選択したエージェントに切り替わる
+### US-2: 選択したエージェントを正しい引数で起動する
 
-### 機能要件
+開発者として、model / version / permissions / collaboration mode などを正しい CLI 契約で渡したい。
 
-**FR-01: エージェント検出**
-- 対応エージェント: Claude Code, Codex, Gemini, OpenCode, Copilot
-- パス検出・バージョン確認
+### US-3: 起動失敗を原因つきで扱う
 
-**FR-02: ライフサイクル管理**
-- 起動・停止・再起動
-- PTYセッション連携
+開発者として、エージェントが見つからない、バージョン不正、起動失敗などを明確に知りたい。
 
-**FR-03: バージョン管理**
-- 現在バージョン表示
-- 更新確認
+## Acceptance Scenarios
 
-**FR-04: 異常監視**
-- スタック検出
-- アイドル検出
-- Assistant Mode連携
+1. 起動ウィザードでビルトインエージェント一覧が表示される。
+2. 各エージェントの version / model 選択肢が CLI 契約に沿って表示される。
+3. 起動時に選択内容が launch builder へ反映される。
+4. エージェント未検出や起動失敗時に原因つきエラーが UI とログへ残る。
+5. Custom Agent は別カテゴリとして表示されても、本 SPEC の validation / persistence 要件には含めない。
 
-**FR-05: モデル選択**
-- Default/Auto 選択時は `--model` 引数を渡さない（エージェント側デフォルトに任せる）
-- 対応モデル一覧:
+## Edge Cases
 
-| Agent | Models |
-|-------|--------|
-| Claude Code | Default (Opus 4.6), opus, sonnet, haiku |
-| Codex | Default (gpt-5.4), gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.2, gpt-5.1-codex-mini |
-| Gemini | Default, gemini-3-pro-preview, gemini-3-flash-preview, gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite |
-| OpenCode | Default, Custom (provider/model) |
+- 検出済みバージョンが古く、新しい引数契約に対応していない。
+- Default モデルを選んだ場合に余計な `--model` を渡さない。
+- Agent ごとに利用可能な reasoning / fast mode が異なる。
 
-**FR-06: 推論レベル (Codex only)**
-- ReasoningLevel: Low, Medium, High, XHigh
-- 選択モデルに応じて利用可能なレベルが変わる
+## Functional Requirements
 
-**FR-07: Fast mode (Codex only)**
-- `service_tier=fast` を引数に追加
-- SkipPermissions ステップで選択式 (No / Yes / Yes + Fast mode)
+- FR-001: ビルトインエージェントの検出とバージョン確認を提供する。
+- FR-002: Agent ごとの launch contract（model/version/permissions/session mode）を定義する。
+- FR-003: 起動失敗を構造化エラーとして扱い、UI とログへ反映する。
+- FR-004: Built-in agent の UI 表示名と内部 ID の対応を維持する。
+- FR-005: Custom Agent の登録・永続化は本 SPEC の対象外とする。
 
-**FR-08: バージョン選択**
-- installed (検出バージョン), latest, npm registry から最新8バージョンを表示
-- installed/latest 選択時は `--version` を渡さない
+## Success Criteria
 
-### 成功基準
-
-1. 対応エージェントの自動検出が動作する
-2. エージェントの起動・停止が正常に動作する
-3. 異常検出がAssistant Modeに通知される
-
----
+- 各ビルトイン Agent の検出と起動契約が 1 つの SPEC にまとまる。
+- Agent launch builder の責務境界が明確になる。
+- 起動 UI と gwt-core の Agent 定義が同期する。

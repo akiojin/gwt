@@ -1,4 +1,4 @@
-# Plan: SPEC-1786 — Codex hooks.json merge with user-defined hooks
+# Plan: SPEC-1786 — gwt-spec の hooks.json マージ
 
 ## Summary
 

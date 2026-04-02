@@ -1,4 +1,4 @@
-# Plan: SPEC-1787 — Workspace Initialization and SPEC-Driven Workflow
+# Plan: SPEC-1787 — ワークスペース初期化と SPEC 駆動ワークフロー
 
 ## Summary
 

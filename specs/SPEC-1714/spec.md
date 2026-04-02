@@ -1,4 +1,5 @@
 > **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+> **Canonical Boundary**: `SPEC-1714` は worktree-issue linkage と local exact cache の正本である。GitHub discovery/search は `SPEC-1643`、Issue detail rendering は `SPEC-1354` が担当する。
 
 ## 背景
 

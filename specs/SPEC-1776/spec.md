@@ -1,4 +1,6 @@
-# Feature Specification: Migrate from Tauri GUI to ratatui TUI
+> **Canonical Boundary**: `SPEC-1776` は TUI 移行の親 SPEC である。terminal emulation は `SPEC-1541`、workspace shell は `SPEC-1654`、interaction は `SPEC-1770` へ委譲する。
+
+# Tauri GUI から ratatui TUI への移行
 
 ## Background
 

@@ -1,47 +1,51 @@
-> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+# ビルドと配布パイプライン
 
-### 背景
-Tauriビルド（.dmg/.msi/.AppImage）、CI/CDパイプライン、GitHub Releases、自動更新チェック機能を包含する。release.yml、cargo tauri build、更新チェック機能は実装済み。Studio時代の #1553（ビルド・配布・システム監視）の概念を現行Tauriスタックで再定義。
+> **Canonical Boundary**: 本 SPEC は gwt-tui の build / release / installer pipeline を扱う。Tauri build や auto-update は現行アーキテクチャの対象外とする。
 
-### ユーザーシナリオとテスト
+## Background
 
-**S1: リリースビルド**
-- Given: mainブランチにマージされる
-- When: release.ymlが実行される
-- Then: .dmg/.msi/.AppImageがビルドされGitHub Releaseにアップロードされる
+- gwt は `cargo build -p gwt-tui` を基準にビルドし、GitHub Releases とインストーラスクリプトで配布する。
+- 既存の SPEC-1652 は Tauri `.dmg/.msi/.AppImage` と auto-update を前提にしており、現行の TUI 配布方式と一致しない。
+- 本 SPEC は Conventional Commits / git-cliff / GitHub Release を使う現行の release pipeline を正本として定義する。
 
-**S2: 自動更新チェック**
-- Given: アプリが起動する
-- When: 更新チェックが実行される
-- Then: 新バージョンがある場合に通知される
+## User Stories
 
-**S3: 開発ビルド**
-- Given: 開発環境で作業中
-- When: cargo tauri devを実行
-- Then: ホットリロードで開発ビルドが起動する
+### US-1: develop から release PR を作成する
 
-### 機能要件
+開発者として、Conventional Commits から次バージョンを判定し、release PR を作りたい。
 
-**FR-01: ビルドパイプライン**
-- Tauriビルド（macOS/Windows/Linux）
-- CI/CD（GitHub Actions）
+### US-2: main マージで自動リリースする
 
-**FR-02: 配布**
-- GitHub Releases
-- バイナリアセット管理
+開発者として、main への release PR マージ後にタグ・Release・バイナリ生成まで自動化したい。
 
-**FR-03: 自動更新**
-- 更新チェック
-- 通知
+### US-3: 利用者へインストール導線を提供する
 
-**FR-04: バージョン管理**
-- Conventional Commits連携
-- git-cliff CHANGELOG生成
+利用者として、GitHub Releases とインストーラスクリプトから TUI バイナリを取得したい。
 
-### 成功基準
+## Acceptance Scenarios
 
-1. 全プラットフォームのビルドが成功する
-2. GitHub Releaseに正しくアセットがアップロードされる
-3. 自動更新チェックが動作する
+1. develop から release PR を作成すると version / changelog / manifest が更新される。
+2. release PR が main に merge されるとタグと GitHub Release が作成される。
+3. README の install 手順から配布物へ到達できる。
+4. ビルド、lint、test が release 前の必須ゲートとして扱われる。
+5. Tauri 固有の build や auto-update に依存しない。
 
----
+## Edge Cases
+
+- Conventional Commit 種別が誤っていて version 判定が崩れる。
+- release asset の upload に失敗する。
+- README の install 手順と実際の asset 名がずれる。
+
+## Functional Requirements
+
+- FR-001: build 正本は `cargo build -p gwt-tui` とする。
+- FR-002: release PR で version / changelog を更新する。
+- FR-003: main merge 後に GitHub Release と配布 asset を自動生成する。
+- FR-004: README と installer script を現行配布フローと同期させる。
+- FR-005: Tauri build と auto-update は本 SPEC の対象外とする。
+
+## Success Criteria
+
+- release workflow の正本が TUI 配布方式と一致する。
+- README / workflow / versioning が同じ前提で運用できる。
+- 旧 Tauri 前提の説明が残らない。

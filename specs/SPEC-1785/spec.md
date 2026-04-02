@@ -1,4 +1,6 @@
-# SPECs画面からのAgent起動（Worktree自動作成付き）
+> **Canonical Boundary**: `SPEC-1785` は SPECs 画面からの launch 導線を扱う。直近セッション再開や前回設定 reuse の正本は `SPEC-1782` である。
+
+# SPECs 画面からの Agent 起動
 
 Parent: SPEC-1776
 

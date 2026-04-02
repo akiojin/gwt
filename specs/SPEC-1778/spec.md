@@ -1,4 +1,4 @@
-# ボイス入力機能（whisper-rs 統合）
+# 音声入力
 
 ## Background
 

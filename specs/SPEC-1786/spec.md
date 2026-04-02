@@ -1,4 +1,4 @@
-# Feature Specification: Codex hooks.json merge with user-defined hooks
+# gwt-spec の hooks.json マージ
 
 ## Background
 

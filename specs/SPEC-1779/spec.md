@@ -1,3 +1,5 @@
+> **Canonical Boundary**: `SPEC-1779` は custom agent 登録 UI と永続化の正本である。built-in agent の検出 / launch contract は `SPEC-1646` が担当する。
+
 # カスタムエージェント登録
 
 ## Background

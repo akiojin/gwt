@@ -1,4 +1,5 @@
 > **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC has been updated for the gwt-tui migration. The original TextMeshPro/Unity implementation has been replaced by ratatui + vt100 crate-based terminal emulation in gwt-tui.
+> **Canonical Boundary**: `SPEC-1541` は vt100 / ANSI / resize / terminal rendering の正本である。グローバルな TUI 構成は `SPEC-1776`、入力操作ポリシーは `SPEC-1770` が担当する。
 
 ### 背景
 

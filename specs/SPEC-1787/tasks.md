@@ -1,4 +1,4 @@
-# Tasks: SPEC-1787 — Workspace Initialization and SPEC-Driven Workflow
+# Tasks: SPEC-1787 — ワークスペース初期化と SPEC 駆動ワークフロー
 
 ## Phase 0: Setup
 

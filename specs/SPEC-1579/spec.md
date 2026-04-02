@@ -1,9 +1,10 @@
 > **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC requires adaptation for the gwt-tui migration. GUI-specific references (gwt-tauri, Svelte, xterm.js) should be read as gwt-tui equivalents. See SPEC-1776 for the migration plan.
+> **Canonical Boundary**: `SPEC-1579` は gwt-spec workflow / storage / completion gate の正本である。ワークスペース初期化と SPEC 起点導線は `SPEC-1787` が担当する。
 
 <!-- GWT_SPEC_ARTIFACT:doc:spec.md -->
 doc:spec.md
 
-# Feature Specification: gwt-spec system — workflow, storage/API, and completion gate
+# ワークフロー・ストレージ/API・完了ゲート統合仕様
 
 ## Background
 

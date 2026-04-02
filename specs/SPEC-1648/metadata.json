@@ -1,6 +1,6 @@
 {
   "id": "1648",
-  "title": "セッション管理（データ永続化）",
+  "title": "セッション保存・復元",
   "status": "open",
   "phase": "draft",
   "created_at": "2026-03-17T03:40:08Z",

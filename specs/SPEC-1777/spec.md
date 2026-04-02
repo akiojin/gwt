@@ -1,4 +1,4 @@
-# SPECs タブ — ローカル SPEC 一覧・詳細・検索 UI
+# SPECs タブ — 一覧・詳細・検索
 
 ## Background
 

@@ -1,4 +1,5 @@
 > **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+> **Canonical Boundary**: `SPEC-1643` は GitHub discovery / search / version history の正本である。Issue detail rendering は `SPEC-1354`、cache / linkage は `SPEC-1714`、`gwt-pr-check` 出力は `SPEC-1775` が担当する。
 
 ### 背景
 GitHub Issue/Spec 探索、PR 管理、Release/Tag 表示、VersionHistoryPanel、gh CLI 連携を包含する GitHub 連携機能。Studio 時代の #1544（GitHub連携）の機能概念を現行スタックで再定義する。

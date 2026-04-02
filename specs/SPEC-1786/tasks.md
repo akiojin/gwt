@@ -1,4 +1,4 @@
-# Tasks: SPEC-1786 — Codex hooks.json merge with user-defined hooks
+# Tasks: SPEC-1786 — gwt-spec の hooks.json マージ
 
 ## Phase 1: Foundational — gwt-core マージロジック
 

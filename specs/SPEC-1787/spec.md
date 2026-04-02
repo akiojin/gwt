@@ -1,4 +1,6 @@
-# Feature Specification: Workspace Initialization and SPEC-Driven Workflow
+> **Canonical Boundary**: `SPEC-1787` は workspace initialization と SPEC-first workflow の正本である。gwt-spec workflow / storage / completion gate の正本は `SPEC-1579` である。
+
+# ワークスペース初期化と SPEC 駆動ワークフロー
 
 ## Background
 

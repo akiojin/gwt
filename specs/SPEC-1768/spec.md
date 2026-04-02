@@ -1,6 +1,6 @@
 > **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC was originally designed for the GUI Agent Canvas tile system. In the gwt-tui context, this is **P3 (low priority)** — TUI does not use a canvas-based tile system. The concepts below are retained as reference for potential future TUI split-pane or layout management.
 
-# タイルシステム共通仕様（TUI 参考）
+# タイルシステム共通仕様
 
 ## Background
 

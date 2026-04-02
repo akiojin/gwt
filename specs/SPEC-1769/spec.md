@@ -1,6 +1,6 @@
 > **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC has been updated for the gwt-tui migration. Image display in TUI uses sixel or kitty graphics protocol instead of GUI-based image rendering.
 
-# TUI 画像表示（sixel / kitty graphics protocol）
+# TUI 画像表示（sixel/kitty）
 
 ## Background
 

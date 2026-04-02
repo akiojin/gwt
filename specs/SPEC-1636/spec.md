@@ -1,6 +1,7 @@
 > **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC has been updated for the gwt-tui migration. Assistant Mode now operates as a PTY-based Assistant within gwt-tui Shell tabs.
+> **Canonical Boundary**: `SPEC-1636` は Assistant shell の interrupt / queue / startup analysis 挙動だけを扱う。Agent catalog と launch contract は `SPEC-1646`、tab lifecycle は `SPEC-1654` が担当する。
 
-# Assistant Send Interrupt and Tab Queue
+# Assistant PTY モードの割り込み送信とキュー
 
 ## Background
 

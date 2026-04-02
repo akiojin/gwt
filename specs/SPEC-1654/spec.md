@@ -1,6 +1,7 @@
 > **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC has been updated for the gwt-tui migration. Agent Canvas is removed. The workspace shell now uses Shell tabs and Agent tabs within the gwt-tui management screen.
+> **Canonical Boundary**: `SPEC-1654` は Shell / Agent タブと管理画面の正本である。Assistant 送信制御は `SPEC-1636`、session persistence は `SPEC-1648`、TUI 全体の移行親は `SPEC-1776` が担当する。
 
-# Workspace Shell（Shell タブ・Agent タブ・管理画面タブシステム）
+# ワークスペースシェル
 
 ## Background
 

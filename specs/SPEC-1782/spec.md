@@ -1,4 +1,6 @@
-# Quick Start — ブランチ単位のワンクリックエージェント起動
+> **Canonical Boundary**: `SPEC-1782` は Branches 起点の Quick Start 再開導線を扱う。SPEC 起点の launch 導線は `SPEC-1785` が担当する。
+
+# Quick Start — ブランチ単位のワンクリック起動
 
 Parent: SPEC-1776 (FR-022, US3, US5)
 

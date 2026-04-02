@@ -3,6 +3,8 @@
 更新日: 2026-04-02
 対象: `specs/SPEC-*` 41件（open 33 / closed 8）
 
+このレポートは 2026-04-02 時点の baseline snapshot です。以降の P0 正規化の進捗は末尾に追記します。
+
 ## 概要
 
 この監査の目的は、ローカル `SPEC` 群を今後継続運用できる形に正規化することです。
@@ -181,3 +183,12 @@
 4. 最後にタイトルと見出しを一括で揃える
 
 補足として、`docs/architecture.md` はまだ GUI/Tauri 時代の説明であり、`SPEC-1776` / `SPEC-1654` / README の現状とズレています。SPEC 正規化の後段で更新対象に含めるべきです。
+
+## P0 正規化進捗（2026-04-02）
+
+- `metadata.id` の `SPEC-*` 表記を 10 件で数値文字列に統一
+- `open + spec-only` 8 件に `plan.md` / `tasks.md` を追加
+- `open + TBD plan` 6 件の `plan.md` を現行アーキテクチャに合わせて書き直し
+- 主要な衝突領域に `canonical / child / superseded` 注記を追加
+
+残作業は P1 のタイトル全面統一、closed 履歴 SPEC の整理、open-all-done の close 判定です。

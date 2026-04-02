@@ -1,6 +1,6 @@
 {
-  "id": "SPEC-1785",
-  "title": "SPECs画面からのAgent起動（Worktree自動作成付き）",
+  "id": "1785",
+  "title": "SPECs 画面からの Agent 起動",
   "status": "open",
   "phase": "planned",
   "created_at": "2026-04-01",

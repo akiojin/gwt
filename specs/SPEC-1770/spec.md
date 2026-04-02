@@ -1,6 +1,7 @@
 > **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC has been updated for the gwt-tui migration. Agent Canvas interactions are replaced by TUI mouse and keyboard operations using crossterm events.
+> **Canonical Boundary**: `SPEC-1770` は TUI 上の input interaction policy の正本である。terminal emulation 自体は `SPEC-1541`、TUI 全体構成は `SPEC-1776` が担当する。
 
-# TUI マウス操作・キーボードインタラクション
+# TUI マウス・キーボード操作
 
 ## Background
 

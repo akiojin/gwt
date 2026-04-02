@@ -1,4 +1,4 @@
-# SPEC Semantic Search + Search Naming Convention
+# SPEC セマンティック検索と検索命名規約
 
 ## Background
 
