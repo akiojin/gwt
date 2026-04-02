@@ -1,153 +1,65 @@
-//! Message enum for Elm Architecture update loop
+//! Message type — all actions in the Elm Architecture.
 
 use crossterm::event::{KeyEvent, MouseEvent};
 
-use crate::model::{ErrorEntry, ManagementTab};
-use crate::screens::versions::VersionsMessage;
-use crate::screens::{BranchesMessage, IssuesMessage, LogsMessage, SettingsMessage};
+use crate::model::ManagementTab;
 
-/// All messages that can flow through the Elm Architecture update loop.
-#[derive(Debug)]
+/// Every possible action in the TUI.
+#[derive(Debug, Clone)]
 pub enum Message {
-    // -- Navigation -----------------------------------------------------------
-    /// Quit the application
+    /// Quit the application.
     Quit,
-    /// Toggle between Main and Management layers (Ctrl+G, Ctrl+G)
+    /// Toggle between Main (sessions) and Management layers.
     ToggleLayer,
-    /// Switch to a specific management tab
+    /// Switch to a specific management tab.
     SwitchManagementTab(ManagementTab),
-
-    // -- Session tab management -----------------------------------------------
-    /// Next session tab (Ctrl+G, ])
+    /// Activate the next session tab.
     NextSession,
-    /// Previous session tab (Ctrl+G, [)
+    /// Activate the previous session tab.
     PrevSession,
-    /// Switch to session by 1-based index (Ctrl+G, 1-9)
+    /// Switch to session by index (0-based).
     SwitchSession(usize),
-    /// Toggle between equal-grid and maximized session workspace
+    /// Toggle session layout between Tab and Grid.
     ToggleSessionLayout,
-    /// Close current session (Ctrl+G, &)
-    CloseSession,
-    /// Open a new shell tab (Ctrl+G, c)
+    /// Create a new shell session.
     NewShell,
-    /// Legacy shortcut: return the active terminal viewport to the live tail
-    TogglePtyCopyMode,
-
-    // -- Input events ---------------------------------------------------------
-    /// Raw key input (forwarded to active pane or screen handler)
+    /// Close the active session.
+    CloseSession,
+    /// Raw key input forwarded to the active pane.
     KeyInput(KeyEvent),
-    /// Pasted text input
-    Paste(String),
-    /// Mouse input
+    /// Mouse input.
     MouseInput(MouseEvent),
-    /// Terminal resize
+    /// Terminal resize.
     Resize(u16, u16),
-
-    // -- PTY ------------------------------------------------------------------
-    /// Output from a PTY pane
-    PtyOutput {
-        pane_id: String,
-        data: Vec<u8>,
-    },
-
-    // -- Tick -----------------------------------------------------------------
-    /// Periodic tick (~250ms) for background polling
+    /// PTY output arrived for a pane.
+    PtyOutput(String, Vec<u8>),
+    /// Periodic tick (100ms).
     Tick,
-
-    // -- Errors ---------------------------------------------------------------
-    /// Push a new error onto the queue
-    PushError(ErrorEntry),
-    /// Dismiss the front-most error
+    /// Push an error message onto the queue.
+    PushError(String),
+    /// Dismiss the top error.
     DismissError,
-
-    // -- Wizard ----------------------------------------------------------------
-    /// Key input forwarded to wizard overlay
-    WizardKey(KeyEvent),
-
-    // -- Overlays / dialogs ---------------------------------------------------
-    /// Open the clone wizard
-    OpenCloneWizard,
-    /// Close the clone wizard
-    CloseCloneWizard,
-    /// Open the speckit wizard
-    OpenSpecKitWizard,
-    /// Close the speckit wizard
-    CloseSpecKitWizard,
-    /// Confirm dialog accepted
-    ConfirmAccepted,
-    /// Confirm dialog cancelled
-    ConfirmCancelled,
-    /// Progress advance
-    ProgressAdvance,
-    /// Progress error
-    ProgressError(String),
-
-    // -- Screen-specific messages (delegated) ---------------------------------
-    BranchesMsg(BranchesMessage),
-    IssuesMsg(IssuesMessage),
-    SettingsMsg(SettingsMessage),
-    LogsMsg(LogsMessage),
-    VersionsMsg(VersionsMessage),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ErrorSeverity;
 
     #[test]
     fn message_variants_are_constructible() {
-        // Ensure key variants compile and can be pattern-matched
-        let msgs: Vec<Message> = vec![
-            Message::Quit,
-            Message::ToggleLayer,
-            Message::SwitchManagementTab(ManagementTab::Branches),
-            Message::NextSession,
-            Message::PrevSession,
-            Message::SwitchSession(0),
-            Message::ToggleSessionLayout,
-            Message::CloseSession,
-            Message::NewShell,
-            Message::TogglePtyCopyMode,
-            Message::WizardKey(KeyEvent {
-                code: crossterm::event::KeyCode::Enter,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-                kind: crossterm::event::KeyEventKind::Press,
-                state: crossterm::event::KeyEventState::NONE,
-            }),
-            Message::Paste("hello\nworld".to_string()),
-            Message::Resize(80, 24),
-            Message::PtyOutput {
-                pane_id: "p1".into(),
-                data: vec![0x41],
-            },
-            Message::Tick,
-            Message::PushError(ErrorEntry {
-                message: "err".into(),
-                severity: ErrorSeverity::Minor,
-            }),
-            Message::DismissError,
-            Message::OpenCloneWizard,
-            Message::CloseCloneWizard,
-            Message::OpenSpecKitWizard,
-            Message::CloseSpecKitWizard,
-            Message::ConfirmAccepted,
-            Message::ConfirmCancelled,
-            Message::ProgressAdvance,
-            Message::ProgressError("err".into()),
-            Message::BranchesMsg(BranchesMessage::Refresh),
-            Message::IssuesMsg(IssuesMessage::Refresh),
-            Message::SettingsMsg(SettingsMessage::Refresh),
-            Message::LogsMsg(LogsMessage::Refresh),
-            Message::VersionsMsg(VersionsMessage::SelectNext),
-        ];
-        assert!(msgs.len() > 10);
-    }
-
-    #[test]
-    fn message_is_debug() {
-        let msg = Message::Quit;
-        let s = format!("{msg:?}");
-        assert!(s.contains("Quit"));
+        let _ = Message::Quit;
+        let _ = Message::ToggleLayer;
+        let _ = Message::SwitchManagementTab(ManagementTab::Branches);
+        let _ = Message::NextSession;
+        let _ = Message::PrevSession;
+        let _ = Message::SwitchSession(0);
+        let _ = Message::ToggleSessionLayout;
+        let _ = Message::NewShell;
+        let _ = Message::CloseSession;
+        let _ = Message::Tick;
+        let _ = Message::PushError("err".into());
+        let _ = Message::DismissError;
+        let _ = Message::Resize(80, 24);
+        let _ = Message::PtyOutput("id".into(), vec![0x41]);
     }
 }

@@ -1,117 +1,153 @@
-//! Ctrl+G prefix keybind system
-//!
-//! Keybindings follow a Ctrl+G prefix pattern (like tmux's Ctrl+B):
-//! - Ctrl+G, then a second key triggers an action
-//! - Timeout after 1s returns to normal mode
+//! Keybind registry — Ctrl+G prefix system with auto-collected help.
 
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
+use crate::message::Message;
+use crate::model::ManagementTab;
 
-/// The state of the prefix key system.
+/// Timeout for the Ctrl+G prefix sequence.
+const PREFIX_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// State machine for the Ctrl+G prefix system.
 #[derive(Debug, Clone, Default)]
 pub enum PrefixState {
-    /// Normal mode: waiting for Ctrl+G
+    /// Waiting for Ctrl+G.
     #[default]
-    Normal,
-    /// Prefix received: waiting for the second key
-    Prefix { at: Instant },
+    Idle,
+    /// Ctrl+G pressed, waiting for the second key.
+    Active { since: Instant },
 }
 
-/// Actions produced by the keybind system.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KeyAction {
-    /// No action (key consumed or prefix waiting)
-    None,
-    /// Forward the key to the active pane / screen
-    Forward(KeyEvent),
-    /// Toggle between Main and Management layers
-    ToggleLayer,
-    /// Next session tab
-    NextSession,
-    /// Previous session tab
-    PrevSession,
-    /// Switch to session by 1-based number (1-9)
-    SwitchSession(usize),
-    /// Toggle between equal-grid and maximized workspace
-    ToggleSessionLayout,
-    /// Close current session
-    CloseSession,
-    /// New shell
-    NewShell,
-    /// Legacy shortcut: return the active terminal viewport to the live tail
-    TogglePtyCopyMode,
-    /// Show help
-    ShowHelp,
-    /// Quit
-    Quit,
-}
-
-/// Process a key event through the prefix system.
-///
-/// Returns the resulting action. Mutates `state` in place.
-pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
-    match state {
-        PrefixState::Normal => {
-            if is_ctrl_g(&key) {
-                *state = PrefixState::Prefix { at: Instant::now() };
-                KeyAction::None
-            } else {
-                KeyAction::Forward(key)
-            }
-        }
-        PrefixState::Prefix { at } => {
-            let elapsed = at.elapsed();
-            *state = PrefixState::Normal;
-
-            // Timeout check
-            if elapsed > PREFIX_TIMEOUT {
-                return KeyAction::Forward(key);
-            }
-
-            // Second key after Ctrl+G
-            match key.code {
-                // Ctrl+G, Ctrl+G → toggle layer
-                KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    KeyAction::ToggleLayer
-                }
-                // Ctrl+G, ] → next session
-                KeyCode::Char(']') => KeyAction::NextSession,
-                // Ctrl+G, [ → prev session
-                KeyCode::Char('[') => KeyAction::PrevSession,
-                // Ctrl+G, 1-9 → switch session
-                KeyCode::Char(c @ '1'..='9') => {
-                    KeyAction::SwitchSession((c as usize) - ('0' as usize))
-                }
-                // Ctrl+G, x → close session
-                KeyCode::Char('x') => KeyAction::CloseSession,
-                // Ctrl+G, z → toggle equal-grid / maximized session workspace
-                KeyCode::Char('z') => KeyAction::ToggleSessionLayout,
-                // Ctrl+G, c → new shell
-                KeyCode::Char('c') => KeyAction::NewShell,
-                // Ctrl+G, m → legacy live-tail shortcut
-                KeyCode::Char('m') => KeyAction::TogglePtyCopyMode,
-                // Ctrl+G, ? → help
-                KeyCode::Char('?') => KeyAction::ShowHelp,
-                // Ctrl+G, q → no longer used for quit (Ctrl+C double-tap instead)
-                KeyCode::Char('q') => KeyAction::Forward(key),
-                // Unknown second key → discard prefix, forward key
-                _ => KeyAction::Forward(key),
-            }
+impl PrefixState {
+    /// Check if the prefix has timed out.
+    pub fn is_expired(&self) -> bool {
+        match self {
+            Self::Idle => false,
+            Self::Active { since } => since.elapsed() > PREFIX_TIMEOUT,
         }
     }
 }
 
-/// Check if a key event is Ctrl+G.
-fn is_ctrl_g(key: &KeyEvent) -> bool {
-    key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL)
+/// A registered keybinding.
+#[derive(Debug, Clone)]
+pub struct Keybinding {
+    /// Display string for the key combo (e.g. "Ctrl+G, g").
+    pub keys: String,
+    /// Description of what this binding does.
+    pub description: String,
 }
 
-/// Check if a key event is Ctrl+C.
-pub fn is_ctrl_c(key: &KeyEvent) -> bool {
-    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+/// Registry of all keybindings, also drives the prefix state machine.
+#[derive(Debug)]
+pub struct KeybindRegistry {
+    pub prefix_state: PrefixState,
+    bindings: Vec<Keybinding>,
+}
+
+impl Default for KeybindRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeybindRegistry {
+    pub fn new() -> Self {
+        let bindings = vec![
+            Keybinding {
+                keys: "Ctrl+G, g".into(),
+                description: "Toggle management panel".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, ]".into(),
+                description: "Next session".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, [".into(),
+                description: "Previous session".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, 1-9".into(),
+                description: "Switch to session N".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, z".into(),
+                description: "Toggle Tab/Grid layout".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, c".into(),
+                description: "New shell session".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, x".into(),
+                description: "Close active session".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, q".into(),
+                description: "Quit".into(),
+            },
+            Keybinding {
+                keys: "Ctrl+G, ?".into(),
+                description: "Show help".into(),
+            },
+        ];
+
+        Self {
+            prefix_state: PrefixState::Idle,
+            bindings,
+        }
+    }
+
+    /// Get all bindings for help display.
+    pub fn all_bindings(&self) -> &[Keybinding] {
+        &self.bindings
+    }
+
+    /// Process a key event through the prefix state machine.
+    /// Returns `Some(Message)` if the key was consumed, `None` if it should be forwarded.
+    pub fn process_key(&mut self, key: KeyEvent) -> Option<Message> {
+        // Check for timeout
+        if self.prefix_state.is_expired() {
+            self.prefix_state = PrefixState::Idle;
+        }
+
+        match &self.prefix_state {
+            PrefixState::Idle => {
+                // Check for Ctrl+G
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
+                    self.prefix_state = PrefixState::Active {
+                        since: Instant::now(),
+                    };
+                    return Some(Message::Tick); // Consumed, no action yet
+                }
+                None // Not a prefix key, forward to PTY
+            }
+            PrefixState::Active { .. } => {
+                self.prefix_state = PrefixState::Idle;
+                match key.code {
+                    KeyCode::Char('g') => Some(Message::ToggleLayer),
+                    KeyCode::Char(']') => Some(Message::NextSession),
+                    KeyCode::Char('[') => Some(Message::PrevSession),
+                    KeyCode::Char('z') => Some(Message::ToggleSessionLayout),
+                    KeyCode::Char('c') => Some(Message::NewShell),
+                    KeyCode::Char('x') => Some(Message::CloseSession),
+                    KeyCode::Char('q') => Some(Message::Quit),
+                    KeyCode::Char(n) if n.is_ascii_digit() && n != '0' => {
+                        let idx = (n as usize) - ('1' as usize);
+                        Some(Message::SwitchSession(idx))
+                    }
+                    KeyCode::Char('b') => {
+                        Some(Message::SwitchManagementTab(ManagementTab::Branches))
+                    }
+                    KeyCode::Char('s') => Some(Message::SwitchManagementTab(ManagementTab::Specs)),
+                    KeyCode::Char('i') => Some(Message::SwitchManagementTab(ManagementTab::Issues)),
+                    KeyCode::Esc => Some(Message::Tick), // Cancel prefix
+                    _ => None,                           // Unknown, discard
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -119,158 +155,116 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-    fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent {
             code,
-            modifiers,
+            modifiers: mods,
             kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
+            state: KeyEventState::empty(),
         }
     }
 
-    fn ctrl_g() -> KeyEvent {
-        make_key(KeyCode::Char('g'), KeyModifiers::CONTROL)
-    }
-
-    fn ctrl_c() -> KeyEvent {
-        make_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
-    }
-
-    fn plain(c: char) -> KeyEvent {
-        make_key(KeyCode::Char(c), KeyModifiers::NONE)
+    #[test]
+    fn idle_ctrl_g_activates_prefix() {
+        let mut reg = KeybindRegistry::new();
+        let result = reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert!(result.is_some());
+        assert!(matches!(reg.prefix_state, PrefixState::Active { .. }));
     }
 
     #[test]
-    fn normal_key_is_forwarded() {
-        let mut state = PrefixState::Normal;
-        let key = plain('a');
-        let action = process_key(&mut state, key);
-        assert_eq!(action, KeyAction::Forward(key));
+    fn prefix_g_toggles_layer() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::ToggleLayer)));
+        assert!(matches!(reg.prefix_state, PrefixState::Idle));
     }
 
     #[test]
-    fn ctrl_g_enters_prefix() {
-        let mut state = PrefixState::Normal;
-        let action = process_key(&mut state, ctrl_g());
-        assert_eq!(action, KeyAction::None);
-        assert!(matches!(state, PrefixState::Prefix { .. }));
+    fn prefix_q_quits() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::Quit)));
     }
 
     #[test]
-    fn ctrl_g_ctrl_g_toggles_layer() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        let action = process_key(&mut state, ctrl_g());
-        assert_eq!(action, KeyAction::ToggleLayer);
-        assert!(matches!(state, PrefixState::Normal));
+    fn prefix_bracket_navigates_sessions() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::NextSession)));
+
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('['), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::PrevSession)));
     }
 
     #[test]
-    fn ctrl_g_bracket_navigates_sessions() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        assert_eq!(process_key(&mut state, plain(']')), KeyAction::NextSession);
-
-        process_key(&mut state, ctrl_g());
-        assert_eq!(process_key(&mut state, plain('[')), KeyAction::PrevSession);
+    fn prefix_number_switches_session() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::SwitchSession(2))));
     }
 
     #[test]
-    fn ctrl_g_number_switches_session() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        assert_eq!(
-            process_key(&mut state, plain('3')),
-            KeyAction::SwitchSession(3)
-        );
+    fn prefix_z_toggles_layout() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::ToggleSessionLayout)));
     }
 
     #[test]
-    fn ctrl_g_c_new_shell() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        assert_eq!(process_key(&mut state, plain('c')), KeyAction::NewShell);
+    fn prefix_esc_cancels() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(result.is_some()); // Tick — consumed but no action
+        assert!(matches!(reg.prefix_state, PrefixState::Idle));
     }
 
     #[test]
-    fn ctrl_g_z_toggles_session_layout() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        assert_eq!(
-            process_key(&mut state, plain('z')),
-            KeyAction::ToggleSessionLayout
-        );
+    fn non_prefix_key_returns_none() {
+        let mut reg = KeybindRegistry::new();
+        let result = reg.process_key(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(result.is_none());
     }
 
     #[test]
-    fn ctrl_g_m_triggers_legacy_live_tail_shortcut() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        assert_eq!(
-            process_key(&mut state, plain('m')),
-            KeyAction::TogglePtyCopyMode
-        );
+    fn all_bindings_not_empty() {
+        let reg = KeybindRegistry::new();
+        assert!(!reg.all_bindings().is_empty());
     }
 
     #[test]
-    fn ctrl_g_n_forwards_after_shortcut_removal() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
+    fn expired_prefix_resets_to_idle() {
+        let mut reg = KeybindRegistry::new();
+        reg.prefix_state = PrefixState::Active {
+            since: Instant::now() - Duration::from_secs(3),
+        };
+        let result = reg.process_key(key(KeyCode::Char('g'), KeyModifiers::NONE));
+        // Should treat as idle — 'g' without ctrl is not a prefix trigger
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn prefix_management_shortcuts() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('b'), KeyModifiers::NONE));
         assert!(matches!(
-            process_key(&mut state, plain('n')),
-            KeyAction::Forward(_)
+            result,
+            Some(Message::SwitchManagementTab(ManagementTab::Branches))
         ));
-    }
 
-    #[test]
-    fn ctrl_g_ampersand_close_session() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        assert_eq!(process_key(&mut state, plain('x')), KeyAction::CloseSession);
-    }
-
-    #[test]
-    fn ctrl_g_q_forwards() {
-        // Ctrl+G, q no longer quits — forwards to screen instead
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('i'), KeyModifiers::NONE));
         assert!(matches!(
-            process_key(&mut state, plain('q')),
-            KeyAction::Forward(_)
+            result,
+            Some(Message::SwitchManagementTab(ManagementTab::Issues))
         ));
-    }
-
-    #[test]
-    fn unknown_second_key_forwards() {
-        let mut state = PrefixState::Normal;
-        process_key(&mut state, ctrl_g());
-        let key = plain('y');
-        assert_eq!(process_key(&mut state, key), KeyAction::Forward(key));
-    }
-
-    #[test]
-    fn is_ctrl_c_check() {
-        assert!(is_ctrl_c(&ctrl_c()));
-        assert!(!is_ctrl_c(&plain('c')));
-    }
-
-    #[test]
-    fn message_conversion_covers_all_actions() {
-        // Ensure KeyAction variants compile
-        let actions = vec![
-            KeyAction::None,
-            KeyAction::Forward(plain('x')),
-            KeyAction::ToggleLayer,
-            KeyAction::NextSession,
-            KeyAction::PrevSession,
-            KeyAction::SwitchSession(1),
-            KeyAction::ToggleSessionLayout,
-            KeyAction::CloseSession,
-            KeyAction::NewShell,
-            KeyAction::TogglePtyCopyMode,
-            KeyAction::ShowHelp,
-            KeyAction::Quit,
-        ];
-        assert_eq!(actions.len(), 12);
     }
 }

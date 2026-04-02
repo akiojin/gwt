@@ -1,4 +1,4 @@
-//! Issues management screen (stub).
+//! Profiles management screen (stub).
 
 use ratatui::{
     layout::Rect,
@@ -7,17 +7,17 @@ use ratatui::{
     Frame,
 };
 
-/// State for the issues screen.
+/// State for the profiles screen.
 #[derive(Debug, Default)]
-pub struct IssuesState;
+pub struct ProfilesState;
 
-/// Messages specific to the issues screen.
+/// Messages specific to the profiles screen.
 #[derive(Debug, Clone)]
-pub enum IssuesMessage {}
+pub enum ProfilesMessage {}
 
-/// Render the issues screen.
+/// Render the profiles screen.
 pub fn render(frame: &mut Frame, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Issues");
+    let block = Block::default().borders(Borders::ALL).title("Profiles");
     let text = Paragraph::new("Not yet implemented")
         .block(block)
         .style(Style::default().fg(Color::DarkGray));
@@ -44,6 +44,6 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(text.contains("Issues"));
+        assert!(text.contains("Profiles"));
     }
 }

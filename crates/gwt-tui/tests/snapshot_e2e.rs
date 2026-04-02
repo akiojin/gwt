@@ -4,11 +4,17 @@
 //! Each test renders a screen to a fixed-size buffer and compares
 //! against a stored snapshot (.snap file).
 
+use std::path::PathBuf;
+
 use gwt_tui::app;
 use gwt_tui::message::Message;
 use gwt_tui::model::{ActiveLayer, ManagementTab, Model, SessionLayout};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+
+fn test_model() -> Model {
+    Model::new(PathBuf::from("/tmp/test-repo"))
+}
 
 /// Render the current model state to a string for snapshot comparison.
 fn render_to_string(model: &Model, width: u16, height: u16) -> String {
@@ -46,14 +52,14 @@ fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
 
 #[test]
 fn snapshot_initial_management_layer() {
-    let model = Model::new();
+    let model = test_model();
     let output = render_to_string(&model, 80, 24);
     insta::assert_snapshot!("initial_management_layer", output);
 }
 
 #[test]
 fn snapshot_branches_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Branches;
     let output = render_to_string(&model, 80, 24);
@@ -62,7 +68,7 @@ fn snapshot_branches_tab() {
 
 #[test]
 fn snapshot_specs_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Specs;
     let output = render_to_string(&model, 80, 24);
@@ -71,7 +77,7 @@ fn snapshot_specs_tab() {
 
 #[test]
 fn snapshot_issues_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Issues;
     let output = render_to_string(&model, 80, 24);
@@ -80,7 +86,7 @@ fn snapshot_issues_tab() {
 
 #[test]
 fn snapshot_git_view_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::GitView;
     let output = render_to_string(&model, 80, 24);
@@ -89,7 +95,7 @@ fn snapshot_git_view_tab() {
 
 #[test]
 fn snapshot_versions_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Versions;
     let output = render_to_string(&model, 80, 24);
@@ -98,7 +104,7 @@ fn snapshot_versions_tab() {
 
 #[test]
 fn snapshot_settings_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Settings;
     let output = render_to_string(&model, 80, 24);
@@ -107,7 +113,7 @@ fn snapshot_settings_tab() {
 
 #[test]
 fn snapshot_logs_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Logs;
     let output = render_to_string(&model, 80, 24);
@@ -116,7 +122,7 @@ fn snapshot_logs_tab() {
 
 #[test]
 fn snapshot_profiles_tab() {
-    let mut model = Model::new();
+    let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Profiles;
     let output = render_to_string(&model, 80, 24);
@@ -129,7 +135,7 @@ fn snapshot_profiles_tab() {
 
 #[test]
 fn snapshot_toggle_to_main_layer() {
-    let mut model = Model::new();
+    let mut model = test_model();
     app::update(&mut model, Message::ToggleLayer);
     let output = render_to_string(&model, 80, 24);
     insta::assert_snapshot!("main_layer_empty", output);
@@ -137,7 +143,7 @@ fn snapshot_toggle_to_main_layer() {
 
 #[test]
 fn snapshot_tab_grid_toggle() {
-    let mut model = Model::new();
+    let mut model = test_model();
     // Switch to main layer first
     app::update(&mut model, Message::ToggleLayer);
     // Toggle layout
@@ -153,7 +159,7 @@ fn snapshot_tab_grid_toggle() {
 
 #[test]
 fn snapshot_error_overlay() {
-    let mut model = Model::new();
+    let mut model = test_model();
     app::update(
         &mut model,
         Message::PushError("Something went wrong".to_string()),
@@ -164,7 +170,7 @@ fn snapshot_error_overlay() {
 
 #[test]
 fn snapshot_management_tab_switch() {
-    let mut model = Model::new();
+    let mut model = test_model();
     app::update(
         &mut model,
         Message::SwitchManagementTab(ManagementTab::Settings),
@@ -175,14 +181,14 @@ fn snapshot_management_tab_switch() {
 
 #[test]
 fn snapshot_wide_terminal() {
-    let model = Model::new();
+    let model = test_model();
     let output = render_to_string(&model, 120, 40);
     insta::assert_snapshot!("wide_terminal_120x40", output);
 }
 
 #[test]
 fn snapshot_narrow_terminal() {
-    let model = Model::new();
+    let model = test_model();
     let output = render_to_string(&model, 40, 15);
     insta::assert_snapshot!("narrow_terminal_40x15", output);
 }

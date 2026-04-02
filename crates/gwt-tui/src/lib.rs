@@ -1,15 +1,14 @@
-//! gwt-tui: TUI frontend for Git Worktree Manager
-#![allow(dead_code, clippy::should_implement_trait, clippy::len_zero)]
+//! gwt-tui: Terminal UI for Git Worktree Manager
+//!
+//! Elm Architecture: Model -> Message -> Update -> View
+//! Built with ratatui + crossterm.
 
 pub mod app;
-pub mod config;
 pub mod event;
 pub mod input;
 pub mod message;
 pub mod model;
+pub mod notification_router;
 pub mod renderer;
 pub mod screens;
 pub mod widgets;
-
-// Re-export wizard types for library consumers
-pub use screens::wizard;
