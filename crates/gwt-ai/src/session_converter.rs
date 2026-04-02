@@ -9,6 +9,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AIError;
 
+/// Supported session formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFormat {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+}
+
+impl SessionFormat {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "gemini" => Some(Self::Gemini),
+            "opencode" => Some(Self::OpenCode),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
+        }
+    }
+}
+
 /// A role in the conversation history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -50,8 +80,11 @@ impl SessionEncoder for ClaudeEncoder {
         }
         let lines: Vec<String> = history
             .iter()
-            .map(|m| serde_json::to_string(m).unwrap_or_default())
-            .collect();
+            .map(|m| {
+                serde_json::to_string(m)
+                    .map_err(|e| AIError::ParseError(format!("JSON encode error: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(lines.join("\n"))
     }
 }
@@ -140,15 +173,20 @@ impl SessionEncoder for OpenCodeEncoder {
 
 /// Get an encoder by target format name (case-insensitive).
 pub fn get_encoder(name: &str) -> Result<Box<dyn SessionEncoder>, AIError> {
-    match name.to_lowercase().as_str() {
-        "claude" => Ok(Box::new(ClaudeEncoder)),
-        "codex" => Ok(Box::new(CodexEncoder)),
-        "gemini" => Ok(Box::new(GeminiEncoder)),
-        "opencode" => Ok(Box::new(OpenCodeEncoder)),
-        _ => Err(AIError::ConfigError(format!(
+    match SessionFormat::parse(name) {
+        Some(SessionFormat::Claude) => Ok(Box::new(ClaudeEncoder)),
+        Some(SessionFormat::Codex) => Ok(Box::new(CodexEncoder)),
+        Some(SessionFormat::Gemini) => Ok(Box::new(GeminiEncoder)),
+        Some(SessionFormat::OpenCode) => Ok(Box::new(OpenCodeEncoder)),
+        None => Err(AIError::ConfigError(format!(
             "Unknown target format: {name}"
         ))),
     }
+}
+
+/// Return the supported format names in stable order.
+pub fn supported_formats() -> &'static [&'static str] {
+    &["claude", "codex", "gemini", "opencode"]
 }
 
 /// Convert a session history from one format to another.
@@ -159,7 +197,12 @@ pub fn convert_session(
     to: &str,
     history: &[SessionMessage],
 ) -> Result<String, AIError> {
-    if from.eq_ignore_ascii_case(to) {
+    let source = SessionFormat::parse(from)
+        .ok_or_else(|| AIError::ConfigError(format!("Unknown source format: {from}")))?;
+    let target = SessionFormat::parse(to)
+        .ok_or_else(|| AIError::ConfigError(format!("Unknown target format: {to}")))?;
+
+    if source == target {
         return Err(AIError::ConfigError(
             "Source and target formats are the same".into(),
         ));
@@ -168,7 +211,7 @@ pub fn convert_session(
         return Err(AIError::ParseError("Empty session history".into()));
     }
 
-    let encoder = get_encoder(to)?;
+    let encoder = get_encoder(target.name())?;
     encoder.encode(history)
 }
 
@@ -305,5 +348,18 @@ mod tests {
         let history = sample_history();
         let err = convert_session("claude", "unknown", &history).unwrap_err();
         assert!(matches!(err, AIError::ConfigError(_)));
+    }
+
+    #[test]
+    fn convert_session_rejects_unknown_source() {
+        let history = sample_history();
+        let err = convert_session("unknown", "codex", &history).unwrap_err();
+        assert!(matches!(err, AIError::ConfigError(_)));
+    }
+
+    #[test]
+    fn supported_formats_are_stable_and_non_empty() {
+        let formats = supported_formats();
+        assert_eq!(formats, &["claude", "codex", "gemini", "opencode"]);
     }
 }

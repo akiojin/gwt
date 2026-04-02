@@ -19,6 +19,8 @@ uuid.workspace = true
 tracing.workspace = true
 which.workspace = true
 thiserror.workspace = true
+reqwest.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

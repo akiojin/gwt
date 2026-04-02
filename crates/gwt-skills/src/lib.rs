@@ -12,6 +12,7 @@ pub use registry::{register_builtins, BuiltinSkill, EmbeddedSkill, RegistryError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs2::FileExt;
     use std::path::PathBuf;
 
     // ── SkillRegistry tests ──
@@ -155,7 +156,7 @@ mod tests {
     // ── Hooks backup/restore/corruption/safe-merge tests ──
 
     #[test]
-    fn backup_hooks_creates_bak_file() {
+    fn backup_hooks_creates_timestamped_and_latest_backups() {
         let dir = tempfile::tempdir().unwrap();
         let hooks_file = dir.path().join("hooks.json");
         let cfg = HooksConfig {
@@ -166,10 +167,21 @@ mod tests {
 
         let bak = backup_hooks(&hooks_file).unwrap();
         assert!(bak.exists());
-        assert_eq!(bak, hooks_file.with_extension("json.bak"));
-        let bak_content: HooksConfig =
+        assert_ne!(bak, hooks_file.with_extension("json.bak"));
+
+        let timestamped_name = bak.file_name().unwrap().to_string_lossy();
+        assert!(timestamped_name.starts_with("hooks.json."));
+        assert!(timestamped_name.ends_with(".bak"));
+
+        let latest = hooks_file.with_extension("json.bak");
+        assert!(latest.exists());
+        let latest_content: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&latest).unwrap()).unwrap();
+        assert_eq!(latest_content, cfg);
+
+        let timestamped_content: HooksConfig =
             serde_json::from_str(&std::fs::read_to_string(&bak).unwrap()).unwrap();
-        assert_eq!(bak_content, cfg);
+        assert_eq!(timestamped_content, cfg);
     }
 
     #[test]
@@ -193,6 +205,27 @@ mod tests {
         restore_from_backup(&hooks_file).unwrap();
         let restored = std::fs::read_to_string(&hooks_file).unwrap();
         assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn restore_from_backup_uses_timestamped_backup_when_latest_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let original = HooksConfig {
+            managed_hooks: vec![make_hook("pre-commit", "lint", true)],
+            user_hooks: vec![make_hook("post-merge", "notify", false)],
+        };
+        std::fs::write(&hooks_file, serde_json::to_string(&original).unwrap()).unwrap();
+
+        let timestamped = backup_hooks(&hooks_file).unwrap();
+        std::fs::remove_file(hooks_file.with_extension("json.bak")).unwrap();
+        std::fs::write(&hooks_file, "BROKEN").unwrap();
+
+        restore_from_backup(&hooks_file).unwrap();
+        let restored: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_file).unwrap()).unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(timestamped.parent(), Some(dir.path()));
     }
 
     #[test]
@@ -291,6 +324,84 @@ mod tests {
 
         let bak = hooks_file.with_extension("json.bak");
         assert!(bak.exists());
+    }
+
+    #[test]
+    fn merge_hooks_safe_recovers_empty_file_from_timestamped_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let initial = HooksConfig {
+            managed_hooks: vec![make_hook("pre-commit", "old-lint", true)],
+            user_hooks: vec![make_hook("post-merge", "notify", false)],
+        };
+        std::fs::write(&hooks_file, serde_json::to_string(&initial).unwrap()).unwrap();
+        backup_hooks(&hooks_file).unwrap();
+        std::fs::remove_file(hooks_file.with_extension("json.bak")).unwrap();
+        std::fs::write(&hooks_file, "").unwrap();
+
+        let managed = vec![make_hook("pre-commit", "new-lint", true)];
+        merge_hooks_safe(&hooks_file, &managed).unwrap();
+
+        let cfg: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_file).unwrap()).unwrap();
+        assert_eq!(cfg.managed_hooks.len(), 1);
+        assert_eq!(cfg.managed_hooks[0].command, "new-lint");
+        assert_eq!(cfg.user_hooks, initial.user_hooks);
+    }
+
+    #[test]
+    fn merge_hooks_safe_rejects_locked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let initial = HooksConfig::default();
+        std::fs::write(&hooks_file, serde_json::to_string(&initial).unwrap()).unwrap();
+
+        let lock_path = hooks_file.with_extension("json.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        lock_file.try_lock_exclusive().unwrap();
+
+        let err = merge_hooks_safe(&hooks_file, &[]).unwrap_err();
+        assert!(matches!(err, HooksError::LockUnavailable(_)));
+        drop(lock_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_hooks_safe_preserves_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shared_dir = dir.path().join("shared");
+        let workspace_dir = dir.path().join("workspace");
+        std::fs::create_dir(&shared_dir).unwrap();
+        std::fs::create_dir(&workspace_dir).unwrap();
+
+        let target = shared_dir.join("hooks.json");
+        let link = workspace_dir.join("hooks.json");
+        let initial = HooksConfig {
+            managed_hooks: vec![make_hook("pre-commit", "old-lint", true)],
+            user_hooks: vec![make_hook("post-merge", "notify", false)],
+        };
+        std::fs::write(&target, serde_json::to_string(&initial).unwrap()).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let managed = vec![make_hook("pre-commit", "new-lint", true)];
+        merge_hooks_safe(&link, &managed).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let cfg: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(cfg.managed_hooks[0].command, "new-lint");
+        assert_eq!(cfg.user_hooks, initial.user_hooks);
     }
 
     // ── Registry builtin tests ──

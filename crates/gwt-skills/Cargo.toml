@@ -9,6 +9,8 @@ description = "Skill registry and hooks management for gwt"
 publish = false
 
 [dependencies]
+chrono.workspace = true
+fs2.workspace = true
 gwt-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

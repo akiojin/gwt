@@ -1,6 +1,10 @@
 //! Hooks management — merge managed and user hooks while preserving ownership.
 
+use chrono::Utc;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Marker prefix that identifies gwt-managed hooks.
@@ -37,6 +41,9 @@ pub enum HooksError {
 
     #[error("Backup not found: {0}")]
     BackupNotFound(PathBuf),
+
+    #[error("Hooks lock unavailable: {0}")]
+    LockUnavailable(PathBuf),
 }
 
 /// Check whether a hook is gwt-managed based on its comment marker.
@@ -69,23 +76,123 @@ fn backup_path_for(path: &Path) -> PathBuf {
     path.with_extension("json.bak")
 }
 
-/// Create a backup of the hooks file (hooks.json -> hooks.json.bak).
+/// Derive the timestamped backup path for a hooks file.
+fn timestamped_backup_path_for(path: &Path) -> PathBuf {
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+    path.with_extension(format!("json.{stamp}.bak"))
+}
+
+/// Derive the lock file path for a hooks file.
+fn lock_path_for(path: &Path) -> PathBuf {
+    path.with_extension("json.lock")
+}
+
+/// Resolve a hooks path to its actual file target when the path is a symlink.
+fn resolved_hooks_path(path: &Path) -> PathBuf {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return path.to_path_buf();
+    };
+    if !meta.file_type().is_symlink() {
+        return path.to_path_buf();
+    }
+
+    let Ok(link) = std::fs::read_link(path) else {
+        return path.to_path_buf();
+    };
+
+    if link.is_absolute() {
+        link
+    } else {
+        path.parent().unwrap_or(Path::new(".")).join(link)
+    }
+}
+
+/// Find the newest timestamped backup path for a hooks file.
+fn newest_timestamped_backup(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let file_name = path.file_name()?.to_string_lossy().to_string();
+    let prefix = format!("{file_name}.");
+    let suffix = ".bak";
+
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(suffix))
+        })
+        .collect();
+
+    matches.sort();
+    matches.pop()
+}
+
+/// Return the ordered backup candidates, newest stable/latest first.
+fn backup_candidates_for(path: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![backup_path_for(path)];
+    if let Some(timestamped) = newest_timestamped_backup(path) {
+        if candidates[0] != timestamped {
+            candidates.push(timestamped);
+        }
+    }
+    candidates
+}
+
+/// Try to parse the first valid backup candidate.
+fn load_backup_config(path: &Path) -> Result<Option<HooksConfig>, HooksError> {
+    for candidate in backup_candidates_for(path) {
+        if candidate.exists() {
+            let content = std::fs::read_to_string(&candidate)?;
+            if let Some(config) = try_parse_config(&content) {
+                return Ok(Some(config));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Acquire an exclusive lock for the resolved hooks target.
+fn acquire_lock(path: &Path) -> Result<std::fs::File, HooksError> {
+    let lock_path = lock_path_for(path);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    match file.try_lock_exclusive() {
+        Ok(_) => Ok(file),
+        Err(_) => Err(HooksError::LockUnavailable(lock_path)),
+    }
+}
+
+/// Create a backup of the hooks file (timestamped + stable latest copy).
 ///
-/// Returns the path to the backup file.
+/// Returns the path to the timestamped backup file.
 pub fn backup_hooks(path: &Path) -> Result<PathBuf, HooksError> {
-    let bak = backup_path_for(path);
-    std::fs::copy(path, &bak)?;
-    Ok(bak)
+    let target = resolved_hooks_path(path);
+    let timestamped = timestamped_backup_path_for(&target);
+    let stable = backup_path_for(&target);
+
+    std::fs::copy(&target, &timestamped)?;
+    std::fs::copy(&target, &stable)?;
+
+    Ok(timestamped)
 }
 
 /// Restore hooks file from its backup (.bak).
 pub fn restore_from_backup(path: &Path) -> Result<(), HooksError> {
-    let bak = backup_path_for(path);
-    if !bak.exists() {
-        return Err(HooksError::BackupNotFound(bak));
+    let target = resolved_hooks_path(path);
+    for candidate in backup_candidates_for(&target) {
+        if candidate.exists() {
+            std::fs::copy(&candidate, &target)?;
+            return Ok(());
+        }
     }
-    std::fs::copy(&bak, path)?;
-    Ok(())
+    Err(HooksError::BackupNotFound(backup_path_for(&target)))
 }
 
 /// Check if content is corrupted (invalid JSON for HooksConfig).
@@ -104,20 +211,19 @@ fn try_parse_config(content: &str) -> Option<HooksConfig> {
 /// 2. Merge managed hooks (replace gwt-managed, keep user hooks)
 /// 3. Write result atomically via temp file + rename
 pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError> {
-    let existing = if path.exists() {
-        let content = std::fs::read_to_string(path)?;
-        if let Some(config) = try_parse_config(&content) {
-            backup_hooks(path)?;
+    let target = resolved_hooks_path(path);
+    let _lock = acquire_lock(&target)?;
+
+    let existing = if path.exists() || target.exists() {
+        let content =
+            std::fs::read_to_string(path).or_else(|_| std::fs::read_to_string(&target))?;
+        if content.trim().is_empty() {
+            load_backup_config(&target)?.unwrap_or_default()
+        } else if let Some(config) = try_parse_config(&content) {
+            backup_hooks(&target)?;
             config
         } else {
-            // File is corrupt -- read backup directly if available
-            let bak = backup_path_for(path);
-            if bak.exists() {
-                let bak_content = std::fs::read_to_string(&bak)?;
-                try_parse_config(&bak_content).unwrap_or_default()
-            } else {
-                HooksConfig::default()
-            }
+            load_backup_config(&target)?.unwrap_or_default()
         }
     } else {
         HooksConfig::default()
@@ -129,11 +235,22 @@ pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError>
     };
 
     // Write atomically (temp file + rename)
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let tmp_path = dir.join(".hooks.json.tmp");
+    let dir = target.parent().unwrap_or(Path::new("."));
+    let tmp_path = dir.join(format!(
+        ".{}.tmp-{}",
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("hooks.json"),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
     let json = serde_json::to_string_pretty(&new_config)?;
-    std::fs::write(&tmp_path, &json)?;
-    std::fs::rename(&tmp_path, path)?;
+    {
+        let mut tmp = std::fs::File::create(&tmp_path)?;
+        tmp.write_all(json.as_bytes())?;
+        tmp.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &target)?;
 
     Ok(())
 }
