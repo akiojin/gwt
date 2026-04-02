@@ -68,10 +68,11 @@
 - Management open/close preserves the last chosen session layout mode
 - Branch rows now show running/stopped session summaries in addition to total session count
 - Startup now loads `Issues / SPECs / Versions / Logs` through a native background thread while keeping `Branches` available immediately
+- No remaining code path depends on hidden panes; the session model is now grid/maximize only
 
 ### Next
 
-- Remove remaining assumptions that the shell is fundamentally tab-first and finish the explicit `hidden pane` cleanup task
+- Run broader verification on the rebuilt shell model and continue polish from the branch-first baseline
 
 ## 2026-04-02: Profiles tab extraction
 

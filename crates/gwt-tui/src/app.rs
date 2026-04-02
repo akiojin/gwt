@@ -3786,6 +3786,7 @@ mod tests {
         m.terminal_rows = 10;
 
         let _reader = add_cat_session(&mut m, "history-ansi");
+        m.session_layout_mode = SessionLayoutMode::Maximized;
         m.vt_parsers.insert(
             "pane-history-ansi".to_string(),
             vt100::Parser::new(6, 40, 2),

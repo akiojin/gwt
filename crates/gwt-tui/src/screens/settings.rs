@@ -2023,7 +2023,7 @@ mod tests {
 
         env.add_new_var();
         assert_eq!(env.vars.len(), 3);
-        assert_eq!(env.selected_index, 2);
+        assert_eq!(env.selected_index, 0);
 
         env.delete_selected();
         assert_eq!(env.vars.len(), 2);

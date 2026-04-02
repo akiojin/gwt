@@ -244,7 +244,7 @@ mod tests {
     fn unknown_second_key_forwards() {
         let mut state = PrefixState::Normal;
         process_key(&mut state, ctrl_g());
-        let key = plain('z');
+        let key = plain('y');
         assert_eq!(process_key(&mut state, key), KeyAction::Forward(key));
     }
 
@@ -271,6 +271,6 @@ mod tests {
             KeyAction::ShowHelp,
             KeyAction::Quit,
         ];
-        assert_eq!(actions.len(), 11);
+        assert_eq!(actions.len(), 12);
     }
 }

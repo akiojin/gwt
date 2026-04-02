@@ -23,7 +23,7 @@
 - [x] T202: focus session の maximize toggle を実装する
 - [x] T203: maximize 時の tab switch を実装する
 - [x] T204: 管理画面開閉後の layout restore を実装する
-- [ ] T205: `hidden pane` 依存を削除する
+- [x] T205: `hidden pane` 依存を削除する
 
 ## Phase 3: Management Workspace Core
 
