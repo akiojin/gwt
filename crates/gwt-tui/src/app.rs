@@ -98,6 +98,12 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::KeyInput(_) | Message::MouseInput(_) | Message::Tick => {
             // Phase 2: forward to active pane / tick logic
         }
+        Message::Branches(msg) => {
+            screens::branches::update(&mut model.branches, msg);
+        }
+        Message::Profiles(msg) => {
+            screens::profiles::update(&mut model.profiles, msg);
+        }
     }
 }
 
@@ -159,10 +165,10 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
 /// Render the content of the active management tab.
 fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
     match model.management_tab {
-        ManagementTab::Branches => screens::branches::render(frame, area),
+        ManagementTab::Branches => screens::branches::render(&model.branches, frame, area),
         ManagementTab::Specs => screens::specs::render(frame, area),
         ManagementTab::Issues => screens::issues::render(frame, area),
-        ManagementTab::Profiles => screens::profiles::render(frame, area),
+        ManagementTab::Profiles => screens::profiles::render(&model.profiles, frame, area),
         ManagementTab::GitView => screens::git_view::render(frame, area),
         ManagementTab::Versions => screens::versions::render(frame, area),
         ManagementTab::Settings => screens::settings::render(frame, area),

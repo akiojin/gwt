@@ -3,6 +3,8 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::model::ManagementTab;
+use crate::screens::branches::BranchesMessage;
+use crate::screens::profiles::ProfilesMessage;
 
 /// Every possible action in the TUI.
 #[derive(Debug, Clone)]
@@ -39,6 +41,10 @@ pub enum Message {
     PushError(String),
     /// Dismiss the top error.
     DismissError,
+    /// Branches screen message.
+    Branches(BranchesMessage),
+    /// Profiles screen message.
+    Profiles(ProfilesMessage),
 }
 
 #[cfg(test)]
@@ -61,5 +67,7 @@ mod tests {
         let _ = Message::DismissError;
         let _ = Message::Resize(80, 24);
         let _ = Message::PtyOutput("id".into(), vec![0x41]);
+        let _ = Message::Branches(BranchesMessage::MoveUp);
+        let _ = Message::Profiles(ProfilesMessage::MoveUp);
     }
 }

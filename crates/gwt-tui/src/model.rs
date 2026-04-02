@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+use crate::screens::branches::BranchesState;
+use crate::screens::profiles::ProfilesState;
+
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveLayer {
@@ -132,6 +135,10 @@ pub struct Model {
     pub repo_path: PathBuf,
     /// Terminal size.
     pub terminal_size: (u16, u16),
+    /// Branches screen state.
+    pub branches: BranchesState,
+    /// Profiles screen state.
+    pub profiles: ProfilesState,
 }
 
 impl Model {
@@ -155,6 +162,8 @@ impl Model {
             quit: false,
             repo_path,
             terminal_size: (80, 24),
+            branches: BranchesState::default(),
+            profiles: ProfilesState::default(),
         }
     }
 
