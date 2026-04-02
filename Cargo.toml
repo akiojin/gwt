@@ -11,10 +11,11 @@ members = [
     "crates/gwt-notification",
     "crates/gwt-skills",
     "crates/gwt-terminal",
+    "crates/gwt-tui",
     "crates/gwt-voice",
 ]
 default-members = [
-    "crates/gwt-core",
+    "crates/gwt-tui",
 ]
 
 [workspace.package]
