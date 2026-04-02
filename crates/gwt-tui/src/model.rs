@@ -3,6 +3,9 @@
 use std::path::PathBuf;
 
 use crate::screens::branches::BranchesState;
+use crate::screens::git_view::GitViewState;
+use crate::screens::issues::IssuesState;
+use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
 
 /// Which UI layer is active.
@@ -29,6 +32,7 @@ pub enum ManagementTab {
     Branches,
     Specs,
     Issues,
+    PrDashboard,
     Profiles,
     GitView,
     Versions,
@@ -38,10 +42,11 @@ pub enum ManagementTab {
 
 impl ManagementTab {
     /// All tabs in display order.
-    pub const ALL: [ManagementTab; 8] = [
+    pub const ALL: [ManagementTab; 9] = [
         ManagementTab::Branches,
         ManagementTab::Specs,
         ManagementTab::Issues,
+        ManagementTab::PrDashboard,
         ManagementTab::Profiles,
         ManagementTab::GitView,
         ManagementTab::Versions,
@@ -55,6 +60,7 @@ impl ManagementTab {
             Self::Branches => "Branches",
             Self::Specs => "Specs",
             Self::Issues => "Issues",
+            Self::PrDashboard => "PRs",
             Self::Profiles => "Profiles",
             Self::GitView => "Git View",
             Self::Versions => "Versions",
@@ -139,6 +145,12 @@ pub struct Model {
     pub branches: BranchesState,
     /// Profiles screen state.
     pub profiles: ProfilesState,
+    /// Issues screen state.
+    pub issues: IssuesState,
+    /// Git view screen state.
+    pub git_view: GitViewState,
+    /// PR dashboard screen state.
+    pub pr_dashboard: PrDashboardState,
 }
 
 impl Model {
@@ -164,6 +176,9 @@ impl Model {
             terminal_size: (80, 24),
             branches: BranchesState::default(),
             profiles: ProfilesState::default(),
+            issues: IssuesState::default(),
+            git_view: GitViewState::default(),
+            pr_dashboard: PrDashboardState::default(),
         }
     }
 
@@ -212,8 +227,8 @@ mod tests {
     }
 
     #[test]
-    fn management_tab_all_has_eight_entries() {
-        assert_eq!(ManagementTab::ALL.len(), 8);
+    fn management_tab_all_has_nine_entries() {
+        assert_eq!(ManagementTab::ALL.len(), 9);
     }
 
     #[test]

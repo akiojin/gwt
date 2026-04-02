@@ -4,6 +4,9 @@ use crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::model::ManagementTab;
 use crate::screens::branches::BranchesMessage;
+use crate::screens::git_view::GitViewMessage;
+use crate::screens::issues::IssuesMessage;
+use crate::screens::pr_dashboard::PrDashboardMessage;
 use crate::screens::profiles::ProfilesMessage;
 
 /// Every possible action in the TUI.
@@ -45,6 +48,12 @@ pub enum Message {
     Branches(BranchesMessage),
     /// Profiles screen message.
     Profiles(ProfilesMessage),
+    /// Issues screen message.
+    Issues(IssuesMessage),
+    /// Git view screen message.
+    GitView(GitViewMessage),
+    /// PR dashboard screen message.
+    PrDashboard(PrDashboardMessage),
 }
 
 #[cfg(test)]
@@ -69,5 +78,8 @@ mod tests {
         let _ = Message::PtyOutput("id".into(), vec![0x41]);
         let _ = Message::Branches(BranchesMessage::MoveUp);
         let _ = Message::Profiles(ProfilesMessage::MoveUp);
+        let _ = Message::Issues(IssuesMessage::MoveUp);
+        let _ = Message::GitView(GitViewMessage::MoveUp);
+        let _ = Message::PrDashboard(PrDashboardMessage::MoveUp);
     }
 }

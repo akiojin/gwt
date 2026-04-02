@@ -104,6 +104,15 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Profiles(msg) => {
             screens::profiles::update(&mut model.profiles, msg);
         }
+        Message::Issues(msg) => {
+            screens::issues::update(&mut model.issues, msg);
+        }
+        Message::GitView(msg) => {
+            screens::git_view::update(&mut model.git_view, msg);
+        }
+        Message::PrDashboard(msg) => {
+            screens::pr_dashboard::update(&mut model.pr_dashboard, msg);
+        }
     }
 }
 
@@ -167,9 +176,12 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
     match model.management_tab {
         ManagementTab::Branches => screens::branches::render(&model.branches, frame, area),
         ManagementTab::Specs => screens::specs::render(frame, area),
-        ManagementTab::Issues => screens::issues::render(frame, area),
+        ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
+        ManagementTab::PrDashboard => {
+            screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
+        }
         ManagementTab::Profiles => screens::profiles::render(&model.profiles, frame, area),
-        ManagementTab::GitView => screens::git_view::render(frame, area),
+        ManagementTab::GitView => screens::git_view::render(&model.git_view, frame, area),
         ManagementTab::Versions => screens::versions::render(frame, area),
         ManagementTab::Settings => screens::settings::render(frame, area),
         ManagementTab::Logs => screens::logs::render(frame, area),

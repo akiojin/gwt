@@ -121,6 +121,15 @@ fn snapshot_logs_tab() {
 }
 
 #[test]
+fn snapshot_pr_dashboard_tab() {
+    let mut model = test_model();
+    model.active_layer = ActiveLayer::Management;
+    model.management_tab = ManagementTab::PrDashboard;
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("pr_dashboard_tab", output);
+}
+
+#[test]
 fn snapshot_profiles_tab() {
     let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
