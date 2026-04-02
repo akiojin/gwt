@@ -1,3 +1,5 @@
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+
 # SPEC-1438 Codex Hooks 対応 — タスク一覧
 
 ## Phase 1: アセット準備

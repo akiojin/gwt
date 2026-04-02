@@ -1,3 +1,5 @@
+> **Status Note**: この SPEC は実装完了により closed。task は履歴として保持する。
+
 ## Phase 0: Setup
 
 - [x] TASK-0-1: `crates/gwt-core/src/git/issue_cache.rs` を新規作成し、`mod.rs` に `pub mod issue_cache;` を追加

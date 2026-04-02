@@ -191,4 +191,22 @@
 - `open + TBD plan` 6 件の `plan.md` を現行アーキテクチャに合わせて書き直し
 - 主要な衝突領域に `canonical / child / superseded` 注記を追加
 
-残作業は P1 のタイトル全面統一、closed 履歴 SPEC の整理、open-all-done の close 判定です。
+## P1 正規化進捗（2026-04-02）
+
+- 残っていた legacy / 英語タイトル SPEC の `metadata.title` と `spec.md` H1 を一致させた
+- H1 が欠けていた旧 SPEC に統一タイトルを追加した
+- `Feature Specification:` / `機能仕様:` などの接頭辞をタイトルから除去した
+- legacy closed SPEC に historical / superseded 注記を追加し、履歴 SPEC であることを明示した
+
+## P2 状態整合化進捗（2026-04-02）
+
+- `open + tasks 完了` だった 5 件を `closed` へ変更した
+  - `SPEC-1636`, `SPEC-1644`, `SPEC-1650`, `SPEC-1656`, `SPEC-1714`
+- `closed + tasks 未完了` の 7 件に「旧 backlog の保存であり現行の完了条件ではない」注記を追加した
+  - `SPEC-1438`, `SPEC-1540`, `SPEC-1543`, `SPEC-1544`, `SPEC-1552`, `SPEC-1578`, `SPEC-1647`
+- 現在の件数は `open 28 / closed 13`
+
+## 残課題
+
+- `docs/architecture.md` は依然として GUI/Tauri 時代の説明が多く、`SPEC-1776` / `SPEC-1654` と整合していない
+- `SPEC-1777`, `SPEC-1779`, `SPEC-1782`, `SPEC-1786` などは close 候補だが、手動 E2E や残 task の整理が必要

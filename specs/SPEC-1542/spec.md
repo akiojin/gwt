@@ -1,10 +1,14 @@
-### 背景
+> **Historical Status**: この closed SPEC は設定永続化レイヤーの履歴正本である。現行挙動の参照用に保持し、追加要件は新規 child SPEC で管理する。
+
+# データ永続化レイヤー
+
+## Background
 
 現行 gwt では、アプリ設定が `config.toml` と複数の sidecar 設定ファイルに分散し、stale な値が保存結果を上書きしうる。特に API キーや recent projects などの app-wide settings は、保存先が複数ある状態を許すと整合性が壊れる。
 
 この仕様では、**アプリ設定の正本を `~/.gwt/config.toml` に一本化**し、project 固有メタデータだけを `<project>/.gwt/project.toml` に限定する。`sessions` `logs` `cache` `history` は設定ではない別カテゴリとして扱う。
 
-### ユーザーシナリオ
+## User Stories
 
 - **US-1 [P0]**: ユーザーが設定画面で変更した値は `~/.gwt/config.toml` にのみ保存され、再起動後も同じ値が読み込まれる
 - **US-2 [P0]**: API キー、agent config、custom tools、recent projects は sidecar file を削除しても動作が変わらない
@@ -12,7 +16,7 @@
 - **US-4 [P1]**: repo-local `.gwt.toml` / `.gwt/config.toml` は global-only settings を上書きできない
 - **US-5 [P1]**: retired sidecar file が存在しても、アプリはそれらを読まない
 
-### 機能要件
+## Functional Requirements
 
 | ID | 要件 |
 |---|---|
@@ -29,7 +33,7 @@
 | FR-011 | env override は runtime behavior にのみ作用し、設定保存によって `config.toml` に永続化されない |
 | FR-012 | `sessions`, `session-summaries`, `agent-history`, `stats`, `logs`, `cache`, `updates` は設定ファイルではなく runtime/state/cache として本仕様の対象外とする |
 
-### 非機能要件
+## Non-Functional Requirements
 
 | ID | 要件 |
 |---|---|
@@ -38,7 +42,7 @@
 | NFR-003 | secret を repo-local 設定へ保存しない |
 | NFR-004 | retired sidecar file の存在有無でアプリ挙動が変わらない |
 
-### 成功基準
+## Success Criteria
 
 | ID | 基準 |
 |---|---|

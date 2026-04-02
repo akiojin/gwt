@@ -1,12 +1,15 @@
 > **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+> **Status Note**: この SPEC は実装完了により closed。files semantic search 基盤の参照として保持し、追加変更は新規 child SPEC で管理する。
 
-### 背景
+# プロジェクトファイルインデックス
+
+## Background
 プロジェクトファイルのベクトル検索機能を提供する。Studio時代の #1554（プロジェクトインデックス＆検索）の機能概念を現行スタックで再定義。
 
 GitHub Issue/PR のインデックス機能は #1684 (GitHub Issue/PR Index) に分離。
 Assistant Mode連携（変更とIssueの関連付け）は #1636 FR-10 でカバー済み。
 
-### ユーザーシナリオとテスト
+## User Stories
 
 **S1: ファイル内容のセマンティック検索**
 - Given: プロジェクトファイルがインデックス済み
@@ -18,7 +21,7 @@ Assistant Mode連携（変更とIssueの関連付け）は #1636 FR-10 でカバ
 - When: インデックス更新がトリガーされる
 - Then: インデックスが最新状態に更新される
 
-### 機能要件
+## Functional Requirements
 
 **FR-01: ベクトル検索**
 - ファイル内容のベクトル化
@@ -33,7 +36,7 @@ Assistant Mode連携（変更とIssueの関連付け）は #1636 FR-10 でカバ
 - 4つの呼び出し側スキルはIssue検索のみ使用しており、ファイル検索の不要なコンテキスト注入を排除
 - バックエンド（Rust/Python/GUI）は変更不要。スキル/コマンドMarkdownとRust登録コードのみ変更
 
-### 成功基準
+## Success Criteria
 
 1. セマンティック検索が正確な結果を返す
 2. インデックスが効率的に更新される

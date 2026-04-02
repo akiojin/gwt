@@ -1,3 +1,5 @@
+> **Status Note**: この SPEC は実装完了により closed。task は履歴として保持する。
+
 # Tasks
 
 ## Phase 0: Ownership boundary refresh

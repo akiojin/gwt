@@ -1,3 +1,5 @@
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+
 - [ ] T001 [S] Rust 側の `skill_registration.rs` を完全分析（全関数・テストケースの棚卸し）
 - [ ] T002 [S] Unity C# でのアセット埋め込み方式を決定（C# const/static 埋め込みを採用）
 - [ ] T003 [F] `ISkillRegistrationService` インターフェース設計

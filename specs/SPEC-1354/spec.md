@@ -1,4 +1,4 @@
-# Feature Specification: Issue Tab — artifact-first SPEC detail compatibility
+# Issue タブ — GitHub Issue 一覧・詳細・フルフロー
 
 ## Background
 

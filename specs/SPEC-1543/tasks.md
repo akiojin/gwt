@@ -1,3 +1,5 @@
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+
 - [ ] T001 [S] [US-1] `IGitService` インターフェース定義
 - [ ] T002 [S] [US-1] データ型定義（Worktree, Branch, FileChange, FileDiff, CommitEntry, StashEntry, WorkingTreeEntry, GitChangeSummary）
 - [ ] T003 [F] [US-1] `GitCommandRunner` 基盤クラス実装（`System.Diagnostics.Process` + UniTask + CancellationToken + タイムアウト）
