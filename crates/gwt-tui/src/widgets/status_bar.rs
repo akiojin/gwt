@@ -89,7 +89,7 @@ mod tests {
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
         assert!(text.contains("Shell"));
-        assert!(text.contains("Main"));
+        assert!(text.contains("Mgmt"));
     }
 
     #[test]

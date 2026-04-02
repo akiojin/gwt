@@ -205,6 +205,30 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::specs::SpecsMessage;
     use screens::versions::VersionsMessage;
 
+    // Global management keys: tab switching with Left/Right arrows
+    // (only when not in text input mode like search or edit)
+    if !is_in_text_input_mode(model) {
+        let tab_count = ManagementTab::ALL.len();
+        let idx = ManagementTab::ALL
+            .iter()
+            .position(|t| *t == model.management_tab)
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Right => {
+                model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
+                return;
+            }
+            KeyCode::Left => {
+                model.management_tab =
+                    ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Tab-specific key routing
     match model.management_tab {
         ManagementTab::Branches => {
             let msg = match key.code {
@@ -346,6 +370,17 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 screens::profiles::update(&mut model.profiles, m);
             }
         }
+    }
+}
+
+/// Check if the active management screen is in a text input mode (search, edit).
+fn is_in_text_input_mode(model: &Model) -> bool {
+    match model.management_tab {
+        ManagementTab::Branches => model.branches.search_active,
+        ManagementTab::Issues => model.issues.search_active,
+        ManagementTab::Specs => model.specs.search_active || model.specs.editing,
+        ManagementTab::Settings => model.settings.editing,
+        _ => false,
     }
 }
 
@@ -568,13 +603,13 @@ mod tests {
     #[test]
     fn update_toggle_layer() {
         let mut model = test_model();
-        assert_eq!(model.active_layer, ActiveLayer::Main);
-
-        update(&mut model, Message::ToggleLayer);
         assert_eq!(model.active_layer, ActiveLayer::Management);
 
         update(&mut model, Message::ToggleLayer);
         assert_eq!(model.active_layer, ActiveLayer::Main);
+
+        update(&mut model, Message::ToggleLayer);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
     }
 
     #[test]

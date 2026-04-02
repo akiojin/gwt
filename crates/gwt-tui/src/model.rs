@@ -193,7 +193,7 @@ impl Model {
         };
 
         Self {
-            active_layer: ActiveLayer::Main,
+            active_layer: ActiveLayer::Management,
             sessions: vec![default_session],
             active_session: 0,
             session_layout: SessionLayout::Tab,
@@ -228,6 +228,16 @@ impl Model {
     /// Get the active session, if any.
     pub fn active_session_tab(&self) -> Option<&SessionTab> {
         self.sessions.get(self.active_session)
+    }
+
+    /// Whether a wizard overlay is active.
+    pub fn has_wizard(&self) -> bool {
+        self.wizard.is_some()
+    }
+
+    /// Whether the branches search is active.
+    pub fn is_branches_search_active(&self) -> bool {
+        self.branches.search_active
     }
 
     /// Save session state to a TOML file. Best-effort: errors are logged, not fatal.
@@ -292,7 +302,7 @@ mod tests {
     #[test]
     fn model_new_defaults() {
         let model = Model::new(PathBuf::from("/tmp/repo"));
-        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
         assert_eq!(model.session_count(), 1);
         assert_eq!(model.active_session, 0);
         assert_eq!(model.session_layout, SessionLayout::Tab);
@@ -349,7 +359,7 @@ mod tests {
 
         let loaded = Model::load_session_state(&path).unwrap();
         assert_eq!(loaded.display_mode, "tab");
-        assert!(!loaded.management_visible);
+        assert!(loaded.management_visible);
         assert_eq!(loaded.active_management_tab, "Branches");
         assert_eq!(loaded.session_count, 1);
     }
