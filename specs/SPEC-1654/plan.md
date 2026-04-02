@@ -25,6 +25,7 @@ Rewrite `#1654` as the canonical shell and execution-session spec. Replace Sideb
 - Canvas components own tiles, viewport, selection, and relation edges
 - Branch Browser consumes `#1644` projections and does not own branch truth
 - Window-local restore persists shell/canvas state instead of split tab groups
+- Branch-targeted launch resolves a single worktree path and reuses it for hook checks, PTY cwd, and session metadata updates
 
 ## Complexity Tracking
 

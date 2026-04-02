@@ -290,6 +290,7 @@ pub struct WizardState {
 
     // Branch
     pub branch_name: String,
+    pub base_branch_name: Option<String>,
     pub is_new_branch: bool,
     pub branch_type: BranchType,
     pub new_branch_name: String,
@@ -370,6 +371,7 @@ impl WizardState {
             version_options: vec!["installed".to_string(), "latest".to_string()],
             version_index: 0,
             branch_name: String::new(),
+            base_branch_name: None,
             is_new_branch: false,
             branch_type: BranchType::default(),
             new_branch_name: String::new(),
@@ -409,6 +411,7 @@ impl WizardState {
     pub fn open_for_branch(branch_name: &str, history: Vec<QuickStartEntry>) -> Self {
         let mut state = Self::new();
         state.branch_name = branch_name.to_string();
+        state.base_branch_name = Some(branch_name.to_string());
         state.is_new_branch = false;
         state.has_branch_action = true;
 
@@ -1073,6 +1076,11 @@ impl WizardState {
             model,
             version,
             branch_name: branch,
+            base_branch: if self.is_new_branch {
+                self.base_branch_name.clone()
+            } else {
+                None
+            },
             is_new_branch: self.is_new_branch,
             execution_mode: self.execution_mode,
             session_id: self.session_id.clone(),
@@ -1158,6 +1166,7 @@ pub struct WizardLaunchConfig {
     pub model: Option<String>,
     pub version: Option<String>,
     pub branch_name: String,
+    pub base_branch: Option<String>,
     pub is_new_branch: bool,
     pub execution_mode: WizardExecutionMode,
     pub session_id: Option<String>,
@@ -2345,6 +2354,7 @@ mod tests {
         let config = state.build_launch_config().unwrap();
         assert_eq!(config.agent_id, "claude");
         assert_eq!(config.branch_name, "feature/test");
+        assert_eq!(config.base_branch, None);
         assert!(!config.is_new_branch);
         assert!(!config.skip_permissions);
     }
@@ -2356,6 +2366,20 @@ mod tests {
         state.new_branch_name = "add-login".to_string();
         let config = state.build_launch_config().unwrap();
         assert_eq!(config.branch_name, "feature/add-login");
+        assert_eq!(config.base_branch, None);
+        assert!(config.is_new_branch);
+    }
+
+    #[test]
+    fn build_launch_config_new_branch_uses_selected_branch_as_base() {
+        let mut state = WizardState::open_for_branch("develop", vec![]);
+        state.is_new_branch = true;
+        state.branch_type = BranchType::Feature;
+        state.new_branch_name = "add-login".to_string();
+
+        let config = state.build_launch_config().unwrap();
+        assert_eq!(config.branch_name, "feature/add-login");
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
         assert!(config.is_new_branch);
     }
 

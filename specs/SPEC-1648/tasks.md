@@ -13,3 +13,4 @@
 ## Phase 3: Verification
 
 - [ ] T005: session restore の主要失敗ケースを受け入れ条件へ追加する。
+- [x] T006: launch 時に保存する worktree path と session-id detection に使う path を actual launched worktree に揃える。

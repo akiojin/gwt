@@ -20,6 +20,7 @@
 - [x] T202 [US2] Support create/focus worktree actions from selected refs
 - [x] T203 [US2] Add Branch Browser tests for mode switching, selection, and action dispatch
 - [x] T204 [US2] Render selected branch detail in a full-window layout without left/right split panes
+- [x] T205 [US2] Preserve selected base branch through the wizard `Create new branch` flow and launch agents in the materialized new-branch worktree
 
 ## Phase 4: User Story 3 - Agent Canvas owns execution relationships
 
@@ -39,6 +40,7 @@
 - [x] T402 [US4] Remove split group persistence from the canonical shell path rather than only bypassing it
 - [x] T403 [US4] Restore shell/canvas state per window without cross-window contamination after the canvas interaction model is finalized
 - [x] T404 [US4] Reconcile persisted shell state with the full-window single-surface model
+- [x] T405 [US4] Persist and re-detect agent sessions using the actual launched worktree path instead of the repository root fallback
 
 ## Phase 6: Validation
 

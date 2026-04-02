@@ -1684,18 +1684,84 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
 fn resolve_branch_working_dir(
     repo_root: &std::path::Path,
     branch_name: &str,
+    is_new_branch: bool,
+    base_branch: Option<&str>,
 ) -> std::path::PathBuf {
+    use gwt_core::error::GwtError;
     use gwt_core::worktree::WorktreeManager;
     match WorktreeManager::new(repo_root) {
-        Ok(wt_manager) => match wt_manager.get_by_branch(branch_name) {
-            Ok(Some(wt)) => wt.path,
-            Ok(None) => wt_manager
-                .create_for_branch(branch_name)
+        Ok(wt_manager) => {
+            let resolved = if is_new_branch {
+                match wt_manager.create_new_branch(branch_name, base_branch) {
+                    Ok(wt) => Ok(wt),
+                    Err(GwtError::BranchAlreadyExists { .. }) => {
+                        wt_manager.create_for_branch(branch_name)
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                match wt_manager.get_by_branch(branch_name) {
+                    Ok(Some(wt)) => return wt.path,
+                    Ok(None) => wt_manager.create_for_branch(branch_name),
+                    Err(_) => return repo_root.to_path_buf(),
+                }
+            };
+            resolved
                 .map(|wt| wt.path)
-                .unwrap_or_else(|_| repo_root.to_path_buf()),
-            Err(_) => repo_root.to_path_buf(),
-        },
+                .unwrap_or_else(|_| repo_root.to_path_buf())
+        }
         Err(_) => repo_root.to_path_buf(),
+    }
+}
+
+fn resolve_wizard_working_dir(
+    repo_root: &std::path::Path,
+    wiz_config: &crate::screens::wizard::WizardLaunchConfig,
+) -> std::path::PathBuf {
+    if wiz_config.branch_name.is_empty() {
+        repo_root.to_path_buf()
+    } else {
+        resolve_branch_working_dir(
+            repo_root,
+            &wiz_config.branch_name,
+            wiz_config.is_new_branch,
+            wiz_config.base_branch.as_deref(),
+        )
+    }
+}
+
+fn build_agent_session_entry(
+    worktree_path: &std::path::Path,
+    wiz_config: &crate::screens::wizard::WizardLaunchConfig,
+    tool_label: String,
+    session_id: Option<String>,
+) -> gwt_core::config::ToolSessionEntry {
+    gwt_core::config::ToolSessionEntry {
+        branch: wiz_config.branch_name.clone(),
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        tool_id: wiz_config.agent_id.clone(),
+        tool_label,
+        session_id,
+        mode: Some(wiz_config.execution_mode.label().to_string()),
+        model: wiz_config.model.clone(),
+        reasoning_level: wiz_config
+            .reasoning_level
+            .as_ref()
+            .map(|r| r.label().to_string()),
+        skip_permissions: Some(wiz_config.skip_permissions),
+        tool_version: wiz_config.version.clone(),
+        collaboration_modes: None,
+        docker_service: None,
+        docker_force_host: None,
+        docker_recreate: None,
+        docker_build: None,
+        docker_keep: None,
+        docker_container_name: None,
+        docker_compose_args: None,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
     }
 }
 
@@ -1713,11 +1779,7 @@ fn check_codex_hooks_confirm(
         return false;
     }
 
-    let working_dir = if !wiz_config.branch_name.is_empty() {
-        resolve_branch_working_dir(&model.repo_root, &wiz_config.branch_name)
-    } else {
-        model.repo_root.clone()
-    };
+    let working_dir = resolve_wizard_working_dir(&model.repo_root, wiz_config);
 
     let codex_root = working_dir.join(".codex");
     if gwt_core::config::codex_hooks_needs_update(&codex_root) {
@@ -1742,11 +1804,7 @@ fn spawn_agent_session(
     };
 
     let agent_id = &wiz_config.agent_id;
-    let working_dir = if !wiz_config.branch_name.is_empty() {
-        resolve_branch_working_dir(&model.repo_root, &wiz_config.branch_name)
-    } else {
-        model.repo_root.clone()
-    };
+    let working_dir = resolve_wizard_working_dir(&model.repo_root, wiz_config);
 
     // Register managed skills/hooks for this agent (SPEC-1438 FR-REG-001)
     if !skip_hooks_registration {
@@ -1894,50 +1952,23 @@ fn spawn_agent_session(
         .unwrap_or_else(|| agent_id.to_string());
     let _ = gwt_core::config::save_session_entry(
         &model.repo_root,
-        gwt_core::config::ToolSessionEntry {
-            branch: wiz_config.branch_name.clone(),
-            worktree_path: Some(model.repo_root.to_string_lossy().to_string()),
-            tool_id: wiz_config.agent_id.clone(),
-            tool_label: agent_label,
-            session_id: wiz_config.session_id.clone(),
-            mode: Some(wiz_config.execution_mode.label().to_string()),
-            model: wiz_config.model.clone(),
-            reasoning_level: wiz_config
-                .reasoning_level
-                .as_ref()
-                .map(|r| r.label().to_string()),
-            skip_permissions: Some(wiz_config.skip_permissions),
-            tool_version: wiz_config.version.clone(),
-            collaboration_modes: None,
-            docker_service: None,
-            docker_force_host: None,
-            docker_recreate: None,
-            docker_build: None,
-            docker_keep: None,
-            docker_container_name: None,
-            docker_compose_args: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
-        },
+        build_agent_session_entry(
+            &working_dir,
+            wiz_config,
+            agent_label,
+            wiz_config.session_id.clone(),
+        ),
     );
 
     // Background session_id detection (SPEC-1782 FR-050, NFR-002)
     {
         let repo_root = model.repo_root.clone();
+        let working_dir = working_dir.clone();
         let tool_id = wiz_config.agent_id.clone();
-        let branch = wiz_config.branch_name.clone();
         let agent_label_bg = gwt_core::agent::launch::find_agent_def(&tool_id)
             .map(|d| d.display_name.to_string())
             .unwrap_or_else(|| tool_id.clone());
-        let model_str = wiz_config.model.clone();
-        let version_str = wiz_config.version.clone();
-        let skip_perm = wiz_config.skip_permissions;
-        let reasoning = wiz_config
-            .reasoning_level
-            .as_ref()
-            .map(|r| r.label().to_string());
+        let wiz_config_bg = wiz_config.clone();
 
         std::thread::Builder::new()
             .name("session-id-detect".into())
@@ -1945,34 +1976,16 @@ fn spawn_agent_session(
                 // Wait for the agent to initialize and create a session file
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 if let Some(session_id) =
-                    gwt_core::ai::detect_session_id_for_tool(&tool_id, &repo_root)
+                    gwt_core::ai::detect_session_id_for_tool(&tool_id, &working_dir)
                 {
                     let _ = gwt_core::config::save_session_entry(
                         &repo_root,
-                        gwt_core::config::ToolSessionEntry {
-                            branch,
-                            worktree_path: Some(repo_root.to_string_lossy().to_string()),
-                            tool_id,
-                            tool_label: agent_label_bg,
-                            session_id: Some(session_id),
-                            mode: Some("Normal".to_string()),
-                            model: model_str,
-                            reasoning_level: reasoning,
-                            skip_permissions: Some(skip_perm),
-                            tool_version: version_str,
-                            collaboration_modes: None,
-                            docker_service: None,
-                            docker_force_host: None,
-                            docker_recreate: None,
-                            docker_build: None,
-                            docker_keep: None,
-                            docker_container_name: None,
-                            docker_compose_args: None,
-                            timestamp: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(0),
-                        },
+                        build_agent_session_entry(
+                            &working_dir,
+                            &wiz_config_bg,
+                            agent_label_bg,
+                            Some(session_id),
+                        ),
                     );
                 }
             })
@@ -2291,13 +2304,55 @@ mod tests {
     use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
     use gwt_core::terminal::AgentColor;
     use std::collections::{BTreeMap, HashMap};
+    use std::path::Path;
     use std::sync::mpsc;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     fn test_model() -> Model {
         let mut m = Model::new(PathBuf::from("/tmp/test"));
         m.active_layer = crate::model::ActiveLayer::Management; // Force Management for tests
         m
+    }
+
+    fn run_git_in(dir: &Path, args: &[&str]) {
+        let output = gwt_core::process::command("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let output = gwt_core::process::command("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn create_test_repo() -> TempDir {
+        let temp = TempDir::new().expect("tempdir");
+        run_git_in(temp.path(), &["init"]);
+        run_git_in(temp.path(), &["config", "user.email", "test@example.com"]);
+        run_git_in(temp.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(temp.path().join("README.md"), "hello").expect("seed repo");
+        run_git_in(temp.path(), &["add", "README.md"]);
+        run_git_in(temp.path(), &["commit", "-m", "init"]);
+        temp
     }
 
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -2435,6 +2490,58 @@ mod tests {
             let _ = tx.send(result);
         });
         rx.recv_timeout(timeout).expect("reader timed out")
+    }
+
+    #[test]
+    fn resolve_branch_working_dir_creates_new_branch_worktree_from_selected_base() {
+        let temp = create_test_repo();
+        run_git_in(temp.path(), &["branch", "develop"]);
+
+        let working_dir =
+            resolve_branch_working_dir(temp.path(), "feature/add-login", true, Some("develop"));
+
+        assert_ne!(working_dir, temp.path());
+        assert!(working_dir.exists());
+        assert_eq!(
+            git_stdout(&working_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature/add-login"
+        );
+        assert_eq!(
+            git_stdout(&working_dir, &["rev-parse", "feature/add-login"]),
+            git_stdout(&working_dir, &["rev-parse", "develop"])
+        );
+    }
+
+    #[test]
+    fn build_agent_session_entry_preserves_actual_worktree_path() {
+        let wiz_config = crate::screens::wizard::WizardLaunchConfig {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5".to_string()),
+            version: Some("1.2.3".to_string()),
+            branch_name: "feature/add-login".to_string(),
+            base_branch: Some("develop".to_string()),
+            is_new_branch: true,
+            execution_mode: crate::screens::wizard::WizardExecutionMode::Normal,
+            session_id: None,
+            skip_permissions: true,
+            fast_mode: true,
+            reasoning_level: Some(crate::screens::wizard::ReasoningLevel::High),
+        };
+
+        let entry = build_agent_session_entry(
+            Path::new("/repo/.worktrees/feature-add-login"),
+            &wiz_config,
+            "Codex CLI".to_string(),
+            Some("sess-123".to_string()),
+        );
+
+        assert_eq!(
+            entry.worktree_path.as_deref(),
+            Some("/repo/.worktrees/feature-add-login")
+        );
+        assert_eq!(entry.branch, "feature/add-login");
+        assert_eq!(entry.session_id.as_deref(), Some("sess-123"));
+        assert_eq!(entry.mode.as_deref(), Some("Normal"));
     }
 
     // -- Update tests ---------------------------------------------------------

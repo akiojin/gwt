@@ -29,6 +29,7 @@
 3. 設定ファイルと session history が別ファイルとして管理される。
 4. raw PTY scrollback は session lifetime の一時データとして扱われ、再起動後の必須復元対象には含めない。
 5. 不正データや古い schema は安全に無視または移行できる。
+6. branch-targeted launch で worktree が materialize された場合、session metadata は repository root ではなく実際に起動した worktree path を保存し、その path を session-id detection / resume の基準に使う。
 
 ## Edge Cases
 
@@ -43,6 +44,7 @@
 - FR-003: Agent resume に必要な session id / tool / branch 情報を保存する。
 - FR-004: raw PTY transcript は永続化対象外とする。
 - FR-005: schema 変更時に後方互換または安全な読み飛ばしを提供する。
+- FR-006: session metadata は actual launched worktree path を保持し、repository root alias に置き換えてはならない。
 
 ## Success Criteria
 

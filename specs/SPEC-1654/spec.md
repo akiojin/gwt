@@ -37,6 +37,7 @@
 1. **Given** メイン画面を表示中、**When** Ctrl+G を押す、**Then** 管理画面に切り替わり Branches タブが表示される
 2. **Given** 管理画面の Branches タブ、**When** ブランチを選択して worktree 作成を実行する、**Then** worktree が作成され Agent タブに反映される
 3. **Given** 管理画面を表示中、**When** ESC または Ctrl+G を押す、**Then** メイン画面に戻る
+4. **Given** Branch Wizard を選択済み branch から開いて `Create new branch` を選ぶ、**When** Agent を launch する、**Then** 新規 branch は選択済み base branch から materialize され、PTY は current repo root ではなく新しい worktree で開始される
 
 ### User Story 3 - セッション状態の復元
 
@@ -60,6 +61,7 @@
 - **FR-007**: セッション状態（タブ構成、アクティブタブ）を `~/.gwt/sessions/` に保存・復元する
 - **FR-008**: タブの並び替え・クローズが可能
 - **FR-009**: 管理画面の各タブはターミナル全体を使って表示する
+- **FR-010**: Branch Wizard の launch flow は resolved worktree path を一度決定し、Codex hook 判定・PTY の cwd・session history / session-id detection で同じ path を使わなければならない
 
 ## Non-Functional Requirements
 
