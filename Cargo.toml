@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/gwt-core",
+    "crates/gwt-terminal",
     "crates/gwt-tauri",
 ]
 default-members = [
@@ -18,6 +19,7 @@ authors = ["akiojin"]
 [workspace.dependencies]
 # Internal crates
 gwt-core = { path = "crates/gwt-core" }
+gwt-terminal = { path = "crates/gwt-terminal" }
 
 # Error handling
 thiserror = "2"
