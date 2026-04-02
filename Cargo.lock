@@ -2375,6 +2375,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-agent"
+version = "8.17.2"
+dependencies = [
+ "chrono",
+ "gwt-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.0.6+spec-1.1.0",
+ "tracing",
+ "uuid",
+ "which",
+]
+
+[[package]]
 name = "gwt-core"
 version = "8.17.2"
 dependencies = [
