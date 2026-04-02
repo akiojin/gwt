@@ -88,6 +88,8 @@ pub enum Message {
     PasteFiles,
     /// Open the wizard overlay.
     OpenWizard,
+    /// Open the wizard overlay with SPEC context for prefilling (spec_id, title).
+    OpenWizardWithSpec(String, String),
     /// Close the wizard overlay.
     CloseWizard,
 }
@@ -129,6 +131,7 @@ mod tests {
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
         let _ = Message::PasteFiles;
         let _ = Message::OpenWizard;
+        let _ = Message::OpenWizardWithSpec("SPEC-1".into(), "Title".into());
         let _ = Message::CloseWizard;
     }
 }

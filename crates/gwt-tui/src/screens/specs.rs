@@ -35,6 +35,10 @@ pub struct SpecsState {
     pub detail_section: usize,
     pub search_query: String,
     pub search_active: bool,
+    /// Whether we are editing the phase field of the selected spec.
+    pub editing: bool,
+    /// Buffer for the phase field being edited.
+    pub edit_field: String,
 }
 
 impl SpecsState {
@@ -83,6 +87,18 @@ pub enum SpecsMessage {
     SearchClear,
     Refresh,
     SetSpecs(Vec<SpecItem>),
+    /// Launch an agent session for the selected spec (Shift+Enter).
+    LaunchAgent,
+    /// Start editing the phase of the selected spec.
+    StartEdit,
+    /// Save the current edit.
+    SaveEdit,
+    /// Cancel the current edit.
+    CancelEdit,
+    /// Append a character to the edit buffer.
+    EditInput(char),
+    /// Remove the last character from the edit buffer.
+    EditBackspace,
 }
 
 /// Update specs state in response to a message.
@@ -146,6 +162,46 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         SpecsMessage::SetSpecs(specs) => {
             state.specs = specs;
             state.clamp_selected();
+        }
+        SpecsMessage::LaunchAgent => {
+            // Signal handled by caller — selected spec context is read from state.
+            // This is a no-op in the specs screen itself; the app layer reads
+            // state.selected_spec() to prefill the wizard.
+        }
+        SpecsMessage::StartEdit => {
+            if !state.editing {
+                if let Some(spec) = state.selected_spec() {
+                    state.edit_field = spec.phase.clone();
+                    state.editing = true;
+                }
+            }
+        }
+        SpecsMessage::SaveEdit => {
+            if state.editing {
+                let filtered = state.filtered_specs();
+                if let Some(spec) = filtered.get(state.selected) {
+                    let id = spec.id.clone();
+                    if let Some(s) = state.specs.iter_mut().find(|s| s.id == id) {
+                        s.phase = state.edit_field.clone();
+                    }
+                }
+                state.editing = false;
+                state.edit_field.clear();
+            }
+        }
+        SpecsMessage::CancelEdit => {
+            state.editing = false;
+            state.edit_field.clear();
+        }
+        SpecsMessage::EditInput(ch) => {
+            if state.editing {
+                state.edit_field.push(ch);
+            }
+        }
+        SpecsMessage::EditBackspace => {
+            if state.editing {
+                state.edit_field.pop();
+            }
         }
     }
 }
@@ -233,16 +289,27 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
                 Style::default().fg(Color::White)
             };
 
+            let is_editing = idx == state.selected && state.editing;
+
+            let phase_display = if is_editing {
+                format!(" [{}_]", state.edit_field)
+            } else {
+                format!(" [{}]", spec.phase)
+            };
+
+            let phase_style = if is_editing {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Magenta)
+            };
+
             let line = Line::from(vec![
                 Span::styled(
                     format!("{:<10} ", spec.id),
                     Style::default().fg(Color::Yellow),
                 ),
                 Span::styled(spec.title.clone(), style),
-                Span::styled(
-                    format!(" [{}]", spec.phase),
-                    Style::default().fg(Color::Magenta),
-                ),
+                Span::styled(phase_display, phase_style),
                 Span::styled(
                     format!(" ({})", spec.status),
                     Style::default().fg(status_color),
@@ -646,5 +713,160 @@ mod tests {
         assert_eq!(DETAIL_SECTIONS.len(), 5);
         assert_eq!(DETAIL_SECTIONS[0], "spec.md");
         assert_eq!(DETAIL_SECTIONS[4], "data-model.md");
+    }
+
+    // ---- LaunchAgent tests ----
+
+    #[test]
+    fn launch_agent_noop_on_empty() {
+        let mut state = SpecsState::default();
+        update(&mut state, SpecsMessage::LaunchAgent);
+        // No panic, no state change
+        assert!(state.specs.is_empty());
+    }
+
+    #[test]
+    fn launch_agent_preserves_selection() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 1;
+        update(&mut state, SpecsMessage::LaunchAgent);
+        assert_eq!(state.selected, 1);
+        let spec = state.selected_spec().unwrap();
+        assert_eq!(spec.id, "SPEC-2");
+    }
+
+    #[test]
+    fn launch_agent_returns_context_from_selected() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 2;
+        update(&mut state, SpecsMessage::LaunchAgent);
+        let spec = state.selected_spec().unwrap();
+        assert_eq!(spec.id, "SPEC-3");
+        assert_eq!(spec.title, "Voice commands");
+    }
+
+    #[test]
+    fn launch_agent_respects_search_filter() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.search_query = "agent".to_string();
+        state.selected = 0;
+        update(&mut state, SpecsMessage::LaunchAgent);
+        let spec = state.selected_spec().unwrap();
+        assert_eq!(spec.id, "SPEC-2"); // "Agent orchestration" matches
+    }
+
+    #[test]
+    fn launch_agent_with_filtered_empty_is_safe() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.search_query = "nonexistent_query_xyz".to_string();
+        update(&mut state, SpecsMessage::LaunchAgent);
+        assert!(state.selected_spec().is_none());
+    }
+
+    // ---- Edit tests ----
+
+    #[test]
+    fn start_edit_enters_edit_mode() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartEdit);
+        assert!(state.editing);
+        assert_eq!(state.edit_field, "implementation");
+    }
+
+    #[test]
+    fn start_edit_noop_on_empty() {
+        let mut state = SpecsState::default();
+        update(&mut state, SpecsMessage::StartEdit);
+        assert!(!state.editing);
+    }
+
+    #[test]
+    fn edit_input_appends() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        update(&mut state, SpecsMessage::StartEdit);
+        update(&mut state, SpecsMessage::EditInput('x'));
+        assert_eq!(state.edit_field, "implementationx");
+    }
+
+    #[test]
+    fn edit_input_ignored_when_not_editing() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        update(&mut state, SpecsMessage::EditInput('x'));
+        assert!(state.edit_field.is_empty());
+    }
+
+    #[test]
+    fn edit_backspace_removes() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        update(&mut state, SpecsMessage::StartEdit);
+        update(&mut state, SpecsMessage::EditBackspace);
+        assert_eq!(state.edit_field, "implementatio");
+    }
+
+    #[test]
+    fn edit_backspace_on_empty_is_noop() {
+        let mut state = SpecsState::default();
+        state.editing = true;
+        state.edit_field.clear();
+        update(&mut state, SpecsMessage::EditBackspace);
+        assert!(state.edit_field.is_empty());
+    }
+
+    #[test]
+    fn save_edit_updates_phase() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartEdit);
+        state.edit_field = "done".to_string();
+        update(&mut state, SpecsMessage::SaveEdit);
+        assert!(!state.editing);
+        assert_eq!(state.specs[0].phase, "done");
+    }
+
+    #[test]
+    fn cancel_edit_discards() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartEdit);
+        state.edit_field = "changed".to_string();
+        update(&mut state, SpecsMessage::CancelEdit);
+        assert!(!state.editing);
+        assert_eq!(state.specs[0].phase, "implementation"); // unchanged
+    }
+
+    #[test]
+    fn save_edit_noop_when_not_editing() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        let original = state.specs[0].phase.clone();
+        update(&mut state, SpecsMessage::SaveEdit);
+        assert_eq!(state.specs[0].phase, original);
+    }
+
+    #[test]
+    fn render_editing_does_not_panic() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.editing = true;
+        state.edit_field = "testing".to_string();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
     }
 }

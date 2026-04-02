@@ -1,6 +1,6 @@
 //! Model — central application state for the Elm Architecture.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::input::voice::VoiceInputState;
 use crate::screens::branches::BranchesState;
@@ -231,6 +231,58 @@ impl Model {
     pub fn active_session_tab(&self) -> Option<&SessionTab> {
         self.sessions.get(self.active_session)
     }
+
+    /// Save session state to a TOML file. Best-effort: errors are logged, not fatal.
+    pub fn save_session_state(&self, path: &Path) -> Result<(), String> {
+        let display_mode = match self.session_layout {
+            SessionLayout::Tab => "tab",
+            SessionLayout::Grid => "grid",
+        };
+        let content = format!(
+            "display_mode = \"{}\"\nmanagement_visible = {}\nactive_management_tab = \"{}\"\nsession_count = {}\n",
+            display_mode, self.management_visible, self.management_tab.label(), self.sessions.len(),
+        );
+        std::fs::write(path, content).map_err(|e| e.to_string())
+    }
+
+    /// Load session state from a TOML file. Returns None on any error.
+    pub fn load_session_state(path: &Path) -> Option<SessionState> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let mut state = SessionState::default();
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("display_mode = ") {
+                state.display_mode = val.trim_matches('"').to_string();
+            } else if let Some(val) = line.strip_prefix("management_visible = ") {
+                state.management_visible = val == "true";
+            } else if let Some(val) = line.strip_prefix("active_management_tab = ") {
+                state.active_management_tab = val.trim_matches('"').to_string();
+            } else if let Some(val) = line.strip_prefix("session_count = ") {
+                state.session_count = val.parse().unwrap_or(0);
+            }
+        }
+        Some(state)
+    }
+}
+
+/// Persisted session layout state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionState {
+    pub display_mode: String,
+    pub management_visible: bool,
+    pub active_management_tab: String,
+    pub session_count: usize,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            display_mode: "tab".to_string(),
+            management_visible: false,
+            active_management_tab: "Branches".to_string(),
+            session_count: 1,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -276,5 +328,79 @@ mod tests {
         let vt = VtState::new(40, 120);
         assert_eq!(vt.rows(), 40);
         assert_eq!(vt.cols(), 120);
+    }
+
+    // ---- SessionState tests ----
+
+    #[test]
+    fn session_state_default() {
+        let state = SessionState::default();
+        assert_eq!(state.display_mode, "tab");
+        assert!(!state.management_visible);
+        assert_eq!(state.active_management_tab, "Branches");
+        assert_eq!(state.session_count, 1);
+    }
+
+    #[test]
+    fn save_and_load_session_state_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+
+        let model = Model::new(PathBuf::from("/tmp/repo"));
+        model.save_session_state(&path).unwrap();
+
+        let loaded = Model::load_session_state(&path).unwrap();
+        assert_eq!(loaded.display_mode, "tab");
+        assert!(!loaded.management_visible);
+        assert_eq!(loaded.active_management_tab, "Branches");
+        assert_eq!(loaded.session_count, 1);
+    }
+
+    #[test]
+    fn save_session_state_with_grid_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.session_layout = SessionLayout::Grid;
+        model.management_visible = true;
+        model.management_tab = ManagementTab::Settings;
+        model.save_session_state(&path).unwrap();
+
+        let loaded = Model::load_session_state(&path).unwrap();
+        assert_eq!(loaded.display_mode, "grid");
+        assert!(loaded.management_visible);
+        assert_eq!(loaded.active_management_tab, "Settings");
+    }
+
+    #[test]
+    fn load_session_state_missing_file_returns_none() {
+        let result = Model::load_session_state(Path::new("/nonexistent/path/session.toml"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn save_session_state_tracks_session_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        // Add extra sessions
+        model.sessions.push(SessionTab {
+            id: "shell-1".to_string(),
+            name: "Shell 2".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: VtState::new(24, 80),
+        });
+        model.sessions.push(SessionTab {
+            id: "shell-2".to_string(),
+            name: "Shell 3".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: VtState::new(24, 80),
+        });
+        model.save_session_state(&path).unwrap();
+
+        let loaded = Model::load_session_state(&path).unwrap();
+        assert_eq!(loaded.session_count, 3);
     }
 }

@@ -167,6 +167,14 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::OpenWizard => {
             model.wizard = Some(crate::screens::wizard::WizardState::default());
         }
+        Message::OpenWizardWithSpec(spec_id, title) => {
+            let wizard = crate::screens::wizard::WizardState {
+                branch_name: format!("feature/{}", spec_id.to_lowercase()),
+                spec_context: Some(crate::screens::wizard::SpecContext { spec_id, title }),
+                ..Default::default()
+            };
+            model.wizard = Some(wizard);
+        }
         Message::CloseWizard => {
             model.wizard = None;
         }
@@ -520,5 +528,28 @@ mod tests {
         let mut model = test_model();
         update(&mut model, Message::DismissError);
         assert!(model.error_queue.is_empty());
+    }
+
+    #[test]
+    fn update_open_wizard_with_spec_prefills() {
+        let mut model = test_model();
+        update(
+            &mut model,
+            Message::OpenWizardWithSpec("SPEC-42".into(), "My Feature".into()),
+        );
+        let wizard = model.wizard.as_ref().unwrap();
+        assert_eq!(wizard.branch_name, "feature/spec-42");
+        let ctx = wizard.spec_context.as_ref().unwrap();
+        assert_eq!(ctx.spec_id, "SPEC-42");
+        assert_eq!(ctx.title, "My Feature");
+    }
+
+    #[test]
+    fn update_open_wizard_without_spec_has_no_context() {
+        let mut model = test_model();
+        update(&mut model, Message::OpenWizard);
+        let wizard = model.wizard.as_ref().unwrap();
+        assert!(wizard.spec_context.is_none());
+        assert!(wizard.branch_name.is_empty());
     }
 }

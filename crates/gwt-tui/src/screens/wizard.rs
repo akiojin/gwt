@@ -104,6 +104,13 @@ pub struct AgentOption {
     pub available: bool,
 }
 
+/// SPEC context for prefilling the wizard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecContext {
+    pub spec_id: String,
+    pub title: String,
+}
+
 /// State for the wizard overlay.
 #[derive(Debug, Clone)]
 pub struct WizardState {
@@ -124,6 +131,8 @@ pub struct WizardState {
     pub completed: bool,
     /// Whether the wizard has been cancelled.
     pub cancelled: bool,
+    /// Optional SPEC context for prefilling.
+    pub spec_context: Option<SpecContext>,
 }
 
 impl Default for WizardState {
@@ -142,6 +151,7 @@ impl Default for WizardState {
             ai_suggest: AISuggestState::default(),
             completed: false,
             cancelled: false,
+            spec_context: None,
         }
     }
 }
