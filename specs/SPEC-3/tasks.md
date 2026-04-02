@@ -38,12 +38,12 @@
 
 ## Phase 4: Session Conversion UI
 
-- [ ] T019 [P] Write RED test: session conversion replaces PTY with new agent, preserves working directory.
-- [ ] T020 [P] Write RED test: session conversion failure restores original session.
-- [ ] T021 Implement session conversion action: terminate current PTY, launch new agent.
-- [ ] T022 Implement conversion error handling: restore original session on failure, display notification.
-- [ ] T023 Wire conversion into session context keybinding.
-- [ ] T024 Verify session conversion tests pass GREEN.
+- [x] T019 [P] Write RED test: session conversion replaces PTY with new agent, preserves working directory.
+- [x] T020 [P] Write RED test: session conversion failure restores original session.
+- [x] T021 Implement session conversion action: terminate current PTY, launch new agent.
+- [x] T022 Implement conversion error handling: restore original session on failure, display notification.
+- [x] T023 Wire conversion into session context keybinding.
+- [x] T024 Verify session conversion tests pass GREEN.
 
 ## Phase 5: Regression and Polish
 

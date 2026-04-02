@@ -217,36 +217,7 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::Confirm(msg) => {
-            let should_apply_session_conversion =
-                matches!(msg, screens::confirm::ConfirmMessage::Accept)
-                    && model.confirm.accepted()
-                    && model.pending_session_conversion.is_some();
-            let dismisses_session_conversion =
-                matches!(msg, screens::confirm::ConfirmMessage::Cancel)
-                    || (matches!(msg, screens::confirm::ConfirmMessage::Accept)
-                        && !model.confirm.accepted());
-            screens::confirm::update(&mut model.confirm, msg);
-            if should_apply_session_conversion {
-                if let Some(pending) = model.pending_session_conversion.take() {
-                    let target_display_name = pending.target_display_name.clone();
-                    match apply_pending_session_conversion(model, pending) {
-                        Ok(()) => apply_notification(
-                            model,
-                            Notification::new(
-                                Severity::Info,
-                                "session",
-                                format!("Converted session to {target_display_name}"),
-                            ),
-                        ),
-                        Err(err) => apply_notification(
-                            model,
-                            Notification::new(Severity::Error, "session", err),
-                        ),
-                    }
-                }
-            } else if dismisses_session_conversion {
-                model.pending_session_conversion = None;
-            }
+            handle_confirm_message(model, msg);
         }
         Message::Voice(msg) => {
             let voice_enabled = Settings::load()
@@ -853,6 +824,43 @@ fn open_session_conversion_with(model: &mut Model, detected_agents: Vec<Detected
     ));
 }
 
+fn handle_confirm_message(model: &mut Model, msg: screens::confirm::ConfirmMessage) {
+    handle_confirm_message_with(model, msg, AgentDetector::detect_all());
+}
+
+fn handle_confirm_message_with(
+    model: &mut Model,
+    msg: screens::confirm::ConfirmMessage,
+    detected_agents: Vec<DetectedAgent>,
+) {
+    let should_apply_session_conversion = matches!(msg, screens::confirm::ConfirmMessage::Accept)
+        && model.confirm.accepted()
+        && model.pending_session_conversion.is_some();
+    let dismisses_session_conversion = matches!(msg, screens::confirm::ConfirmMessage::Cancel)
+        || (matches!(msg, screens::confirm::ConfirmMessage::Accept) && !model.confirm.accepted());
+    screens::confirm::update(&mut model.confirm, msg);
+    if should_apply_session_conversion {
+        if let Some(pending) = model.pending_session_conversion.take() {
+            let target_display_name = pending.target_display_name.clone();
+            match apply_pending_session_conversion_with(model, pending, detected_agents) {
+                Ok(()) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Info,
+                        "session",
+                        format!("Converted session to {target_display_name}"),
+                    ),
+                ),
+                Err(err) => {
+                    apply_notification(model, Notification::new(Severity::Error, "session", err))
+                }
+            }
+        }
+    } else if dismisses_session_conversion {
+        model.pending_session_conversion = None;
+    }
+}
+
 fn schedule_startup_version_cache_refresh() {
     schedule_startup_version_cache_refresh_with(
         wizard_version_cache_path(),
@@ -1032,13 +1040,6 @@ fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
 
     let text = gwt_clipboard::ClipboardText::get_text().ok()?;
     clipboard_payload_to_bytes(&[], &text)
-}
-
-fn apply_pending_session_conversion(
-    model: &mut Model,
-    pending: PendingSessionConversion,
-) -> Result<(), String> {
-    apply_pending_session_conversion_with(model, pending, AgentDetector::detect_all())
 }
 
 fn apply_pending_session_conversion_with(
@@ -1794,7 +1795,36 @@ mod tests {
     }
 
     #[test]
-    fn update_confirm_accept_applies_pending_session_conversion_and_logs_info() {
+    fn update_service_select_select_sets_pending_conversion_and_opens_confirm() {
+        let mut model = test_model();
+        model.sessions[0] =
+            agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
+        model.service_select = Some(screens::service_select::ServiceSelectState::with_options(
+            "Select Agent",
+            vec!["Codex".to_string()],
+            vec!["codex".to_string()],
+        ));
+
+        update(
+            &mut model,
+            Message::ServiceSelect(screens::service_select::ServiceSelectMessage::Select),
+        );
+
+        assert!(model.service_select.is_none());
+        assert_eq!(
+            model.pending_session_conversion,
+            Some(PendingSessionConversion {
+                session_index: 0,
+                target_agent_id: "codex".to_string(),
+                target_display_name: "Codex".to_string(),
+            })
+        );
+        assert!(model.confirm.visible);
+        assert_eq!(model.confirm.message, "Convert session to Codex?");
+    }
+
+    #[test]
+    fn handle_confirm_message_with_accept_applies_pending_session_conversion_and_logs_info() {
         let mut model = test_model();
         model.sessions[0] =
             agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
@@ -1810,19 +1840,10 @@ mod tests {
         let target_name = target.agent_id.display_name().to_string();
         let target_command = target.agent_id.command().to_string();
         let target_color = tui_agent_color(target.agent_id.default_color());
-        apply_pending_session_conversion_with(&mut model, model.pending_session_conversion.clone().unwrap(), vec![target]).unwrap();
-
-        assert!(model.pending_session_conversion.is_some());
-        model.pending_session_conversion = Some(PendingSessionConversion {
-            session_index: 0,
-            target_agent_id: target_command.clone(),
-            target_display_name: target_name.clone(),
-        });
-        model.confirm = screens::confirm::ConfirmState::with_message("Convert?");
-        model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
-        update(
+        handle_confirm_message_with(
             &mut model,
-            Message::Confirm(screens::confirm::ConfirmMessage::Accept),
+            screens::confirm::ConfirmMessage::Accept,
+            vec![target],
         );
 
         assert_eq!(model.sessions[0].name, target_name);
@@ -1835,10 +1856,11 @@ mod tests {
         );
         assert_eq!(model.logs.entries.last().unwrap().source, "session");
         assert!(model.current_notification.is_some());
+        assert!(model.pending_session_conversion.is_none());
     }
 
     #[test]
-    fn update_confirm_accept_conversion_failure_routes_error_queue() {
+    fn handle_confirm_message_with_failure_routes_error_queue() {
         let mut model = test_model();
         model.sessions[0] =
             agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
@@ -1851,15 +1873,19 @@ mod tests {
         model.confirm = screens::confirm::ConfirmState::with_message("Convert?");
         model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
 
-        update(
-            &mut model,
-            Message::Confirm(screens::confirm::ConfirmMessage::Accept),
-        );
+        handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Accept, vec![]);
 
         assert_eq!(model.sessions[0].name, original.name);
         assert_eq!(model.sessions[0].tab_type, original.tab_type);
         assert_eq!(model.error_queue.len(), 1);
-        assert!(model.logs.entries.last().unwrap().message.contains("missing-agent"));
+        assert!(model
+            .logs
+            .entries
+            .last()
+            .unwrap()
+            .message
+            .contains("missing-agent"));
+        assert!(model.pending_session_conversion.is_none());
     }
 
     #[test]
