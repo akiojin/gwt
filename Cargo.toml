@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/gwt-config",
     "crates/gwt-core",
 ]
 default-members = [
@@ -16,6 +17,7 @@ authors = ["akiojin"]
 
 [workspace.dependencies]
 # Internal crates
+gwt-config = { path = "crates/gwt-config" }
 gwt-core = { path = "crates/gwt-core" }
 
 # Error handling

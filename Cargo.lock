@@ -47,6 +47,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-config"
+version = "8.17.2"
+dependencies = [
+ "dirs",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 1.0.6+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "gwt-core"
 version = "8.17.2"
 dependencies = [
