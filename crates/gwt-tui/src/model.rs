@@ -3,12 +3,16 @@
 use std::path::PathBuf;
 
 use crate::screens::branches::BranchesState;
+use crate::screens::confirm::ConfirmState;
 use crate::screens::git_view::GitViewState;
 use crate::screens::issues::IssuesState;
+use crate::screens::logs::LogsState;
 use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
 use crate::screens::settings::SettingsState;
 use crate::screens::specs::SpecsState;
+use crate::screens::versions::VersionsState;
+use crate::screens::wizard::WizardState;
 
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +161,14 @@ pub struct Model {
     pub specs: SpecsState,
     /// Settings screen state.
     pub settings: SettingsState,
+    /// Logs screen state.
+    pub logs: LogsState,
+    /// Versions screen state.
+    pub versions: VersionsState,
+    /// Wizard overlay state (None when not active).
+    pub wizard: Option<WizardState>,
+    /// Confirmation dialog state.
+    pub confirm: ConfirmState,
 }
 
 impl Model {
@@ -187,6 +199,10 @@ impl Model {
             pr_dashboard: PrDashboardState::default(),
             specs: SpecsState::default(),
             settings: SettingsState::default(),
+            logs: LogsState::default(),
+            versions: VersionsState::default(),
+            wizard: None,
+            confirm: ConfirmState::default(),
         }
     }
 

@@ -4,12 +4,16 @@ use crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::model::ManagementTab;
 use crate::screens::branches::BranchesMessage;
+use crate::screens::confirm::ConfirmMessage;
 use crate::screens::git_view::GitViewMessage;
 use crate::screens::issues::IssuesMessage;
+use crate::screens::logs::LogsMessage;
 use crate::screens::pr_dashboard::PrDashboardMessage;
 use crate::screens::profiles::ProfilesMessage;
 use crate::screens::settings::SettingsMessage;
 use crate::screens::specs::SpecsMessage;
+use crate::screens::versions::VersionsMessage;
+use crate::screens::wizard::WizardMessage;
 
 /// Every possible action in the TUI.
 #[derive(Debug, Clone)]
@@ -60,6 +64,18 @@ pub enum Message {
     Specs(SpecsMessage),
     /// Settings screen message.
     Settings(SettingsMessage),
+    /// Logs screen message.
+    Logs(LogsMessage),
+    /// Versions screen message.
+    Versions(VersionsMessage),
+    /// Wizard overlay message.
+    Wizard(WizardMessage),
+    /// Confirmation dialog message.
+    Confirm(ConfirmMessage),
+    /// Open the wizard overlay.
+    OpenWizard,
+    /// Close the wizard overlay.
+    CloseWizard,
 }
 
 #[cfg(test)]
@@ -89,5 +105,11 @@ mod tests {
         let _ = Message::PrDashboard(PrDashboardMessage::MoveUp);
         let _ = Message::Specs(SpecsMessage::MoveUp);
         let _ = Message::Settings(SettingsMessage::MoveUp);
+        let _ = Message::Logs(LogsMessage::MoveUp);
+        let _ = Message::Versions(VersionsMessage::MoveUp);
+        let _ = Message::Wizard(WizardMessage::MoveUp);
+        let _ = Message::Confirm(ConfirmMessage::Toggle);
+        let _ = Message::OpenWizard;
+        let _ = Message::CloseWizard;
     }
 }

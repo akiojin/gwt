@@ -119,6 +119,29 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Settings(msg) => {
             screens::settings::update(&mut model.settings, msg);
         }
+        Message::Logs(msg) => {
+            screens::logs::update(&mut model.logs, msg);
+        }
+        Message::Versions(msg) => {
+            screens::versions::update(&mut model.versions, msg);
+        }
+        Message::Wizard(msg) => {
+            if let Some(ref mut wizard) = model.wizard {
+                screens::wizard::update(wizard, msg);
+                if wizard.completed || wizard.cancelled {
+                    model.wizard = None;
+                }
+            }
+        }
+        Message::Confirm(msg) => {
+            screens::confirm::update(&mut model.confirm, msg);
+        }
+        Message::OpenWizard => {
+            model.wizard = Some(crate::screens::wizard::WizardState::default());
+        }
+        Message::CloseWizard => {
+            model.wizard = None;
+        }
     }
 }
 
@@ -139,9 +162,17 @@ pub fn view(model: &Model, frame: &mut Frame) {
         render_sessions_area(model, frame, size);
     }
 
-    // Error overlay on top
-    if let Some(err) = model.error_queue.first() {
-        render_error_overlay(err, frame, size);
+    // Confirm dialog overlay
+    screens::confirm::render(&model.confirm, frame, size);
+
+    // Wizard overlay (on top of everything except errors)
+    if let Some(ref wizard) = model.wizard {
+        screens::wizard::render(wizard, frame, size);
+    }
+
+    // Error overlay on top of everything
+    if !model.error_queue.is_empty() {
+        screens::error::render(&model.error_queue, frame, size);
     }
 }
 
@@ -188,9 +219,9 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
         }
         ManagementTab::Profiles => screens::profiles::render(&model.profiles, frame, area),
         ManagementTab::GitView => screens::git_view::render(&model.git_view, frame, area),
-        ManagementTab::Versions => screens::versions::render(frame, area),
+        ManagementTab::Versions => screens::versions::render(&model.versions, frame, area),
         ManagementTab::Settings => screens::settings::render(&model.settings, frame, area),
-        ManagementTab::Logs => screens::logs::render(frame, area),
+        ManagementTab::Logs => screens::logs::render(&model.logs, frame, area),
     }
 }
 
@@ -297,26 +328,6 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
             }
         }
     }
-}
-
-/// Render an error overlay.
-fn render_error_overlay(err: &str, frame: &mut Frame, area: Rect) {
-    let width = (area.width / 2).max(40).min(area.width);
-    let height = 5_u16.min(area.height);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let overlay_area = Rect::new(x, y, width, height);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red))
-        .title("Error");
-
-    let text = Paragraph::new(err.to_string())
-        .block(block)
-        .style(Style::default().fg(Color::Red));
-
-    frame.render_widget(text, overlay_area);
 }
 
 #[cfg(test)]
