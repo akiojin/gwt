@@ -29,8 +29,8 @@
 
 - [ ] T004: ヘッダーにキーバインドヒント追加
   - `crates/gwt-tui/src/screens/specs.rs`
-  - 一覧ヘッダー: ` SPECs ({count})  [/] Search  [Shift+Enter] Launch`
-  - 詳細ヘッダー: ` {spec_id} - {title}  [Shift+Enter] Launch  [Esc] Back`
+- 一覧ヘッダー: `SPECs ({count})  [/] Search  [Shift+Enter] Launch`
+- 詳細ヘッダー: `{spec_id} - {title}  [Shift+Enter] Launch  [Esc] Back`
   - テスト: render smoke テストでヒント文字列の存在確認
 
 ## Phase 3: Phase確認ダイアログ (US-3)
