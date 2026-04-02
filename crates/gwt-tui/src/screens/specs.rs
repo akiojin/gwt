@@ -299,8 +299,10 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().borders(Borders::ALL);
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    let list = List::new(items).block(block).highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(state.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
 /// Render the detail view for the selected spec.

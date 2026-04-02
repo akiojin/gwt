@@ -119,6 +119,7 @@ pub struct BranchesState {
     pub(crate) view_mode: ViewMode,
     pub(crate) search_query: String,
     pub(crate) search_active: bool,
+    pub(crate) detail_view: bool,
 }
 
 impl BranchesState {
@@ -187,7 +188,9 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             super::move_down(&mut state.selected, len);
         }
         BranchesMessage::Select => {
-            // Selection action — handled by caller via selected_branch()
+            if !state.filtered_branches().is_empty() {
+                state.detail_view = !state.detail_view;
+            }
         }
         BranchesMessage::ToggleSort => {
             state.sort_mode = state.sort_mode.next();
@@ -309,8 +312,10 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     }
 
     let block = Block::default().borders(Borders::ALL);
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    let list = List::new(items).block(block).highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(state.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
 #[cfg(test)]

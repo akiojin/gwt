@@ -502,8 +502,10 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         state.category.label(),
         hints
     ));
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    let list = List::new(items).block(block).highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(state.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
 #[cfg(test)]

@@ -637,7 +637,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
         // Split: left = management panel, right = sessions
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(size);
 
         render_management_panel(model, frame, chunks[0]);
