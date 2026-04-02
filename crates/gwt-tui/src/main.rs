@@ -60,8 +60,9 @@ fn run_app(
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
-        RepoType::Normal => Model::new(repo_path),
-        RepoType::Bare => Model::new_initialization(repo_path, true),
+        RepoType::Normal(root) => Model::new(root),
+        RepoType::Bare { develop_worktree: Some(wt) } => Model::new(wt),
+        RepoType::Bare { develop_worktree: None } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
     let mut keybinds = KeybindRegistry::new();

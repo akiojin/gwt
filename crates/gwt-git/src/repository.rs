@@ -8,12 +8,12 @@ use std::process::Command;
 use gwt_core::{GwtError, Result};
 
 /// The type of repository detected at a given path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoType {
-    /// A normal (non-bare) git repository.
-    Normal,
-    /// A bare git repository (legacy gwt layout).
-    Bare,
+    /// A normal (non-bare) git repository. Contains the resolved repo root path.
+    Normal(PathBuf),
+    /// A bare git repository with an optional develop worktree path.
+    Bare { develop_worktree: Option<PathBuf> },
     /// Not inside any git repository.
     NonRepo,
 }
@@ -24,40 +24,38 @@ pub enum RepoType {
 /// Distinguishes between normal repos, bare repos, and non-repo directories.
 pub fn detect_repo_type(path: &Path) -> RepoType {
     // Check if path itself has .git (normal repo or worktree)
-    let git_path = path.join(".git");
-    if git_path.exists() {
-        return RepoType::Normal;
+    if path.join(".git").exists() {
+        return RepoType::Normal(path.to_path_buf());
     }
     // Check if path itself is a bare repo (has HEAD + objects + refs)
     if path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists() {
-        return RepoType::Bare;
+        let develop = find_develop_worktree(path.parent().unwrap_or(path));
+        return RepoType::Bare { develop_worktree: develop };
     }
-    // Check child directories for:
-    // 1. A *.git bare repo directory (e.g., gwt.git/)
-    // 2. A worktree directory (has .git file pointing to bare repo)
+    // Check child directories for bare repos, worktrees, or normal repos
     if let Ok(entries) = std::fs::read_dir(path) {
+        let mut found_bare = false;
         for entry in entries.flatten() {
             let child = entry.path();
             if !child.is_dir() {
                 continue;
             }
-            // Check for bare repo in child (e.g., repo.git/)
             if child.join("HEAD").exists()
                 && child.join("objects").exists()
                 && child.join("refs").exists()
             {
-                return RepoType::Bare;
+                found_bare = true;
             }
-            // Check for worktree in child (e.g., develop/.git file)
-            let child_git = child.join(".git");
-            if child_git.is_file() {
-                // .git file = worktree marker → parent has a bare repo
-                return RepoType::Bare;
+            if child.join(".git").is_file() {
+                found_bare = true;
             }
-            // Check for normal repo in child
-            if child_git.is_dir() {
-                return RepoType::Normal;
+            if child.join(".git").is_dir() {
+                return RepoType::Normal(child);
             }
+        }
+        if found_bare {
+            let develop = find_develop_worktree(path);
+            return RepoType::Bare { develop_worktree: develop };
         }
     }
     // Walk parent directories
@@ -67,17 +65,28 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
             break;
         }
         if parent.join(".git").exists() {
-            return RepoType::Normal;
+            return RepoType::Normal(parent.to_path_buf());
         }
         if parent.join("HEAD").exists()
             && parent.join("objects").exists()
             && parent.join("refs").exists()
         {
-            return RepoType::Bare;
+            let develop = find_develop_worktree(parent.parent().unwrap_or(parent));
+            return RepoType::Bare { develop_worktree: develop };
         }
         current = parent.to_path_buf();
     }
     RepoType::NonRepo
+}
+
+/// Find a develop worktree in the given directory.
+/// Looks for a child directory named "develop" that has a .git worktree marker.
+fn find_develop_worktree(parent: &Path) -> Option<PathBuf> {
+    let develop = parent.join("develop");
+    if develop.is_dir() && develop.join(".git").exists() {
+        return Some(develop);
+    }
+    None
 }
 
 /// Clone a repository into the target directory using a normal shallow clone.
@@ -330,7 +339,7 @@ mod tests {
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
-        assert_eq!(detect_repo_type(tmp.path()), RepoType::Normal);
+        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Normal(_)));
     }
 
     #[test]
@@ -340,7 +349,7 @@ mod tests {
             .args(["init", "--bare", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
-        assert_eq!(detect_repo_type(tmp.path()), RepoType::Bare);
+        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Bare { .. }));
     }
 
     #[test]
@@ -352,7 +361,7 @@ mod tests {
             .unwrap();
         let subdir = tmp.path().join("a").join("b");
         std::fs::create_dir_all(&subdir).unwrap();
-        assert_eq!(detect_repo_type(&subdir), RepoType::Normal);
+        assert!(matches!(detect_repo_type(&subdir), RepoType::Normal(_)));
     }
 
     #[test]
@@ -364,7 +373,7 @@ mod tests {
             .output()
             .unwrap();
         // Parent directory (tmp) should detect Bare via child scan
-        assert_eq!(detect_repo_type(tmp.path()), RepoType::Bare);
+        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Bare { .. }));
     }
 
     #[test]
@@ -377,7 +386,7 @@ mod tests {
             .output()
             .unwrap();
         // Parent directory should detect Normal via child scan
-        assert_eq!(detect_repo_type(tmp.path()), RepoType::Normal);
+        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Normal(_)));
     }
 
     // ---- clone_repo tests ----
