@@ -176,6 +176,50 @@ fn open_branch_session_selector(
     model.overlay_mode = OverlayMode::BranchSessionSelector;
 }
 
+fn spec_default_branch_name(spec_id: &str) -> String {
+    format!("feature/feature-{}", spec_id.trim_start_matches("SPEC-"))
+}
+
+fn open_spec_launch(
+    model: &mut Model,
+    spec_id: &str,
+    branch_name: &str,
+    is_new_branch: bool,
+    worktree_path: Option<&Path>,
+) {
+    let history = if is_new_branch {
+        vec![]
+    } else {
+        load_quick_start_history(&model.repo_root, branch_name, worktree_path)
+    };
+    model.wizard = Some(crate::screens::wizard::WizardState::open_for_spec(
+        spec_id,
+        branch_name,
+        is_new_branch,
+        history,
+    ));
+}
+
+fn open_issue_launch(model: &mut Model, issue_number: u64) {
+    let existing_branch = gwt_core::git::find_branch_for_issue(&model.repo_root, issue_number)
+        .ok()
+        .flatten();
+    let branch_name = existing_branch
+        .clone()
+        .unwrap_or_else(|| gwt_core::git::generate_branch_name("feature/", issue_number));
+    let history = if existing_branch.is_some() {
+        load_quick_start_history(&model.repo_root, &branch_name, None)
+    } else {
+        vec![]
+    };
+    model.wizard = Some(crate::screens::wizard::WizardState::open_for_issue(
+        issue_number,
+        &branch_name,
+        existing_branch.is_none(),
+        history,
+    ));
+}
+
 fn spawn_management_data_preload(
     repo_root: PathBuf,
 ) -> mpsc::Receiver<crate::model::ManagementDataUpdate> {
@@ -1054,22 +1098,93 @@ pub fn update(model: &mut Model, msg: Message) {
                             msg.map(Message::IssuesMsg)
                         }
                         ManagementTab::Specs => {
-                            crate::screens::specs::handle_key(&model.specs_state, &key).map(|m| {
-                                // Intercept OpenDetail to load spec.md content
-                                if matches!(m, crate::screens::specs::SpecsMessage::OpenDetail) {
-                                    let visible = model.specs_state.visible_specs();
-                                    if let Some(spec) = visible.get(model.specs_state.selected) {
-                                        let detail_sections =
-                                            crate::screens::specs::load_spec_detail(
-                                                &model.repo_root,
-                                                &spec.dir_name,
+                            if let Some(m) =
+                                crate::screens::specs::handle_key(&model.specs_state, &key)
+                            {
+                                match m {
+                                    crate::screens::specs::SpecsMessage::OpenDetail => {
+                                        let visible = model.specs_state.visible_specs();
+                                        if let Some(spec) = visible.get(model.specs_state.selected)
+                                        {
+                                            let detail_sections =
+                                                crate::screens::specs::load_spec_detail(
+                                                    &model.repo_root,
+                                                    &spec.dir_name,
+                                                );
+                                            model.specs_state.set_detail_sections(detail_sections);
+                                        }
+                                        crate::screens::specs::update(
+                                            &mut model.specs_state,
+                                            crate::screens::specs::SpecsMessage::OpenDetail,
+                                        );
+                                    }
+                                    crate::screens::specs::SpecsMessage::LaunchAgent => {
+                                        let selected_spec = model
+                                            .specs_state
+                                            .visible_specs()
+                                            .get(model.specs_state.selected)
+                                            .map(|spec| (*spec).clone());
+                                        if let Some(spec) = selected_spec {
+                                            if spec.branches.is_empty() {
+                                                let branch_name = spec_default_branch_name(&spec.id);
+                                                open_spec_launch(
+                                                    model,
+                                                    &spec.id,
+                                                    &branch_name,
+                                                    true,
+                                                    None,
+                                                );
+                                            } else {
+                                                model.specs_state.confirm_spec_index =
+                                                    model.specs_state.selected;
+                                                model.specs_state.branch_candidates =
+                                                    spec.branches.clone();
+                                                model.specs_state.branch_selected = 0;
+                                                model.specs_state.branch_select_mode = true;
+                                            }
+                                        }
+                                    }
+                                    crate::screens::specs::SpecsMessage::SelectBranch => {
+                                        let selected_spec = model
+                                            .specs_state
+                                            .visible_specs()
+                                            .get(model.specs_state.confirm_spec_index)
+                                            .map(|spec| (*spec).clone());
+                                        if let Some(spec) = selected_spec {
+                                            let branch_idx = model.specs_state.branch_selected;
+                                            let branch_name = if branch_idx
+                                                < model.specs_state.branch_candidates.len()
+                                            {
+                                                model.specs_state.branch_candidates[branch_idx]
+                                                    .clone()
+                                            } else {
+                                                spec_default_branch_name(&spec.id)
+                                            };
+                                            let is_new =
+                                                branch_idx >= model.specs_state.branch_candidates.len();
+                                            model.specs_state.branch_select_mode = false;
+                                            open_spec_launch(
+                                                model,
+                                                &spec.id,
+                                                &branch_name,
+                                                is_new,
+                                                None,
                                             );
-                                        model.specs_state.set_detail_sections(detail_sections);
+                                        }
+                                    }
+                                    crate::screens::specs::SpecsMessage::NewSpec => {
+                                        model.wizard = Some(
+                                            crate::screens::wizard::WizardState::open_for_spec_drafting(),
+                                        );
+                                    }
+                                    other => {
+                                        crate::screens::specs::update(&mut model.specs_state, other);
                                     }
                                 }
-                                crate::screens::specs::update(&mut model.specs_state, m);
-                                Message::Tick // dummy
-                            })
+                                Some(Message::Tick)
+                            } else {
+                                None
+                            }
                         }
                         ManagementTab::Settings => {
                             crate::screens::settings::handle_key(&model.settings_state, &key)
@@ -1360,6 +1475,11 @@ pub fn update(model: &mut Model, msg: Message) {
                             ),
                         );
                     }
+                }
+            }
+            crate::screens::issues::IssuesMessage::LaunchAgent => {
+                if let Some(issue) = model.issues_state.selected_issue().cloned() {
+                    open_issue_launch(model, issue.number);
                 }
             }
             other => {
@@ -3085,6 +3205,74 @@ mod tests {
         assert!(m.branch_session_selector.is_some(), "expected selector");
         assert!(m.wizard.is_none());
         assert_eq!(m.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn issues_launch_agent_opens_issue_wizard() {
+        let mut m = test_model();
+        m.issues_state.issues = vec![crate::screens::issues::IssueItem {
+            number: 42,
+            title: "Demo issue".to_string(),
+            state: "OPEN".to_string(),
+            labels: vec![],
+        }];
+
+        update(
+            &mut m,
+            Message::IssuesMsg(crate::screens::issues::IssuesMessage::LaunchAgent),
+        );
+
+        let wizard = m.wizard.expect("wizard should open");
+        assert_eq!(wizard.branch_name, "feature/issue-42");
+        assert!(wizard.is_new_branch);
+        assert_eq!(wizard.spec_id.as_deref(), Some("issue-42"));
+    }
+
+    #[test]
+    fn specs_launch_agent_without_existing_branch_opens_new_branch_wizard() {
+        let mut m = test_model();
+        m.specs_state.specs = vec![crate::screens::specs::SpecItem {
+            dir_name: "SPEC-1776".to_string(),
+            id: "1776".to_string(),
+            title: "Rebuild".to_string(),
+            status: "open".to_string(),
+            phase: "draft".to_string(),
+            branches: vec![],
+        }];
+        m.management_tab = ManagementTab::Specs;
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::SHIFT)),
+        );
+
+        let wizard = m.wizard.expect("wizard should open");
+        assert_eq!(wizard.branch_name, "feature/feature-1776");
+        assert!(wizard.is_new_branch);
+        assert_eq!(wizard.spec_id.as_deref(), Some("1776"));
+    }
+
+    #[test]
+    fn specs_launch_agent_with_existing_branches_opens_branch_selector() {
+        let mut m = test_model();
+        m.specs_state.specs = vec![crate::screens::specs::SpecItem {
+            dir_name: "SPEC-1776".to_string(),
+            id: "1776".to_string(),
+            title: "Rebuild".to_string(),
+            status: "open".to_string(),
+            phase: "draft".to_string(),
+            branches: vec!["feature/feature-1776".to_string()],
+        }];
+        m.management_tab = ManagementTab::Specs;
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::SHIFT)),
+        );
+
+        assert!(m.wizard.is_none());
+        assert!(m.specs_state.branch_select_mode);
+        assert_eq!(m.specs_state.branch_candidates, vec!["feature/feature-1776"]);
     }
 
     #[test]

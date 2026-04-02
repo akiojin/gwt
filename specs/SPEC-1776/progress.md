@@ -84,10 +84,12 @@
 - Switching to `Profiles` forces the environment-profile view rather than the old settings category tabs
 - Existing profile CRUD tests and render smoke tests still pass under the new exposure model
 - Profiles env editing now merges OS environment entries with profile overrides/additions and supports disable/override persistence
+- `SPECs` launch now opens either a branch selector or a derived new-branch wizard
+- `Issues` launch now opens the issue-derived branch wizard directly
 
 ### Next
 
-- Continue the management-core work on `SPECs` and `Issues` launch-entry synchronization
+- Continue polishing the branch list density and Profiles interaction details
 
 ## 2026-04-02: Normal-mode virtual terminal viewport
 

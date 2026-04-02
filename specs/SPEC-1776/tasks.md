@@ -28,8 +28,8 @@
 ## Phase 3: Management Workspace Core
 
 - [x] T300: 管理画面タブを `Branches / SPECs / Issues / Profiles` に整理する
-- [ ] T301: `SPECs` 一覧・詳細・launch entry を parent flow に同期する
-- [ ] T302: `Issues` 一覧・詳細・launch entry を parent flow に同期する
+- [x] T301: `SPECs` 一覧・詳細・launch entry を parent flow に同期する
+- [x] T302: `Issues` 一覧・詳細・launch entry を parent flow に同期する
 - [x] T303: `Profiles` タブを env profile 専用 UI として作り直す
 - [x] T304: `Profiles` で env profile の作成・編集・削除・切替を実装する
 - [x] T305: `Profiles` で OS 環境変数参照・置換を実装する
