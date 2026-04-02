@@ -552,6 +552,7 @@ dependencies = [
  "gwt-voice",
  "insta",
  "ratatui",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

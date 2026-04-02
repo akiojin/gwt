@@ -193,6 +193,7 @@ pub fn update(model: &mut Model, msg: Message) {
                                 let _ = gwt_git::install_develop_protection(&path);
                                 let _ = gwt_git::initialize_workspace(&path);
                                 model.reset(path);
+                                load_initial_data(model);
                             }
                             Err(e) => {
                                 state.clone_status =
@@ -224,6 +225,89 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::CloseWizard => {
             model.wizard = None;
         }
+    }
+}
+
+/// Load initial data from the repository into the model.
+///
+/// Populates branches, specs, and version tags.  Each section is
+/// best-effort: failures are silently ignored so the TUI still starts.
+pub fn load_initial_data(model: &mut Model) {
+    // -- Branches --
+    if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
+        let items: Vec<screens::branches::BranchItem> = branches
+            .iter()
+            .map(|b| screens::branches::BranchItem {
+                name: b.name.clone(),
+                is_head: b.is_head,
+                is_local: b.is_local,
+                category: screens::branches::categorize_branch(&b.name),
+            })
+            .collect();
+        screens::branches::update(
+            &mut model.branches,
+            screens::branches::BranchesMessage::SetBranches(items),
+        );
+    }
+
+    // -- Specs (from specs/ directory metadata.json files) --
+    let specs_dir = model.repo_path.join("specs");
+    if specs_dir.is_dir() {
+        let mut spec_items: Vec<screens::specs::SpecItem> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&specs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let meta_path = path.join("metadata.json");
+                    if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                            spec_items.push(screens::specs::SpecItem {
+                                id: v["id"].as_str().unwrap_or("").to_string(),
+                                title: v["title"].as_str().unwrap_or("").to_string(),
+                                phase: v["phase"].as_str().unwrap_or("").to_string(),
+                                status: v["status"].as_str().unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        spec_items.sort_by(|a, b| a.id.cmp(&b.id));
+        screens::specs::update(
+            &mut model.specs,
+            screens::specs::SpecsMessage::SetSpecs(spec_items),
+        );
+    }
+
+    // -- Version tags --
+    let repo_str = model.repo_path.to_string_lossy().to_string();
+    if let Ok(output) = gwt_core::process::run_command(
+        "git",
+        &[
+            "-C",
+            &repo_str,
+            "tag",
+            "-l",
+            "--sort=-v:refname",
+            "--format=%(refname:short)\t%(creatordate:short)\t%(subject)",
+        ],
+    ) {
+        let tags: Vec<screens::versions::VersionTag> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                screens::versions::VersionTag {
+                    name: parts.first().unwrap_or(&"").to_string(),
+                    date: parts.get(1).unwrap_or(&"").to_string(),
+                    message: parts.get(2).unwrap_or(&"").to_string(),
+                }
+            })
+            .collect();
+        screens::versions::update(
+            &mut model.versions,
+            screens::versions::VersionsMessage::SetTags(tags),
+        );
     }
 }
 
@@ -302,7 +386,10 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
                 KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
                 KeyCode::Char('/') => Some(BranchesMessage::SearchStart),
-                KeyCode::Char('r') => Some(BranchesMessage::Refresh),
+                KeyCode::Char('r') => {
+                    load_initial_data(model);
+                    return;
+                }
                 KeyCode::Esc => Some(BranchesMessage::SearchClear),
                 _ => None,
             };
@@ -354,7 +441,10 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Tab => Some(SpecsMessage::NextSection),
                 KeyCode::BackTab => Some(SpecsMessage::PrevSection),
                 KeyCode::Char('/') => Some(SpecsMessage::SearchStart),
-                KeyCode::Char('r') => Some(SpecsMessage::Refresh),
+                KeyCode::Char('r') => {
+                    load_initial_data(model);
+                    return;
+                }
                 KeyCode::Esc => Some(SpecsMessage::SearchClear),
                 _ => None,
             };
@@ -408,7 +498,10 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             let msg = match key.code {
                 KeyCode::Char('j') | KeyCode::Down => Some(VersionsMessage::MoveDown),
                 KeyCode::Char('k') | KeyCode::Up => Some(VersionsMessage::MoveUp),
-                KeyCode::Char('r') => Some(VersionsMessage::Refresh),
+                KeyCode::Char('r') => {
+                    load_initial_data(model);
+                    return;
+                }
                 _ => None,
             };
             if let Some(m) = msg {

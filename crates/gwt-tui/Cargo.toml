@@ -28,6 +28,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 tokio = { workspace = true }
 vt100 = "0.15"
+serde_json = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

@@ -65,6 +65,10 @@ fn run_app(
         RepoType::Bare { develop_worktree: None } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    // Load initial data (branches, specs, tags) — best-effort
+    if model.active_layer != ActiveLayer::Initialization {
+        app::load_initial_data(&mut model);
+    }
     let mut keybinds = KeybindRegistry::new();
 
     loop {
