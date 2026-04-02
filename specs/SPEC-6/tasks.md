@@ -1,0 +1,86 @@
+# SPEC-6: Tasks
+
+## Phase 1: Notification Bus and Status Bar
+
+### 1.1 Core Types [P]
+
+- [ ] TEST: Unit test for `Severity` enum ordering (Debug < Info < Warn < Error)
+- [ ] TEST: Unit test for `Notification` struct construction with timestamp, severity, source, message
+- [ ] IMPL: Add `Severity` enum in gwt-core
+  - File: `crates/gwt-core/src/notification.rs`
+- [ ] IMPL: Add `Notification` struct in gwt-core
+  - File: `crates/gwt-core/src/notification.rs`
+
+### 1.2 Notification Bus [P]
+
+- [ ] TEST: Unit test for `NotificationBus` send/receive (async)
+- [ ] TEST: Unit test for bus non-blocking behavior (sender does not block on slow consumer)
+- [ ] IMPL: Add `NotificationBus` with tokio mpsc channel
+  - File: `crates/gwt-core/src/notification.rs`
+- [ ] IMPL: Bus capacity configuration (default: 256 pending notifications)
+
+### 1.3 Status Bar Notification Area
+
+- [ ] TEST: Snapshot test for status bar with Info notification displayed
+- [ ] TEST: Snapshot test for status bar with Warn notification (distinct color)
+- [ ] TEST: Unit test for auto-dismiss timer (Info dismissed after 5s)
+- [ ] IMPL: Add notification area to status bar widget (right side)
+  - File: `crates/gwt-tui/src/widgets/status_bar.rs`
+- [ ] IMPL: Auto-dismiss timer for Info notifications
+- [ ] IMPL: Warn notification rendering with amber/yellow color
+- [ ] IMPL: Dismiss keybinding for Warn notifications
+
+## Phase 2: Severity Routing
+
+### 2.1 Router [P]
+
+- [ ] TEST: Unit test for routing: Debug -> log only
+- [ ] TEST: Unit test for routing: Info -> status bar
+- [ ] TEST: Unit test for routing: Warn -> status bar with color
+- [ ] TEST: Unit test for routing: Error -> modal dialog
+- [ ] IMPL: Add `NotificationRouter` that dispatches by severity
+  - File: `crates/gwt-tui/src/notification_router.rs`
+
+### 2.2 Error Modal Upgrade
+
+- [ ] TEST: Unit test for error modal accepting `Notification` objects
+- [ ] TEST: Unit test for error queue stacking (dismiss one, next appears)
+- [ ] IMPL: Refactor existing error queue overlay to use `Notification` struct
+  - File: `crates/gwt-tui/src/widgets/error_modal.rs`
+- [ ] IMPL: Modal displays message, details, and dismiss instruction
+- [ ] IMPL: Queue management: dismiss with Enter/Esc, show next in queue
+
+## Phase 3: Structured Log Integration
+
+### 3.1 Structured Log Store [P]
+
+- [ ] TEST: Unit test for ring buffer: inserts, capacity limit, oldest evicted
+- [ ] TEST: Unit test for log entry format (timestamp, severity, source, message)
+- [ ] IMPL: Add `StructuredLog` ring buffer store
+  - File: `crates/gwt-core/src/notification.rs`
+- [ ] IMPL: Configurable capacity (default: 10,000 entries)
+
+### 3.2 Logs Tab Extension
+
+- [ ] TEST: Snapshot test for Logs tab with severity filter active
+- [ ] TEST: Unit test for severity filtering (show only Warn+Error, show all, etc.)
+- [ ] IMPL: Extend Logs tab to display structured log entries
+  - File: `crates/gwt-tui/src/screens/logs.rs`
+- [ ] IMPL: Severity filter toggle (keybinding to cycle filters)
+- [ ] IMPL: Debug filter toggle (show/hide Debug entries)
+- [ ] IMPL: Scrollable log list with timestamp and severity columns
+
+### 3.3 Bus-to-Log Integration
+
+- [ ] TEST: Integration test: notification sent via bus -> appears in structured log
+- [ ] TEST: Integration test: notification sent via bus -> routed to correct surface
+- [ ] IMPL: Connect NotificationBus consumer to StructuredLog store
+- [ ] IMPL: Connect NotificationBus consumer to NotificationRouter
+
+## Phase 4: Integration Testing
+
+- [ ] TEST: End-to-end test: Info notification appears in status bar and auto-dismisses
+- [ ] TEST: End-to-end test: Error notification appears in modal, dismiss shows next
+- [ ] TEST: End-to-end test: all severity levels logged in structured log
+- [ ] TEST: Regression test: existing error queue behavior preserved
+- [ ] TEST: Performance test: 100 simultaneous errors do not freeze UI
