@@ -1,5 +1,11 @@
 //! App — Update and View functions for the Elm Architecture.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use gwt_ai::{suggest_branch_name, AIClient};
+use gwt_config::{AISettings, Settings};
+use gwt_notification::{Notification, Severity};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -87,10 +93,14 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::PushError(err) => {
             model.error_queue.push_back(err);
         }
+        Message::Notify(notification) => {
+            apply_notification(model, notification);
+        }
         Message::DismissError => {
             model.error_queue.pop_front();
         }
         Message::Tick => {
+            tick_notification(model);
             // Forward tick to wizard (AI suggest spinner) when active
             if let Some(ref mut wizard) = model.wizard {
                 if wizard.ai_suggest.loading {
@@ -130,6 +140,15 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::pr_dashboard::update(&mut model.pr_dashboard, msg);
         }
         Message::Specs(msg) => {
+            if matches!(msg, screens::specs::SpecsMessage::LaunchAgent) {
+                let spec_context = model
+                    .specs
+                    .selected_spec()
+                    .map(|spec| (spec.id.clone(), spec.title.clone()));
+                if let Some((spec_id, title)) = spec_context {
+                    update(model, Message::OpenWizardWithSpec(spec_id, title));
+                }
+            }
             screens::specs::update(&mut model.specs, msg);
         }
         Message::Settings(msg) => {
@@ -144,6 +163,7 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Wizard(msg) => {
             if let Some(ref mut wizard) = model.wizard {
                 screens::wizard::update(wizard, msg);
+                maybe_start_wizard_branch_suggestions(wizard);
                 if wizard.completed || wizard.cancelled {
                     model.wizard = None;
                 }
@@ -174,7 +194,14 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::confirm::update(&mut model.confirm, msg);
         }
         Message::Voice(msg) => {
+            let transcription = match &msg {
+                VoiceInputMessage::TranscriptionResult(text) => Some(text.clone()),
+                _ => None,
+            };
             crate::input::voice::update(&mut model.voice, msg);
+            if let Some(text) = transcription.filter(|text| !text.trim().is_empty()) {
+                push_input_to_active_session(model, text.into_bytes());
+            }
         }
         Message::Initialization(msg) => {
             use screens::initialization::InitializationMessage;
@@ -186,8 +213,7 @@ pub fn update(model: &mut Model, msg: Message) {
                     InitializationMessage::StartClone => {
                         let url = state.url_input.clone();
                         let target = model.repo_path.clone();
-                        state.clone_status =
-                            screens::initialization::CloneStatus::Cloning;
+                        state.clone_status = screens::initialization::CloneStatus::Cloning;
                         match gwt_git::clone_repo(&url, &target) {
                             Ok(path) => {
                                 let _ = gwt_git::install_develop_protection(&path);
@@ -208,8 +234,9 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::PasteFiles => {
-            // Placeholder: actual clipboard access is handled by gwt-clipboard crate.
-            // TUI triggers the action; the event loop will dispatch to clipboard integration.
+            if let Some(bytes) = read_clipboard_input_bytes() {
+                push_input_to_active_session(model, bytes);
+            }
         }
         Message::OpenWizard => {
             model.wizard = Some(crate::screens::wizard::WizardState::default());
@@ -251,6 +278,7 @@ pub fn load_initial_data(model: &mut Model) {
     }
 
     // -- Specs (from specs/ directory metadata.json files) --
+    model.specs.spec_root = Some(model.repo_path.clone());
     let specs_dir = model.repo_path.join("specs");
     if specs_dir.is_dir() {
         let mut spec_items: Vec<screens::specs::SpecItem> = Vec::new();
@@ -423,33 +451,71 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Specs => {
+            if model.specs.detail_editing {
+                let msg = match key.code {
+                    KeyCode::Enter => Some(SpecsMessage::SaveSectionEdit),
+                    KeyCode::Esc => Some(SpecsMessage::CancelSectionEdit),
+                    KeyCode::Backspace => Some(SpecsMessage::SectionEditBackspace),
+                    _ => search_input_char(&key).map(SpecsMessage::SectionEditInput),
+                };
+                if let Some(m) = msg {
+                    update(model, Message::Specs(m));
+                }
+                return;
+            }
+
+            if model.specs.editing {
+                let msg = match key.code {
+                    KeyCode::Enter => Some(SpecsMessage::SaveEdit),
+                    KeyCode::Esc => Some(SpecsMessage::CancelEdit),
+                    KeyCode::Backspace => Some(SpecsMessage::EditBackspace),
+                    _ => search_input_char(&key).map(SpecsMessage::EditInput),
+                };
+                if let Some(m) = msg {
+                    update(model, Message::Specs(m));
+                }
+                return;
+            }
+
             if model.specs.search_active {
                 let msg = match key.code {
                     KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
                     _ => search_input_char(&key).map(SpecsMessage::SearchInput),
                 };
                 if let Some(m) = msg {
-                    screens::specs::update(&mut model.specs, m);
+                    update(model, Message::Specs(m));
                     return;
                 }
             }
 
             let msg = match key.code {
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(SpecsMessage::LaunchAgent)
+                }
                 KeyCode::Char('j') | KeyCode::Down => Some(SpecsMessage::MoveDown),
                 KeyCode::Char('k') | KeyCode::Up => Some(SpecsMessage::MoveUp),
                 KeyCode::Enter => Some(SpecsMessage::ToggleDetail),
                 KeyCode::Tab => Some(SpecsMessage::NextSection),
                 KeyCode::BackTab => Some(SpecsMessage::PrevSection),
+                KeyCode::Char('e') => Some(if model.specs.detail_view {
+                    SpecsMessage::StartSectionEdit
+                } else {
+                    SpecsMessage::StartEdit
+                }),
                 KeyCode::Char('/') => Some(SpecsMessage::SearchStart),
                 KeyCode::Char('r') => {
                     load_initial_data(model);
                     return;
                 }
-                KeyCode::Esc => Some(SpecsMessage::SearchClear),
+                KeyCode::Esc => Some(if model.specs.detail_view {
+                    SpecsMessage::ToggleDetail
+                } else {
+                    SpecsMessage::SearchClear
+                }),
                 _ => None,
             };
             if let Some(m) = msg {
-                screens::specs::update(&mut model.specs, m);
+                update(model, Message::Specs(m));
             }
         }
         ManagementTab::Settings => {
@@ -565,6 +631,58 @@ fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEv
     let Some(bytes) = key_event_to_bytes(key) else {
         return;
     };
+    push_input_to_active_session(model, bytes);
+}
+
+fn apply_notification(model: &mut Model, notification: Notification) {
+    model.notification_log.push(notification.clone());
+    let entries = notification_log_snapshot(model);
+    screens::logs::update(
+        &mut model.logs,
+        screens::logs::LogsMessage::SetEntries(entries),
+    );
+
+    if let Some(msg) = crate::notification_router::route(&notification) {
+        update(model, msg);
+    }
+
+    match notification.severity {
+        Severity::Info => {
+            model.current_notification = Some(notification);
+            model.current_notification_ttl = Some(Duration::from_secs(5));
+        }
+        Severity::Warn => {
+            model.current_notification = Some(notification);
+            model.current_notification_ttl = None;
+        }
+        Severity::Debug | Severity::Error => {}
+    }
+}
+
+fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
+    model
+        .notification_log
+        .entries()
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+fn tick_notification(model: &mut Model) {
+    let Some(ttl) = model.current_notification_ttl else {
+        return;
+    };
+
+    let step = Duration::from_millis(100);
+    if ttl <= step {
+        model.current_notification = None;
+        model.current_notification_ttl = None;
+    } else {
+        model.current_notification_ttl = Some(ttl - step);
+    }
+}
+
+fn push_input_to_active_session(model: &mut Model, bytes: Vec<u8>) {
     let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
         return;
     };
@@ -572,6 +690,125 @@ fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEv
     model
         .pending_pty_inputs
         .push_back(crate::model::PendingPtyInput { session_id, bytes });
+}
+
+fn maybe_start_wizard_branch_suggestions(wizard: &mut screens::wizard::WizardState) {
+    maybe_start_wizard_branch_suggestions_with(wizard, request_branch_suggestions);
+}
+
+fn maybe_start_wizard_branch_suggestions_with<F>(
+    wizard: &mut screens::wizard::WizardState,
+    request: F,
+) where
+    F: FnOnce(&str) -> Result<Vec<String>, String>,
+{
+    if wizard.step != screens::wizard::WizardStep::AIBranchSuggest
+        || !wizard.ai_suggest.loading
+        || wizard.ai_suggest.tick_counter != 0
+        || !wizard.ai_suggest.suggestions.is_empty()
+        || wizard.ai_suggest.error.is_some()
+    {
+        return;
+    }
+
+    let context = wizard_branch_suggestion_context(wizard);
+    let msg = match request(&context) {
+        Ok(suggestions) => screens::wizard::WizardMessage::SetBranchSuggestions(suggestions),
+        Err(err) => screens::wizard::WizardMessage::SetBranchSuggestError(err),
+    };
+    screens::wizard::update(wizard, msg);
+}
+
+fn wizard_branch_suggestion_context(wizard: &screens::wizard::WizardState) -> String {
+    let mut parts = Vec::new();
+    if let Some(summary) = wizard.spec_context_summary() {
+        parts.push(format!("SPEC: {summary}"));
+    }
+    if !wizard.branch_name.trim().is_empty() {
+        parts.push(format!(
+            "Current branch seed: {}",
+            wizard.branch_name.trim()
+        ));
+    }
+    if !wizard.issue_id.trim().is_empty() {
+        parts.push(format!("Issue: {}", wizard.issue_id.trim()));
+    }
+    if parts.is_empty() {
+        "Create a concise git branch name for a new worktree task.".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
+fn request_branch_suggestions(context: &str) -> Result<Vec<String>, String> {
+    let client = branch_suggestion_client()?;
+    suggest_branch_name(&client, context).map_err(|err| err.to_string())
+}
+
+fn branch_suggestion_client() -> Result<AIClient, String> {
+    if let Ok(settings) = Settings::load() {
+        if let Some(ai_settings) = settings
+            .profiles
+            .active_profile()
+            .and_then(|profile| profile.ai_settings.as_ref())
+        {
+            if ai_settings.is_enabled() {
+                return ai_client_from_settings(ai_settings);
+            }
+        }
+    }
+
+    let endpoint = std::env::var("OPENAI_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    let model = std::env::var("OPENAI_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "AI branch suggestion requires active profile AI settings or OPENAI_MODEL".to_string()
+        })?;
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+
+    AIClient::new(&endpoint, &api_key, &model).map_err(|err| err.to_string())
+}
+
+fn ai_client_from_settings(settings: &AISettings) -> Result<AIClient, String> {
+    AIClient::new(
+        &settings.endpoint,
+        settings.api_key.as_deref().unwrap_or(""),
+        &settings.model,
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
+    if let Ok(paths) = gwt_clipboard::ClipboardFilePaste::extract_file_paths() {
+        if let Some(bytes) = clipboard_payload_to_bytes(&paths, "") {
+            return Some(bytes);
+        }
+    }
+
+    let text = gwt_clipboard::ClipboardText::get_text().ok()?;
+    clipboard_payload_to_bytes(&[], &text)
+}
+
+fn clipboard_payload_to_bytes(paths: &[PathBuf], fallback_text: &str) -> Option<Vec<u8>> {
+    if !paths.is_empty() {
+        let payload = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(payload.into_bytes());
+    }
+
+    let text = fallback_text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.as_bytes().to_vec())
+    }
 }
 
 fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
@@ -611,7 +848,9 @@ fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
         ManagementTab::Issues => model.issues.search_active,
-        ManagementTab::Specs => model.specs.search_active || model.specs.editing,
+        ManagementTab::Specs => {
+            model.specs.search_active || model.specs.editing || model.specs.detail_editing
+        }
         ManagementTab::Settings => model.settings.editing,
         _ => false,
     }
@@ -833,6 +1072,7 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+    use gwt_notification::{Notification, Severity};
     use std::path::PathBuf;
 
     fn test_model() -> Model {
@@ -1008,6 +1248,96 @@ mod tests {
     }
 
     #[test]
+    fn route_key_to_management_specs_launch_agent_opens_wizard() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-9".into(),
+            title: "Docker wizard".into(),
+            phase: "implementation".into(),
+            status: "open".into(),
+        }];
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        let wizard = model.wizard.as_ref().unwrap();
+        assert_eq!(wizard.spec_context.as_ref().unwrap().spec_id, "SPEC-9");
+        assert_eq!(wizard.spec_context.as_ref().unwrap().title, "Docker wizard");
+    }
+
+    #[test]
+    fn route_key_to_management_specs_start_phase_edit() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-3".into(),
+            title: "Voice commands".into(),
+            phase: "draft".into(),
+            status: "open".into(),
+        }];
+
+        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        assert!(model.specs.editing);
+        assert_eq!(model.specs.edit_field, "draft");
+    }
+
+    #[test]
+    fn maybe_start_wizard_branch_suggestions_with_applies_result() {
+        let mut wizard = screens::wizard::WizardState::default();
+        wizard.step = screens::wizard::WizardStep::AIBranchSuggest;
+        wizard.ai_suggest.loading = true;
+        wizard.spec_context = Some(screens::wizard::SpecContext {
+            spec_id: "SPEC-42".into(),
+            title: "My Feature".into(),
+        });
+
+        maybe_start_wizard_branch_suggestions_with(&mut wizard, |_| {
+            Ok(vec!["feature/spec-42-my-feature".into()])
+        });
+
+        assert!(!wizard.ai_suggest.loading);
+        assert_eq!(
+            wizard.ai_suggest.suggestions,
+            vec!["feature/spec-42-my-feature".to_string()]
+        );
+    }
+
+    #[test]
+    fn maybe_start_wizard_branch_suggestions_with_applies_error() {
+        let mut wizard = screens::wizard::WizardState::default();
+        wizard.step = screens::wizard::WizardStep::AIBranchSuggest;
+        wizard.ai_suggest.loading = true;
+
+        maybe_start_wizard_branch_suggestions_with(&mut wizard, |_| {
+            Err("missing AI configuration".to_string())
+        });
+
+        assert!(!wizard.ai_suggest.loading);
+        assert_eq!(
+            wizard.ai_suggest.error.as_deref(),
+            Some("missing AI configuration")
+        );
+    }
+
+    #[test]
+    fn wizard_branch_suggestion_context_includes_spec_and_branch_seed() {
+        let mut wizard = screens::wizard::WizardState::default();
+        wizard.branch_name = "feature/spec-7-voice".into();
+        wizard.issue_id = "1776".into();
+        wizard.spec_context = Some(screens::wizard::SpecContext {
+            spec_id: "SPEC-7".into(),
+            title: "Voice settings".into(),
+        });
+
+        let context = wizard_branch_suggestion_context(&wizard);
+
+        assert!(context.contains("SPEC: SPEC-7 - Voice settings"));
+        assert!(context.contains("Current branch seed: feature/spec-7-voice"));
+        assert!(context.contains("Issue: 1776"));
+    }
+
+    #[test]
     fn update_key_input_in_main_layer_queues_pty_bytes() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -1020,6 +1350,114 @@ mod tests {
         let forwarded = model.pending_pty_inputs().back().unwrap();
         assert_eq!(forwarded.session_id, "shell-0");
         assert_eq!(forwarded.bytes, vec![0x03]);
+    }
+
+    #[test]
+    fn update_voice_transcription_result_queues_pty_bytes() {
+        let mut model = test_model();
+        update(
+            &mut model,
+            Message::Voice(VoiceInputMessage::TranscriptionResult("git status".into())),
+        );
+
+        let forwarded = model.pending_pty_inputs().back().unwrap();
+        assert_eq!(forwarded.session_id, "shell-0");
+        assert_eq!(forwarded.bytes, b"git status".to_vec());
+        assert_eq!(model.voice.buffer, "git status");
+    }
+
+    #[test]
+    fn update_voice_transcription_result_ignores_empty_text() {
+        let mut model = test_model();
+        update(
+            &mut model,
+            Message::Voice(VoiceInputMessage::TranscriptionResult("   ".into())),
+        );
+
+        assert!(model.pending_pty_inputs().is_empty());
+        assert_eq!(model.voice.buffer, "   ");
+    }
+
+    #[test]
+    fn clipboard_payload_to_bytes_prefers_paths() {
+        let bytes = clipboard_payload_to_bytes(
+            &[
+                std::path::PathBuf::from("/tmp/one.txt"),
+                std::path::PathBuf::from("/tmp/two.txt"),
+            ],
+            "",
+        )
+        .unwrap();
+
+        assert_eq!(bytes, b"/tmp/one.txt\n/tmp/two.txt".to_vec());
+    }
+
+    #[test]
+    fn clipboard_payload_to_bytes_falls_back_to_text() {
+        let bytes = clipboard_payload_to_bytes(&[], "echo hello").unwrap();
+        assert_eq!(bytes, b"echo hello".to_vec());
+    }
+
+    #[test]
+    fn clipboard_payload_to_bytes_ignores_empty_payload() {
+        assert!(clipboard_payload_to_bytes(&[], "   ").is_none());
+    }
+
+    #[test]
+    fn update_notify_info_sets_status_notification_and_log() {
+        let mut model = test_model();
+        let notification = Notification::new(Severity::Info, "core", "Started");
+
+        update(&mut model, Message::Notify(notification));
+
+        assert!(model.current_notification.is_some());
+        assert_eq!(model.logs.entries.len(), 1);
+        assert_eq!(model.logs.entries[0].message, "Started");
+        assert!(model.error_queue.is_empty());
+    }
+
+    #[test]
+    fn update_notify_warn_persists_across_ticks() {
+        let mut model = test_model();
+        let notification = Notification::new(Severity::Warn, "git", "Detached HEAD");
+
+        update(&mut model, Message::Notify(notification));
+        for _ in 0..60 {
+            update(&mut model, Message::Tick);
+        }
+
+        assert!(model.current_notification.is_some());
+        assert_eq!(
+            model.current_notification.as_ref().unwrap().message,
+            "Detached HEAD"
+        );
+    }
+
+    #[test]
+    fn update_notify_info_auto_dismisses_after_timeout() {
+        let mut model = test_model();
+        let notification = Notification::new(Severity::Info, "core", "Started");
+
+        update(&mut model, Message::Notify(notification));
+        for _ in 0..50 {
+            update(&mut model, Message::Tick);
+        }
+
+        assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn update_notify_error_routes_to_error_queue_and_log() {
+        let mut model = test_model();
+        let notification = Notification::new(Severity::Error, "pty", "Crashed");
+
+        update(&mut model, Message::Notify(notification));
+
+        assert_eq!(model.error_queue.len(), 1);
+        assert_eq!(model.error_queue.front().unwrap(), "Crashed");
+        assert_eq!(model.logs.entries.len(), 1);
+        assert_eq!(model.logs.entries[0].source, "pty");
+        assert!(model.current_notification.is_none());
     }
 
     #[test]

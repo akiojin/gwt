@@ -1,26 +1,7 @@
 //! Notification router — routes notifications by severity.
 
 use crate::message::Message;
-
-/// Notification severity levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
-    /// Debug: log only, no UI.
-    Debug,
-    /// Info: status bar for 5 seconds.
-    Info,
-    /// Warning: status bar, persisted until dismissed.
-    Warn,
-    /// Error: modal overlay.
-    Error,
-}
-
-/// A notification to be routed.
-#[derive(Debug, Clone)]
-pub struct Notification {
-    pub severity: Severity,
-    pub message: String,
-}
+use gwt_notification::{Notification, Severity};
 
 /// Route a notification to the appropriate UI message.
 ///
@@ -55,38 +36,26 @@ mod tests {
 
     #[test]
     fn debug_returns_none() {
-        let n = Notification {
-            severity: Severity::Debug,
-            message: "debug msg".into(),
-        };
+        let n = Notification::new(Severity::Debug, "router", "debug msg");
         assert!(route(&n).is_none());
     }
 
     #[test]
-    fn info_returns_none_for_now() {
-        let n = Notification {
-            severity: Severity::Info,
-            message: "info msg".into(),
-        };
+    fn info_returns_none() {
+        let n = Notification::new(Severity::Info, "router", "info msg");
         assert!(route(&n).is_none());
     }
 
     #[test]
     fn error_returns_push_error() {
-        let n = Notification {
-            severity: Severity::Error,
-            message: "boom".into(),
-        };
+        let n = Notification::new(Severity::Error, "router", "boom");
         let msg = route(&n);
         assert!(matches!(msg, Some(Message::PushError(ref s)) if s == "boom"));
     }
 
     #[test]
-    fn warn_returns_none_for_now() {
-        let n = Notification {
-            severity: Severity::Warn,
-            message: "warn msg".into(),
-        };
+    fn warn_returns_none() {
+        let n = Notification::new(Severity::Warn, "router", "warn msg");
         assert!(route(&n).is_none());
     }
 }

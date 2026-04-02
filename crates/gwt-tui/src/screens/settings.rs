@@ -8,6 +8,8 @@ use ratatui::{
     Frame,
 };
 
+use gwt_config::{ConfigError, Settings, VoiceConfig};
+
 /// Settings category tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
@@ -99,7 +101,12 @@ impl SettingsState {
 
     /// Load fields for the current category.
     pub fn load_category_fields(&mut self) {
-        self.fields = fields_for_category(self.category);
+        let settings = if self.category == SettingsCategory::Voice {
+            Settings::load().ok()
+        } else {
+            None
+        };
+        self.fields = fields_for_category_with_settings(self.category, settings.as_ref());
         self.selected = 0;
         self.editing = false;
         self.edit_buffer.clear();
@@ -108,6 +115,15 @@ impl SettingsState {
 
 /// Return default fields for a given category.
 pub fn fields_for_category(category: SettingsCategory) -> Vec<SettingField> {
+    fields_for_category_with_settings(category, None)
+}
+
+/// Return default fields for a given category, optionally using live settings
+/// for categories that should reflect persisted configuration.
+pub fn fields_for_category_with_settings(
+    category: SettingsCategory,
+    settings: Option<&Settings>,
+) -> Vec<SettingField> {
     match category {
         SettingsCategory::General => vec![
             SettingField {
@@ -211,24 +227,47 @@ pub fn fields_for_category(category: SettingsCategory) -> Vec<SettingField> {
                 field_type: FieldType::Bool,
             },
         ],
-        SettingsCategory::Voice => vec![
-            SettingField {
-                label: "Enabled".to_string(),
-                value: "false".to_string(),
-                field_type: FieldType::Bool,
-            },
-            SettingField {
-                label: "Input device".to_string(),
-                value: "default".to_string(),
-                field_type: FieldType::Text,
-            },
-            SettingField {
-                label: "Language".to_string(),
-                value: "en-US".to_string(),
-                field_type: FieldType::Text,
-            },
-        ],
+        SettingsCategory::Voice => {
+            let voice = settings.map(|s| &s.voice);
+            voice_fields(voice)
+        }
     }
+}
+
+/// Build the Voice settings fields from the persisted voice config.
+pub fn voice_fields(voice: Option<&VoiceConfig>) -> Vec<SettingField> {
+    let voice = voice.cloned().unwrap_or_default();
+    vec![
+        SettingField {
+            label: "Model path".to_string(),
+            value: voice
+                .model_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            field_type: FieldType::Path,
+        },
+        SettingField {
+            label: "Hotkey".to_string(),
+            value: voice.hotkey,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: "Input device".to_string(),
+            value: voice.input_device,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: "Language".to_string(),
+            value: voice.language,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: "Enabled".to_string(),
+            value: voice.enabled.to_string(),
+            field_type: FieldType::Bool,
+        },
+    ]
 }
 
 /// Messages specific to the settings screen.
@@ -256,6 +295,49 @@ fn toggle_bool_field(field: &mut SettingField) {
             "true".to_string()
         };
     }
+}
+
+fn collect_voice_config_from_fields(state: &SettingsState) -> VoiceConfig {
+    let mut voice = VoiceConfig::default();
+
+    for field in &state.fields {
+        match field.label.as_str() {
+            "Model path" => {
+                voice.model_path = if field.value.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(&field.value))
+                };
+            }
+            "Hotkey" => {
+                voice.hotkey = if field.value.trim().is_empty() {
+                    "Ctrl+G,v".to_string()
+                } else {
+                    field.value.clone()
+                };
+            }
+            "Input device" => {
+                voice.input_device = if field.value.trim().is_empty() {
+                    "system_default".to_string()
+                } else {
+                    field.value.clone()
+                };
+            }
+            "Language" => {
+                voice.language = if field.value.trim().is_empty() {
+                    "auto".to_string()
+                } else {
+                    field.value.clone()
+                };
+            }
+            "Enabled" => {
+                voice.enabled = field.value == "true";
+            }
+            _ => {}
+        }
+    }
+
+    voice
 }
 
 /// Persist current settings fields to gwt-config's global config.
@@ -289,15 +371,18 @@ fn save_settings_to_config(state: &SettingsState) -> Result<(), String> {
                     }
                 }
                 // Voice
-                (SettingsCategory::Voice, "Enabled") => {
-                    settings.voice.enabled = field.value == "true";
-                }
-                (SettingsCategory::Voice, "Language") => {
-                    if field.value.is_empty() {
-                        settings.voice.language = None;
-                    } else {
-                        settings.voice.language = Some(field.value.clone());
-                    }
+                (SettingsCategory::Voice, "Model path")
+                | (SettingsCategory::Voice, "Hotkey")
+                | (SettingsCategory::Voice, "Input device")
+                | (SettingsCategory::Voice, "Language")
+                | (SettingsCategory::Voice, "Enabled") => {
+                    settings.voice = collect_voice_config_from_fields(state);
+                    settings
+                        .voice
+                        .validate()
+                        .map_err(|e| ConfigError::ValidationError {
+                            reason: e.to_string(),
+                        })?;
                 }
                 _ => {} // Other fields have no backend mapping yet
             }
@@ -305,6 +390,45 @@ fn save_settings_to_config(state: &SettingsState) -> Result<(), String> {
         Ok(())
     })
     .map_err(|e| format!("{e}"))
+}
+
+/// Save settings to a specific TOML file path.
+pub fn save_settings_to_path(state: &SettingsState, path: &std::path::Path) -> Result<(), String> {
+    let mut settings = Settings::load_from_path(path).unwrap_or_default();
+
+    for field in &state.fields {
+        match (state.category, field.label.as_str()) {
+            (SettingsCategory::General, "Log level") => {
+                settings.debug = field.value == "debug";
+            }
+            (SettingsCategory::Worktree, "Default path") => {
+                if field.value.is_empty() || field.value == "~/.gwt/worktrees" {
+                    settings.worktree_root = None;
+                } else {
+                    settings.worktree_root = Some(std::path::PathBuf::from(&field.value));
+                }
+            }
+            (SettingsCategory::Agent, "Default agent") => {
+                if field.value.is_empty() {
+                    settings.agent.default_agent = None;
+                } else {
+                    settings.agent.default_agent = Some(field.value.clone());
+                }
+            }
+            (SettingsCategory::Voice, "Model path")
+            | (SettingsCategory::Voice, "Hotkey")
+            | (SettingsCategory::Voice, "Input device")
+            | (SettingsCategory::Voice, "Language")
+            | (SettingsCategory::Voice, "Enabled") => {
+                settings.voice = collect_voice_config_from_fields(state);
+                settings.voice.validate().map_err(|e| e.to_string())?;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    settings.save(path).map_err(|e| e.to_string())
 }
 
 /// Update settings state in response to a message.
@@ -502,7 +626,11 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         state.category.label(),
         hints
     ));
-    let list = List::new(items).block(block).highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -517,6 +645,13 @@ mod tests {
 
     fn state_with_fields() -> SettingsState {
         let mut state = SettingsState::default();
+        state.load_category_fields();
+        state
+    }
+
+    fn voice_state_with_fields() -> SettingsState {
+        let mut state = SettingsState::default();
+        state.category = SettingsCategory::Voice;
         state.load_category_fields();
         state
     }
@@ -732,6 +867,67 @@ mod tests {
             let fields = fields_for_category(cat);
             assert!(!fields.is_empty(), "Category {:?} has no fields", cat);
         }
+    }
+
+    #[test]
+    fn voice_category_has_expected_fields() {
+        let fields = fields_for_category(SettingsCategory::Voice);
+        let labels: Vec<_> = fields.iter().map(|field| field.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Model path",
+                "Hotkey",
+                "Input device",
+                "Language",
+                "Enabled",
+            ]
+        );
+    }
+
+    #[test]
+    fn voice_fields_reflect_persisted_settings() {
+        let voice = VoiceConfig {
+            model_path: Some(std::path::PathBuf::from("/tmp/models/qwen")),
+            hotkey: "Ctrl+Alt+V".to_string(),
+            input_device: "mic-2".to_string(),
+            language: "ja".to_string(),
+            enabled: true,
+        };
+        let fields = voice_fields(Some(&voice));
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[0].value, "/tmp/models/qwen");
+        assert_eq!(fields[1].value, "Ctrl+Alt+V");
+        assert_eq!(fields[2].value, "mic-2");
+        assert_eq!(fields[3].value, "ja");
+        assert_eq!(fields[4].value, "true");
+    }
+
+    #[test]
+    fn save_settings_to_path_persists_voice_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let model_dir = dir.path().join("model");
+        std::fs::create_dir(&model_dir).unwrap();
+
+        let mut state = voice_state_with_fields();
+        state.fields[0].value = model_dir.display().to_string();
+        state.fields[1].value = "Ctrl+Shift+V".to_string();
+        state.fields[2].value = "mic-9".to_string();
+        state.fields[3].value = "en".to_string();
+        state.fields[4].value = "true".to_string();
+
+        save_settings_to_path(&state, &config_path).unwrap();
+
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert_eq!(
+            loaded.voice.model_path.as_deref(),
+            Some(model_dir.as_path())
+        );
+        assert_eq!(loaded.voice.hotkey, "Ctrl+Shift+V");
+        assert_eq!(loaded.voice.input_device, "mic-9");
+        assert_eq!(loaded.voice.language, "en");
+        assert!(loaded.voice.enabled);
     }
 
     #[test]

@@ -3,24 +3,80 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Parsed clipboard paste payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardPasteContent {
+    /// Clipboard content is a list of absolute file paths.
+    FilePaths(Vec<PathBuf>),
+    /// Clipboard content should be pasted as plain text.
+    Text(String),
+}
+
 /// Clipboard-based file path extraction.
 pub struct ClipboardFilePaste;
 
 impl ClipboardFilePaste {
+    /// Extract clipboard content as either file paths or text.
+    pub fn extract_paste_content() -> Result<ClipboardPasteContent, ClipboardError> {
+        let text = read_clipboard()?;
+        Ok(parse_clipboard_paste(&text))
+    }
+
     /// Extract file paths from the system clipboard.
     ///
-    /// Returns absolute paths parsed from the clipboard content (newline-separated).
-    /// Uses platform-specific tools: `pbpaste` on macOS, `xclip`/`wl-paste` on Linux.
+    /// Returns absolute paths parsed from the clipboard content when the
+    /// clipboard contains only absolute path lines. Otherwise returns an
+    /// empty list so the caller can fall back to text pasting.
     pub fn extract_file_paths() -> Result<Vec<PathBuf>, ClipboardError> {
-        let text = read_clipboard()?;
-        let paths: Vec<PathBuf> = text
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .collect();
-        Ok(paths)
+        match Self::extract_paste_content()? {
+            ClipboardPasteContent::FilePaths(paths) => Ok(paths),
+            ClipboardPasteContent::Text(_) => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Parse clipboard text into file paths or plain text.
+pub fn parse_clipboard_paste(text: &str) -> ClipboardPasteContent {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return ClipboardPasteContent::Text(String::new());
+    }
+
+    let mut paths = Vec::with_capacity(lines.len());
+    for line in lines {
+        let path = PathBuf::from(line);
+        if !path.is_absolute() {
+            return ClipboardPasteContent::Text(text.to_string());
+        }
+        paths.push(path);
+    }
+
+    ClipboardPasteContent::FilePaths(paths)
+}
+
+/// Convert clipboard payload into bytes suitable for PTY input.
+///
+/// File paths take precedence over text. Empty text yields `None`.
+pub fn clipboard_payload_to_bytes(paths: &[PathBuf], text: &str) -> Option<Vec<u8>> {
+    if !paths.is_empty() {
+        let joined = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(joined.into_bytes());
+    }
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(text.as_bytes().to_vec())
     }
 }
 

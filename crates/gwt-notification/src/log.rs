@@ -4,6 +4,7 @@ use crate::{Notification, Severity};
 const MAX_ENTRIES: usize = 10_000;
 
 /// Ring-buffered structured log of notifications.
+#[derive(Debug, Clone)]
 pub struct StructuredLog {
     entries: Vec<Notification>,
     /// Write position in the ring buffer.

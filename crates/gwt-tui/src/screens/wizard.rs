@@ -86,10 +86,22 @@ impl WizardStep {
 }
 
 /// State for AI branch name suggestions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchSuggestionOption {
+    /// Branch name that can be applied to the wizard state.
+    pub branch_name: String,
+    /// Display label shown in the list.
+    pub label: String,
+}
+
+const AI_SUGGEST_TIMEOUT_TICKS: usize = 12;
+
 #[derive(Debug, Clone, Default)]
 pub struct AISuggestState {
     /// Suggested branch names from AI.
     pub suggestions: Vec<String>,
+    /// Structured options for the current suggestion set.
+    pub options: Vec<BranchSuggestionOption>,
     /// Whether we are waiting for AI to respond.
     pub loading: bool,
     /// Error message if AI suggestion failed.
@@ -172,6 +184,8 @@ impl WizardState {
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     0
+                } else if !self.ai_suggest.options.is_empty() {
+                    self.ai_suggest.options.len()
                 } else {
                     self.ai_suggest.suggestions.len().max(1)
                 }
@@ -215,6 +229,12 @@ impl WizardState {
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     vec![]
+                } else if !self.ai_suggest.options.is_empty() {
+                    self.ai_suggest
+                        .options
+                        .iter()
+                        .map(|option| option.label.clone())
+                        .collect()
                 } else if self.ai_suggest.suggestions.is_empty() {
                     vec!["(no suggestions)".to_string()]
                 } else {
@@ -227,6 +247,35 @@ impl WizardState {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+        }
+    }
+
+    /// Human-readable summary for the current SPEC context, if any.
+    pub fn spec_context_summary(&self) -> Option<String> {
+        self.spec_context.as_ref().map(|ctx| {
+            if ctx.title.trim().is_empty() {
+                ctx.spec_id.clone()
+            } else {
+                format!("{} - {}", ctx.spec_id, ctx.title)
+            }
+        })
+    }
+
+    /// Suggested branch name derived from the current SPEC context, if any.
+    pub fn spec_context_branch_seed(&self) -> Option<String> {
+        let ctx = self.spec_context.as_ref()?;
+        let mut suffix = slugify_branch_component(&ctx.spec_id);
+        if !ctx.title.trim().is_empty() {
+            let title = slugify_branch_component(&ctx.title);
+            if !title.is_empty() {
+                suffix.push('-');
+                suffix.push_str(&title);
+            }
+        }
+        if suffix.is_empty() {
+            None
+        } else {
+            Some(format!("feature/{}", suffix))
         }
     }
 }
@@ -266,23 +315,29 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
             super::move_down(&mut state.selected, count);
         }
         WizardMessage::Select => {
-            // Store selection for current step, then advance
-            apply_selection(state);
-            if let Some(next) = state.step.next() {
-                state.step = next;
-                state.selected = 0;
-                // When entering AIBranchSuggest, start loading
-                if next == WizardStep::AIBranchSuggest {
-                    state.ai_suggest = AISuggestState {
-                        suggestions: Vec::new(),
-                        loading: true,
-                        error: None,
-                        tick_counter: 0,
-                    };
-                }
+            if state.step == WizardStep::AIBranchSuggest {
+                advance_from_ai_branch_step(state);
             } else {
-                // Last step — mark completed
-                state.completed = true;
+                // Store selection for current step, then advance
+                apply_selection(state);
+                if let Some(next) = state.step.next() {
+                    state.step = next;
+                    state.selected = 0;
+                    // When entering AIBranchSuggest, start loading
+                    if next == WizardStep::AIBranchSuggest {
+                        state.ai_suggest = AISuggestState {
+                            suggestions: Vec::new(),
+                            options: Vec::new(),
+                            loading: true,
+                            error: None,
+                            tick_counter: 0,
+                        };
+                        ensure_branch_name_seed(state);
+                    }
+                } else {
+                    // Last step — mark completed
+                    state.completed = true;
+                }
             }
         }
         WizardMessage::Back => {
@@ -324,7 +379,14 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
         WizardMessage::SetBranchSuggestions(suggestions) => {
             state.ai_suggest.loading = false;
             state.ai_suggest.error = None;
-            state.ai_suggest.suggestions = suggestions;
+            state.ai_suggest.suggestions = suggestions.clone();
+            state.ai_suggest.options = suggestions
+                .into_iter()
+                .map(|branch_name| BranchSuggestionOption {
+                    label: branch_name.clone(),
+                    branch_name,
+                })
+                .collect();
             if state.step == WizardStep::AIBranchSuggest {
                 state.selected = 0;
             }
@@ -332,25 +394,35 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
         WizardMessage::SetBranchSuggestError(err) => {
             state.ai_suggest.loading = false;
             state.ai_suggest.error = Some(err);
+            state.ai_suggest.options.clear();
         }
         WizardMessage::EditSelectedSuggestion => {
             if state.step == WizardStep::AIBranchSuggest {
                 // Pre-fill branch name with selected suggestion, switch to manual input
-                if let Some(name) = state.ai_suggest.suggestions.get(state.selected) {
-                    state.branch_name = name.clone();
-                }
+                apply_selected_ai_suggestion(state);
+                ensure_branch_name_seed(state);
                 state.step = WizardStep::BranchNameInput;
                 state.selected = 0;
             }
         }
         WizardMessage::SkipToManualInput => {
             if state.step == WizardStep::AIBranchSuggest {
+                ensure_branch_name_seed(state);
                 state.step = WizardStep::BranchNameInput;
                 state.selected = 0;
             }
         }
         WizardMessage::Tick => {
             state.ai_suggest.tick_counter = state.ai_suggest.tick_counter.wrapping_add(1);
+            if state.step == WizardStep::AIBranchSuggest
+                && state.ai_suggest.loading
+                && state.ai_suggest.tick_counter >= AI_SUGGEST_TIMEOUT_TICKS
+            {
+                state.ai_suggest.loading = false;
+                state.ai_suggest.error = Some("AI branch suggestion timed out".to_string());
+                state.ai_suggest.options.clear();
+                ensure_branch_name_seed(state);
+            }
         }
     }
 }
@@ -380,9 +452,7 @@ fn apply_selection(state: &mut WizardState) {
             }
         }
         WizardStep::AIBranchSuggest => {
-            if let Some(name) = state.ai_suggest.suggestions.get(state.selected) {
-                state.branch_name = name.clone();
-            }
+            apply_selected_ai_suggestion(state);
         }
         WizardStep::SkipPermissions => {
             state.skip_perms = state.selected == 0;
@@ -393,6 +463,66 @@ fn apply_selection(state: &mut WizardState) {
             }
         }
         _ => {}
+    }
+}
+
+fn slugify_branch_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut prev_dash = false;
+    for ch in value.trim().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if !prev_dash {
+                out.push(mapped);
+            }
+            prev_dash = true;
+        } else {
+            out.push(mapped);
+            prev_dash = false;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn ensure_branch_name_seed(state: &mut WizardState) {
+    if state.branch_name.is_empty() {
+        if let Some(seed) = state.spec_context_branch_seed() {
+            state.branch_name = seed;
+        }
+    }
+}
+
+fn apply_selected_ai_suggestion(state: &mut WizardState) {
+    if let Some(option) = state.ai_suggest.options.get(state.selected) {
+        state.branch_name = option.branch_name.clone();
+    } else if let Some(name) = state.ai_suggest.suggestions.get(state.selected) {
+        state.branch_name = name.clone();
+    }
+}
+
+fn advance_from_ai_branch_step(state: &mut WizardState) {
+    if state.ai_suggest.loading || state.ai_suggest.error.is_some() {
+        ensure_branch_name_seed(state);
+        state.step = WizardStep::BranchNameInput;
+        state.selected = 0;
+        return;
+    }
+
+    if state.ai_suggest.options.is_empty() {
+        ensure_branch_name_seed(state);
+        state.step = WizardStep::BranchNameInput;
+        state.selected = 0;
+        return;
+    }
+
+    apply_selected_ai_suggestion(state);
+    if let Some(next) = state.step.next() {
+        state.step = next;
+        state.selected = 0;
     }
 }
 
@@ -516,16 +646,21 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
 /// reuses the default option-list renderer via the fallthrough in
 /// `render_step_content`.
 fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("AI Branch Suggestions");
+    let title = state
+        .spec_context_summary()
+        .map(|summary| format!("AI Branch Suggestions - {}", summary))
+        .unwrap_or_else(|| "AI Branch Suggestions".to_string());
+    let block = Block::default().borders(Borders::ALL).title(title);
 
     if state.ai_suggest.loading {
         let spinner_chars = [
             '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
         ];
         let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
-        let text = Paragraph::new(format!(" {} Generating branch name suggestions...", ch))
+        let text = Paragraph::new(format!(
+            " {} Generating branch name suggestions...\n\n Type Enter to use a manual branch name if needed.",
+            ch
+        ))
             .block(block)
             .style(Style::default().fg(Color::Yellow));
         frame.render_widget(text, area);
@@ -892,6 +1027,19 @@ mod tests {
         );
         assert!(!state.ai_suggest.loading);
         assert_eq!(state.ai_suggest.suggestions, suggestions);
+        assert_eq!(
+            state
+                .ai_suggest
+                .options
+                .iter()
+                .map(|option| option.branch_name.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "feature/add-auth".to_string(),
+                "feature/user-login".to_string(),
+                "feature/oauth-flow".to_string(),
+            ]
+        );
         assert_eq!(state.selected, 0);
         assert!(state.ai_suggest.error.is_none());
     }
@@ -913,11 +1061,14 @@ mod tests {
     fn ai_suggest_navigate_suggestions() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
-        state.ai_suggest.suggestions = vec![
-            "feature/a".to_string(),
-            "feature/b".to_string(),
-            "feature/c".to_string(),
-        ];
+        update(
+            &mut state,
+            WizardMessage::SetBranchSuggestions(vec![
+                "feature/a".to_string(),
+                "feature/b".to_string(),
+                "feature/c".to_string(),
+            ]),
+        );
         assert_eq!(state.selected, 0);
         update(&mut state, WizardMessage::MoveDown);
         assert_eq!(state.selected, 1);
@@ -931,7 +1082,13 @@ mod tests {
     fn ai_suggest_select_stores_branch_name() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
-        state.ai_suggest.suggestions = vec!["feature/a".to_string(), "feature/b".to_string()];
+        update(
+            &mut state,
+            WizardMessage::SetBranchSuggestions(vec![
+                "feature/a".to_string(),
+                "feature/b".to_string(),
+            ]),
+        );
         state.selected = 1;
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.branch_name, "feature/b");
@@ -942,7 +1099,13 @@ mod tests {
     fn ai_suggest_edit_switches_to_manual() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
-        state.ai_suggest.suggestions = vec!["feature/a".to_string(), "feature/b".to_string()];
+        update(
+            &mut state,
+            WizardMessage::SetBranchSuggestions(vec![
+                "feature/a".to_string(),
+                "feature/b".to_string(),
+            ]),
+        );
         state.selected = 0;
         update(&mut state, WizardMessage::EditSelectedSuggestion);
         assert_eq!(state.step, WizardStep::BranchNameInput);
@@ -1051,10 +1214,44 @@ mod tests {
         // option_count should be 1 (from max(1))
         assert_eq!(state.option_count(), 1);
 
-        // Select should advance to next step (no branch name stored since suggestions empty)
+        // Select should fall back to manual branch input
         update(&mut state, WizardMessage::Select);
-        assert_eq!(state.step, WizardStep::IssueSelect);
+        assert_eq!(state.step, WizardStep::BranchNameInput);
         assert!(state.branch_name.is_empty());
+    }
+
+    #[test]
+    fn ai_suggest_timeout_switches_to_manual_fallback() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        state.ai_suggest.loading = true;
+
+        for _ in 0..AI_SUGGEST_TIMEOUT_TICKS {
+            update(&mut state, WizardMessage::Tick);
+        }
+
+        assert!(!state.ai_suggest.loading);
+        assert_eq!(
+            state.ai_suggest.error.as_deref(),
+            Some("AI branch suggestion timed out")
+        );
+
+        update(&mut state, WizardMessage::Select);
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+    }
+
+    #[test]
+    fn spec_context_branch_seed_is_derived() {
+        let mut state = WizardState::default();
+        state.spec_context = Some(SpecContext {
+            spec_id: "SPEC-42".to_string(),
+            title: "My Feature".to_string(),
+        });
+
+        assert_eq!(
+            state.spec_context_branch_seed(),
+            Some("feature/spec-42-my-feature".to_string())
+        );
     }
 
     #[test]

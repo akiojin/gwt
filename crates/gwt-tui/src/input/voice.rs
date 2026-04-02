@@ -1,5 +1,7 @@
 //! Voice input state tracking and rendering for the TUI.
 
+use gwt_voice::VoiceState as BackendVoiceState;
+
 /// Voice input status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VoiceStatus {
@@ -38,6 +40,44 @@ impl VoiceInputState {
             self.status,
             VoiceStatus::Recording | VoiceStatus::Transcribing
         )
+    }
+
+    /// Convert the UI state into the backend voice state model.
+    pub fn backend_state(&self) -> BackendVoiceState {
+        match self.status {
+            VoiceStatus::Idle => BackendVoiceState::Idle,
+            VoiceStatus::Recording => BackendVoiceState::Recording,
+            VoiceStatus::Transcribing => BackendVoiceState::Transcribing,
+            VoiceStatus::Error => BackendVoiceState::Error(
+                self.error_message
+                    .clone()
+                    .unwrap_or_else(|| "Unknown error".to_string()),
+            ),
+        }
+    }
+
+    /// Apply a backend voice state to the UI state.
+    pub fn apply_backend_state(&mut self, state: &BackendVoiceState) {
+        self.status = match state {
+            BackendVoiceState::Idle => VoiceStatus::Idle,
+            BackendVoiceState::Recording => VoiceStatus::Recording,
+            BackendVoiceState::Transcribing => VoiceStatus::Transcribing,
+            BackendVoiceState::Error(_) => VoiceStatus::Error,
+        };
+
+        match state {
+            BackendVoiceState::Error(message) => {
+                self.error_message = Some(message.clone());
+                self.recording_duration_ms = 0;
+            }
+            BackendVoiceState::Idle => {
+                self.error_message = None;
+                self.recording_duration_ms = 0;
+            }
+            BackendVoiceState::Recording | BackendVoiceState::Transcribing => {
+                self.error_message = None;
+            }
+        }
     }
 }
 
@@ -240,5 +280,21 @@ mod tests {
         update(&mut state, VoiceInputMessage::StartRecording);
         assert_eq!(state.status, VoiceStatus::Recording);
         assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn backend_state_roundtrip_preserves_status_and_error() {
+        let mut state = VoiceInputState::new();
+        state.apply_backend_state(&BackendVoiceState::Transcribing);
+        assert_eq!(state.status, VoiceStatus::Transcribing);
+        assert!(state.error_message.is_none());
+
+        state.apply_backend_state(&BackendVoiceState::Error("mic failed".to_string()));
+        assert_eq!(state.status, VoiceStatus::Error);
+        assert_eq!(state.error_message.as_deref(), Some("mic failed"));
+        assert_eq!(
+            state.backend_state(),
+            BackendVoiceState::Error("mic failed".to_string())
+        );
     }
 }

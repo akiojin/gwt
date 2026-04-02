@@ -23,4 +23,14 @@ impl VoiceState {
     pub fn is_recording(&self) -> bool {
         matches!(self, Self::Recording)
     }
+
+    /// Returns `true` when transcription is in progress.
+    pub fn is_transcribing(&self) -> bool {
+        matches!(self, Self::Transcribing)
+    }
+
+    /// Returns `true` when the state represents an error.
+    pub fn is_error(&self) -> bool {
+        matches!(self, Self::Error(_))
+    }
 }

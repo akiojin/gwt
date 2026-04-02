@@ -1,5 +1,10 @@
 //! Specs management screen.
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -39,6 +44,14 @@ pub struct SpecsState {
     pub(crate) editing: bool,
     /// Buffer for the phase field being edited.
     pub(crate) edit_field: String,
+    /// Root directory used for spec file persistence.
+    pub(crate) spec_root: Option<PathBuf>,
+    /// Whether the detail section is being edited inline.
+    pub(crate) detail_editing: bool,
+    /// Buffer for the detail section content being edited.
+    pub(crate) detail_edit_buffer: String,
+    /// Latest persistence error.
+    pub(crate) save_error: Option<String>,
 }
 
 impl SpecsState {
@@ -70,6 +83,170 @@ impl SpecsState {
     }
 }
 
+fn spec_root_for_state(state: &SpecsState) -> Option<&Path> {
+    state.spec_root.as_deref()
+}
+
+fn spec_dir(root: &Path, spec_id: &str) -> PathBuf {
+    let spec_name = if spec_id.starts_with("SPEC-") {
+        spec_id.to_string()
+    } else {
+        format!("SPEC-{spec_id}")
+    };
+    root.join("specs").join(spec_name)
+}
+
+fn spec_metadata_path(root: &Path, spec_id: &str) -> PathBuf {
+    spec_dir(root, spec_id).join("metadata.json")
+}
+
+fn spec_markdown_path(root: &Path, spec_id: &str, file_name: &str) -> PathBuf {
+    spec_dir(root, spec_id).join(file_name)
+}
+
+fn read_spec_markdown_file(root: &Path, spec_id: &str, file_name: &str) -> Result<String, String> {
+    fs::read_to_string(spec_markdown_path(root, spec_id, file_name)).map_err(|e| e.to_string())
+}
+
+/// Update a metadata field in `metadata.json`.
+pub fn update_spec_metadata_field(
+    root: &Path,
+    spec_id: &str,
+    field_name: &str,
+    field_value: &str,
+) -> Result<(), String> {
+    let path = spec_metadata_path(root, spec_id);
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut value: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| "metadata.json must contain a JSON object".to_string())?;
+    obj.insert(
+        field_name.to_string(),
+        serde_json::Value::String(field_value.to_string()),
+    );
+    let serialized = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    fs::write(&path, serialized).map_err(|e| e.to_string())
+}
+
+/// Replace a markdown section by heading, preserving the rest of the file.
+pub fn replace_markdown_section(
+    content: &str,
+    heading: &str,
+    new_body: &str,
+) -> Result<String, String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut start_idx = None;
+    let mut heading_level = 0usize;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            let level = trimmed.chars().take_while(|c| *c == '#').count();
+            let title = trimmed[level..].trim();
+            if title == heading {
+                start_idx = Some(idx);
+                heading_level = level;
+                break;
+            }
+        }
+    }
+
+    let start_idx = match start_idx {
+        Some(idx) => idx,
+        None => {
+            let mut appended = String::new();
+            if !content.is_empty() {
+                appended.push_str(content.trim_end_matches('\n'));
+                appended.push_str("\n\n");
+            }
+            appended.push_str(&format!(
+                "{} {}\n",
+                "#".repeat(heading_level.max(2)),
+                heading
+            ));
+            if !new_body.is_empty() {
+                appended.push_str(new_body.trim_end_matches('\n'));
+                appended.push('\n');
+            }
+            return Ok(appended);
+        }
+    };
+
+    let mut end_idx = lines.len();
+    for (idx, line) in lines.iter().enumerate().skip(start_idx + 1) {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            end_idx = idx;
+            break;
+        }
+    }
+
+    let mut output = String::new();
+    for line in &lines[..=start_idx] {
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    if !new_body.is_empty() {
+        output.push_str(new_body.trim_end_matches('\n'));
+        output.push('\n');
+        output.push('\n');
+    }
+    if end_idx < lines.len() {
+        for line in &lines[end_idx..] {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    Ok(output)
+}
+
+/// Extract a markdown section body by heading.
+pub fn extract_markdown_section(content: &str, heading: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut start_idx = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            let level = trimmed.chars().take_while(|c| *c == '#').count();
+            let title = trimmed[level..].trim();
+            if title == heading {
+                start_idx = Some(idx);
+                break;
+            }
+        }
+    }
+
+    let start_idx = start_idx?;
+    let mut end_idx = lines.len();
+    for (idx, line) in lines.iter().enumerate().skip(start_idx + 1) {
+        if line.trim_start().starts_with('#') {
+            end_idx = idx;
+            break;
+        }
+    }
+
+    let body = lines[start_idx + 1..end_idx]
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(body.trim().to_string())
+}
+
+/// Update a markdown artifact file on disk.
+pub fn update_spec_markdown_section(
+    root: &Path,
+    spec_id: &str,
+    file_name: &str,
+    new_body: &str,
+) -> Result<(), String> {
+    let path = spec_markdown_path(root, spec_id, file_name);
+    fs::write(&path, new_body).map_err(|e| e.to_string())
+}
+
 /// Messages specific to the specs screen.
 #[derive(Debug, Clone)]
 pub enum SpecsMessage {
@@ -96,6 +273,16 @@ pub enum SpecsMessage {
     EditInput(char),
     /// Remove the last character from the edit buffer.
     EditBackspace,
+    /// Start editing the active detail section.
+    StartSectionEdit,
+    /// Save the active detail section.
+    SaveSectionEdit,
+    /// Cancel the active detail section edit.
+    CancelSectionEdit,
+    /// Append a character to the detail section buffer.
+    SectionEditInput(char),
+    /// Remove the last character from the detail section buffer.
+    SectionEditBackspace,
 }
 
 /// Update specs state in response to a message.
@@ -168,18 +355,27 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 if let Some(spec) = state.selected_spec() {
                     state.edit_field = spec.phase.clone();
                     state.editing = true;
+                    state.save_error = None;
                 }
             }
         }
         SpecsMessage::SaveEdit => {
             if state.editing {
-                let filtered = state.filtered_specs();
-                if let Some(spec) = filtered.get(state.selected) {
-                    let id = spec.id.clone();
+                let selected_id = state.selected_spec().map(|spec| spec.id.clone());
+                if let Some(id) = selected_id {
+                    if let Some(root) = spec_root_for_state(state) {
+                        if let Err(err) =
+                            update_spec_metadata_field(root, &id, "phase", &state.edit_field)
+                        {
+                            state.save_error = Some(err);
+                            return;
+                        }
+                    }
                     if let Some(s) = state.specs.iter_mut().find(|s| s.id == id) {
                         s.phase = state.edit_field.clone();
                     }
                 }
+                state.save_error = None;
                 state.editing = false;
                 state.edit_field.clear();
             }
@@ -187,6 +383,7 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         SpecsMessage::CancelEdit => {
             state.editing = false;
             state.edit_field.clear();
+            state.save_error = None;
         }
         SpecsMessage::EditInput(ch) => {
             if state.editing {
@@ -196,6 +393,55 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         SpecsMessage::EditBackspace => {
             if state.editing {
                 state.edit_field.pop();
+            }
+        }
+        SpecsMessage::StartSectionEdit => {
+            if state.detail_view && !state.detail_editing {
+                if let Some(spec) = state.selected_spec() {
+                    let section_name = DETAIL_SECTIONS[state.detail_section];
+                    state.detail_edit_buffer = if let Some(root) = spec_root_for_state(state) {
+                        fs::read_to_string(spec_markdown_path(root, &spec.id, section_name))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    state.detail_editing = true;
+                    state.save_error = None;
+                }
+            }
+        }
+        SpecsMessage::SaveSectionEdit => {
+            if state.detail_editing {
+                if let Some(spec) = state.selected_spec() {
+                    if let Some(root) = spec_root_for_state(state) {
+                        if let Err(err) = update_spec_markdown_section(
+                            root,
+                            &spec.id,
+                            DETAIL_SECTIONS[state.detail_section],
+                            &state.detail_edit_buffer,
+                        ) {
+                            state.save_error = Some(err);
+                            return;
+                        }
+                    }
+                    state.save_error = None;
+                }
+                state.detail_editing = false;
+            }
+        }
+        SpecsMessage::CancelSectionEdit => {
+            state.detail_editing = false;
+            state.detail_edit_buffer.clear();
+            state.save_error = None;
+        }
+        SpecsMessage::SectionEditInput(ch) => {
+            if state.detail_editing {
+                state.detail_edit_buffer.push(ch);
+            }
+        }
+        SpecsMessage::SectionEditBackspace => {
+            if state.detail_editing {
+                state.detail_edit_buffer.pop();
             }
         }
     }
@@ -236,7 +482,14 @@ fn render_header(state: &SpecsState, frame: &mut Frame, area: Rect) {
 
     let count = state.filtered_specs().len();
     let total = state.specs.len();
-    let header_text = format!(" Specs ({}/{})  |{}", count, total, search_display);
+    let header_text = if let Some(err) = &state.save_error {
+        format!(
+            " Specs ({}/{})  |{}  | Save error: {}",
+            count, total, search_display, err
+        )
+    } else {
+        format!(" Specs ({}/{})  |{}", count, total, search_display)
+    };
 
     let block = Block::default().borders(Borders::ALL).title("Specs");
     let paragraph = Paragraph::new(header_text)
@@ -299,7 +552,11 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().borders(Borders::ALL);
-    let list = List::new(items).block(block).highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -329,10 +586,17 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .split(area);
 
     // Header section
-    let header_text = format!(
-        " {} - {}\n Phase: {} | Status: {}\n Press Enter to go back | Tab/Shift+Tab: sections",
-        spec.id, spec.title, spec.phase, spec.status,
-    );
+    let header_text = if let Some(err) = &state.save_error {
+        format!(
+            " {} - {}\n Phase: {} | Status: {}\n Save error: {}\n Press Enter to go back | Tab/Shift+Tab: sections",
+            spec.id, spec.title, spec.phase, spec.status, err
+        )
+    } else {
+        format!(
+            " {} - {}\n Phase: {} | Status: {}\n Press Enter to go back | Tab/Shift+Tab: sections",
+            spec.id, spec.title, spec.phase, spec.status,
+        )
+    };
     let header_block = Block::default().borders(Borders::ALL).title("Spec Detail");
     let header = Paragraph::new(header_text)
         .block(header_block)
@@ -353,11 +617,31 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
 
     // Section content placeholder
     let section_name = DETAIL_SECTIONS[state.detail_section];
-    let content_text = format!(
-        "Content of {} for {}\n\n(File content would be loaded here)",
-        section_name, spec.id,
-    );
-    let content_block = Block::default().borders(Borders::ALL).title(section_name);
+    let content_text = if state.detail_editing {
+        format!(
+            "{}\n_\nEnter: save | Esc: cancel | Backspace: delete",
+            state.detail_edit_buffer
+        )
+    } else if let Some(root) = spec_root_for_state(state) {
+        read_spec_markdown_file(root, &spec.id, section_name).unwrap_or_else(|_| {
+            format!(
+                "Unable to load {} for {}\n\nPress 'e' to create or replace this file.",
+                section_name, spec.id
+            )
+        })
+    } else {
+        format!(
+            "Content of {} for {}\n\nSpec root is not configured.",
+            section_name, spec.id,
+        )
+    };
+    let content_block = Block::default()
+        .borders(Borders::ALL)
+        .title(if state.detail_editing {
+            format!("Editing {}", section_name)
+        } else {
+            section_name.to_string()
+        });
     let content = Paragraph::new(content_text)
         .block(content_block)
         .wrap(Wrap { trim: false })
@@ -371,6 +655,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::fs;
 
     fn sample_specs() -> Vec<SpecItem> {
         vec![
@@ -399,6 +684,35 @@ mod tests {
                 status: "blocked".to_string(),
             },
         ]
+    }
+
+    fn write_spec_fixture(root: &std::path::Path, spec_id: &str) {
+        let spec_dir = super::spec_dir(root, spec_id);
+        fs::create_dir_all(&spec_dir).unwrap();
+        fs::write(
+            spec_dir.join("metadata.json"),
+            serde_json::json!({
+                "id": spec_id,
+                "title": "Fixture",
+                "phase": "draft",
+                "status": "open"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(spec_dir.join("spec.md"), "# spec.md\n\noriginal\n").unwrap();
+        fs::write(spec_dir.join("plan.md"), "# plan.md\n\nplan body\n").unwrap();
+        fs::write(spec_dir.join("tasks.md"), "# tasks.md\n\ntasks body\n").unwrap();
+        fs::write(
+            spec_dir.join("research.md"),
+            "# research.md\n\nresearch body\n",
+        )
+        .unwrap();
+        fs::write(
+            spec_dir.join("data-model.md"),
+            "# data-model.md\n\ndata model body\n",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -708,6 +1022,74 @@ mod tests {
         assert_eq!(DETAIL_SECTIONS.len(), 5);
         assert_eq!(DETAIL_SECTIONS[0], "spec.md");
         assert_eq!(DETAIL_SECTIONS[4], "data-model.md");
+    }
+
+    #[test]
+    fn update_spec_metadata_field_persists_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-99");
+
+        update_spec_metadata_field(dir.path(), "SPEC-99", "phase", "implementation").unwrap();
+
+        let metadata =
+            fs::read_to_string(super::spec_metadata_path(dir.path(), "SPEC-99")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(parsed["phase"], "implementation");
+    }
+
+    #[test]
+    fn save_edit_updates_metadata_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-100");
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-100".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartEdit);
+        state.edit_field = "implementation".to_string();
+        update(&mut state, SpecsMessage::SaveEdit);
+
+        let metadata =
+            fs::read_to_string(super::spec_metadata_path(dir.path(), "SPEC-100")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(parsed["phase"], "implementation");
+        assert_eq!(state.specs[0].phase, "implementation");
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
+    fn save_section_edit_updates_markdown_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-101");
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-101".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.detail_view = true;
+        state.detail_section = 0;
+        update(&mut state, SpecsMessage::StartSectionEdit);
+        assert!(state.detail_editing);
+        assert!(state.detail_edit_buffer.contains("original"));
+
+        state.detail_edit_buffer = "# spec.md\n\nupdated body\n".to_string();
+        update(&mut state, SpecsMessage::SaveSectionEdit);
+
+        let body = fs::read_to_string(super::spec_markdown_path(dir.path(), "SPEC-101", "spec.md"))
+            .unwrap();
+        assert_eq!(body, "# spec.md\n\nupdated body\n");
+        assert!(!state.detail_editing);
+        assert!(state.save_error.is_none());
     }
 
     // ---- LaunchAgent tests ----

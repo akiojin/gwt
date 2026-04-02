@@ -1,6 +1,7 @@
 //! Message type — all actions in the Elm Architecture.
 
 use crossterm::event::{KeyEvent, MouseEvent};
+use gwt_notification::Notification;
 
 use crate::input::voice::VoiceInputMessage;
 use crate::model::ManagementTab;
@@ -53,6 +54,8 @@ pub enum Message {
     Tick,
     /// Push an error message onto the queue.
     PushError(String),
+    /// Push a structured notification through the UI routing path.
+    Notify(Notification),
     /// Dismiss the top error.
     DismissError,
     /// Branches screen message.
@@ -114,6 +117,11 @@ mod tests {
         let _ = Message::CloseSession;
         let _ = Message::Tick;
         let _ = Message::PushError("err".into());
+        let _ = Message::Notify(Notification::new(
+            gwt_notification::Severity::Info,
+            "test",
+            "message",
+        ));
         let _ = Message::DismissError;
         let _ = Message::Resize(80, 24);
         let _ = Message::PtyOutput("id".into(), vec![0x41]);

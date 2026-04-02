@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::input::voice::VoiceInputState;
 use crate::screens::branches::BranchesState;
@@ -19,6 +20,7 @@ use crate::screens::settings::SettingsState;
 use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
+use gwt_notification::{Notification, StructuredLog};
 
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +144,12 @@ impl VtState {
 /// Central application state.
 #[derive(Debug)]
 pub struct Model {
+    /// Active status-bar notification (Info/Warn surface).
+    pub(crate) current_notification: Option<Notification>,
+    /// Remaining lifetime for auto-dismissing status notifications.
+    pub(crate) current_notification_ttl: Option<Duration>,
+    /// Structured notification log.
+    pub(crate) notification_log: StructuredLog,
     /// Which layer has focus.
     pub active_layer: ActiveLayer,
     /// All open session tabs.
@@ -205,8 +213,15 @@ impl Model {
             tab_type: SessionTabType::Shell,
             vt: VtState::new(24, 80),
         };
+        let specs = SpecsState {
+            spec_root: Some(repo_path.clone()),
+            ..SpecsState::default()
+        };
 
         Self {
+            current_notification: None,
+            current_notification_ttl: None,
+            notification_log: StructuredLog::default(),
             active_layer: ActiveLayer::Management,
             sessions: vec![default_session],
             active_session: 0,
@@ -221,7 +236,7 @@ impl Model {
             issues: IssuesState::default(),
             git_view: GitViewState::default(),
             pr_dashboard: PrDashboardState::default(),
-            specs: SpecsState::default(),
+            specs,
             settings: SettingsState::default(),
             logs: LogsState::default(),
             versions: VersionsState::default(),
