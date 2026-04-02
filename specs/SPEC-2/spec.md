@@ -95,7 +95,14 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
-- **FR-006**: 8 management tabs: Branches, SPECs, Issues, Profiles, Git View, Versions, Settings, Logs.
+- **FR-006**: 7 management tabs: Branches, Issues, Profiles, Git View, Versions, Settings, Logs. (SPECs tab removed — SPECs are shown in Branch Detail view.)
+- **FR-006a**: Branch Detail view: Enter on a branch in Branches tab replaces tab content with detail view. Esc returns to branch list. Sections:
+  - **Overview**: Branch name, head status, worktree path, linked Issues, PR status
+  - **SPECs**: SPEC list from the branch's worktree `specs/` directory (worktree-only)
+  - **Git Status**: Staged/unstaged/untracked files, recent commits
+  - **Sessions**: Active agent/shell sessions on this branch
+  - **Actions**: Launch agent, create worktree, delete worktree
+  - Tab key cycles between sections within the detail view.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-009**: Session navigation: Ctrl+G,] (next), Ctrl+G,[ (prev), Ctrl+G,1-9 (direct).

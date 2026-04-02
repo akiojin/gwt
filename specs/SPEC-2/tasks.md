@@ -33,7 +33,26 @@
 - [ ] T017 Wire Git View into management panel tab navigation at index 5.
 - [ ] T018 Verify Git View tests pass GREEN.
 
-## Phase 4: Regression and Polish
+## Phase 4: Branch Detail View + SPECs Tab Removal
+
+- [ ] T022 Remove ManagementTab::Specs variant from model.rs (7 tabs instead of 8)
+- [ ] T023 Remove specs tab routing from app.rs (route_key_to_management, render_management_tab_content)
+- [ ] T024 Create screens/branch_detail.rs with BranchDetailState:
+  - sections: Overview, SPECs, GitStatus, Sessions, Actions
+  - active_section: usize (Tab cycles)
+  - spec_items, files, commits, sessions, pr_status
+- [ ] T025 Add BranchDetailMessage: NextSection, PrevSection, MoveUp, MoveDown, Select, Refresh, Back
+- [ ] T026 Implement Overview section: branch name, head, worktree path, linked Issues, PR
+- [ ] T027 Implement SPECs section: read specs/ from worktree path, list SPEC metadata
+- [ ] T028 Implement GitStatus section: staged/unstaged/untracked files, recent commits
+- [ ] T029 Implement Sessions section: active sessions on this branch
+- [ ] T030 Implement Actions section: Launch Agent, Create Worktree, Delete Worktree
+- [ ] T031 Wire into branches.rs: Enter on branch → BranchDetail, Esc → back to list
+- [ ] T032 Add BranchDetailState to Model, route messages in app.rs
+- [ ] T033 Write 10+ tests for branch detail state transitions and rendering
+- [ ] T034 Update E2E snapshot tests
+
+## Phase 5: Regression and Polish
 
 - [ ] T019 Run full existing test suite and verify no regressions.
 - [ ] T020 Run `cargo clippy` and `cargo fmt` on all changed files.

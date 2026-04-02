@@ -171,7 +171,11 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().borders(Borders::ALL).title(title);
-    let list = List::new(items).block(block).highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);

@@ -100,6 +100,7 @@ pub fn update(model: &mut Model, msg: Message) {
             model.error_queue.pop_front();
         }
         Message::Tick => {
+            drain_notification_bus(model);
             tick_notification(model);
             // Forward tick to wizard (AI suggest spinner) when active
             if let Some(ref mut wizard) = model.wizard {
@@ -194,14 +195,10 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::confirm::update(&mut model.confirm, msg);
         }
         Message::Voice(msg) => {
-            let transcription = match &msg {
-                VoiceInputMessage::TranscriptionResult(text) => Some(text.clone()),
-                _ => None,
-            };
-            crate::input::voice::update(&mut model.voice, msg);
-            if let Some(text) = transcription.filter(|text| !text.trim().is_empty()) {
-                push_input_to_active_session(model, text.into_bytes());
-            }
+            let voice_enabled = Settings::load()
+                .map(|settings| settings.voice.enabled)
+                .unwrap_or(false);
+            handle_voice_message(model, msg, voice_enabled);
         }
         Message::Initialization(msg) => {
             use screens::initialization::InitializationMessage;
@@ -682,6 +679,12 @@ fn tick_notification(model: &mut Model) {
     }
 }
 
+fn drain_notification_bus(model: &mut Model) {
+    for notification in model.drain_notifications() {
+        update(model, Message::Notify(notification));
+    }
+}
+
 fn push_input_to_active_session(model: &mut Model, bytes: Vec<u8>) {
     let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
         return;
@@ -690,6 +693,21 @@ fn push_input_to_active_session(model: &mut Model, bytes: Vec<u8>) {
     model
         .pending_pty_inputs
         .push_back(crate::model::PendingPtyInput { session_id, bytes });
+}
+
+fn handle_voice_message(model: &mut Model, msg: VoiceInputMessage, voice_enabled: bool) {
+    if matches!(msg, VoiceInputMessage::StartRecording) && !voice_enabled {
+        return;
+    }
+
+    let transcription = match &msg {
+        VoiceInputMessage::TranscriptionResult(text) => Some(text.clone()),
+        _ => None,
+    };
+    crate::input::voice::update(&mut model.voice, msg);
+    if let Some(text) = transcription.filter(|text| !text.trim().is_empty()) {
+        push_input_to_active_session(model, text.into_bytes());
+    }
 }
 
 fn maybe_start_wizard_branch_suggestions(wizard: &mut screens::wizard::WizardState) {
@@ -1355,9 +1373,10 @@ mod tests {
     #[test]
     fn update_voice_transcription_result_queues_pty_bytes() {
         let mut model = test_model();
-        update(
+        handle_voice_message(
             &mut model,
-            Message::Voice(VoiceInputMessage::TranscriptionResult("git status".into())),
+            VoiceInputMessage::TranscriptionResult("git status".into()),
+            true,
         );
 
         let forwarded = model.pending_pty_inputs().back().unwrap();
@@ -1369,13 +1388,36 @@ mod tests {
     #[test]
     fn update_voice_transcription_result_ignores_empty_text() {
         let mut model = test_model();
-        update(
+        handle_voice_message(
             &mut model,
-            Message::Voice(VoiceInputMessage::TranscriptionResult("   ".into())),
+            VoiceInputMessage::TranscriptionResult("   ".into()),
+            true,
         );
 
         assert!(model.pending_pty_inputs().is_empty());
         assert_eq!(model.voice.buffer, "   ");
+    }
+
+    #[test]
+    fn handle_voice_start_recording_is_noop_when_disabled() {
+        let mut model = test_model();
+
+        handle_voice_message(&mut model, VoiceInputMessage::StartRecording, false);
+
+        assert_eq!(model.voice.status, crate::input::voice::VoiceStatus::Idle);
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn handle_voice_start_recording_transitions_when_enabled() {
+        let mut model = test_model();
+
+        handle_voice_message(&mut model, VoiceInputMessage::StartRecording, true);
+
+        assert_eq!(
+            model.voice.status,
+            crate::input::voice::VoiceStatus::Recording
+        );
     }
 
     #[test]
@@ -1458,6 +1500,21 @@ mod tests {
         assert_eq!(model.logs.entries.len(), 1);
         assert_eq!(model.logs.entries[0].source, "pty");
         assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn update_tick_drains_notification_bus_into_notify_flow() {
+        let mut model = test_model();
+        let notification = Notification::new(Severity::Info, "bus", "Queued");
+
+        assert!(model.notification_bus_handle().send(notification));
+
+        update(&mut model, Message::Tick);
+
+        assert_eq!(model.logs.entries.len(), 1);
+        assert_eq!(model.logs.entries[0].message, "Queued");
+        assert!(model.current_notification.is_some());
+        assert!(model.drain_notifications().is_empty());
     }
 
     #[test]

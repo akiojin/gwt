@@ -20,7 +20,7 @@ use crate::screens::settings::SettingsState;
 use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
-use gwt_notification::{Notification, StructuredLog};
+use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
 
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +150,10 @@ pub struct Model {
     pub(crate) current_notification_ttl: Option<Duration>,
     /// Structured notification log.
     pub(crate) notification_log: StructuredLog,
+    /// Sender side of the notification bus.
+    pub(crate) _notification_bus: NotificationBus,
+    /// Receiver side of the notification bus.
+    pub(crate) notification_receiver: NotificationReceiver,
     /// Which layer has focus.
     pub active_layer: ActiveLayer,
     /// All open session tabs.
@@ -213,6 +217,7 @@ impl Model {
             tab_type: SessionTabType::Shell,
             vt: VtState::new(24, 80),
         };
+        let (notification_bus, notification_receiver) = NotificationBus::new();
         let specs = SpecsState {
             spec_root: Some(repo_path.clone()),
             ..SpecsState::default()
@@ -222,6 +227,8 @@ impl Model {
             current_notification: None,
             current_notification_ttl: None,
             notification_log: StructuredLog::default(),
+            _notification_bus: notification_bus,
+            notification_receiver,
             active_layer: ActiveLayer::Management,
             sessions: vec![default_session],
             active_session: 0,
@@ -281,6 +288,17 @@ impl Model {
     /// Buffered PTY input awaiting delivery to sessions.
     pub fn pending_pty_inputs(&self) -> &VecDeque<PendingPtyInput> {
         &self.pending_pty_inputs
+    }
+
+    /// Cloneable handle for sending notifications into the TUI.
+    #[allow(dead_code)]
+    pub(crate) fn notification_bus_handle(&self) -> NotificationBus {
+        self._notification_bus.clone()
+    }
+
+    /// Drain queued notifications from the in-process bus.
+    pub(crate) fn drain_notifications(&mut self) -> Vec<Notification> {
+        self.notification_receiver.drain()
     }
 
     /// Get a mutable reference to the initialization state.
@@ -378,7 +396,7 @@ mod tests {
 
     #[test]
     fn model_new_defaults() {
-        let model = Model::new(PathBuf::from("/tmp/repo"));
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
         assert_eq!(model.active_layer, ActiveLayer::Management);
         assert_eq!(model.session_count(), 1);
         assert_eq!(model.active_session, 0);
@@ -386,6 +404,12 @@ mod tests {
         assert_eq!(model.management_tab, ManagementTab::Branches);
         assert!(model.error_queue.is_empty());
         assert!(!model.quit);
+        assert!(model.drain_notifications().is_empty());
+        assert!(model.notification_bus_handle().send(Notification::new(
+            gwt_notification::Severity::Info,
+            "test",
+            "queued",
+        )));
     }
 
     #[test]

@@ -6,12 +6,13 @@ use crate::Notification;
 const CHANNEL_CAPACITY: usize = 1000;
 
 /// Sender half of the notification bus.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NotificationBus {
     tx: mpsc::Sender<Notification>,
 }
 
 /// Receiver half of the notification bus.
+#[derive(Debug)]
 pub struct NotificationReceiver {
     rx: mpsc::Receiver<Notification>,
 }
@@ -35,6 +36,15 @@ impl NotificationReceiver {
     pub fn try_recv(&mut self) -> Option<Notification> {
         self.rx.try_recv().ok()
     }
+
+    /// Drain all currently queued notifications without blocking.
+    pub fn drain(&mut self) -> Vec<Notification> {
+        let mut notifications = Vec::new();
+        while let Some(notification) = self.try_recv() {
+            notifications.push(notification);
+        }
+        notifications
+    }
 }
 
 #[cfg(test)]
@@ -55,6 +65,20 @@ mod tests {
     #[test]
     fn try_recv_empty_returns_none() {
         let (_bus, mut rx) = NotificationBus::new();
+        assert!(rx.try_recv().is_none());
+    }
+
+    #[test]
+    fn drain_returns_all_pending_notifications() {
+        let (bus, mut rx) = NotificationBus::new();
+        bus.send(Notification::new(Severity::Info, "core", "one"));
+        bus.send(Notification::new(Severity::Warn, "core", "two"));
+
+        let drained = rx.drain();
+
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].message, "one");
+        assert_eq!(drained[1].message, "two");
         assert!(rx.try_recv().is_none());
     }
 

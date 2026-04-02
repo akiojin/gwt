@@ -30,7 +30,9 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
     // Check if path itself is a bare repo (has HEAD + objects + refs)
     if path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists() {
         let develop = find_develop_worktree(path.parent().unwrap_or(path));
-        return RepoType::Bare { develop_worktree: develop };
+        return RepoType::Bare {
+            develop_worktree: develop,
+        };
     }
     // Check child directories for bare repos, worktrees, or normal repos
     if let Ok(entries) = std::fs::read_dir(path) {
@@ -55,7 +57,9 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
         }
         if found_bare {
             let develop = find_develop_worktree(path);
-            return RepoType::Bare { develop_worktree: develop };
+            return RepoType::Bare {
+                develop_worktree: develop,
+            };
         }
     }
     // Walk parent directories
@@ -72,7 +76,9 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
             && parent.join("refs").exists()
         {
             let develop = find_develop_worktree(parent.parent().unwrap_or(parent));
-            return RepoType::Bare { develop_worktree: develop };
+            return RepoType::Bare {
+                develop_worktree: develop,
+            };
         }
         current = parent.to_path_buf();
     }
@@ -349,7 +355,10 @@ mod tests {
             .args(["init", "--bare", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
-        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Bare { .. }));
+        assert!(matches!(
+            detect_repo_type(tmp.path()),
+            RepoType::Bare { .. }
+        ));
     }
 
     #[test]
@@ -373,7 +382,10 @@ mod tests {
             .output()
             .unwrap();
         // Parent directory (tmp) should detect Bare via child scan
-        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Bare { .. }));
+        assert!(matches!(
+            detect_repo_type(tmp.path()),
+            RepoType::Bare { .. }
+        ));
     }
 
     #[test]
