@@ -1722,13 +1722,12 @@ fn handle_settings_msg(model: &mut Model, msg: SettingsMessage) {
         SettingsMessage::ProfileEnvEdit => state.enter_env_edit_mode(),
         SettingsMessage::EnvNew => state.env_state.add_new_var(),
         SettingsMessage::EnvDelete => state.env_state.delete_selected(),
+        SettingsMessage::EnvToggleDisabled => {
+            state.env_state.toggle_selected_disabled();
+        }
         SettingsMessage::EnvToggleKeyValue => state.env_state.toggle_key_value(),
         SettingsMessage::EnvStartEdit => {
-            if !state.env_state.vars.is_empty() {
-                let idx = state.env_state.selected_index;
-                let key_len = state.env_state.vars[idx].0.len();
-                state.env_state.editing = Some(crate::screens::settings::EnvEditMode::Key(key_len));
-            }
+            state.env_state.start_edit_selected();
         }
         SettingsMessage::EnvConfirm => {
             state.env_state.editing = None;
@@ -1737,10 +1736,9 @@ fn handle_settings_msg(model: &mut Model, msg: SettingsMessage) {
 }
 
 fn handle_env_edit_char(state: &mut crate::screens::SettingsState, c: char) {
-    let idx = state.env_state.selected_index;
-    if idx >= state.env_state.vars.len() {
+    let Some(idx) = state.env_state.selected_profile_index() else {
         return;
-    }
+    };
     if let Some(ref mode) = state.env_state.editing.clone() {
         match mode {
             crate::screens::settings::EnvEditMode::Key(cursor) => {
@@ -1760,10 +1758,9 @@ fn handle_env_edit_char(state: &mut crate::screens::SettingsState, c: char) {
 }
 
 fn handle_env_edit_backspace(state: &mut crate::screens::SettingsState) {
-    let idx = state.env_state.selected_index;
-    if idx >= state.env_state.vars.len() {
+    let Some(idx) = state.env_state.selected_profile_index() else {
         return;
-    }
+    };
     if let Some(ref mode) = state.env_state.editing.clone() {
         match mode {
             crate::screens::settings::EnvEditMode::Key(cursor) => {

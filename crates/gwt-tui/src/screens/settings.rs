@@ -357,9 +357,27 @@ impl ProfileFormState {
 // Environment variable edit state
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvDisplayKind {
+    OsOnly,
+    OsDisabled,
+    Added,
+    Overridden,
+}
+
+#[derive(Debug, Clone)]
+struct DisplayEnvItem {
+    key: String,
+    value: String,
+    kind: EnvDisplayKind,
+    profile_index: Option<usize>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EnvEditState {
     pub vars: Vec<(String, String)>,
+    pub os_vars: Vec<(String, String)>,
+    pub disabled_keys: Vec<String>,
     pub selected_index: usize,
     pub editing: Option<EnvEditMode>,
 }
@@ -378,8 +396,12 @@ impl EnvEditState {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         vars.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut os_vars: Vec<(String, String)> = std::env::vars().collect();
+        os_vars.sort_by(|a, b| a.0.cmp(&b.0));
         Self {
             vars,
+            os_vars,
+            disabled_keys: profile.disabled_env.clone(),
             selected_index: 0,
             editing: None,
         }
@@ -391,21 +413,26 @@ impl EnvEditState {
 
     pub fn add_new_var(&mut self) {
         self.vars.push((String::new(), String::new()));
-        self.selected_index = self.vars.len() - 1;
+        self.selected_index = 0;
         self.editing = Some(EnvEditMode::Key(0));
     }
 
     pub fn delete_selected(&mut self) {
-        if !self.vars.is_empty() {
-            self.vars.remove(self.selected_index);
-            if self.selected_index > 0 && self.selected_index >= self.vars.len() {
-                self.selected_index = self.vars.len().saturating_sub(1);
+        if self.selected_is_overridden() {
+            self.delete_selected_override();
+            return;
+        }
+        if let Some(index) = self.selected_profile_index() {
+            self.vars.remove(index);
+            if self.selected_index > 0 && self.selected_index >= self.display_len() {
+                self.selected_index = self.display_len().saturating_sub(1);
             }
         }
     }
 
     pub fn select_next(&mut self) {
-        if !self.vars.is_empty() && self.selected_index < self.vars.len() - 1 {
+        let total = self.display_len();
+        if total > 0 && self.selected_index < total - 1 {
             self.selected_index += 1;
         }
     }
@@ -433,6 +460,151 @@ impl EnvEditState {
                 }
             }
         }
+    }
+
+    fn display_len(&self) -> usize {
+        self.display_items().len()
+    }
+
+    fn selected_display_item(&self) -> Option<DisplayEnvItem> {
+        let items = self.display_items();
+        items.get(self.selected_index).cloned()
+    }
+
+    fn display_items(&self) -> Vec<DisplayEnvItem> {
+        let mut os_map: HashMap<String, String> = HashMap::new();
+        for (key, value) in &self.os_vars {
+            os_map.insert(key.clone(), value.clone());
+        }
+        let mut profile_map: HashMap<String, (usize, String)> = HashMap::new();
+        for (index, (key, value)) in self.vars.iter().enumerate() {
+            profile_map.insert(key.clone(), (index, value.clone()));
+        }
+
+        let mut keys: Vec<String> = os_map.keys().cloned().collect();
+        for key in profile_map.keys() {
+            if !os_map.contains_key(key) {
+                keys.push(key.clone());
+            }
+        }
+        keys.sort();
+
+        keys.into_iter()
+            .map(|key| match (profile_map.get(&key), os_map.get(&key)) {
+                (Some((index, profile_value)), Some(_)) => DisplayEnvItem {
+                    key,
+                    value: profile_value.clone(),
+                    kind: EnvDisplayKind::Overridden,
+                    profile_index: Some(*index),
+                },
+                (Some((index, profile_value)), None) => DisplayEnvItem {
+                    key,
+                    value: profile_value.clone(),
+                    kind: EnvDisplayKind::Added,
+                    profile_index: Some(*index),
+                },
+                (None, Some(os_value)) => DisplayEnvItem {
+                    key: key.clone(),
+                    value: os_value.clone(),
+                    kind: if self.disabled_keys.contains(&key) {
+                        EnvDisplayKind::OsDisabled
+                    } else {
+                        EnvDisplayKind::OsOnly
+                    },
+                    profile_index: None,
+                },
+                (None, None) => DisplayEnvItem {
+                    key,
+                    value: String::new(),
+                    kind: EnvDisplayKind::OsOnly,
+                    profile_index: None,
+                },
+            })
+            .collect()
+    }
+
+    pub fn selected_profile_index(&self) -> Option<usize> {
+        self.selected_display_item()
+            .and_then(|item| item.profile_index)
+    }
+
+    pub fn selected_is_overridden(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::Overridden)
+        )
+    }
+
+    pub fn selected_is_added(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::Added)
+        )
+    }
+
+    pub fn selected_is_os_entry(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::OsOnly | EnvDisplayKind::OsDisabled)
+        )
+    }
+
+    pub fn selected_key(&self) -> Option<String> {
+        self.selected_display_item().map(|item| item.key)
+    }
+
+    pub fn toggle_selected_disabled(&mut self) -> bool {
+        let Some(item) = self.selected_display_item() else {
+            return false;
+        };
+        if !matches!(
+            item.kind,
+            EnvDisplayKind::OsOnly | EnvDisplayKind::OsDisabled
+        ) {
+            return false;
+        }
+        if let Some(pos) = self.disabled_keys.iter().position(|key| key == &item.key) {
+            self.disabled_keys.remove(pos);
+            false
+        } else {
+            self.disabled_keys.push(item.key);
+            self.disabled_keys.sort();
+            true
+        }
+    }
+
+    pub fn delete_selected_override(&mut self) {
+        if let Some(item) = self.selected_display_item() {
+            if item.kind == EnvDisplayKind::Overridden {
+                if let Some(pos) = self.vars.iter().position(|var| var.0 == item.key) {
+                    self.vars.remove(pos);
+                }
+            }
+        }
+    }
+
+    pub fn start_edit_selected(&mut self) {
+        let Some(item) = self.selected_display_item() else {
+            return;
+        };
+        if let Some(index) = item.profile_index {
+            let value_len = self.vars[index].1.len();
+            self.selected_index = self
+                .selected_index
+                .min(self.display_len().saturating_sub(1));
+            self.editing = Some(EnvEditMode::Value(value_len));
+            return;
+        }
+
+        self.vars.push((item.key.clone(), item.value.clone()));
+        self.vars.sort_by(|a, b| a.0.cmp(&b.0));
+        let new_index = self
+            .display_items()
+            .iter()
+            .position(|display| display.key == item.key && display.profile_index.is_some())
+            .unwrap_or(0);
+        self.selected_index = new_index;
+        self.editing = Some(EnvEditMode::Value(item.value.len()));
     }
 }
 
@@ -881,6 +1053,7 @@ impl SettingsState {
             .ok_or("Profile not found")?;
 
         profile.env = self.env_state.to_env();
+        profile.disabled_env = self.env_state.disabled_keys.clone();
         Ok(())
     }
 
@@ -938,6 +1111,7 @@ pub enum SettingsMessage {
     // Env edit
     EnvNew,
     EnvDelete,
+    EnvToggleDisabled,
     EnvToggleKeyValue,
     EnvStartEdit,
     EnvConfirm,
@@ -1398,7 +1572,8 @@ fn render_profile_delete_confirm(
 fn render_env_edit(state: &SettingsState, buf: &mut Buffer, area: Rect) {
     let env = &state.env_state;
 
-    if env.vars.is_empty() {
+    let display_items = env.display_items();
+    if display_items.is_empty() {
         let paragraph = Paragraph::new("No environment variables. Press 'n' to add.")
             .alignment(Alignment::Center)
             .block(styled_block(" Environment Variables "));
@@ -1406,39 +1581,45 @@ fn render_env_edit(state: &SettingsState, buf: &mut Buffer, area: Rect) {
         return;
     }
 
-    let list_items: Vec<ListItem> = env
-        .vars
+    let list_items: Vec<ListItem> = display_items
         .iter()
         .enumerate()
-        .map(|(i, (key, value))| {
+        .map(|(i, item)| {
             let is_selected = i == env.selected_index;
             let display = if let Some(ref edit_mode) = env.editing {
                 if is_selected {
                     match edit_mode {
                         EnvEditMode::Key(cursor) => {
-                            let mut k = key.clone();
+                            let mut k = item.key.clone();
                             let pos = (*cursor).min(k.len());
                             k.insert(pos, '|');
-                            format!("  {} = {}", k, value)
+                            format!("  {} = {}", k, item.value)
                         }
                         EnvEditMode::Value(cursor) => {
-                            let mut v = value.clone();
+                            let mut v = item.value.clone();
                             let pos = (*cursor).min(v.len());
                             v.insert(pos, '|');
-                            format!("  {} = {}", key, v)
+                            format!("  {} = {}", item.key, v)
                         }
                     }
                 } else {
-                    format!("  {} = {}", key, value)
+                    format!("  {} = {}", item.key, item.value)
                 }
             } else {
-                format!("  {} = {}", key, value)
+                format!("  {} = {}", item.key, item.value)
             };
 
             let style = if is_selected {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
-                Style::default()
+                match item.kind {
+                    EnvDisplayKind::Overridden => Style::default().fg(Color::Yellow),
+                    EnvDisplayKind::Added => Style::default().fg(Color::Green),
+                    EnvDisplayKind::OsDisabled => Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                    EnvDisplayKind::OsOnly => Style::default(),
+                }
             };
             ListItem::new(display).style(style)
         })
@@ -1626,6 +1807,7 @@ fn handle_env_edit_key(state: &SettingsState, key: &KeyEvent) -> Option<Settings
             KeyCode::Enter => Some(SettingsMessage::EnvStartEdit),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(SettingsMessage::EnvNew),
             KeyCode::Char('d') | KeyCode::Char('D') => Some(SettingsMessage::EnvDelete),
+            KeyCode::Char(' ') => Some(SettingsMessage::EnvToggleDisabled),
             _ => None,
         }
     }
@@ -1810,6 +1992,82 @@ mod tests {
 
         let env_map = env.to_env();
         assert_eq!(env_map.len(), 2);
+    }
+
+    #[test]
+    fn env_edit_state_classifies_os_and_profile_entries() {
+        let mut profile = Profile::new("test");
+        profile
+            .env
+            .insert("TOKEN".to_string(), "override".to_string());
+        profile.env.insert("NEW".to_string(), "added".to_string());
+        profile.disabled_env.push("HOME".to_string());
+
+        let mut env = EnvEditState::from_profile(&profile);
+        env.os_vars = vec![
+            ("HOME".to_string(), "/tmp".to_string()),
+            ("PATH".to_string(), "/bin".to_string()),
+            ("TOKEN".to_string(), "os-token".to_string()),
+        ];
+
+        let items = env.display_items();
+        let home = items.iter().find(|item| item.key == "HOME").unwrap();
+        assert_eq!(home.kind, EnvDisplayKind::OsDisabled);
+        let path = items.iter().find(|item| item.key == "PATH").unwrap();
+        assert_eq!(path.kind, EnvDisplayKind::OsOnly);
+        let token = items.iter().find(|item| item.key == "TOKEN").unwrap();
+        assert_eq!(token.kind, EnvDisplayKind::Overridden);
+        let added = items.iter().find(|item| item.key == "NEW").unwrap();
+        assert_eq!(added.kind, EnvDisplayKind::Added);
+    }
+
+    #[test]
+    fn env_edit_state_toggle_selected_disabled_marks_os_entry() {
+        let profile = Profile::new("test");
+        let mut env = EnvEditState::from_profile(&profile);
+        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
+
+        assert!(env.toggle_selected_disabled());
+        assert_eq!(env.disabled_keys, vec!["PATH".to_string()]);
+        assert!(!env.toggle_selected_disabled());
+        assert!(env.disabled_keys.is_empty());
+    }
+
+    #[test]
+    fn env_edit_state_start_edit_selected_on_os_entry_creates_override() {
+        let profile = Profile::new("test");
+        let mut env = EnvEditState::from_profile(&profile);
+        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
+
+        env.start_edit_selected();
+
+        assert_eq!(env.vars.len(), 1);
+        assert_eq!(env.vars[0].0, "PATH");
+        assert_eq!(env.vars[0].1, "/bin");
+        assert!(env.selected_is_overridden() || env.selected_is_added());
+    }
+
+    #[test]
+    fn persist_env_edit_saves_disabled_env() {
+        let mut state = SettingsState::new();
+        let profile = Profile::new("dev");
+        let mut config = ProfilesConfig::default();
+        config.profiles.insert("dev".to_string(), profile);
+        state.profiles_config = Some(config);
+        state.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        state.env_state.os_vars = vec![("HOME".to_string(), "/tmp".to_string())];
+        state.env_state.toggle_selected_disabled();
+
+        state.persist_env_edit().unwrap();
+
+        let saved = state
+            .profiles_config
+            .as_ref()
+            .unwrap()
+            .profiles
+            .get("dev")
+            .unwrap();
+        assert_eq!(saved.disabled_env, vec!["HOME".to_string()]);
     }
 
     #[test]
