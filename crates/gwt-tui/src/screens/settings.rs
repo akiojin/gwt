@@ -1571,13 +1571,15 @@ fn render_profile_delete_confirm(
 
 fn render_env_edit(state: &SettingsState, buf: &mut Buffer, area: Rect) {
     let env = &state.env_state;
+    let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(area);
 
     let display_items = env.display_items();
     if display_items.is_empty() {
         let paragraph = Paragraph::new("No environment variables. Press 'n' to add.")
             .alignment(Alignment::Center)
             .block(styled_block(" Environment Variables "));
-        Widget::render(paragraph, area, buf);
+        Widget::render(paragraph, layout[0], buf);
+        render_env_footer(env, buf, layout[1]);
         return;
     }
 
@@ -1586,6 +1588,12 @@ fn render_env_edit(state: &SettingsState, buf: &mut Buffer, area: Rect) {
         .enumerate()
         .map(|(i, item)| {
             let is_selected = i == env.selected_index;
+            let kind_marker = match item.kind {
+                EnvDisplayKind::Overridden => "[OVR]",
+                EnvDisplayKind::Added => "[ADD]",
+                EnvDisplayKind::OsDisabled => "[OFF]",
+                EnvDisplayKind::OsOnly => "[OS ]",
+            };
             let display = if let Some(ref edit_mode) = env.editing {
                 if is_selected {
                     match edit_mode {
@@ -1593,20 +1601,20 @@ fn render_env_edit(state: &SettingsState, buf: &mut Buffer, area: Rect) {
                             let mut k = item.key.clone();
                             let pos = (*cursor).min(k.len());
                             k.insert(pos, '|');
-                            format!("  {} = {}", k, item.value)
+                            format!(" {kind_marker} {} = {}", k, item.value)
                         }
                         EnvEditMode::Value(cursor) => {
                             let mut v = item.value.clone();
                             let pos = (*cursor).min(v.len());
                             v.insert(pos, '|');
-                            format!("  {} = {}", item.key, v)
+                            format!(" {kind_marker} {} = {}", item.key, v)
                         }
                     }
                 } else {
-                    format!("  {} = {}", item.key, item.value)
+                    format!(" {kind_marker} {} = {}", item.key, item.value)
                 }
             } else {
-                format!("  {} = {}", item.key, item.value)
+                format!(" {kind_marker} {} = {}", item.key, item.value)
             };
 
             let style = if is_selected {
@@ -1626,7 +1634,37 @@ fn render_env_edit(state: &SettingsState, buf: &mut Buffer, area: Rect) {
         .collect();
 
     let list = List::new(list_items).block(styled_block(" Environment Variables "));
-    Widget::render(list, area, buf);
+    Widget::render(list, layout[0], buf);
+    render_env_footer(env, buf, layout[1]);
+}
+
+fn render_env_footer(env: &EnvEditState, buf: &mut Buffer, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+
+    let hint = if env.editing.is_some() {
+        "[Enter] Confirm  [Tab] Key/Value  [Esc] Save & Back"
+    } else if env.selected_is_os_entry() {
+        "[Enter] Override  [Space] Disable/Enable  [n] Add  [Esc] Save & Back"
+    } else if env.selected_is_overridden() {
+        "[Enter] Edit Override  [d] Delete Override  [n] Add  [Esc] Save & Back"
+    } else if env.selected_is_added() {
+        "[Enter] Edit  [d] Delete  [n] Add  [Esc] Save & Back"
+    } else {
+        "[Enter] Edit  [n] Add  [Esc] Save & Back"
+    };
+
+    let span = Span::styled(hint, Style::default().fg(Color::DarkGray));
+    buf.set_span(area.x, area.y, &span, area.width);
+
+    if area.height > 1 {
+        let legend = Span::styled(
+            "[OS] inherited  [OVR] override  [ADD] added  [OFF] disabled",
+            Style::default().fg(Color::DarkGray),
+        );
+        buf.set_span(area.x, area.y + 1, &legend, area.width);
+    }
 }
 
 fn render_ai_settings(state: &SettingsState, buf: &mut Buffer, area: Rect) {
@@ -2120,6 +2158,48 @@ mod tests {
         });
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
         render(&state, &mut buf, Rect::new(0, 0, 80, 24));
+    }
+
+    #[test]
+    fn render_env_footer_shows_os_entry_actions() {
+        let profile = Profile::new("test");
+        let mut env = EnvEditState::from_profile(&profile);
+        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
+
+        let area = Rect::new(0, 0, 80, 2);
+        let mut buf = Buffer::empty(area);
+        render_env_footer(&env, &mut buf, area);
+
+        let text: String = (0..80)
+            .map(|x| {
+                buf.cell((x, 0))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+        assert!(text.contains("Override"), "expected override hint, got: {text:?}");
+    }
+
+    #[test]
+    fn render_env_footer_shows_override_actions() {
+        let mut profile = Profile::new("test");
+        profile.env.insert("PATH".to_string(), "/custom".to_string());
+        let mut env = EnvEditState::from_profile(&profile);
+        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
+
+        let area = Rect::new(0, 0, 80, 2);
+        let mut buf = Buffer::empty(area);
+        render_env_footer(&env, &mut buf, area);
+
+        let text: String = (0..80)
+            .map(|x| {
+                buf.cell((x, 0))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+        assert!(
+            text.contains("Delete Override"),
+            "expected delete override hint, got: {text:?}"
+        );
     }
 
     #[test]
