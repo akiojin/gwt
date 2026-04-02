@@ -1,8 +1,21 @@
 //! Process execution helpers.
 
-use std::process::Command;
+use std::process::{Command, Output};
 
 use crate::error::{GwtError, Result};
+
+/// Convert a completed process `Output` into a trimmed stdout `String`,
+/// returning an error when the exit status is non-zero.
+fn capture_output(cmd: &str, output: Output) -> Result<String> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GwtError::Other(format!(
+            "{cmd} exited with {}: {stderr}",
+            output.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
 
 /// Run a command and capture its stdout as a trimmed `String`.
 ///
@@ -13,16 +26,7 @@ pub fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
         .args(args)
         .output()
         .map_err(GwtError::Io)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GwtError::Other(format!(
-            "{cmd} exited with {}: {stderr}",
-            output.status
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    capture_output(cmd, output)
 }
 
 /// Run a command with additional environment variables and capture its stdout.
@@ -32,18 +36,8 @@ pub fn run_command_with_env(cmd: &str, args: &[&str], env: &[(String, String)]) 
     for (key, value) in env {
         command.env(key, value);
     }
-
     let output = command.output().map_err(GwtError::Io)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GwtError::Other(format!(
-            "{cmd} exited with {}: {stderr}",
-            output.status
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    capture_output(cmd, output)
 }
 
 /// Check whether a command exists on `$PATH`.

@@ -34,9 +34,7 @@ pub fn gwt_logs_dir() -> PathBuf {
 /// Ensure that the directory at `path` exists, creating it recursively if
 /// necessary.
 pub fn ensure_dir(path: &Path) -> Result<()> {
-    if !path.exists() {
-        std::fs::create_dir_all(path)?;
-    }
+    std::fs::create_dir_all(path)?;
     Ok(())
 }
 
