@@ -6,8 +6,8 @@
 - [x] T002: `research.md` に cross-spec comparison matrix を追加する
 - [x] T003: `data-model.md` / `quickstart.md` を新しい shell model に合わせて更新する
 - [ ] T004: 主要 sync 対象 SPEC (`SPEC-1654`, `SPEC-1770`, `SPEC-1777`, `SPEC-1782`) の差分メモを作る
-- [ ] T005: workflow / persistence / integration 監査対象 (`SPEC-1579`, `SPEC-1787`, `SPEC-1714`, `SPEC-1354`, `SPEC-1643`, `SPEC-1786`, `SPEC-1542`, `SPEC-1656`, `SPEC-1648`, `SPEC-1646`, `SPEC-1644`, `SPEC-1636`, `SPEC-1779`) を `sync required / reference only / deferred` に分類する
-- [ ] T006: `gwt-spec-ops` 系 skill contract が `SPEC-1579` / `SPEC-1787` 側で parent UX と矛盾しないか監査メモを残す
+- [x] T005: workflow / persistence / integration 監査対象 (`SPEC-1579`, `SPEC-1787`, `SPEC-1714`, `SPEC-1354`, `SPEC-1643`, `SPEC-1786`, `SPEC-1542`, `SPEC-1656`, `SPEC-1648`, `SPEC-1646`, `SPEC-1644`, `SPEC-1636`, `SPEC-1779`) を `sync required / reference only / deferred` に分類する
+- [x] T006: `gwt-spec-ops` 系 skill contract が `SPEC-1579` / `SPEC-1787` 側で parent UX と矛盾しないか監査メモを残す
 
 ## Phase 1: Branch-First Entry
 

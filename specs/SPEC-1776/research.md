@@ -79,6 +79,25 @@
 
 These are considered covered through `SPEC-1579` and `SPEC-1787`. `SPEC-1776` does not redefine their workflow contract; it only constrains how `Branches`, `SPECs`, and `Issues` surfaces hand users into those flows.
 
+## Workflow Contract Audit
+
+### `SPEC-1579`
+
+- Status: `reference only`
+- Reason: `gwt-spec-ops`, `gwt-spec-implement`, `gwt-spec-plan`, `gwt-spec-tasks`, `gwt-spec-analyze` の ownership と stop condition はすでに `SPEC-1579` が正本として持っている
+- Result: `SPEC-1776` 側で workflow contract を再定義する必要はない
+- Constraint on parent UX: `SPECs` / `Issues` / `Branches` から workflow へ handoff するとき、owner は常に `SPEC-1579` / `SPEC-1787` で定義された visible workflow owner を使う
+
+### `SPEC-1787`
+
+- Status: `sync required`
+- Reason: 現行文面には `Branch-centric workflow — Work should start from SPEC/Issue, not from Branches tab branch selection` とあり、今回の `branch-first primary entry` 方針と衝突している
+- Result: branch-first UX と SPEC-first workflow を両立するように wording を更新する必要がある
+- Required sync:
+  - `Branches` は primary entry だが、SPEC/Issue launch は first-class のまま維持する
+  - `SPEC-first workflow` は workflow owner として維持し、UI entry surface の優先順位だけ parent UX に合わせる
+  - initialization 後にどのタブへ着地するかも、`Branches` / `SPECs` の方針と整合させて再確認する
+
 ## Accepted Product Decisions
 
 - 旧TUIの使いやすさは `branch list` と操作意味にある

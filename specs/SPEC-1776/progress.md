@@ -10,6 +10,7 @@
 - Explicitly deferred `Settings`, `Logs`, `Versions`, and `AI summary`
 - Expanded the coverage inventory to include workflow, persistence, and integration owners such as `SPEC-1579`, `SPEC-1787`, `SPEC-1714`, `SPEC-1786`, `SPEC-1542`, and `SPEC-1656`
 - Marked `gwt-spec-ops` and related embedded workflow skills as covered via `SPEC-1579` / `SPEC-1787`, not redefined in the parent TUI spec
+- Audited the workflow side more concretely: `SPEC-1579` remains reference-only, while `SPEC-1787` needs wording sync because it currently rejects a branch-first primary entry
 
 ### Done
 
@@ -17,6 +18,7 @@
 - `research.md` now records the old TUI vs current TUI vs current backend vs new target matrix
 - `tasks.md` now starts with child-spec-aware implementation phases instead of full-feature migration
 - `tasks.md` also includes explicit audit tasks for workflow, persistence, issue, hooks, and profile-related specs
+- `research.md` now includes a concrete `gwt-spec-ops` coverage audit and identifies `SPEC-1787` as the first workflow wording conflict
 
 ### Next
 
