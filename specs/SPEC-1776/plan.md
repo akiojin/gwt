@@ -34,8 +34,9 @@
 - Session surface は通常時 `equal grid`、集中時 `maximize + tab switch`
 - 管理画面は `tabbed management workspace` を採用し、初回は `Branches / SPECs / Issues / Profiles` に絞る
 - `Profiles` は環境変数プロファイル専用とし、一般設定は後続 `Settings` フェーズへ回す
-- branch-first core の安定後は、既存実装を活かして `Versions` と `Logs` を順次再露出する
-- `AI summary` と `Settings` は引き続き後続フェーズ
+- branch-first core の安定後は、既存実装を活かして `Settings`、`Versions`、`Logs` を順次再露出する
+- `Profiles` は env 専任のまま維持し、`Settings` には environment category を戻さない
+- `AI summary` は引き続き後続フェーズ
 
 ## Architecture Direction
 
@@ -85,6 +86,7 @@
 - `Branches / SPECs / Issues / Profiles` の 4 タブへ整理する
 - `SPECs / Issues` は一覧・詳細・launch entry を維持する
 - `Profiles` は env profile 管理に絞る
+- `Settings` は non-env categories (`General / Worktree / Agent / Custom / AI`) を扱う
 
 ### Phase 4: Launch Flow Integration
 
@@ -107,7 +109,6 @@
 
 ### Deferred Phase
 
-- `Settings`
 - `AI summary`
 - custom agent UI refresh
 

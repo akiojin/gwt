@@ -771,8 +771,14 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
 
 fn activate_management_tab(model: &mut Model, tab: ManagementTab) {
     model.management_tab = tab;
-    if matches!(tab, ManagementTab::Profiles) {
-        model.settings_state.category = crate::screens::settings::SettingsCategory::Environment;
+    match tab {
+        ManagementTab::Profiles => {
+            model.settings_state.category = crate::screens::settings::SettingsCategory::Environment;
+        }
+        ManagementTab::Settings => {
+            model.settings_state.ensure_management_tab_category();
+        }
+        _ => {}
     }
 }
 
@@ -1049,9 +1055,10 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Branches => ManagementTab::Specs,
                         ManagementTab::Specs => ManagementTab::Issues,
                         ManagementTab::Issues => ManagementTab::Profiles,
-                        ManagementTab::Profiles => ManagementTab::Versions,
+                        ManagementTab::Profiles => ManagementTab::Settings,
+                        ManagementTab::Settings => ManagementTab::Versions,
                         ManagementTab::Versions => ManagementTab::Logs,
-                        ManagementTab::Logs | ManagementTab::Settings => ManagementTab::Branches,
+                        ManagementTab::Logs => ManagementTab::Branches,
                     };
                     activate_management_tab(model, next_tab);
                     sync_active_terminal_history(model);
@@ -1594,7 +1601,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     crate::screens::specs::render(&model.specs_state, buf, layout[2]);
                 }
                 ManagementTab::Settings => {
-                    crate::screens::settings::render(&model.settings_state, buf, layout[2]);
+                    crate::screens::settings::render_settings_tab(
+                        &model.settings_state,
+                        buf,
+                        layout[2],
+                    );
                 }
                 ManagementTab::Profiles => {
                     crate::screens::settings::render_profiles_tab(
@@ -1712,8 +1723,20 @@ fn handle_settings_msg(model: &mut Model, msg: SettingsMessage) {
         SettingsMessage::Refresh => {
             state.load_settings();
         }
-        SettingsMessage::NextCategory => state.next_category(),
-        SettingsMessage::PrevCategory => state.prev_category(),
+        SettingsMessage::NextCategory => {
+            if model.management_tab == ManagementTab::Settings {
+                state.next_management_tab_category();
+            } else {
+                state.next_category();
+            }
+        }
+        SettingsMessage::PrevCategory => {
+            if model.management_tab == ManagementTab::Settings {
+                state.prev_management_tab_category();
+            } else {
+                state.prev_category();
+            }
+        }
         SettingsMessage::SelectNext => state.select_next(),
         SettingsMessage::SelectPrev => state.select_prev(),
         SettingsMessage::Edit => {
@@ -3089,6 +3112,16 @@ mod tests {
             m.settings_state.category,
             crate::screens::settings::SettingsCategory::Environment
         );
+
+        update(
+            &mut m,
+            Message::SwitchManagementTab(ManagementTab::Settings),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Settings);
+        assert_eq!(
+            m.settings_state.category,
+            crate::screens::settings::SettingsCategory::General
+        );
     }
 
     #[test]
@@ -3935,6 +3968,12 @@ mod tests {
             Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
         );
         assert_eq!(m.management_tab, ManagementTab::Profiles);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Settings);
 
         update(
             &mut m,

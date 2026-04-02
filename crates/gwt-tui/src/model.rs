@@ -46,11 +46,12 @@ pub enum ManagementTab {
 }
 
 impl ManagementTab {
-    pub const ALL: [ManagementTab; 6] = [
+    pub const ALL: [ManagementTab; 7] = [
         ManagementTab::Branches,
         ManagementTab::Specs,
         ManagementTab::Issues,
         ManagementTab::Profiles,
+        ManagementTab::Settings,
         ManagementTab::Versions,
         ManagementTab::Logs,
     ];
@@ -987,9 +988,10 @@ mod tests {
         assert_eq!(ManagementTab::ALL[1].label(), "SPECs");
         assert_eq!(ManagementTab::ALL[2].label(), "Issues");
         assert_eq!(ManagementTab::ALL[3].label(), "Profiles");
-        assert_eq!(ManagementTab::ALL[4].label(), "Versions");
-        assert_eq!(ManagementTab::ALL[5].label(), "Logs");
-        assert_eq!(ManagementTab::ALL.len(), 6);
+        assert_eq!(ManagementTab::ALL[4].label(), "Settings");
+        assert_eq!(ManagementTab::ALL[5].label(), "Versions");
+        assert_eq!(ManagementTab::ALL[6].label(), "Logs");
+        assert_eq!(ManagementTab::ALL.len(), 7);
     }
 
     #[test]

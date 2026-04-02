@@ -1,5 +1,25 @@
 # Progress: SPEC-1776
 
+## 2026-04-02: Settings re-exposure
+
+### Progress
+
+- Re-exposed `Settings` as a management tab without collapsing `Profiles` back into it
+- Added a dedicated visible-order slot for `Settings` between `Profiles` and `Versions`
+- Restricted `Settings` category navigation to non-env categories so `Env` remains owned by `Profiles`
+- Added RED/GREEN coverage for tab switching, category skipping, and hidden `Env` tab rendering
+
+### Done
+
+- Management tab cycle now follows `Branches / SPECs / Issues / Profiles / Settings / Versions / Logs`
+- Switching from `Profiles` to `Settings` resets the category from `Env` back to `General`
+- `Settings` renders only `General / Worktree / Agent / Custom / AI` category tabs
+- Existing settings surface is reachable again without duplicating env-profile management
+
+### Next
+
+- Keep the remaining deferred scope narrow: `AI summary` and custom-agent redesign only
+
 ## 2026-04-02: Versions and Logs re-exposure
 
 ### Progress

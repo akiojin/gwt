@@ -52,6 +52,18 @@ impl SettingsCategory {
     fn index(self) -> usize {
         Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
     }
+
+    pub const MANAGEMENT_TAB_ALL: [SettingsCategory; 5] = [
+        SettingsCategory::General,
+        SettingsCategory::Worktree,
+        SettingsCategory::Agent,
+        SettingsCategory::CustomAgents,
+        SettingsCategory::AISettings,
+    ];
+
+    fn management_index(self) -> Option<usize> {
+        Self::MANAGEMENT_TAB_ALL.iter().position(|c| *c == self)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +760,27 @@ impl SettingsState {
         self.reset_category_state();
     }
 
+    pub fn ensure_management_tab_category(&mut self) {
+        if self.category.management_index().is_none() {
+            self.category = SettingsCategory::General;
+            self.reset_category_state();
+        }
+    }
+
+    pub fn next_management_tab_category(&mut self) {
+        let idx = self.category.management_index().unwrap_or(0);
+        self.category = SettingsCategory::MANAGEMENT_TAB_ALL
+            [(idx + 1) % SettingsCategory::MANAGEMENT_TAB_ALL.len()];
+        self.reset_category_state();
+    }
+
+    pub fn prev_management_tab_category(&mut self) {
+        let idx = self.category.management_index().unwrap_or(0);
+        let len = SettingsCategory::MANAGEMENT_TAB_ALL.len();
+        self.category = SettingsCategory::MANAGEMENT_TAB_ALL[(idx + len - 1) % len];
+        self.reset_category_state();
+    }
+
     fn reset_category_state(&mut self) {
         self.selected_item = 0;
         self.custom_agent_index = 0;
@@ -1143,12 +1176,28 @@ pub fn render(state: &SettingsState, buf: &mut Buffer, area: Rect) {
     ])
     .split(area);
 
-    render_tabs(state, buf, chunks[0]);
+    render_tabs(state, buf, chunks[0], &SettingsCategory::ALL);
     render_content(state, buf, chunks[1]);
 }
 
-fn render_tabs(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let titles: Vec<Line> = SettingsCategory::ALL
+pub fn render_settings_tab(state: &SettingsState, buf: &mut Buffer, area: Rect) {
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // Category tabs
+        Constraint::Min(0),    // Content
+    ])
+    .split(area);
+
+    render_tabs(state, buf, chunks[0], &SettingsCategory::MANAGEMENT_TAB_ALL);
+    render_content(state, buf, chunks[1]);
+}
+
+fn render_tabs(
+    state: &SettingsState,
+    buf: &mut Buffer,
+    area: Rect,
+    categories: &[SettingsCategory],
+) {
+    let titles: Vec<Line> = categories
         .iter()
         .map(|cat| {
             let style = if *cat == state.category {
@@ -1165,7 +1214,12 @@ fn render_tabs(state: &SettingsState, buf: &mut Buffer, area: Rect) {
     let tabs = Tabs::new(titles)
         .block(styled_block(" Categories "))
         .highlight_style(Style::default().fg(Color::Cyan))
-        .select(state.category.index());
+        .select(
+            categories
+                .iter()
+                .position(|cat| *cat == state.category)
+                .unwrap_or(0),
+        );
 
     Widget::render(tabs, area, buf);
 }
@@ -1895,6 +1949,25 @@ mod tests {
     }
 
     #[test]
+    fn management_tab_category_navigation_skips_environment() {
+        let mut state = SettingsState::new();
+        state.category = SettingsCategory::CustomAgents;
+
+        state.next_management_tab_category();
+        assert_eq!(state.category, SettingsCategory::AISettings);
+
+        state.next_management_tab_category();
+        assert_eq!(state.category, SettingsCategory::General);
+
+        state.category = SettingsCategory::Environment;
+        state.ensure_management_tab_category();
+        assert_eq!(state.category, SettingsCategory::General);
+
+        state.prev_management_tab_category();
+        assert_eq!(state.category, SettingsCategory::AISettings);
+    }
+
+    #[test]
     fn category_items_empty_when_no_settings() {
         let state = SettingsState::new();
         assert!(state.category_items().is_empty());
@@ -2158,6 +2231,31 @@ mod tests {
         });
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
         render(&state, &mut buf, Rect::new(0, 0, 80, 24));
+    }
+
+    #[test]
+    fn render_settings_tab_hides_environment_category() {
+        let mut state = SettingsState::new();
+        state.settings = Some(Settings::default());
+        state.category = SettingsCategory::General;
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render_settings_tab(&state, &mut buf, area);
+
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push(
+                    buf.cell((x, y))
+                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')),
+                );
+            }
+        }
+        assert!(
+            text.contains("General"),
+            "expected General tab, got: {text:?}"
+        );
+        assert!(!text.contains("Env"), "unexpected Env tab, got: {text:?}");
     }
 
     #[test]

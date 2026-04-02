@@ -15,13 +15,13 @@
 | Enter behavior | focus / show hidden / wizard | tab 前提 | launch primitives あり | `no / one / many` の 3 分岐 |
 | Hidden pane concept | あり | なし | 不要 | 廃止 |
 | Management workspace | 旧TUIは tab ではない | tabbed management | data loaders あり | tabbed management を採用 |
-| Initial management tabs | 旧TUIは統合的 | Branches / SPECs / Issues / Versions / Settings / Logs | backend support は広い | branch-first core は `Branches / SPECs / Issues / Profiles`、follow-up で `Versions / Logs` を再露出 |
+| Initial management tabs | 旧TUIは統合的 | Branches / SPECs / Issues / Versions / Settings / Logs | backend support は広い | branch-first core は `Branches / SPECs / Issues / Profiles`、follow-up で `Settings / Versions / Logs` を再露出 |
 | Terminal basis | `tmux` + terminal | `native PTY` + `vt100` | `terminal::*` 完備 | 現行 terminal 基盤を維持 |
 | Quick Start | あり | child 実装あり | session store / detect あり | Branches flow に接続維持 |
 | SPECs tab | 旧TUIには直接対応薄い | local artifact viewer あり | local SPEC loader あり | tab 維持、parent navigation に同期 |
 | Issues tab | GitHub Issue 導線あり | GitHub Issue detail あり | issue cache / linkage あり | tab 維持、launch entry 維持 |
 | Profiles | Settings 内の env 管理 | Settings 内に存在 | persistence あり | `Profiles = Env profiles` として独立タブ化 |
-| Settings | 強い設定面あり | 実装済み | persistence あり | 後続 |
+| Settings | 強い設定面あり | 実装済み | persistence あり | `Profiles` と分離した non-env settings として再露出 |
 | Logs | 旧TUIに存在 | 実装済み | log reader あり | branch-first core 後に再露出 |
 | Versions | 旧TUIには薄い | 実装済み | git metadata あり | branch-first core 後に再露出 |
 | AI summary | 旧TUIに存在 | 現行でも文脈あり | summary infrastructure あり | 後続 |

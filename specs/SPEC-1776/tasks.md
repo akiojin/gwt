@@ -55,7 +55,7 @@
 
 ## Deferred
 
-- [ ] T900: `Settings` を戻す
+- [x] T900: `Settings` を戻す
 - [x] T901: `Logs` を戻す
 - [x] T902: `Versions` を戻す
 - [ ] T903: `AI summary` を再導入する
