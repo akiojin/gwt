@@ -70,6 +70,7 @@ pub struct BranchItem {
     pub is_protected: bool,
     pub last_tool_usage: Option<String>,
     pub last_tool_id: Option<String>,
+    pub quick_start_available: bool,
     pub linked_issue_number: Option<u64>,
     pub linked_issue_state: Option<String>,
     pub pr_title: Option<String>,
@@ -105,6 +106,7 @@ impl BranchItem {
             is_protected,
             last_tool_usage: None,
             last_tool_id: None,
+            quick_start_available: false,
             linked_issue_number: None,
             linked_issue_state: None,
             pr_title: None,
@@ -583,8 +585,9 @@ pub fn load_branches(repo_root: &Path) -> Vec<BranchItem> {
         let mut item = BranchItem::from_branch(branch);
         // Enrich with tool usage data.
         if let Some(entry) = tool_map.get(&branch.name) {
-            item.last_tool_usage = Some(entry.tool_label.clone());
+            item.last_tool_usage = Some(entry.format_tool_usage());
             item.last_tool_id = Some(entry.tool_id.clone());
+            item.quick_start_available = entry.session_id.is_some();
         }
         items.push(item);
     }
@@ -918,6 +921,10 @@ fn render_branch_row(
         ));
     }
 
+    if branch.quick_start_available {
+        spans.push(Span::styled(" ↺", Style::default().fg(Color::Yellow)));
+    }
+
     if let Some(number) = branch.linked_issue_number {
         let issue_color = match branch.linked_issue_state.as_deref() {
             Some(state) if state.eq_ignore_ascii_case("open") => Color::Green,
@@ -1023,6 +1030,7 @@ mod tests {
             is_protected: is_protected_branch(name, false),
             last_tool_usage: None,
             last_tool_id: None,
+            quick_start_available: false,
             linked_issue_number: None,
             linked_issue_state: None,
             pr_title: None,
@@ -1468,6 +1476,7 @@ mod tests {
         branch.running_session_count = 1;
         branch.stopped_session_count = 1;
         branch.worktree_indicator = 'w';
+        branch.quick_start_available = true;
         branch.linked_issue_number = Some(42);
         branch.linked_issue_state = Some("open".to_string());
         state.branches = vec![branch];
@@ -1497,6 +1506,7 @@ mod tests {
         assert!(row_text.contains("●1"), "expected running summary in row");
         assert!(row_text.contains("○1"), "expected stopped summary in row");
         assert!(row_text.contains(" w"), "expected worktree indicator in row");
+        assert!(row_text.contains("↺"), "expected quick-start marker in row");
         assert!(row_text.contains("#42 open"), "expected linked issue in row");
     }
 
