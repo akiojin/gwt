@@ -75,10 +75,6 @@ fn runtime_sources_do_not_invoke_git_directly() {
 
     let mut files = Vec::new();
     collect_rs_files(&crate_root.join("src"), &mut files);
-    collect_rs_files(
-        &repo_root.join("crates").join("gwt-tauri").join("src"),
-        &mut files,
-    );
 
     let violations = find_violations(repo_root, &files);
     assert!(
@@ -100,10 +96,6 @@ fn workspace_sources_use_process_helpers_for_external_commands() {
     collect_rs_files(&crate_root.join("src"), &mut files);
     collect_rs_files(&crate_root.join("tests"), &mut files);
     collect_rs_files(&crate_root.join("benches"), &mut files);
-    collect_rs_files(
-        &repo_root.join("crates").join("gwt-tauri").join("src"),
-        &mut files,
-    );
 
     let violations = find_process_constructor_violations(repo_root, &files);
     assert!(

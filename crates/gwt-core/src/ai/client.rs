@@ -37,32 +37,9 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolFunction {
-    pub name: String,
-    pub description: String,
-    pub parameters: Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolDefinition {
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    pub function: ToolFunction,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ToolCall {
-    pub name: String,
-    pub arguments: Value,
-    #[serde(default)]
-    pub call_id: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct AIResponse {
     pub text: String,
-    pub tool_calls: Vec<ToolCall>,
     pub usage_tokens: Option<u64>,
     pub status: Option<String>,
 }
@@ -192,8 +169,6 @@ struct ResponsesRequest<'a> {
     input: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<ToolDefinition>,
     max_output_tokens: u32,
     temperature: f32,
 }
@@ -285,7 +260,7 @@ impl AIClient {
             model: &self.model,
             input,
             instructions,
-            tools: Vec::new(),
+
             max_output_tokens: MAX_OUTPUT_TOKENS,
             temperature: TEMPERATURE,
         };
@@ -298,11 +273,10 @@ impl AIClient {
         Ok(text)
     }
 
-    /// Call Responses API with tool definitions and multi-turn conversation history.
-    pub fn create_response_with_tools(
+    /// Call Responses API with multi-turn conversation history.
+    pub fn create_response_with_conversation(
         &self,
         conversation: Vec<ConversationItem>,
-        tools: Vec<ToolDefinition>,
         instructions: Option<String>,
         max_tokens: u32,
         temperature: f32,
@@ -316,22 +290,20 @@ impl AIClient {
             model: &self.model,
             input,
             instructions,
-            tools,
             max_output_tokens: max_tokens,
             temperature,
         };
 
         let body =
             self.send_with_retry(&url, &request_body, RetryMode::RetryTransientNetworkErrors)?;
-        let (text, tool_calls, usage, status) = parse_response_with_tools(&body)?;
+        let (text, usage) = parse_response_with_usage(&body)?;
         if let Some(tokens) = usage {
             self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
         }
         Ok(AIResponse {
             text,
-            tool_calls,
             usage_tokens: usage,
-            status,
+            status: None,
         })
     }
 
@@ -546,116 +518,6 @@ fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIErro
     }
     let usage_tokens = parsed.usage.map(|u| u.total_tokens);
     Ok((texts.join(""), usage_tokens))
-}
-
-#[allow(clippy::type_complexity)]
-fn parse_response_with_tools(
-    body: &str,
-) -> Result<(String, Vec<ToolCall>, Option<u64>, Option<String>), AIError> {
-    let value: Value = serde_json::from_str(body)
-        .map_err(|e| AIError::ParseError(format!("Invalid response: {}", e)))?;
-    let output = value
-        .get("output")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| AIError::ParseError("Missing output array".to_string()))?;
-
-    let mut texts = Vec::new();
-    let mut tool_calls = Vec::new();
-
-    for item in output {
-        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        if item_type == "message" {
-            if item.get("role").and_then(|v| v.as_str()).unwrap_or("") != "assistant" {
-                continue;
-            }
-            if let Some(contents) = item.get("content").and_then(|v| v.as_array()) {
-                for content in contents {
-                    let content_type = content.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if content_type == "output_text" || content_type == "text" {
-                        if let Some(text) = content.get("text").and_then(|v| v.as_str()) {
-                            texts.push(text.to_string());
-                        }
-                    }
-                }
-            }
-
-            if let Some(calls) = item.get("tool_calls").and_then(|v| v.as_array()) {
-                for call in calls {
-                    if let Some(parsed) = parse_tool_call(call) {
-                        tool_calls.push(parsed);
-                    }
-                }
-            }
-            continue;
-        }
-
-        if item_type == "tool_call" || item_type == "function_call" {
-            if let Some(parsed) = parse_tool_call(item) {
-                tool_calls.push(parsed);
-            }
-        }
-    }
-
-    if texts.is_empty() && tool_calls.is_empty() {
-        return Err(AIError::ParseError(
-            "No assistant output_text or tool calls in response".to_string(),
-        ));
-    }
-
-    let usage_tokens = value
-        .get("usage")
-        .and_then(|u| u.get("total_tokens"))
-        .and_then(|v| v.as_u64());
-
-    let status = value
-        .get("status")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    Ok((texts.join(""), tool_calls, usage_tokens, status))
-}
-
-fn parse_tool_call(value: &Value) -> Option<ToolCall> {
-    let call_id = value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            value
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-
-    let (name, args) = if let Some(func) = value.get("function") {
-        let name = func
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())?;
-        let args = func.get("arguments").cloned().unwrap_or(Value::Null);
-        (name, args)
-    } else {
-        let name = value
-            .get("name")
-            .or_else(|| value.get("tool_name"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())?;
-        let args = value.get("arguments").cloned().unwrap_or(Value::Null);
-        (name, args)
-    };
-
-    let arguments = if let Some(text) = args.as_str() {
-        serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
-    } else {
-        args
-    };
-
-    Some(ToolCall {
-        name,
-        arguments,
-        call_id,
-    })
 }
 
 /// Returns true if the error is retryable (rate limited or server error)
@@ -1153,61 +1015,6 @@ mod tests {
         assert_eq!(usage, None);
     }
 
-    #[test]
-    fn test_parse_response_with_tools() {
-        let body = r#"{
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Starting."}],
-                "tool_calls": [{
-                    "id": "call_1",
-                    "name": "send_keys_to_pane",
-                    "arguments": "{\"pane_id\":\"pane-1\",\"text\":\"ls\\n\"}"
-                }]
-            }],
-            "usage": {"total_tokens": 42},
-            "status": "completed"
-        }"#;
-        let (text, calls, usage, status) = parse_response_with_tools(body).unwrap();
-        assert_eq!(text, "Starting.");
-        assert_eq!(usage, Some(42));
-        assert_eq!(status, Some("completed".to_string()));
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "send_keys_to_pane");
-        assert_eq!(
-            calls[0].arguments.get("pane_id").and_then(|v| v.as_str()),
-            Some("pane-1")
-        );
-    }
-
-    #[test]
-    fn test_parse_response_with_tools_incomplete_status() {
-        let body = r#"{
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Partial."}]
-            }],
-            "status": "incomplete"
-        }"#;
-        let (_, _, _, status) = parse_response_with_tools(body).unwrap();
-        assert_eq!(status, Some("incomplete".to_string()));
-    }
-
-    #[test]
-    fn test_parse_response_with_tools_no_status() {
-        let body = r#"{
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Hello."}]
-            }]
-        }"#;
-        let (_, _, _, status) = parse_response_with_tools(body).unwrap();
-        assert_eq!(status, None);
-    }
-
     // ========================================
     // Cumulative Tokens Tests
     // ========================================
@@ -1531,37 +1338,4 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ========================================
-    // parse_tool_call
-    // ========================================
-
-    #[test]
-    fn test_parse_tool_call_from_function_call() {
-        let value = serde_json::json!({
-            "id": "call_1",
-            "name": "send_keys",
-            "arguments": "{\"pane_id\":\"p1\"}"
-        });
-        let tool = parse_tool_call(&value).unwrap();
-        assert_eq!(tool.name, "send_keys");
-        assert_eq!(tool.call_id, Some("call_1".to_string()));
-    }
-
-    #[test]
-    fn test_parse_tool_call_with_object_arguments() {
-        let value = serde_json::json!({
-            "name": "bash",
-            "arguments": {"cmd": "ls"}
-        });
-        let tool = parse_tool_call(&value).unwrap();
-        assert_eq!(tool.name, "bash");
-        assert_eq!(tool.arguments.get("cmd").unwrap().as_str(), Some("ls"));
-    }
-
-    #[test]
-    fn test_parse_tool_call_missing_name() {
-        let value = serde_json::json!({"arguments": "{}"});
-        let result = parse_tool_call(&value);
-        assert!(result.is_none());
-    }
 }

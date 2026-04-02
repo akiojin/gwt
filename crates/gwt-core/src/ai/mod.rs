@@ -17,7 +17,7 @@ pub use branch_suggest::{
 };
 pub use client::{
     format_error_for_display, AIClient, AIError, AIResponse, ChatMessage, ConversationItem,
-    ModelInfo, ToolCall, ToolDefinition, ToolFunction,
+    ModelInfo,
 };
 pub use issue_classify::{
     classify_issue_prefix, parse_classify_response, ISSUE_CLASSIFY_SYSTEM_PROMPT,
