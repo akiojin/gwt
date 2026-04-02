@@ -30,3 +30,4 @@ arboard = "3"
 
 [dev-dependencies]
 tempfile.workspace = true
+insta.workspace = true

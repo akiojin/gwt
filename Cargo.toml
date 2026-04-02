@@ -79,6 +79,7 @@ portable-pty = "0.9"
 
 # Testing
 tempfile = "3"
+insta = { version = "1", features = ["yaml"] }
 
 # Benchmarks
 criterion = { version = "0.8", features = ["html_reports"] }
