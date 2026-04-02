@@ -6,11 +6,14 @@ use crate::model::ManagementTab;
 use crate::input::voice::VoiceInputMessage;
 use crate::screens::branches::BranchesMessage;
 use crate::screens::confirm::ConfirmMessage;
+use crate::screens::docker_progress::DockerProgressMessage;
 use crate::screens::git_view::GitViewMessage;
 use crate::screens::issues::IssuesMessage;
 use crate::screens::logs::LogsMessage;
+use crate::screens::port_select::PortSelectMessage;
 use crate::screens::pr_dashboard::PrDashboardMessage;
 use crate::screens::profiles::ProfilesMessage;
+use crate::screens::service_select::ServiceSelectMessage;
 use crate::screens::settings::SettingsMessage;
 use crate::screens::specs::SpecsMessage;
 use crate::screens::versions::VersionsMessage;
@@ -71,6 +74,12 @@ pub enum Message {
     Versions(VersionsMessage),
     /// Wizard overlay message.
     Wizard(WizardMessage),
+    /// Docker progress overlay message.
+    DockerProgress(DockerProgressMessage),
+    /// Service selection overlay message.
+    ServiceSelect(ServiceSelectMessage),
+    /// Port selection overlay message.
+    PortSelect(PortSelectMessage),
     /// Confirmation dialog message.
     Confirm(ConfirmMessage),
     /// Voice input message.
@@ -113,6 +122,9 @@ mod tests {
         let _ = Message::Logs(LogsMessage::MoveUp);
         let _ = Message::Versions(VersionsMessage::MoveUp);
         let _ = Message::Wizard(WizardMessage::MoveUp);
+        let _ = Message::DockerProgress(DockerProgressMessage::Advance);
+        let _ = Message::ServiceSelect(ServiceSelectMessage::MoveUp);
+        let _ = Message::PortSelect(PortSelectMessage::MoveUp);
         let _ = Message::Confirm(ConfirmMessage::Toggle);
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
         let _ = Message::PasteFiles;

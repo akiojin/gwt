@@ -5,11 +5,14 @@ use std::path::PathBuf;
 use crate::input::voice::VoiceInputState;
 use crate::screens::branches::BranchesState;
 use crate::screens::confirm::ConfirmState;
+use crate::screens::docker_progress::DockerProgressState;
 use crate::screens::git_view::GitViewState;
 use crate::screens::issues::IssuesState;
 use crate::screens::logs::LogsState;
+use crate::screens::port_select::PortSelectState;
 use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
+use crate::screens::service_select::ServiceSelectState;
 use crate::screens::settings::SettingsState;
 use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
@@ -168,6 +171,12 @@ pub struct Model {
     pub versions: VersionsState,
     /// Wizard overlay state (None when not active).
     pub wizard: Option<WizardState>,
+    /// Docker progress overlay state.
+    pub docker_progress: Option<DockerProgressState>,
+    /// Service selection overlay state.
+    pub service_select: Option<ServiceSelectState>,
+    /// Port conflict resolution overlay state.
+    pub port_select: Option<PortSelectState>,
     /// Confirmation dialog state.
     pub confirm: ConfirmState,
     /// Voice input state.
@@ -205,6 +214,9 @@ impl Model {
             logs: LogsState::default(),
             versions: VersionsState::default(),
             wizard: None,
+            docker_progress: None,
+            service_select: None,
+            port_select: None,
             confirm: ConfirmState::default(),
             voice: VoiceInputState::default(),
         }

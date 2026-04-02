@@ -133,6 +133,27 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
+        Message::DockerProgress(msg) => {
+            if let Some(ref mut state) = model.docker_progress {
+                screens::docker_progress::update(state, msg);
+            }
+        }
+        Message::ServiceSelect(msg) => {
+            if let Some(ref mut state) = model.service_select {
+                screens::service_select::update(state, msg);
+                if !state.visible {
+                    model.service_select = None;
+                }
+            }
+        }
+        Message::PortSelect(msg) => {
+            if let Some(ref mut state) = model.port_select {
+                screens::port_select::update(state, msg);
+                if !state.visible {
+                    model.port_select = None;
+                }
+            }
+        }
         Message::Confirm(msg) => {
             screens::confirm::update(&mut model.confirm, msg);
         }
@@ -171,6 +192,21 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
     // Confirm dialog overlay
     screens::confirm::render(&model.confirm, frame, size);
+
+    // Docker progress overlay
+    if let Some(ref docker) = model.docker_progress {
+        screens::docker_progress::render(docker, frame, size);
+    }
+
+    // Service selection overlay
+    if let Some(ref svc) = model.service_select {
+        screens::service_select::render(svc, frame, size);
+    }
+
+    // Port selection overlay
+    if let Some(ref port) = model.port_select {
+        screens::port_select::render(port, frame, size);
+    }
 
     // Wizard overlay (on top of everything except errors)
     if let Some(ref wizard) = model.wizard {
