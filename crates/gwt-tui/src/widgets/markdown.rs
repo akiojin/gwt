@@ -273,18 +273,12 @@ fn inline_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
                 end = pos;
                 break;
             }
-            if tail.starts_with('*')
-                && !tail.starts_with("**")
-                && tail[1..].contains('*')
-            {
+            if tail.starts_with('*') && !tail.starts_with("**") && tail[1..].contains('*') {
                 end = pos;
                 break;
             }
         }
-        spans.push(Span::styled(
-            remainder[..end].to_string(),
-            base_style,
-        ));
+        spans.push(Span::styled(remainder[..end].to_string(), base_style));
         remainder = &remainder[end..];
     }
 
@@ -470,9 +464,6 @@ mod tests {
             row.contains("bold item"),
             "bullet should contain 'bold item' without **: {row}"
         );
-        assert!(
-            !row.contains("**"),
-            "bullet should not contain '**': {row}"
-        );
+        assert!(!row.contains("**"), "bullet should not contain '**': {row}");
     }
 }

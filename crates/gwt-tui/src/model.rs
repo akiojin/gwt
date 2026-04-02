@@ -46,11 +46,13 @@ pub enum ManagementTab {
 }
 
 impl ManagementTab {
-    pub const ALL: [ManagementTab; 4] = [
+    pub const ALL: [ManagementTab; 6] = [
         ManagementTab::Branches,
         ManagementTab::Specs,
         ManagementTab::Issues,
         ManagementTab::Profiles,
+        ManagementTab::Versions,
+        ManagementTab::Logs,
     ];
 
     pub fn index(self) -> usize {
@@ -75,6 +77,10 @@ impl ManagementTab {
             ManagementTab::Settings => "Settings",
             ManagementTab::Logs => "Logs",
         }
+    }
+
+    pub fn visible_index(self) -> Option<usize> {
+        Self::ALL.iter().position(|candidate| *candidate == self)
     }
 }
 
@@ -981,7 +987,9 @@ mod tests {
         assert_eq!(ManagementTab::ALL[1].label(), "SPECs");
         assert_eq!(ManagementTab::ALL[2].label(), "Issues");
         assert_eq!(ManagementTab::ALL[3].label(), "Profiles");
-        assert_eq!(ManagementTab::ALL.len(), 4);
+        assert_eq!(ManagementTab::ALL[4].label(), "Versions");
+        assert_eq!(ManagementTab::ALL[5].label(), "Logs");
+        assert_eq!(ManagementTab::ALL.len(), 6);
     }
 
     #[test]
@@ -1189,7 +1197,10 @@ mod tests {
         let branch = &model.branches_state.branches[0];
         assert_eq!(branch.pr_number, Some(7));
         assert_eq!(branch.pr_title.as_deref(), Some("Demo PR"));
-        assert_eq!(branch.safety_status, crate::screens::branches::SafetyStatus::Warning);
+        assert_eq!(
+            branch.safety_status,
+            crate::screens::branches::SafetyStatus::Warning
+        );
         assert_eq!(branch.worktree_indicator, 'w');
     }
 }

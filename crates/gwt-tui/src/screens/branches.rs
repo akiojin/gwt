@@ -1513,10 +1513,19 @@ mod tests {
         );
         assert!(row_text.contains("●1"), "expected running summary in row");
         assert!(row_text.contains("○1"), "expected stopped summary in row");
-        assert!(row_text.contains(" w"), "expected worktree indicator in row");
-        assert!(row_text.contains("Codex@1.2.3"), "expected tool summary in row");
+        assert!(
+            row_text.contains(" w"),
+            "expected worktree indicator in row"
+        );
+        assert!(
+            row_text.contains("Codex@1.2.3"),
+            "expected tool summary in row"
+        );
         assert!(row_text.contains("↺"), "expected quick-start marker in row");
-        assert!(row_text.contains("#42 open"), "expected linked issue in row");
+        assert!(
+            row_text.contains("#42 open"),
+            "expected linked issue in row"
+        );
     }
 
     #[test]
@@ -1558,7 +1567,11 @@ mod tests {
     fn apply_issue_metadata_sets_linked_issue_fields() {
         let mut items = vec![make_branch("feature/issue-42-demo", false)];
         let mut store = WorktreeIssueLinkStore::default();
-        store.set_link("feature/issue-42-demo", 42, gwt_core::git::issue_linkage::LinkSource::BranchParse);
+        store.set_link(
+            "feature/issue-42-demo",
+            42,
+            gwt_core::git::issue_linkage::LinkSource::BranchParse,
+        );
         let mut cache = IssueExactCache::default();
         cache.upsert(gwt_core::git::issue_cache::IssueExactCacheEntry {
             number: 42,

@@ -1049,10 +1049,9 @@ pub fn update(model: &mut Model, msg: Message) {
                         ManagementTab::Branches => ManagementTab::Specs,
                         ManagementTab::Specs => ManagementTab::Issues,
                         ManagementTab::Issues => ManagementTab::Profiles,
-                        ManagementTab::Profiles => ManagementTab::Branches,
-                        ManagementTab::Versions | ManagementTab::Settings | ManagementTab::Logs => {
-                            ManagementTab::Branches
-                        }
+                        ManagementTab::Profiles => ManagementTab::Versions,
+                        ManagementTab::Versions => ManagementTab::Logs,
+                        ManagementTab::Logs | ManagementTab::Settings => ManagementTab::Branches,
                     };
                     activate_management_tab(model, next_tab);
                     sync_active_terminal_history(model);
@@ -1126,7 +1125,8 @@ pub fn update(model: &mut Model, msg: Message) {
                                             .map(|spec| (*spec).clone());
                                         if let Some(spec) = selected_spec {
                                             if spec.branches.is_empty() {
-                                                let branch_name = spec_default_branch_name(&spec.id);
+                                                let branch_name =
+                                                    spec_default_branch_name(&spec.id);
                                                 open_spec_launch(
                                                     model,
                                                     &spec.id,
@@ -1160,8 +1160,8 @@ pub fn update(model: &mut Model, msg: Message) {
                                             } else {
                                                 spec_default_branch_name(&spec.id)
                                             };
-                                            let is_new =
-                                                branch_idx >= model.specs_state.branch_candidates.len();
+                                            let is_new = branch_idx
+                                                >= model.specs_state.branch_candidates.len();
                                             model.specs_state.branch_select_mode = false;
                                             open_spec_launch(
                                                 model,
@@ -1178,7 +1178,10 @@ pub fn update(model: &mut Model, msg: Message) {
                                         );
                                     }
                                     other => {
-                                        crate::screens::specs::update(&mut model.specs_state, other);
+                                        crate::screens::specs::update(
+                                            &mut model.specs_state,
+                                            other,
+                                        );
                                     }
                                 }
                                 Some(Message::Tick)
@@ -1444,7 +1447,8 @@ pub fn update(model: &mut Model, msg: Message) {
             }
             if matches!(msg, BranchesMessage::Refresh) {
                 model.branches_state.loading = true;
-                model.branches_state.branches = crate::screens::branches::load_branches(&model.repo_root);
+                model.branches_state.branches =
+                    crate::screens::branches::load_branches(&model.repo_root);
                 model.sync_branch_session_counts();
                 model.branch_list_rx = Some(spawn_branch_list_enrichment(model.repo_root.clone()));
                 sync_active_terminal_history(model);
@@ -2725,8 +2729,8 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::Mutex;
     use std::sync::mpsc;
+    use std::sync::Mutex;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -3325,12 +3329,18 @@ mod tests {
             ),
         );
 
-        update(&mut m, Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)));
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
 
         let wizard = m.wizard.expect("wizard should open");
         assert!(wizard.has_quick_start);
         assert_eq!(wizard.quick_start_entries.len(), 1);
-        assert_eq!(wizard.quick_start_entries[0].session_id.as_deref(), Some("sess-123"));
+        assert_eq!(
+            wizard.quick_start_entries[0].session_id.as_deref(),
+            Some("sess-123")
+        );
     }
 
     #[test]
@@ -3377,7 +3387,10 @@ mod tests {
             ),
         );
 
-        update(&mut m, Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)));
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
 
         let wizard = m.wizard.expect("wizard should open");
         assert!(!wizard.has_quick_start);
@@ -3449,7 +3462,10 @@ mod tests {
 
         assert!(m.wizard.is_none());
         assert!(m.specs_state.branch_select_mode);
-        assert_eq!(m.specs_state.branch_candidates, vec!["feature/feature-1776"]);
+        assert_eq!(
+            m.specs_state.branch_candidates,
+            vec!["feature/feature-1776"]
+        );
     }
 
     #[test]
@@ -3919,6 +3935,18 @@ mod tests {
             Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
         );
         assert_eq!(m.management_tab, ManagementTab::Profiles);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Versions);
+
+        update(
+            &mut m,
+            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(m.management_tab, ManagementTab::Logs);
 
         update(
             &mut m,

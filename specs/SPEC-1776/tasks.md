@@ -56,7 +56,7 @@
 ## Deferred
 
 - [ ] T900: `Settings` を戻す
-- [ ] T901: `Logs` を戻す
-- [ ] T902: `Versions` を戻す
+- [x] T901: `Logs` を戻す
+- [x] T902: `Versions` を戻す
 - [ ] T903: `AI summary` を再導入する
 - [ ] T904: custom agent UI を再設計する

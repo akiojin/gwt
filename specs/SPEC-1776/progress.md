@@ -1,5 +1,25 @@
 # Progress: SPEC-1776
 
+## 2026-04-02: Versions and Logs re-exposure
+
+### Progress
+
+- Re-exposed `Versions` and `Logs` in the management tab cycle without reopening the broader `Settings` surface
+- Kept the branch-first core intact by appending the restored tabs after `Profiles`
+- Updated tab rendering to use the visible tab order so hidden `Settings` no longer distorts selection state
+- Added RED/GREEN coverage for management-tab metadata and `Tab` cycling order
+
+### Done
+
+- Management tab cycle now follows `Branches / SPECs / Issues / Profiles / Versions / Logs`
+- Existing `Versions` and `Logs` screens are reachable again from the management workspace
+- The management tab bar now highlights according to visible tab order instead of legacy enum order
+- `SPEC-1776` artifacts now record `Versions / Logs` as restored while `Settings` and `AI summary` remain deferred
+
+### Next
+
+- Continue with deferred work only where it materially improves the rebuilt shell, starting with `Settings` or later `AI summary`
+
 ## 2026-04-02: Parent UX spec reset
 
 ### Progress

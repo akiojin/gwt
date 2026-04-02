@@ -2176,13 +2176,18 @@ mod tests {
                     .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
             })
             .collect();
-        assert!(text.contains("Override"), "expected override hint, got: {text:?}");
+        assert!(
+            text.contains("Override"),
+            "expected override hint, got: {text:?}"
+        );
     }
 
     #[test]
     fn render_env_footer_shows_override_actions() {
         let mut profile = Profile::new("test");
-        profile.env.insert("PATH".to_string(), "/custom".to_string());
+        profile
+            .env
+            .insert("PATH".to_string(), "/custom".to_string());
         let mut env = EnvEditState::from_profile(&profile);
         env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
 

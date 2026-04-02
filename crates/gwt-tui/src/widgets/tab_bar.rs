@@ -109,7 +109,7 @@ fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, tab)| {
-            if i == model.management_tab.index() {
+            if Some(i) == model.management_tab.visible_index() {
                 Line::from(Span::styled(
                     format!(" {} ", tab.label()),
                     Style::default().fg(Color::Black).bg(Color::Cyan).bold(),
@@ -124,7 +124,7 @@ fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
         .collect();
 
     let tabs = Tabs::new(titles)
-        .select(model.management_tab.index())
+        .select(model.management_tab.visible_index().unwrap_or_default())
         .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).bold())
         .style(Style::default().bg(Color::DarkGray))
         .divider(Span::styled(" ", Style::default().bg(Color::DarkGray)));

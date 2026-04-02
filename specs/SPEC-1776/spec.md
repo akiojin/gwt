@@ -122,8 +122,9 @@ As a developer, I want the rebuilt TUI to keep native PTY, hooks, SPEC integrati
 ### Management Workspace
 
 - FR-020: 管理画面は `tabbed management workspace` とする
-- FR-021: 初回完成条件の管理画面タブは `Branches / SPECs / Issues / Profiles` とする
-- FR-022: `Settings / Logs / Versions` は後続フェーズへ回す
+- FR-021: branch-first core の管理画面タブは `Branches / SPECs / Issues / Profiles` を基準とする
+- FR-022: branch-first core 安定後、既存実装を使って `Versions / Logs` を管理画面へ再露出できる
+- FR-023: `Settings` は引き続き後続フェーズへ回す
 
 ### Integrations to Preserve
 
@@ -145,7 +146,7 @@ As a developer, I want the rebuilt TUI to keep native PTY, hooks, SPEC integrati
 ### Deferred Scope
 
 - FR-050: `AI summary` は今回は実装対象外とする
-- FR-051: `Settings / Logs / Versions` は parent comparison matrix に載せるが、初回完成条件には含めない
+- FR-051: `Settings` は parent comparison matrix に載せるが、branch-first core 完了後も後続扱いとする
 - FR-052: custom agent UI の再設計は `Settings` 復帰フェーズで扱う
 
 ## Success Criteria
