@@ -98,15 +98,15 @@
 
 ### 3.5 Polish (remaining from SPEC-1786 Phase 3)
 
-- [ ] **T-056**: Write test for timestamped backup creation on corruption detection.
-- [ ] **T-057**: Write test for last-known-good restoration after backup.
-- [ ] **T-058**: Write test for concurrent write handling (file lock contention).
-- [ ] **T-059**: Write test for symlinked hooks.json merge behavior.
-- [ ] **T-060**: Write test for empty hooks.json file (0 bytes) recovery.
-- [ ] **T-061**: Implement timestamped backup and recovery logic.
-- [ ] **T-062**: Implement file locking for concurrent write prevention.
-- [ ] **T-063**: Improve error messages for merge failure scenarios.
-- [ ] **T-064**: Verify T-056 through T-060 pass (GREEN).
+- [x] **T-056**: Write test for timestamped backup creation on corruption detection.
+- [x] **T-057**: Write test for last-known-good restoration after backup.
+- [x] **T-058**: Write test for concurrent write handling (file lock contention).
+- [x] **T-059**: Write test for symlinked hooks.json merge behavior.
+- [x] **T-060**: Write test for empty hooks.json file (0 bytes) recovery.
+- [x] **T-061**: Implement timestamped backup and recovery logic.
+- [x] **T-062**: Implement file locking for concurrent write prevention.
+- [x] **T-063**: Improve error messages for merge failure scenarios.
+- [x] **T-064**: Verify T-056 through T-060 pass (GREEN).
 
 ### 3.6 Manual E2E Verification (remaining from SPEC-1786 Phase 4)
 

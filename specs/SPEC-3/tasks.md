@@ -11,22 +11,22 @@
 
 ## Phase 1: Version Cache -- Core
 
-- [ ] T001 [P] Write RED test: cache file round-trip (write versions, read back, verify content matches).
-- [ ] T002 [P] Write RED test: cache TTL expiry (fresh cache returns versions, expired cache triggers refresh).
-- [ ] T003 [P] Write RED test: corrupted cache file triggers graceful fallback (empty version list, no crash).
-- [ ] T004 Define cache schema struct: `AgentVersionCache { agents: HashMap<String, AgentVersionEntry> }` with `AgentVersionEntry { versions: Vec<String>, fetched_at: DateTime }`.
-- [ ] T005 Implement cache read: deserialize from `~/.gwt/cache/agent-versions.json`, return empty on error.
-- [ ] T006 Implement cache write: atomic write (temp file + rename) to prevent corruption.
-- [ ] T007 Implement TTL check: compare `fetched_at` with current time, return stale if beyond 24 hours.
-- [ ] T008 Verify cache core tests pass GREEN.
+- [x] T001 [P] Write RED test: cache file round-trip (write versions, read back, verify content matches).
+- [x] T002 [P] Write RED test: cache TTL expiry (fresh cache returns versions, expired cache triggers refresh).
+- [x] T003 [P] Write RED test: corrupted cache file triggers graceful fallback (empty version list, no crash).
+- [x] T004 Define cache schema struct: `AgentVersionCache { agents: HashMap<String, AgentVersionEntry> }` with `AgentVersionEntry { versions: Vec<String>, fetched_at: DateTime }`.
+- [x] T005 Implement cache read: deserialize from `~/.gwt/cache/agent-versions.json`, return empty on error.
+- [x] T006 Implement cache write: atomic write (temp file + rename) to prevent corruption.
+- [x] T007 Implement TTL check: compare `fetched_at` with current time, return stale if beyond 24 hours.
+- [x] T008 Verify cache core tests pass GREEN.
 
 ## Phase 2: Version Cache -- npm Registry Fetch
 
-- [ ] T009 [P] Write RED test: npm registry fetch returns parsed version list for a known package.
-- [ ] T010 [P] Write RED test: network failure during fetch returns error without panic.
-- [ ] T011 Implement npm registry HTTP client: GET `https://registry.npmjs.org/{package}` and parse `versions` field.
-- [ ] T012 Extract last 10 versions sorted by semver descending.
-- [ ] T013 Verify registry fetch tests pass GREEN.
+- [x] T009 [P] Write RED test: npm registry fetch returns parsed version list for a known package.
+- [x] T010 [P] Write RED test: network failure during fetch returns error without panic.
+- [x] T011 Implement npm registry HTTP client: GET `https://registry.npmjs.org/{package}` and parse `versions` field.
+- [x] T012 Extract last 10 versions sorted by semver descending.
+- [x] T013 Verify registry fetch tests pass GREEN.
 
 ## Phase 3: Version Cache -- Startup Integration
 
@@ -47,6 +47,6 @@
 
 ## Phase 5: Regression and Polish
 
-- [ ] T025 Run full existing test suite and verify no regressions.
-- [ ] T026 Run `cargo clippy` and `cargo fmt` on all changed files.
+- [x] T025 Run full existing test suite and verify no regressions.
+- [x] T026 Run `cargo clippy` and `cargo fmt` on all changed files.
 - [ ] T027 Update SPEC-3 progress artifacts with verification results.

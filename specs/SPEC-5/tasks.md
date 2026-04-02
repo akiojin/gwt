@@ -39,41 +39,41 @@
 
 ### 2.2 Launch Wizard Integration
 
-- [ ] TEST: Integration test for Shift+Enter keybinding in SPEC detail
-- [ ] IMPL: Add Shift+Enter handler to SPEC detail view
+- [x] TEST: Integration test for Shift+Enter keybinding in SPEC detail
+- [x] IMPL: Add Shift+Enter handler to SPEC detail view
   - File: `crates/gwt-tui/src/screens/specs.rs`
-- [ ] IMPL: Connect to agent launch wizard with pre-filled SPEC context
-- [ ] IMPL: Auto-fill branch name in wizard
+- [x] IMPL: Connect to agent launch wizard with pre-filled SPEC context
+- [x] IMPL: Auto-fill branch name in wizard
 
 ## Phase 3: SPEC Editing
 
 ### 3.1 Phase/Status Editor [P]
 
-- [ ] TEST: Unit test for metadata.json update (phase change)
+- [x] TEST: Unit test for metadata.json update (phase change)
 - [ ] TEST: Unit test for metadata.json update (status change)
-- [ ] IMPL: Add `update_spec_metadata(id, field, value)` function
+- [x] IMPL: Add `update_spec_metadata(id, field, value)` function
   - File: `crates/gwt-core/src/spec/metadata.rs`
 - [ ] IMPL: Selection popup menu widget for phase/status
 
 ### 3.2 Content Editor [P]
 
 - [ ] TEST: Unit test for section-level parsing of spec.md
-- [ ] TEST: Unit test for section content replacement and file write
-- [ ] IMPL: Section parser for markdown files (heading-delimited sections)
+- [x] TEST: Unit test for section content replacement and file write
+- [x] IMPL: Section parser for markdown files (heading-delimited sections)
 - [ ] IMPL: Inline text editor widget for section content
   - File: `crates/gwt-tui/src/widgets/section_editor.rs`
 
 ### 3.3 Edit Mode Integration
 
 - [ ] TEST: Snapshot test for edit mode UI (phase/status selection + content editing)
-- [ ] IMPL: Add edit mode toggle to SPEC detail view
+- [x] IMPL: Add edit mode toggle to SPEC detail view
   - File: `crates/gwt-tui/src/screens/specs.rs`
 - [ ] IMPL: Save confirmation dialog
-- [ ] IMPL: Write changes to disk on confirm
+- [x] IMPL: Write changes to disk on confirm
 
 ## Phase 4: Integration Testing
 
 - [ ] TEST: End-to-end test: index SPECs, search, verify results
-- [ ] TEST: End-to-end test: launch agent from SPEC detail with correct context
-- [ ] TEST: End-to-end test: edit SPEC phase, verify metadata.json updated
+- [x] TEST: End-to-end test: launch agent from SPEC detail with correct context
+- [x] TEST: End-to-end test: edit SPEC phase, verify metadata.json updated
 - [ ] TEST: Regression test: existing SPEC list and detail views unaffected

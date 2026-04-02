@@ -23,22 +23,22 @@
 
 - [ ] TEST: Snapshot test for status bar with Info notification displayed
 - [ ] TEST: Snapshot test for status bar with Warn notification (distinct color)
-- [ ] TEST: Unit test for auto-dismiss timer (Info dismissed after 5s)
-- [ ] IMPL: Add notification area to status bar widget (right side)
+- [x] TEST: Unit test for auto-dismiss timer (Info dismissed after 5s)
+- [x] IMPL: Add notification area to status bar widget (right side)
   - File: `crates/gwt-tui/src/widgets/status_bar.rs`
-- [ ] IMPL: Auto-dismiss timer for Info notifications
-- [ ] IMPL: Warn notification rendering with amber/yellow color
+- [x] IMPL: Auto-dismiss timer for Info notifications
+- [x] IMPL: Warn notification rendering with amber/yellow color
 - [ ] IMPL: Dismiss keybinding for Warn notifications
 
 ## Phase 2: Severity Routing
 
 ### 2.1 Router [P]
 
-- [ ] TEST: Unit test for routing: Debug -> log only
-- [ ] TEST: Unit test for routing: Info -> status bar
-- [ ] TEST: Unit test for routing: Warn -> status bar with color
-- [ ] TEST: Unit test for routing: Error -> modal dialog
-- [ ] IMPL: Add `NotificationRouter` that dispatches by severity
+- [x] TEST: Unit test for routing: Debug -> log only
+- [x] TEST: Unit test for routing: Info -> status bar
+- [x] TEST: Unit test for routing: Warn -> status bar with color
+- [x] TEST: Unit test for routing: Error -> modal dialog
+- [x] IMPL: Add `NotificationRouter` that dispatches by severity
   - File: `crates/gwt-tui/src/notification_router.rs`
 
 ### 2.2 Error Modal Upgrade
@@ -54,19 +54,19 @@
 
 ### 3.1 Structured Log Store [P]
 
-- [ ] TEST: Unit test for ring buffer: inserts, capacity limit, oldest evicted
+- [x] TEST: Unit test for ring buffer: inserts, capacity limit, oldest evicted
 - [ ] TEST: Unit test for log entry format (timestamp, severity, source, message)
-- [ ] IMPL: Add `StructuredLog` ring buffer store
+- [x] IMPL: Add `StructuredLog` ring buffer store
   - File: `crates/gwt-core/src/notification.rs`
 - [ ] IMPL: Configurable capacity (default: 10,000 entries)
 
 ### 3.2 Logs Tab Extension
 
 - [ ] TEST: Snapshot test for Logs tab with severity filter active
-- [ ] TEST: Unit test for severity filtering (show only Warn+Error, show all, etc.)
-- [ ] IMPL: Extend Logs tab to display structured log entries
+- [x] TEST: Unit test for severity filtering (show only Warn+Error, show all, etc.)
+- [x] IMPL: Extend Logs tab to display structured log entries
   - File: `crates/gwt-tui/src/screens/logs.rs`
-- [ ] IMPL: Severity filter toggle (keybinding to cycle filters)
+- [x] IMPL: Severity filter toggle (keybinding to cycle filters)
 - [ ] IMPL: Debug filter toggle (show/hide Debug entries)
 - [ ] IMPL: Scrollable log list with timestamp and severity columns
 
