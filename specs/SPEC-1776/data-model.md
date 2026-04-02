@@ -6,9 +6,10 @@
 |---|---|
 | `BranchDashboardState` | primary entry としての branch list、session count、selection、quick actions |
 | `SessionWorkspaceState` | session index、equal grid / maximize layout、focus、tab switch |
-| `ManagementWorkspaceState` | `Branches / SPECs / Issues / Profiles` の active tab と tab-local state |
+| `ManagementWorkspaceState` | `Branches / SPECs / Issues / Profiles / Settings / Versions / Logs` の active tab と tab-local state |
 | `LaunchFlowState` | branch enter selector、Quick Start、full Wizard、hooks confirm |
 | `EnvProfilesState` | env profile の一覧、編集、切替、OS env 参照・置換 |
+| `SettingsTabState` | env を除く global settings categories の表示・選択 |
 
 ## Branch Dashboard
 
@@ -32,8 +33,10 @@
 
 | Entity | Fields |
 |---|---|
-| `ManagementTab` | `Branches`, `SPECs`, `Issues`, `Profiles` |
+| `ManagementTab` | `Branches`, `SPECs`, `Issues`, `Profiles`, `Settings`, `Versions`, `Logs` |
 | `ManagementWorkspaceState` | `active_tab`, `last_tab`, `tab_states` |
+| `SettingsCategory` | `General`, `Worktree`, `Agent`, `CustomAgents`, `Environment`, `AISettings` |
+| `SettingsManagementCategory` | visible subset = `General`, `Worktree`, `Agent`, `CustomAgents`, `AISettings` |
 
 ## Env Profiles
 
@@ -54,8 +57,5 @@
 
 ## Explicit Non-Goals in This Parent Model
 
-- `Settings` data model
-- `Logs` data model
-- `Versions` data model
 - `AI summary` data model
 - tmux pane data structures

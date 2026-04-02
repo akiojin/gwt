@@ -29,10 +29,12 @@
 
 ### Management Tabs
 
-- 管理画面は `Branches / SPECs / Issues / Profiles` の 4 タブを持つ
+- 管理画面は `Branches / SPECs / Issues / Profiles / Settings / Versions / Logs` のタブを持つ
 - `SPECs` と `Issues` は一覧・詳細・launch entry まで使える
 - `Profiles` で env profile を作成・編集・削除・切替できる
 - `Profiles` で OS 環境変数参照・置換が使える
+- `Settings` では `General / Worktree / Agent / Custom / AI` が見え、`Env` は重複表示されない
+- `Versions` と `Logs` が管理画面から開ける
 
 ### Integration Safety
 
