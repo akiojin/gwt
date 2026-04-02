@@ -620,6 +620,27 @@ mod tests {
     }
 
     #[test]
+    fn filtered_specs_case_insensitive() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.search_query = "WORKTREE".to_string();
+
+        let filtered = state.filtered_specs();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "SPEC-1");
+    }
+
+    #[test]
+    fn filtered_specs_empty_query_returns_all() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.search_query = String::new();
+
+        let filtered = state.filtered_specs();
+        assert_eq!(filtered.len(), 4);
+    }
+
+    #[test]
     fn selected_spec_returns_correct() {
         let mut state = SpecsState::default();
         state.specs = sample_specs();
