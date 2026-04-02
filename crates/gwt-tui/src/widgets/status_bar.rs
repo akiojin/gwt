@@ -24,6 +24,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     };
 
     let layer = match model.active_layer {
+        ActiveLayer::Initialization => "Init",
         ActiveLayer::Main => "Main",
         ActiveLayer::Management => "Mgmt",
     };
@@ -45,9 +46,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     if let Some(indicator) = voice::render_indicator(&model.voice) {
         spans.push(Span::styled(
             format!(" {indicator} "),
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ));
     }
 

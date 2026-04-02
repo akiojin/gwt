@@ -31,9 +31,8 @@ pub struct IssueCache {
 impl IssueCache {
     /// Create a cache instance using the default directory (`~/.gwt/cache/issues/`).
     pub fn new() -> Result<Self> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            GwtError::Other("Cannot determine home directory".into())
-        })?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| GwtError::Other("Cannot determine home directory".into()))?;
         let cache_dir = home.join(".gwt").join("cache").join("issues");
         fs::create_dir_all(&cache_dir).map_err(|e| GwtError::Other(e.to_string()))?;
         Ok(Self { cache_dir })
@@ -251,10 +250,7 @@ mod tests {
 
     #[test]
     fn cache_filename_produces_safe_names() {
-        assert_eq!(
-            cache_filename("owner", "repo"),
-            "owner_repo_issues.json"
-        );
+        assert_eq!(cache_filename("owner", "repo"), "owner_repo_issues.json");
         assert_eq!(
             cache_filename("../etc", "../../passwd"),
             "___etc_______passwd_issues.json"
@@ -286,7 +282,11 @@ mod tests {
         // File should be inside the cache dir, not outside
         let filename = cache_filename("../etc", "../../passwd");
         let expected = tmp.path().join(&filename);
-        assert!(expected.exists(), "cache file should exist at: {}", expected.display());
+        assert!(
+            expected.exists(),
+            "cache file should exist at: {}",
+            expected.display()
+        );
 
         // Verify it is indeed within the cache directory
         assert!(expected.starts_with(tmp.path()));

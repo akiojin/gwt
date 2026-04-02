@@ -277,8 +277,7 @@ fn save_settings_to_config(state: &SettingsState) -> Result<(), String> {
                     if field.value.is_empty() || field.value == "~/.gwt/worktrees" {
                         settings.worktree_root = None;
                     } else {
-                        settings.worktree_root =
-                            Some(std::path::PathBuf::from(&field.value));
+                        settings.worktree_root = Some(std::path::PathBuf::from(&field.value));
                     }
                 }
                 // Agent
@@ -391,7 +390,7 @@ pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Category tabs
-            Constraint::Min(0),   // Fields
+            Constraint::Min(0),    // Fields
         ])
         .split(area);
 
@@ -498,9 +497,11 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         " Enter: edit | Space: toggle bool | Tab/Shift+Tab: category"
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!("{}{}", state.category.label(), hints));
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "{}{}",
+        state.category.label(),
+        hints
+    ));
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
 }
@@ -727,11 +728,7 @@ mod tests {
     fn fields_for_all_categories_non_empty() {
         for cat in SettingsCategory::ALL {
             let fields = fields_for_category(cat);
-            assert!(
-                !fields.is_empty(),
-                "Category {:?} has no fields",
-                cat
-            );
+            assert!(!fields.is_empty(), "Category {:?} has no fields", cat);
         }
     }
 

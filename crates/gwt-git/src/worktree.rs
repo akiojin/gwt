@@ -51,12 +51,7 @@ impl WorktreeManager {
     /// Create a new worktree at `path` for `branch`.
     pub fn create(&self, branch: &str, path: &Path) -> Result<()> {
         let output = std::process::Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                path.to_str().unwrap_or(""),
-                branch,
-            ])
+            .args(["worktree", "add", path.to_str().unwrap_or(""), branch])
             .current_dir(&self.repo_path)
             .output()
             .map_err(|e| GwtError::Git(format!("worktree add: {e}")))?;
@@ -72,11 +67,7 @@ impl WorktreeManager {
     /// Remove the worktree at `path`.
     pub fn remove(&self, path: &Path) -> Result<()> {
         let output = std::process::Command::new("git")
-            .args([
-                "worktree",
-                "remove",
-                path.to_str().unwrap_or(""),
-            ])
+            .args(["worktree", "remove", path.to_str().unwrap_or("")])
             .current_dir(&self.repo_path)
             .output()
             .map_err(|e| GwtError::Git(format!("worktree remove: {e}")))?;
@@ -114,11 +105,7 @@ fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
             path = Some(PathBuf::from(p));
         } else if let Some(b) = line.strip_prefix("branch ") {
             // Strip refs/heads/ prefix
-            branch = Some(
-                b.strip_prefix("refs/heads/")
-                    .unwrap_or(b)
-                    .to_string(),
-            );
+            branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
         } else if line == "locked" {
             locked = true;
         } else if line == "prunable" {

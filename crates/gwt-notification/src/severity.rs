@@ -71,11 +71,21 @@ mod tests {
 
     #[test]
     fn ordering_full_chain() {
-        let mut levels = vec![Severity::Error, Severity::Debug, Severity::Warn, Severity::Info];
+        let mut levels = vec![
+            Severity::Error,
+            Severity::Debug,
+            Severity::Warn,
+            Severity::Info,
+        ];
         levels.sort();
         assert_eq!(
             levels,
-            vec![Severity::Debug, Severity::Info, Severity::Warn, Severity::Error]
+            vec![
+                Severity::Debug,
+                Severity::Info,
+                Severity::Warn,
+                Severity::Error
+            ]
         );
     }
 

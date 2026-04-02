@@ -97,12 +97,10 @@ impl VersionCache {
         debug!(package = package, "Refreshing version from npm registry");
 
         let url = format!("https://registry.npmjs.org/{}/latest", package);
-        let version = tokio::task::spawn_blocking(move || {
-            reqwest_get_version(&url)
-        })
-        .await
-        .ok()
-        .flatten()?;
+        let version = tokio::task::spawn_blocking(move || reqwest_get_version(&url))
+            .await
+            .ok()
+            .flatten()?;
 
         self.record_version(agent_id, version.clone());
         Some(version)
@@ -206,10 +204,7 @@ mod tests {
         cache.save(&path).unwrap();
 
         let loaded = VersionCache::load(&path);
-        assert_eq!(
-            loaded.get(&AgentId::ClaudeCode).unwrap(),
-            &["1.2.3"]
-        );
+        assert_eq!(loaded.get(&AgentId::ClaudeCode).unwrap(), &["1.2.3"]);
         assert_eq!(loaded.get(&AgentId::Codex).unwrap(), &["0.5.0"]);
     }
 

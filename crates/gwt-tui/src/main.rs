@@ -11,7 +11,13 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use gwt_tui::{app, event, input::keybind::KeybindRegistry, message::Message, model::Model};
+use gwt_git::RepoType;
+use gwt_tui::{
+    app, event,
+    input::keybind::KeybindRegistry,
+    message::Message,
+    model::{ActiveLayer, Model},
+};
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
@@ -52,7 +58,12 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     repo_path: PathBuf,
 ) -> io::Result<()> {
-    let mut model = Model::new(repo_path);
+    // Detect repo type and create appropriate model
+    let mut model = match gwt_git::detect_repo_type(&repo_path) {
+        RepoType::Normal => Model::new(repo_path),
+        RepoType::Bare => Model::new_initialization(repo_path, true),
+        RepoType::NonRepo => Model::new_initialization(repo_path, false),
+    };
     let mut keybinds = KeybindRegistry::new();
 
     loop {
@@ -70,8 +81,9 @@ fn run_app(
         let deadline = event::next_tick_deadline();
         if let Some(msg) = event::poll_event(deadline) {
             // Route key events through keybind registry
+            // (skip keybind processing when in Initialization layer)
             let msg = match msg {
-                Message::KeyInput(key) => {
+                Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
                     keybinds.process_key(key).unwrap_or(Message::KeyInput(key))
                 }
                 other => other,

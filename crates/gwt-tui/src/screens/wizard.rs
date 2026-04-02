@@ -162,13 +162,13 @@ impl WizardState {
     /// Number of selectable options for the current step.
     pub fn option_count(&self) -> usize {
         match self.step {
-            WizardStep::QuickStart => 2,       // "New Agent" / "From Template"
+            WizardStep::QuickStart => 2, // "New Agent" / "From Template"
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
-            WizardStep::ModelSelect => 3,      // e.g. claude-sonnet, claude-opus, gpt-4
-            WizardStep::ReasoningLevel => 3,   // low, medium, high
-            WizardStep::ExecutionMode => 2,    // autonomous, interactive
+            WizardStep::ModelSelect => 3, // e.g. claude-sonnet, claude-opus, gpt-4
+            WizardStep::ReasoningLevel => 3, // low, medium, high
+            WizardStep::ExecutionMode => 2, // autonomous, interactive
             WizardStep::BranchTypeSelect => 3, // feature, fix, custom
-            WizardStep::BranchNameInput => 0,  // text input, no list
+            WizardStep::BranchNameInput => 0, // text input, no list
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     0
@@ -176,9 +176,9 @@ impl WizardState {
                     self.ai_suggest.suggestions.len().max(1)
                 }
             }
-            WizardStep::IssueSelect => 0,      // text input
-            WizardStep::SkipPermissions => 2,  // yes / no
-            WizardStep::Confirm => 2,          // launch / cancel
+            WizardStep::IssueSelect => 0,     // text input
+            WizardStep::SkipPermissions => 2, // yes / no
+            WizardStep::Confirm => 2,         // launch / cancel
         }
     }
 
@@ -222,7 +222,11 @@ impl WizardState {
                 }
             }
             WizardStep::BranchNameInput | WizardStep::IssueSelect => vec![],
-            _ => self.current_static_options().into_iter().map(String::from).collect(),
+            _ => self
+                .current_static_options()
+                .into_iter()
+                .map(String::from)
+                .collect(),
         }
     }
 }
@@ -407,7 +411,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         .constraints([
             Constraint::Length(1), // Progress indicator
             Constraint::Length(3), // Step title
-            Constraint::Min(0),   // Content
+            Constraint::Min(0),    // Content
             Constraint::Length(1), // Hints
         ])
         .split(overlay);
@@ -416,8 +420,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     let step_idx = state.step.index() + 1;
     let total = WizardStep::total();
     let progress_text = format!(" Step {}/{}", step_idx, total);
-    let progress = Paragraph::new(progress_text)
-        .style(Style::default().fg(Color::DarkGray));
+    let progress = Paragraph::new(progress_text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(progress, chunks[0]);
 
     // Step title
@@ -425,13 +428,11 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .title("Agent Launch Wizard")
         .border_style(Style::default().fg(Color::Cyan));
-    let title_text = Paragraph::new(state.step.title())
-        .block(title_block)
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let title_text = Paragraph::new(state.step.title()).block(title_block).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(title_text, chunks[1]);
 
     // Content — either a list of options or a text input
@@ -496,11 +497,7 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, opt)| {
             let style = super::list_item_style(idx == state.selected);
-            let marker = if idx == state.selected {
-                "> "
-            } else {
-                "  "
-            };
+            let marker = if idx == state.selected { "> " } else { "  " };
             let line = Line::from(vec![
                 Span::styled(marker, Style::default().fg(Color::Cyan)),
                 Span::styled(opt.clone(), style),
@@ -524,7 +521,9 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
         .title("AI Branch Suggestions");
 
     if state.ai_suggest.loading {
-        let spinner_chars = ['\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}'];
+        let spinner_chars = [
+            '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
+        ];
         let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
         let text = Paragraph::new(format!(" {} Generating branch name suggestions...", ch))
             .block(block)
@@ -626,20 +625,14 @@ mod tests {
 
     #[test]
     fn step_navigation_next() {
-        assert_eq!(
-            WizardStep::QuickStart.next(),
-            Some(WizardStep::AgentSelect)
-        );
+        assert_eq!(WizardStep::QuickStart.next(), Some(WizardStep::AgentSelect));
         assert_eq!(WizardStep::Confirm.next(), None);
     }
 
     #[test]
     fn step_navigation_prev() {
         assert_eq!(WizardStep::QuickStart.prev(), None);
-        assert_eq!(
-            WizardStep::AgentSelect.prev(),
-            Some(WizardStep::QuickStart)
-        );
+        assert_eq!(WizardStep::AgentSelect.prev(), Some(WizardStep::QuickStart));
     }
 
     #[test]
@@ -938,10 +931,7 @@ mod tests {
     fn ai_suggest_select_stores_branch_name() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
-        state.ai_suggest.suggestions = vec![
-            "feature/a".to_string(),
-            "feature/b".to_string(),
-        ];
+        state.ai_suggest.suggestions = vec!["feature/a".to_string(), "feature/b".to_string()];
         state.selected = 1;
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.branch_name, "feature/b");
@@ -952,10 +942,7 @@ mod tests {
     fn ai_suggest_edit_switches_to_manual() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
-        state.ai_suggest.suggestions = vec![
-            "feature/a".to_string(),
-            "feature/b".to_string(),
-        ];
+        state.ai_suggest.suggestions = vec!["feature/a".to_string(), "feature/b".to_string()];
         state.selected = 0;
         update(&mut state, WizardMessage::EditSelectedSuggestion);
         assert_eq!(state.step, WizardStep::BranchNameInput);
@@ -991,11 +978,7 @@ mod tests {
     fn ai_suggest_option_count_with_suggestions() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
-        state.ai_suggest.suggestions = vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-        ];
+        state.ai_suggest.suggestions = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         assert_eq!(state.option_count(), 3);
     }
 

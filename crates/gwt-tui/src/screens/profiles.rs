@@ -240,13 +240,7 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 }
 
 /// Render a single form field with active/inactive styling.
-fn render_form_field(
-    title: &str,
-    value: &str,
-    is_active: bool,
-    frame: &mut Frame,
-    area: Rect,
-) {
+fn render_form_field(title: &str, value: &str, is_active: bool, frame: &mut Frame, area: Rect) {
     let (text_style, border_style) = if is_active {
         (
             Style::default().fg(Color::Yellow),
@@ -284,7 +278,7 @@ fn render_form(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             Constraint::Length(3), // Name field
             Constraint::Length(3), // Description field
             Constraint::Length(2), // Hints
-            Constraint::Min(0),   // Spacer
+            Constraint::Min(0),    // Spacer
         ])
         .split(area);
 

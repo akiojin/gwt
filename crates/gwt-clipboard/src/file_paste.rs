@@ -65,8 +65,7 @@ pub(crate) fn run_command(cmd: &str, args: &[&str]) -> Result<String, ClipboardE
         )));
     }
 
-    String::from_utf8(output.stdout)
-        .map_err(|e| ClipboardError::InvalidUtf8(e.to_string()))
+    String::from_utf8(output.stdout).map_err(|e| ClipboardError::InvalidUtf8(e.to_string()))
 }
 
 /// Pipe text into a command's stdin.

@@ -25,6 +25,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::ToggleLayer => {
             model.active_layer = match model.active_layer {
+                ActiveLayer::Initialization => ActiveLayer::Initialization, // blocked
                 ActiveLayer::Main => ActiveLayer::Management,
                 ActiveLayer::Management => ActiveLayer::Main,
             };
@@ -102,7 +103,9 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
-            if model.active_layer == ActiveLayer::Management {
+            if model.active_layer == ActiveLayer::Initialization {
+                route_key_to_initialization(model, key);
+            } else if model.active_layer == ActiveLayer::Management {
                 route_key_to_management(model, key);
             } else {
                 forward_key_to_active_session(model, key);
@@ -173,6 +176,36 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Voice(msg) => {
             crate::input::voice::update(&mut model.voice, msg);
         }
+        Message::Initialization(msg) => {
+            use screens::initialization::InitializationMessage;
+            if let Some(ref mut state) = model.initialization {
+                match msg {
+                    InitializationMessage::Exit => {
+                        model.quit = true;
+                    }
+                    InitializationMessage::StartClone => {
+                        let url = state.url_input.clone();
+                        let target = model.repo_path.clone();
+                        state.clone_status =
+                            screens::initialization::CloneStatus::Cloning;
+                        match gwt_git::clone_repo(&url, &target) {
+                            Ok(path) => {
+                                let _ = gwt_git::install_develop_protection(&path);
+                                let _ = gwt_git::initialize_workspace(&path);
+                                model.reset(path);
+                            }
+                            Err(e) => {
+                                state.clone_status =
+                                    screens::initialization::CloneStatus::Error(e.to_string());
+                            }
+                        }
+                    }
+                    other => {
+                        screens::initialization::update(state, other);
+                    }
+                }
+            }
+        }
         Message::PasteFiles => {
             // Placeholder: actual clipboard access is handled by gwt-clipboard crate.
             // TUI triggers the action; the event loop will dispatch to clipboard integration.
@@ -191,6 +224,25 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::CloseWizard => {
             model.wizard = None;
         }
+    }
+}
+
+/// Route a key event to the initialization screen.
+fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEvent) {
+    use screens::initialization::InitializationMessage;
+
+    let msg = match key.code {
+        KeyCode::Esc => Some(Message::Initialization(InitializationMessage::Exit)),
+        KeyCode::Enter => Some(Message::Initialization(InitializationMessage::StartClone)),
+        KeyCode::Backspace => Some(Message::Initialization(InitializationMessage::Backspace)),
+        KeyCode::Char(ch) => Some(Message::Initialization(InitializationMessage::InputChar(
+            ch,
+        ))),
+        _ => None,
+    };
+
+    if let Some(m) = msg {
+        update(model, m);
     }
 }
 
@@ -475,6 +527,18 @@ fn is_in_text_input_mode(model: &Model) -> bool {
 /// Render the full UI (Elm: view).
 pub fn view(model: &Model, frame: &mut Frame) {
     let size = frame.area();
+
+    // Initialization layer is fullscreen — no management panel or sessions
+    if model.active_layer == ActiveLayer::Initialization {
+        if let Some(ref init_state) = model.initialization {
+            screens::initialization::render(init_state, frame, size);
+        }
+        // Error overlay on top
+        if !model.error_queue.is_empty() {
+            screens::error::render(&model.error_queue, frame, size);
+        }
+        return;
+    }
 
     if model.active_layer == ActiveLayer::Management {
         // Split: left = management panel, right = sessions
@@ -876,6 +940,52 @@ mod tests {
         route_key_to_management(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert_eq!(model.issues.search_query, "b");
+    }
+
+    #[test]
+    fn update_toggle_layer_blocked_in_initialization() {
+        let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization);
+
+        update(&mut model, Message::ToggleLayer);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization); // stays
+    }
+
+    #[test]
+    fn update_initialization_exit_quits() {
+        use crate::screens::initialization::InitializationMessage;
+
+        let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        update(
+            &mut model,
+            Message::Initialization(InitializationMessage::Exit),
+        );
+        assert!(model.quit);
+    }
+
+    #[test]
+    fn route_key_to_initialization_esc_exits() {
+        let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        route_key_to_initialization(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(model.quit);
+    }
+
+    #[test]
+    fn route_key_to_initialization_char_input() {
+        let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        route_key_to_initialization(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        let init = model.initialization.as_ref().unwrap();
+        assert_eq!(init.url_input, "h");
+    }
+
+    #[test]
+    fn route_key_to_initialization_backspace() {
+        let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        route_key_to_initialization(&mut model, key(KeyCode::Char('a'), KeyModifiers::NONE));
+        route_key_to_initialization(&mut model, key(KeyCode::Char('b'), KeyModifiers::NONE));
+        route_key_to_initialization(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
+        let init = model.initialization.as_ref().unwrap();
+        assert_eq!(init.url_input, "a");
     }
 
     #[test]

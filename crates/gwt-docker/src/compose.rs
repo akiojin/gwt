@@ -174,11 +174,7 @@ services:
     fn parse_compose_file_from_disk() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("docker-compose.yml");
-        std::fs::write(
-            &path,
-            "services:\n  app:\n    image: alpine:3.18\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "services:\n  app:\n    image: alpine:3.18\n").unwrap();
         let services = parse_compose_file(&path).unwrap();
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].name, "app");

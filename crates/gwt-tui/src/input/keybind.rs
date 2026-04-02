@@ -166,9 +166,7 @@ impl KeybindRegistry {
                         let idx = (n as usize) - ('1' as usize);
                         Some(Message::SwitchSession(idx))
                     }
-                    KeyCode::Char('v') => {
-                        Some(Message::Voice(VoiceInputMessage::StartRecording))
-                    }
+                    KeyCode::Char('v') => Some(Message::Voice(VoiceInputMessage::StartRecording)),
                     KeyCode::Char('b') => {
                         Some(Message::SwitchManagementTab(ManagementTab::Branches))
                     }
@@ -177,8 +175,8 @@ impl KeybindRegistry {
                     KeyCode::Char('p') => Some(Message::PasteFiles),
                     KeyCode::Char('n') => Some(Message::OpenWizard),
                     KeyCode::Char('?') => Some(Message::Tick), // TODO: ShowHelp
-                    KeyCode::Esc => Some(Message::Tick), // Cancel prefix
-                    _ => None,                           // Unknown, discard
+                    KeyCode::Esc => Some(Message::Tick),       // Cancel prefix
+                    _ => None,                                 // Unknown, discard
                 }
             }
         }

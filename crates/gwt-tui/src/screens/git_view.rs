@@ -142,9 +142,7 @@ pub fn render(state: &GitViewState, frame: &mut Frame, area: Rect) {
 /// Render the file list with expandable diffs.
 fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
     if state.files.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("Files (0)");
+        let block = Block::default().borders(Borders::ALL).title("Files (0)");
         let paragraph = Paragraph::new("No changed files")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -158,11 +156,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
     for (idx, file) in state.files.iter().enumerate() {
         let style = super::list_item_style(idx == state.selected);
 
-        let expand_marker = if state.is_expanded(idx) {
-            "v "
-        } else {
-            "> "
-        };
+        let expand_marker = if state.is_expanded(idx) { "v " } else { "> " };
 
         let line = Line::from(vec![
             Span::styled(expand_marker, Style::default().fg(Color::Cyan)),
@@ -202,9 +196,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
 /// Render the commits section.
 fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
     if state.commits.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("Commits (0)");
+        let block = Block::default().borders(Borders::ALL).title("Commits (0)");
         let paragraph = Paragraph::new("No commits loaded")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -222,10 +214,7 @@ fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
                     format!("{} ", &commit.hash[..commit.hash.len().min(7)]),
                     Style::default().fg(Color::Yellow),
                 ),
-                Span::styled(
-                    commit.subject.clone(),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(commit.subject.clone(), Style::default().fg(Color::White)),
                 Span::styled(
                     format!(" ({}, {})", commit.author, commit.date),
                     Style::default().fg(Color::DarkGray),

@@ -34,7 +34,10 @@ impl VoiceInputState {
 
     /// Whether voice input is currently active (recording or transcribing).
     pub fn is_active(&self) -> bool {
-        matches!(self.status, VoiceStatus::Recording | VoiceStatus::Transcribing)
+        matches!(
+            self.status,
+            VoiceStatus::Recording | VoiceStatus::Transcribing
+        )
     }
 }
 
@@ -95,14 +98,9 @@ pub fn render_indicator(state: &VoiceInputState) -> Option<String> {
             let tenths = (state.recording_duration_ms % 1000) / 100;
             Some(format!("\u{1F534} REC {secs}.{tenths}s"))
         }
-        VoiceStatus::Transcribing => {
-            Some("\u{28FF} Transcribing...".to_string())
-        }
+        VoiceStatus::Transcribing => Some("\u{28FF} Transcribing...".to_string()),
         VoiceStatus::Error => {
-            let msg = state
-                .error_message
-                .as_deref()
-                .unwrap_or("Unknown error");
+            let msg = state.error_message.as_deref().unwrap_or("Unknown error");
             Some(format!("\u{26A0} Voice: {msg}"))
         }
     }

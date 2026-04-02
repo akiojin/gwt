@@ -113,9 +113,7 @@ pub fn render(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
 /// Render the PR list.
 fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
     if state.prs.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("PR Dashboard");
+        let block = Block::default().borders(Borders::ALL).title("PR Dashboard");
         let paragraph = Paragraph::new("No pull requests loaded")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -197,7 +195,8 @@ fn render_detail(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         "No (conflicts)"
     };
 
-    let detail_text = format!(
+    let detail_text =
+        format!(
         " #{} - {}\n\n State: {}\n CI: {}\n Mergeable: {}\n Review: {}\n\n Press Enter to go back",
         pr.number, pr.title, pr.state.label(), pr.ci_status, merge_str, pr.review_status,
     );

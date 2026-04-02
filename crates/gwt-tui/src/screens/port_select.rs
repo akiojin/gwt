@@ -88,8 +88,7 @@ pub fn render(state: &PortSelectState, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, dialog);
 
     if state.conflicts.is_empty() {
-        let empty = Paragraph::new("No port conflicts")
-            .style(Style::default().fg(Color::DarkGray));
+        let empty = Paragraph::new("No port conflicts").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty, inner);
         return;
     }
@@ -99,17 +98,20 @@ pub fn render(state: &PortSelectState, frame: &mut Frame, area: Rect) {
         return;
     }
     let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "Container  Host  Suggested",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    let header = Paragraph::new(Line::from(vec![Span::styled(
+        "Container  Host  Suggested",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
     frame.render_widget(header, header_area);
 
-    let list_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1));
+    let list_area = Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
 
     let items: Vec<ListItem> = state
         .conflicts

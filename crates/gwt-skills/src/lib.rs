@@ -4,12 +4,10 @@ pub mod hooks;
 pub mod registry;
 
 pub use hooks::{
-    Hook, HooksConfig, HooksError, backup_hooks, detect_corruption, is_gwt_managed, merge_hooks,
-    merge_hooks_safe, restore_from_backup,
+    backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
+    restore_from_backup, Hook, HooksConfig, HooksError,
 };
-pub use registry::{
-    BuiltinSkill, EmbeddedSkill, RegistryError, SkillRegistry, register_builtins,
-};
+pub use registry::{register_builtins, BuiltinSkill, EmbeddedSkill, RegistryError, SkillRegistry};
 
 #[cfg(test)]
 mod tests {

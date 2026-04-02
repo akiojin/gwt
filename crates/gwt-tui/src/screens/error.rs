@@ -48,9 +48,7 @@ pub fn render(error_queue: &VecDeque<String>, frame: &mut Frame, area: Rect) {
     let text = vec![
         Line::from(Span::styled(
             err.as_str(),
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(

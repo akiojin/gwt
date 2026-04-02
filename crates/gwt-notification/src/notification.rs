@@ -60,8 +60,7 @@ mod tests {
 
     #[test]
     fn with_detail_sets_detail() {
-        let n = Notification::new(Severity::Error, "pty", "crash")
-            .with_detail("segfault at 0x0");
+        let n = Notification::new(Severity::Error, "pty", "crash").with_detail("segfault at 0x0");
         assert_eq!(n.detail.as_deref(), Some("segfault at 0x0"));
     }
 

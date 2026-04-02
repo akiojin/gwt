@@ -21,9 +21,7 @@ pub struct DockerFiles {
 impl DockerFiles {
     /// Returns true if any Docker files were detected.
     pub fn any_found(&self) -> bool {
-        self.dockerfile.is_some()
-            || self.compose_file.is_some()
-            || self.devcontainer_dir.is_some()
+        self.dockerfile.is_some() || self.compose_file.is_some() || self.devcontainer_dir.is_some()
     }
 }
 
@@ -131,13 +129,11 @@ mod tests {
         let files = detect_docker_files(tmp.path());
         assert!(files.any_found());
         assert!(files.compose_file.is_some());
-        assert!(
-            files
-                .compose_file
-                .as_ref()
-                .unwrap()
-                .ends_with("docker-compose.yml")
-        );
+        assert!(files
+            .compose_file
+            .as_ref()
+            .unwrap()
+            .ends_with("docker-compose.yml"));
     }
 
     #[test]
@@ -175,13 +171,11 @@ mod tests {
         std::fs::write(tmp.path().join("docker-compose.yml"), "version: '3'").unwrap();
         std::fs::write(tmp.path().join("compose.yml"), "version: '3'").unwrap();
         let files = detect_docker_files(tmp.path());
-        assert!(
-            files
-                .compose_file
-                .as_ref()
-                .unwrap()
-                .ends_with("docker-compose.yml")
-        );
+        assert!(files
+            .compose_file
+            .as_ref()
+            .unwrap()
+            .ends_with("docker-compose.yml"));
     }
 
     #[test]

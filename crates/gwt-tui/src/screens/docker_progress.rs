@@ -44,10 +44,7 @@ impl DockerStage {
 
     /// Progress index (0-based) within the normal flow.
     pub fn index(self) -> usize {
-        Self::PROGRESS
-            .iter()
-            .position(|s| *s == self)
-            .unwrap_or(0)
+        Self::PROGRESS.iter().position(|s| *s == self).unwrap_or(0)
     }
 
     /// Progress ratio (0.0 .. 1.0).
@@ -147,9 +144,7 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             )
-        } else if stage.index() < state.stage.index()
-            || state.stage == DockerStage::Ready
-        {
+        } else if stage.index() < state.stage.index() || state.stage == DockerStage::Ready {
             ("\u{2714} ", Style::default().fg(Color::Green)) // check mark
         } else {
             ("\u{25CB} ", Style::default().fg(Color::DarkGray)) // circle
@@ -170,8 +165,18 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
     }
 
     // Progress gauge at bottom
-    let gauge_area = Rect::new(inner.x, inner.y + inner.height.saturating_sub(1), inner.width, 1);
-    let text_area = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2));
+    let gauge_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    let text_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, text_area);

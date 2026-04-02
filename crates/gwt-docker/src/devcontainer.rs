@@ -172,11 +172,7 @@ mod tests {
     fn load_basic_devcontainer() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("devcontainer.json");
-        std::fs::write(
-            &path,
-            r#"{ "name": "Test", "image": "ubuntu:22.04" }"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{ "name": "Test", "image": "ubuntu:22.04" }"#).unwrap();
         let cfg = DevContainerConfig::load(&path).unwrap();
         assert_eq!(cfg.name.as_deref(), Some("Test"));
         assert_eq!(cfg.image.as_deref(), Some("ubuntu:22.04"));
@@ -232,11 +228,7 @@ mod tests {
     fn load_with_post_create_command_string() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("devcontainer.json");
-        std::fs::write(
-            &path,
-            r#"{ "postCreateCommand": "npm install" }"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{ "postCreateCommand": "npm install" }"#).unwrap();
         let cfg = DevContainerConfig::load(&path).unwrap();
         let cmd = cfg.post_create_command.unwrap();
         assert_eq!(cmd.to_vec(), vec!["npm install"]);
@@ -246,11 +238,7 @@ mod tests {
     fn load_with_post_create_command_array() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("devcontainer.json");
-        std::fs::write(
-            &path,
-            r#"{ "postCreateCommand": ["npm", "install"] }"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{ "postCreateCommand": ["npm", "install"] }"#).unwrap();
         let cfg = DevContainerConfig::load(&path).unwrap();
         let cmd = cfg.post_create_command.unwrap();
         assert_eq!(cmd.to_vec(), vec!["npm", "install"]);

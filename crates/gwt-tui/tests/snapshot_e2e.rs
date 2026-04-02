@@ -216,6 +216,65 @@ fn snapshot_profiles_tab() {
 }
 
 // ============================================================
+// Initialization Screen Snapshots
+// ============================================================
+
+#[test]
+fn snapshot_initialization_clone_wizard() {
+    let model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("initialization_clone_wizard", output);
+}
+
+#[test]
+fn snapshot_initialization_bare_migration() {
+    let model = Model::new_initialization(PathBuf::from("/tmp/bare"), true);
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("initialization_bare_migration", output);
+}
+
+#[test]
+fn snapshot_initialization_with_url_typed() {
+    let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+    // Simulate typing a URL
+    if let Some(init) = model.initialization_mut() {
+        init.url_input = "https://github.com/user/repo.git".to_string();
+    }
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("initialization_url_typed", output);
+}
+
+#[test]
+fn snapshot_initialization_clone_error() {
+    let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+    if let Some(init) = model.initialization_mut() {
+        init.url_input = "https://bad.url/repo.git".to_string();
+        init.clone_status = gwt_tui::screens::initialization::CloneStatus::Error(
+            "fatal: repository not found".to_string(),
+        );
+    }
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("initialization_clone_error", output);
+}
+
+#[test]
+fn e2e_initialization_esc_exits() {
+    let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+    // In initialization, KeyInput is routed directly (no keybind registry)
+    app::update(&mut model, Message::KeyInput(press(KeyCode::Esc)));
+    assert!(model.quit);
+}
+
+#[test]
+fn e2e_initialization_typing_url() {
+    let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+    app::update(&mut model, Message::KeyInput(press(KeyCode::Char('h'))));
+    app::update(&mut model, Message::KeyInput(press(KeyCode::Char('i'))));
+    let init = model.initialization().unwrap();
+    assert_eq!(init.url_input, "hi");
+}
+
+// ============================================================
 // User Flow Snapshots
 // ============================================================
 

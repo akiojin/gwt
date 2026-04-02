@@ -104,7 +104,12 @@ fn lifecycle(action: &str, id: &str) -> Result<()> {
             "docker {action} failed: {stderr}"
         )));
     }
-    debug!(category = "docker", id = id, action = action, "container lifecycle");
+    debug!(
+        category = "docker",
+        id = id,
+        action = action,
+        "container lifecycle"
+    );
     Ok(())
 }
 

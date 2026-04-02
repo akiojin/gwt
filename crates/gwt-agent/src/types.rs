@@ -158,7 +158,10 @@ mod tests {
     fn agent_id_default_color() {
         assert_eq!(AgentId::ClaudeCode.default_color(), AgentColor::Green);
         assert_eq!(AgentId::Codex.default_color(), AgentColor::Blue);
-        assert_eq!(AgentId::Custom("x".into()).default_color(), AgentColor::Gray);
+        assert_eq!(
+            AgentId::Custom("x".into()).default_color(),
+            AgentColor::Gray
+        );
     }
 
     #[test]

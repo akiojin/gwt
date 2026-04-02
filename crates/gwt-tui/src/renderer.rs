@@ -73,7 +73,7 @@ pub fn detect_urls(text: &str) -> Vec<(usize, usize)> {
         // Strip trailing punctuation that is unlikely part of the URL
         while end > start + scheme_len {
             let last = bytes[end - 1];
-            if matches!(last, b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b'\'' ) {
+            if matches!(last, b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b'\'') {
                 end -= 1;
             } else {
                 break;

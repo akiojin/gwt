@@ -28,13 +28,10 @@ pub struct Branch {
 
 /// List branches with full tracking info for the repo at `repo_path`.
 pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
-    let format = "%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(upstream:track)\t%(creatordate:iso8601)";
+    let format =
+        "%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(upstream:track)\t%(creatordate:iso8601)";
     let output = std::process::Command::new("git")
-        .args([
-            "for-each-ref",
-            &format!("--format={format}"),
-            "refs/heads/",
-        ])
+        .args(["for-each-ref", &format!("--format={format}"), "refs/heads/"])
         .current_dir(repo_path)
         .output()
         .map_err(|e| GwtError::Git(format!("for-each-ref: {e}")))?;

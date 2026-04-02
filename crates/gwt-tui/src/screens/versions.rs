@@ -68,7 +68,7 @@ pub fn render(state: &VersionsState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),   // Tag list
+            Constraint::Min(0),    // Tag list
             Constraint::Length(3), // Detail of selected
         ])
         .split(area);

@@ -169,19 +169,25 @@ impl AgentLaunchBuilder {
         env_vars.insert("DISABLE_ERROR_REPORTING".into(), "1".into());
         env_vars.insert("DISABLE_FEEDBACK_COMMAND".into(), "1".into());
         env_vars.insert("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".into(), "1".into());
-        env_vars.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into());
+        env_vars.insert(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+            "1".into(),
+        );
 
         // Permission mode
         if let Some(ref mode) = self.permission_mode {
             args.push("--permission-mode".to_string());
-            args.push(match mode {
-                PermissionMode::Default => "default",
-                PermissionMode::AcceptEdits => "acceptEdits",
-                PermissionMode::Plan => "plan",
-                PermissionMode::Auto => "auto",
-                PermissionMode::DontAsk => "dontAsk",
-                PermissionMode::BypassPermissions => "bypassPermissions",
-            }.to_string());
+            args.push(
+                match mode {
+                    PermissionMode::Default => "default",
+                    PermissionMode::AcceptEdits => "acceptEdits",
+                    PermissionMode::Plan => "plan",
+                    PermissionMode::Auto => "auto",
+                    PermissionMode::DontAsk => "dontAsk",
+                    PermissionMode::BypassPermissions => "bypassPermissions",
+                }
+                .to_string(),
+            );
         }
 
         // Session mode
@@ -261,7 +267,10 @@ mod tests {
             config.env_vars.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
             Some(&"1".to_string())
         );
-        assert_eq!(config.env_vars.get("TERM"), Some(&"xterm-256color".to_string()));
+        assert_eq!(
+            config.env_vars.get("TERM"),
+            Some(&"xterm-256color".to_string())
+        );
         assert_eq!(
             config.env_vars.get("GWT_PROJECT_ROOT"),
             Some(&"/tmp/project".to_string())
@@ -295,7 +304,9 @@ mod tests {
             .build();
 
         assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"claude-sonnet-4-20250514".to_string()));
+        assert!(config
+            .args
+            .contains(&"claude-sonnet-4-20250514".to_string()));
     }
 
     #[test]
@@ -350,16 +361,30 @@ mod tests {
     fn build_claude_has_telemetry_disable_vars() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
 
-        assert_eq!(config.env_vars.get("CLAUDE_CODE_NO_FLICKER"), Some(&"1".to_string()));
-        assert_eq!(config.env_vars.get("DISABLE_TELEMETRY"), Some(&"1".to_string()));
-        assert_eq!(config.env_vars.get("DISABLE_ERROR_REPORTING"), Some(&"1".to_string()));
-        assert_eq!(config.env_vars.get("DISABLE_FEEDBACK_COMMAND"), Some(&"1".to_string()));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_NO_FLICKER"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            config.env_vars.get("DISABLE_TELEMETRY"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            config.env_vars.get("DISABLE_ERROR_REPORTING"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            config.env_vars.get("DISABLE_FEEDBACK_COMMAND"),
+            Some(&"1".to_string())
+        );
         assert_eq!(
             config.env_vars.get("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"),
             Some(&"1".to_string())
         );
         assert_eq!(
-            config.env_vars.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+            config
+                .env_vars
+                .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
             Some(&"1".to_string())
         );
     }

@@ -32,10 +32,7 @@ mod tests {
     #[test]
     fn clipboard_error_display() {
         let err = ClipboardError::UnsupportedPlatform;
-        assert_eq!(
-            err.to_string(),
-            "Unsupported platform for clipboard access"
-        );
+        assert_eq!(err.to_string(), "Unsupported platform for clipboard access");
     }
 
     #[test]

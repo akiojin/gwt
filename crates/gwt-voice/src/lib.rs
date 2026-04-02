@@ -23,10 +23,7 @@ mod tests {
         let mut backend = NoOpVoiceBackend::new();
         let result = backend.start_recording();
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            VoiceError::NotAvailable
-        ));
+        assert!(matches!(result.unwrap_err(), VoiceError::NotAvailable));
     }
 
     #[test]

@@ -62,7 +62,11 @@ mod tests {
     fn send_multiple() {
         let (bus, mut rx) = NotificationBus::new();
         for i in 0..5 {
-            bus.send(Notification::new(Severity::Debug, "test", format!("msg-{i}")));
+            bus.send(Notification::new(
+                Severity::Debug,
+                "test",
+                format!("msg-{i}"),
+            ));
         }
         let mut count = 0;
         while rx.try_recv().is_some() {

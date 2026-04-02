@@ -2,12 +2,13 @@
 
 use crossterm::event::{KeyEvent, MouseEvent};
 
-use crate::model::ManagementTab;
 use crate::input::voice::VoiceInputMessage;
+use crate::model::ManagementTab;
 use crate::screens::branches::BranchesMessage;
 use crate::screens::confirm::ConfirmMessage;
 use crate::screens::docker_progress::DockerProgressMessage;
 use crate::screens::git_view::GitViewMessage;
+use crate::screens::initialization::InitializationMessage;
 use crate::screens::issues::IssuesMessage;
 use crate::screens::logs::LogsMessage;
 use crate::screens::port_select::PortSelectMessage;
@@ -84,6 +85,8 @@ pub enum Message {
     Confirm(ConfirmMessage),
     /// Voice input message.
     Voice(VoiceInputMessage),
+    /// Initialization screen message.
+    Initialization(InitializationMessage),
     /// Paste file paths from clipboard.
     PasteFiles,
     /// Open the wizard overlay.
@@ -129,6 +132,7 @@ mod tests {
         let _ = Message::PortSelect(PortSelectMessage::MoveUp);
         let _ = Message::Confirm(ConfirmMessage::Toggle);
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
+        let _ = Message::Initialization(InitializationMessage::Exit);
         let _ = Message::PasteFiles;
         let _ = Message::OpenWizard;
         let _ = Message::OpenWizardWithSpec("SPEC-1".into(), "Title".into());

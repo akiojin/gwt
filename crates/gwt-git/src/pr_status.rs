@@ -78,10 +78,7 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
         _ => PrState::Open,
     };
     let url = v["url"].as_str().unwrap_or("").to_string();
-    let mergeable = v["mergeable"]
-        .as_str()
-        .unwrap_or("UNKNOWN")
-        .to_string();
+    let mergeable = v["mergeable"].as_str().unwrap_or("UNKNOWN").to_string();
 
     // Determine CI status from statusCheckRollup
     let ci_status = v["statusCheckRollup"]

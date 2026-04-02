@@ -167,7 +167,7 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Filter tabs
-            Constraint::Min(0),   // Log list / detail
+            Constraint::Min(0),    // Log list / detail
         ])
         .split(area);
 
@@ -182,7 +182,10 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
 
 /// Render the filter tab bar.
 fn render_filter_tabs(state: &LogsState, frame: &mut Frame, area: Rect) {
-    let titles: Vec<Line> = FilterLevel::ALL.iter().map(|f| Line::from(f.label())).collect();
+    let titles: Vec<Line> = FilterLevel::ALL
+        .iter()
+        .map(|f| Line::from(f.label()))
+        .collect();
 
     let active_idx = FilterLevel::ALL
         .iter()

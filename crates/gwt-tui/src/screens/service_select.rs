@@ -75,8 +75,7 @@ pub fn render(state: &ServiceSelectState, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, dialog);
 
     if state.services.is_empty() {
-        let empty = Paragraph::new("No services found")
-            .style(Style::default().fg(Color::DarkGray));
+        let empty = Paragraph::new("No services found").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty, inner);
         return;
     }

@@ -53,8 +53,7 @@ impl SkillRegistry {
 
         let mut count = 0;
         for entry in entries {
-            let entry =
-                entry.map_err(|e| RegistryError::Io(format!("{}: {e}", dir.display())))?;
+            let entry = entry.map_err(|e| RegistryError::Io(format!("{}: {e}", dir.display())))?;
             let skill_file = entry.path().join("skill.json");
             if skill_file.is_file() {
                 let content = std::fs::read_to_string(&skill_file)
@@ -152,4 +151,3 @@ pub fn register_builtins(registry: &mut SkillRegistry) {
         registry.register(builtin.to_embedded());
     }
 }
-

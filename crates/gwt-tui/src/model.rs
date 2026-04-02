@@ -8,6 +8,7 @@ use crate::screens::branches::BranchesState;
 use crate::screens::confirm::ConfirmState;
 use crate::screens::docker_progress::DockerProgressState;
 use crate::screens::git_view::GitViewState;
+use crate::screens::initialization::InitializationState;
 use crate::screens::issues::IssuesState;
 use crate::screens::logs::LogsState;
 use crate::screens::port_select::PortSelectState;
@@ -22,6 +23,8 @@ use crate::screens::wizard::WizardState;
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveLayer {
+    /// Initialization screen (no repo detected — clone wizard or bare migration).
+    Initialization,
     /// Session panes (shell / agent terminals).
     Main,
     /// Management panel (branches, specs, issues, etc.).
@@ -189,6 +192,8 @@ pub struct Model {
     pub(crate) voice: VoiceInputState,
     /// Buffered PTY input generated from forwarded key events.
     pub(crate) pending_pty_inputs: VecDeque<PendingPtyInput>,
+    /// Initialization screen state (present when ActiveLayer::Initialization).
+    pub(crate) initialization: Option<InitializationState>,
 }
 
 impl Model {
@@ -227,7 +232,25 @@ impl Model {
             confirm: ConfirmState::default(),
             voice: VoiceInputState::default(),
             pending_pty_inputs: VecDeque::new(),
+            initialization: None,
         }
+    }
+
+    /// Create a new Model in Initialization layer (no repo detected).
+    pub fn new_initialization(repo_path: PathBuf, bare_migration: bool) -> Self {
+        let mut model = Self::new(repo_path);
+        model.active_layer = ActiveLayer::Initialization;
+        model.initialization = Some(InitializationState::new(bare_migration));
+        model
+    }
+
+    /// Reset all state for a new repository path (after successful clone).
+    ///
+    /// Transitions to Management layer, discarding all previous state.
+    pub fn reset(&mut self, repo_path: PathBuf) {
+        let terminal_size = self.terminal_size;
+        *self = Self::new(repo_path);
+        self.terminal_size = terminal_size;
     }
 
     /// Number of sessions.
@@ -243,6 +266,16 @@ impl Model {
     /// Buffered PTY input awaiting delivery to sessions.
     pub fn pending_pty_inputs(&self) -> &VecDeque<PendingPtyInput> {
         &self.pending_pty_inputs
+    }
+
+    /// Get a mutable reference to the initialization state.
+    pub fn initialization_mut(&mut self) -> Option<&mut InitializationState> {
+        self.initialization.as_mut()
+    }
+
+    /// Get a reference to the initialization state.
+    pub fn initialization(&self) -> Option<&InitializationState> {
+        self.initialization.as_ref()
     }
 
     /// Whether a wizard overlay is active.
@@ -414,6 +447,39 @@ mod tests {
     fn load_session_state_missing_file_returns_none() {
         let result = Model::load_session_state(Path::new("/nonexistent/path/session.toml"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn model_new_initialization_defaults() {
+        let model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization);
+        assert!(model.initialization.is_some());
+        let init = model.initialization.as_ref().unwrap();
+        assert!(!init.bare_migration);
+        assert!(init.url_input.is_empty());
+    }
+
+    #[test]
+    fn model_new_initialization_bare_migration() {
+        let model = Model::new_initialization(PathBuf::from("/tmp/bare"), true);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization);
+        let init = model.initialization.as_ref().unwrap();
+        assert!(init.bare_migration);
+    }
+
+    #[test]
+    fn model_reset_transitions_to_management() {
+        let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization);
+
+        model.terminal_size = (120, 40);
+        model.reset(PathBuf::from("/tmp/repo"));
+
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert!(model.initialization.is_none());
+        assert_eq!(model.repo_path, PathBuf::from("/tmp/repo"));
+        // Terminal size is preserved
+        assert_eq!(model.terminal_size, (120, 40));
     }
 
     #[test]

@@ -15,6 +15,11 @@ pub use branch::Branch;
 pub use commit::CommitEntry;
 pub use diff::{FileEntry, FileStatus};
 pub use issue::{Issue, IssueCache};
-pub use pr_status::{CiStatus, MergeStatus, PrCheckReport, PrStatus, ReviewStatus, pr_check_report};
-pub use repository::Repository;
+pub use pr_status::{
+    pr_check_report, CiStatus, MergeStatus, PrCheckReport, PrStatus, ReviewStatus,
+};
+pub use repository::{
+    clone_repo, detect_repo_type, initialize_workspace, install_develop_protection, RepoType,
+    Repository,
+};
 pub use worktree::{WorktreeInfo, WorktreeManager};

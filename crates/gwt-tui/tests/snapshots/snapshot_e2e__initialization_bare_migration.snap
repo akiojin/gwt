@@ -1,0 +1,21 @@
+---
+source: crates/gwt-tui/tests/snapshot_e2e.rs
+expression: output
+---
+
+       ┌─────────────── gwt — Bare Repository Detected ────────────────┐
+       │                                                               │
+       │        This directory contains a bare Git repository.         │
+       │                                                               │
+       │   gwt requires a normal (non-bare) clone to work properly.    │
+       │             To migrate, re-clone your repository:             │
+       │                                                               │
+       │                   1. Move to a new directory                  │
+       │                 2. git clone --depth=1 <url> .                │
+       │               3. Launch gwt-tui in the new clone              │
+       │                                                               │
+       │                       Press Esc to exit                       │
+       │                                                               │
+       │                                                               │
+       │                                                               │
+       └───────────────────────────────────────────────────────────────┘
