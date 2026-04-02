@@ -18,7 +18,9 @@ pub fn poll_event(deadline: Instant) -> Option<Message> {
 
     if event::poll(remaining).unwrap_or(false) {
         match event::read() {
-            Ok(Event::Key(key)) => Some(Message::KeyInput(key)),
+            Ok(Event::Key(key)) if key.kind == event::KeyEventKind::Press => {
+                Some(Message::KeyInput(key))
+            }
             Ok(Event::Mouse(mouse)) => Some(Message::MouseInput(mouse)),
             Ok(Event::Resize(w, h)) => Some(Message::Resize(w, h)),
             _ => None,
