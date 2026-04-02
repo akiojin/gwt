@@ -1,10 +1,14 @@
 //! App — Update and View functions for the Elm Architecture.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
 
+use gwt_agent::{AgentDetector, AgentId, DetectedAgent, VersionCache};
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings};
+use gwt_core::paths::gwt_cache_dir;
 use gwt_notification::{Notification, Severity};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -22,6 +26,8 @@ use crate::{
     model::{ActiveLayer, ManagementTab, Model, SessionLayout, SessionTabType},
     screens,
 };
+
+static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Process a message and update the model (Elm: update).
 pub fn update(model: &mut Model, msg: Message) {
@@ -236,15 +242,13 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::OpenWizard => {
-            model.wizard = Some(crate::screens::wizard::WizardState::default());
+            open_wizard(model, None);
         }
         Message::OpenWizardWithSpec(spec_id, title) => {
-            let wizard = crate::screens::wizard::WizardState {
-                branch_name: format!("feature/{}", spec_id.to_lowercase()),
-                spec_context: Some(crate::screens::wizard::SpecContext { spec_id, title }),
-                ..Default::default()
-            };
-            model.wizard = Some(wizard);
+            open_wizard(
+                model,
+                Some(crate::screens::wizard::SpecContext { spec_id, title }),
+            );
         }
         Message::CloseWizard => {
             model.wizard = None;
@@ -800,6 +804,143 @@ fn ai_client_from_settings(settings: &AISettings) -> Result<AIClient, String> {
     .map_err(|err| err.to_string())
 }
 
+fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecContext>) {
+    let cache_path = wizard_version_cache_path();
+    let cache = VersionCache::load(&cache_path);
+    let detected_agents = AgentDetector::detect_all();
+    let (wizard, refresh_targets) = prepare_wizard_startup(spec_context, detected_agents, &cache);
+
+    model.wizard = Some(wizard);
+    schedule_wizard_version_cache_refresh(cache_path, refresh_targets);
+}
+
+fn prepare_wizard_startup(
+    spec_context: Option<screens::wizard::SpecContext>,
+    detected_agents: Vec<DetectedAgent>,
+    cache: &VersionCache,
+) -> (screens::wizard::WizardState, Vec<AgentId>) {
+    let branch_name = spec_context
+        .as_ref()
+        .map(|ctx| format!("feature/{}", ctx.spec_id.to_lowercase()))
+        .unwrap_or_default();
+
+    let mut wizard = screens::wizard::WizardState {
+        branch_name,
+        spec_context,
+        ..Default::default()
+    };
+
+    let (agents, refresh_targets) = build_wizard_agent_options(detected_agents, cache);
+    if !agents.is_empty() {
+        screens::wizard::update(
+            &mut wizard,
+            screens::wizard::WizardMessage::SetAgents(agents),
+        );
+    }
+
+    (wizard, refresh_targets)
+}
+
+fn build_wizard_agent_options(
+    detected_agents: Vec<DetectedAgent>,
+    cache: &VersionCache,
+) -> (Vec<screens::wizard::AgentOption>, Vec<AgentId>) {
+    let mut refresh_targets = Vec::new();
+    let options = detected_agents
+        .into_iter()
+        .map(|detected| {
+            let cached_versions = cached_agent_versions(cache, &detected.agent_id);
+            let cache_refreshable = detected.agent_id.package_name().is_some();
+            let cache_outdated = cache_refreshable && cache.needs_refresh(&detected.agent_id);
+            if cache_outdated {
+                refresh_targets.push(detected.agent_id.clone());
+            }
+
+            let versions = if cached_versions.is_empty() {
+                detected.version.into_iter().collect()
+            } else {
+                cached_versions
+            };
+
+            screens::wizard::AgentOption {
+                id: detected.agent_id.command().to_string(),
+                name: detected.agent_id.display_name().to_string(),
+                available: true,
+                versions,
+                cache_outdated,
+            }
+        })
+        .collect();
+
+    (options, refresh_targets)
+}
+
+fn cached_agent_versions(cache: &VersionCache, agent_id: &AgentId) -> Vec<String> {
+    let key = version_cache_key(agent_id);
+    cache
+        .entries
+        .get(&key)
+        .map(|entry| entry.versions.clone())
+        .unwrap_or_default()
+}
+
+fn version_cache_key(agent_id: &AgentId) -> String {
+    match agent_id {
+        AgentId::ClaudeCode => "claude-code".to_string(),
+        AgentId::Codex => "codex".to_string(),
+        AgentId::Gemini => "gemini".to_string(),
+        AgentId::OpenCode => "opencode".to_string(),
+        AgentId::Copilot => "copilot".to_string(),
+        AgentId::Custom(name) => format!("custom-{name}"),
+    }
+}
+
+fn wizard_version_cache_path() -> PathBuf {
+    gwt_cache_dir().join("agent-versions.json")
+}
+
+fn schedule_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<AgentId>) {
+    if refresh_targets.is_empty() {
+        return;
+    }
+
+    if WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let _ = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+
+        if let Ok(runtime) = runtime {
+            runtime.block_on(async move {
+                let mut cache = VersionCache::load(&cache_path);
+                let mut changed = false;
+
+                for agent_id in refresh_targets {
+                    if !cache.needs_refresh(&agent_id) {
+                        continue;
+                    }
+
+                    if let Ok(Some(_versions)) = cache.refresh(&agent_id).await {
+                        changed = true;
+                    }
+                }
+
+                if changed {
+                    let _ = cache.save(&cache_path);
+                }
+            });
+        }
+
+        WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    });
+}
+
 fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
     if let Ok(paths) = gwt_clipboard::ClipboardFilePaste::extract_file_paths() {
         if let Some(bytes) = clipboard_payload_to_bytes(&paths, "") {
@@ -1089,7 +1230,9 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
     use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+    use gwt_agent::{version_cache::VersionEntry, AgentId, DetectedAgent, VersionCache};
     use gwt_notification::{Notification, Severity};
     use std::path::PathBuf;
 
@@ -1103,6 +1246,21 @@ mod tests {
             modifiers,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
+        }
+    }
+
+    fn detected_agent(agent_id: AgentId, version: Option<&str>) -> DetectedAgent {
+        DetectedAgent {
+            agent_id,
+            version: version.map(|value| value.to_string()),
+            path: PathBuf::from("/tmp/fake-agent"),
+        }
+    }
+
+    fn version_entry(versions: &[&str], age_seconds: i64) -> VersionEntry {
+        VersionEntry {
+            versions: versions.iter().map(|value| value.to_string()).collect(),
+            updated_at: Utc::now() - Duration::seconds(age_seconds),
         }
     }
 
@@ -1243,26 +1401,57 @@ mod tests {
     }
 
     #[test]
-    fn update_open_wizard_with_spec_prefills() {
-        let mut model = test_model();
-        update(
-            &mut model,
-            Message::OpenWizardWithSpec("SPEC-42".into(), "My Feature".into()),
+    fn prepare_wizard_startup_prefills_spec_context_and_versions() {
+        let mut cache = VersionCache::new();
+        cache.entries.insert(
+            "claude-code".into(),
+            version_entry(&["1.0.54", "1.0.53"], 60),
         );
-        let wizard = model.wizard.as_ref().unwrap();
+        cache
+            .entries
+            .insert("codex".into(), version_entry(&["0.5.0"], 90_000));
+
+        let detected = vec![
+            detected_agent(AgentId::ClaudeCode, Some("1.0.55")),
+            detected_agent(AgentId::Codex, Some("0.5.1")),
+            detected_agent(AgentId::Gemini, Some("0.2.0")),
+        ];
+
+        let (wizard, refresh_targets) = prepare_wizard_startup(
+            Some(screens::wizard::SpecContext {
+                spec_id: "SPEC-42".into(),
+                title: "My Feature".into(),
+            }),
+            detected,
+            &cache,
+        );
+
         assert_eq!(wizard.branch_name, "feature/spec-42");
         let ctx = wizard.spec_context.as_ref().unwrap();
         assert_eq!(ctx.spec_id, "SPEC-42");
         assert_eq!(ctx.title, "My Feature");
+        assert_eq!(wizard.detected_agents.len(), 3);
+        assert_eq!(wizard.detected_agents[0].versions, vec!["1.0.54", "1.0.53"]);
+        assert_eq!(wizard.detected_agents[1].versions, vec!["0.5.0"]);
+        assert!(wizard.detected_agents[1].cache_outdated);
+        assert_eq!(wizard.detected_agents[2].versions, vec!["0.2.0"]);
+        assert!(wizard.detected_agents[2].cache_outdated);
+        assert_eq!(refresh_targets, vec![AgentId::Codex, AgentId::Gemini]);
     }
 
     #[test]
-    fn update_open_wizard_without_spec_has_no_context() {
-        let mut model = test_model();
-        update(&mut model, Message::OpenWizard);
-        let wizard = model.wizard.as_ref().unwrap();
+    fn prepare_wizard_startup_uses_detected_version_when_cache_is_missing() {
+        let cache = VersionCache::new();
+        let detected = vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))];
+
+        let (wizard, refresh_targets) = prepare_wizard_startup(None, detected, &cache);
+
         assert!(wizard.spec_context.is_none());
         assert!(wizard.branch_name.is_empty());
+        assert_eq!(wizard.detected_agents.len(), 1);
+        assert_eq!(wizard.detected_agents[0].versions, vec!["1.0.55"]);
+        assert!(wizard.detected_agents[0].cache_outdated);
+        assert_eq!(refresh_targets, vec![AgentId::ClaudeCode]);
     }
 
     #[test]

@@ -116,6 +116,40 @@ pub struct AgentOption {
     pub id: String,
     pub name: String,
     pub available: bool,
+    /// Cached version history loaded at wizard startup.
+    pub versions: Vec<String>,
+    /// Whether the cached version list is stale and scheduled for refresh.
+    pub cache_outdated: bool,
+}
+
+impl AgentOption {
+    /// Render the option label shown in the wizard.
+    pub fn display_label(&self) -> String {
+        let status = if self.available { "+" } else { "-" };
+        let mut label = format!("[{}] {}", status, self.name);
+
+        if let Some(summary) = self.cached_version_summary() {
+            label.push_str(&format!(" ({summary})"));
+        }
+
+        if self.cache_outdated {
+            label.push_str(" [cache outdated]");
+        }
+
+        label
+    }
+
+    fn cached_version_summary(&self) -> Option<String> {
+        match self.versions.as_slice() {
+            [] => None,
+            [single] => Some(single.clone()),
+            versions => Some(format!(
+                "{} (+{} older)",
+                versions.last().cloned().unwrap_or_default(),
+                versions.len().saturating_sub(1)
+            )),
+        }
+    }
 }
 
 /// SPEC context for prefilling the wizard.
@@ -219,10 +253,7 @@ impl WizardState {
                 } else {
                     self.detected_agents
                         .iter()
-                        .map(|a| {
-                            let status = if a.available { "+" } else { "-" };
-                            format!("[{}] {}", status, a.name)
-                        })
+                        .map(AgentOption::display_label)
                         .collect()
                 }
             }
@@ -734,16 +765,22 @@ mod tests {
                 id: "claude".to_string(),
                 name: "Claude Code".to_string(),
                 available: true,
+                versions: vec!["1.0.54".to_string(), "1.0.53".to_string()],
+                cache_outdated: false,
             },
             AgentOption {
                 id: "codex".to_string(),
                 name: "Codex CLI".to_string(),
                 available: true,
+                versions: vec!["0.5.0".to_string()],
+                cache_outdated: true,
             },
             AgentOption {
                 id: "aider".to_string(),
                 name: "Aider".to_string(),
                 available: false,
+                versions: Vec::new(),
+                cache_outdated: false,
             },
         ]
     }
@@ -877,6 +914,7 @@ mod tests {
         update(&mut state, WizardMessage::SetAgents(sample_agents()));
         assert_eq!(state.detected_agents.len(), 3);
         assert_eq!(state.selected, 0);
+        assert_eq!(state.detected_agents[0].versions, vec!["1.0.54", "1.0.53"]);
     }
 
     #[test]
@@ -888,6 +926,40 @@ mod tests {
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.agent_id, "codex");
         assert_eq!(state.step, WizardStep::ModelSelect);
+    }
+
+    #[test]
+    fn agent_option_display_includes_versions_and_cache_status() {
+        let option = AgentOption {
+            id: "codex".to_string(),
+            name: "Codex CLI".to_string(),
+            available: true,
+            versions: vec!["1.2.0".to_string(), "1.3.0".to_string()],
+            cache_outdated: true,
+        };
+
+        assert_eq!(
+            option.display_label(),
+            "[+] Codex CLI (1.3.0 (+1 older)) [cache outdated]"
+        );
+    }
+
+    #[test]
+    fn current_options_show_cached_versions_for_agents() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AgentSelect;
+        state.detected_agents = vec![AgentOption {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            available: true,
+            versions: vec!["1.0.54".to_string()],
+            cache_outdated: false,
+        }];
+
+        assert_eq!(
+            state.current_options(),
+            vec!["[+] Claude Code (1.0.54)".to_string()]
+        );
     }
 
     #[test]
