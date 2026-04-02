@@ -3,7 +3,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Tabs;
 
-use crate::model::{ActiveLayer, ManagementTab, Model};
+use crate::model::{ActiveLayer, ManagementTab, Model, SessionLayoutMode};
 
 /// Unicode indicator for active layer
 const MAIN_ICON: &str = "\u{25B6}"; // Right-pointing triangle
@@ -46,6 +46,20 @@ fn render_main_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
             Style::default().fg(Color::Gray).bg(Color::DarkGray),
         );
         buf.set_span(tabs_area.x, tabs_area.y, &hint, tabs_area.width);
+        return;
+    }
+
+    if model.session_layout_mode == SessionLayoutMode::Grid {
+        let focus_name = &model.session_tabs[model.active_session].name;
+        let summary = Span::styled(
+            format!(
+                "{} sessions | focus: {} | Ctrl+G,z: maximize",
+                model.session_tabs.len(),
+                focus_name
+            ),
+            Style::default().fg(Color::Gray).bg(Color::DarkGray),
+        );
+        buf.set_span(tabs_area.x, tabs_area.y, &summary, tabs_area.width);
         return;
     }
 
@@ -121,6 +135,8 @@ fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{SessionLayoutMode, SessionStatus, SessionTab, SessionTabType};
+    use gwt_core::terminal::AgentColor;
     use std::path::PathBuf;
 
     #[test]
@@ -128,5 +144,31 @@ mod tests {
         let model = Model::new(PathBuf::from("/tmp/test"));
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 1));
         render(&model, &mut buf, Rect::new(0, 0, 80, 1));
+    }
+
+    #[test]
+    fn main_tab_bar_shows_grid_summary_in_grid_mode() {
+        let mut model = Model::new(PathBuf::from("/tmp/test"));
+        model.active_layer = ActiveLayer::Main;
+        model.session_layout_mode = SessionLayoutMode::Grid;
+        model.session_tabs.push(SessionTab {
+            pane_id: "p1".into(),
+            name: "Agent #1".into(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Blue,
+            status: SessionStatus::Running,
+            branch: Some("feature/test".into()),
+            spec_id: None,
+        });
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        render(&model, &mut buf, area);
+        let text: String = (0..80)
+            .map(|x| {
+                buf.cell((x, 0))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+        assert!(text.contains("focus: Agent #1"), "got: {text:?}");
     }
 }
