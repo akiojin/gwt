@@ -3,8 +3,14 @@
 pub mod hooks;
 pub mod registry;
 
-pub use hooks::{Hook, HooksConfig, is_gwt_managed, merge_hooks};
-pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
+pub use hooks::{
+    Hook, HooksConfig, HooksError, backup_hooks, detect_corruption, is_gwt_managed, merge_hooks,
+    merge_hooks_safe, restore_from_backup,
+};
+pub use registry::{
+    BuiltinSkill, CiStatus, EmbeddedSkill, MergeStatus, PrCheckReport, RegistryError,
+    ReviewStatus, SkillRegistry, gwt_pr_check_report, register_builtins,
+};
 
 #[cfg(test)]
 mod tests {
@@ -147,6 +153,205 @@ mod tests {
         let cfg = HooksConfig::default();
         assert!(cfg.managed_hooks.is_empty());
         assert!(cfg.user_hooks.is_empty());
+    }
+
+    // ── Hooks backup/restore/corruption/safe-merge tests ──
+
+    #[test]
+    fn backup_hooks_creates_bak_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let cfg = HooksConfig {
+            managed_hooks: vec![make_hook("pre-commit", "lint", true)],
+            user_hooks: vec![],
+        };
+        std::fs::write(&hooks_file, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        let bak = backup_hooks(&hooks_file).unwrap();
+        assert!(bak.exists());
+        assert_eq!(bak, hooks_file.with_extension("json.bak"));
+        let bak_content: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&bak).unwrap()).unwrap();
+        assert_eq!(bak_content, cfg);
+    }
+
+    #[test]
+    fn backup_hooks_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nonexistent.json");
+        assert!(backup_hooks(&missing).is_err());
+    }
+
+    #[test]
+    fn restore_from_backup_restores_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let original = r#"{"managed_hooks":[],"user_hooks":[]}"#;
+        std::fs::write(&hooks_file, original).unwrap();
+        backup_hooks(&hooks_file).unwrap();
+
+        // Corrupt the original
+        std::fs::write(&hooks_file, "CORRUPTED").unwrap();
+
+        restore_from_backup(&hooks_file).unwrap();
+        let restored = std::fs::read_to_string(&hooks_file).unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn restore_from_backup_errors_when_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        std::fs::write(&hooks_file, "{}").unwrap();
+        let result = restore_from_backup(&hooks_file);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_corruption_valid_json() {
+        let valid = r#"{"managed_hooks":[],"user_hooks":[]}"#;
+        assert!(!detect_corruption(valid));
+    }
+
+    #[test]
+    fn detect_corruption_invalid_json() {
+        assert!(detect_corruption("not json at all"));
+        assert!(detect_corruption("{invalid}"));
+        assert!(detect_corruption(""));
+    }
+
+    #[test]
+    fn merge_hooks_safe_creates_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let managed = vec![make_hook("pre-commit", "lint", true)];
+
+        merge_hooks_safe(&hooks_file, &managed).unwrap();
+
+        assert!(hooks_file.exists());
+        let cfg: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_file).unwrap()).unwrap();
+        assert_eq!(cfg.managed_hooks.len(), 1);
+        assert_eq!(cfg.managed_hooks[0].command, "lint");
+    }
+
+    #[test]
+    fn merge_hooks_safe_preserves_user_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let initial = HooksConfig {
+            managed_hooks: vec![make_hook("pre-commit", "old-lint", true)],
+            user_hooks: vec![make_hook("post-merge", "notify", false)],
+        };
+        std::fs::write(&hooks_file, serde_json::to_string(&initial).unwrap()).unwrap();
+
+        let new_managed = vec![make_hook("pre-commit", "new-lint", true)];
+        merge_hooks_safe(&hooks_file, &new_managed).unwrap();
+
+        let cfg: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_file).unwrap()).unwrap();
+        assert_eq!(cfg.managed_hooks.len(), 1);
+        assert_eq!(cfg.managed_hooks[0].command, "new-lint");
+        assert_eq!(cfg.user_hooks.len(), 1);
+        assert_eq!(cfg.user_hooks[0].command, "notify");
+    }
+
+    #[test]
+    fn merge_hooks_safe_recovers_from_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+
+        // Write valid, then backup
+        let valid = HooksConfig {
+            managed_hooks: vec![],
+            user_hooks: vec![make_hook("post-merge", "user-hook", false)],
+        };
+        std::fs::write(&hooks_file, serde_json::to_string(&valid).unwrap()).unwrap();
+        backup_hooks(&hooks_file).unwrap();
+
+        // Corrupt the main file
+        std::fs::write(&hooks_file, "CORRUPT!!!").unwrap();
+
+        let managed = vec![make_hook("pre-commit", "lint", true)];
+        merge_hooks_safe(&hooks_file, &managed).unwrap();
+
+        let cfg: HooksConfig =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_file).unwrap()).unwrap();
+        assert_eq!(cfg.managed_hooks.len(), 1);
+        // User hooks restored from backup
+        assert_eq!(cfg.user_hooks.len(), 1);
+        assert_eq!(cfg.user_hooks[0].command, "user-hook");
+    }
+
+    #[test]
+    fn merge_hooks_safe_creates_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_file = dir.path().join("hooks.json");
+        let initial = HooksConfig::default();
+        std::fs::write(&hooks_file, serde_json::to_string(&initial).unwrap()).unwrap();
+
+        merge_hooks_safe(&hooks_file, &[]).unwrap();
+
+        let bak = hooks_file.with_extension("json.bak");
+        assert!(bak.exists());
+    }
+
+    // ── Registry builtin tests ──
+
+    #[test]
+    fn register_builtins_populates_registry() {
+        let mut reg = SkillRegistry::new();
+        register_builtins(&mut reg);
+        assert_eq!(reg.list().len(), BuiltinSkill::all().len());
+    }
+
+    #[test]
+    fn builtin_skill_names_are_unique() {
+        let names: Vec<&str> = BuiltinSkill::all().iter().map(|b| b.name()).collect();
+        let mut deduped = names.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(names.len(), deduped.len());
+    }
+
+    #[test]
+    fn builtin_to_embedded_has_correct_fields() {
+        let skill = BuiltinSkill::GwtPr.to_embedded();
+        assert_eq!(skill.name, "gwt-pr");
+        assert!(!skill.description.is_empty());
+        assert!(skill.enabled);
+        assert!(skill.script_path.to_str().unwrap().contains("gwt-pr"));
+    }
+
+    #[test]
+    fn register_builtins_skills_are_findable() {
+        let mut reg = SkillRegistry::new();
+        register_builtins(&mut reg);
+        let found = reg.list().iter().find(|s| s.name == "gwt-pr-check");
+        assert!(found.is_some());
+        assert!(found.unwrap().description.contains("PR"));
+    }
+
+    #[test]
+    fn builtin_all_returns_expected_count() {
+        // We defined 8 builtins
+        assert_eq!(BuiltinSkill::all().len(), 8);
+    }
+
+    #[test]
+    fn register_builtins_can_be_overridden() {
+        let mut reg = SkillRegistry::new();
+        register_builtins(&mut reg);
+        // Override one
+        reg.register(EmbeddedSkill {
+            name: "gwt-pr".to_string(),
+            description: "custom override".to_string(),
+            script_path: PathBuf::from("custom.sh"),
+            enabled: false,
+        });
+        let pr = reg.list().iter().find(|s| s.name == "gwt-pr").unwrap();
+        assert_eq!(pr.description, "custom override");
+        assert!(!pr.enabled);
     }
 
     // ── helpers ──
