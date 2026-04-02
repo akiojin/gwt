@@ -1,13 +1,15 @@
 //! Branches screen — branch list with PR/agent status (gwt-cli migration)
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use gwt_core::git::Branch;
+use gwt_core::git::{Branch, PrCache};
+use gwt_core::worktree::{Worktree, WorktreeManager, WorktreeStatus as CoreWorktreeStatus};
 
 // ---------------------------------------------------------------------------
 // Safety status
@@ -60,6 +62,7 @@ pub struct BranchItem {
     pub session_count: usize,
     pub running_session_count: usize,
     pub stopped_session_count: usize,
+    pub worktree_indicator: char,
     pub has_changes: bool,
     pub has_unpushed: bool,
     pub is_protected: bool,
@@ -92,6 +95,7 @@ impl BranchItem {
             session_count: 0,
             running_session_count: 0,
             stopped_session_count: 0,
+            worktree_indicator: '.',
             has_changes: false,
             has_unpushed: branch.ahead > 0,
             is_protected,
@@ -153,6 +157,22 @@ impl BranchItem {
 fn infer_is_remote(branch: &Branch) -> bool {
     branch.name.starts_with("remotes/")
         || (branch.has_remote && branch.upstream.is_none() && branch.name.contains('/'))
+}
+
+fn normalize_branch_name(name: &str) -> &str {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, rest)) = stripped.split_once('/') {
+            return rest;
+        }
+        return stripped;
+    }
+    if let Some(stripped) = name.strip_prefix("origin/") {
+        return stripped;
+    }
+    if let Some(stripped) = name.strip_prefix("upstream/") {
+        return stripped;
+    }
+    name
 }
 
 /// Check if a branch name is protected (main/master/develop).
@@ -570,6 +590,75 @@ pub fn load_branches(repo_root: &Path) -> Vec<BranchItem> {
     items
 }
 
+pub fn load_branches_enriched(repo_root: &Path) -> Vec<BranchItem> {
+    let mut items = load_branches(repo_root);
+
+    let worktrees = WorktreeManager::new(repo_root)
+        .and_then(|manager| manager.list())
+        .unwrap_or_default();
+    apply_worktree_metadata(&mut items, &worktrees);
+
+    let mut pr_cache = PrCache::new();
+    pr_cache.populate(repo_root);
+    apply_pr_metadata(&mut items, &pr_cache);
+
+    items
+}
+
+fn apply_worktree_metadata(items: &mut [BranchItem], worktrees: &[Worktree]) {
+    let worktree_map: HashMap<String, &Worktree> = worktrees
+        .iter()
+        .filter_map(|worktree| {
+            worktree
+                .branch
+                .as_ref()
+                .map(|branch| (normalize_branch_name(branch).to_string(), worktree))
+        })
+        .collect();
+
+    for item in items {
+        let key = normalize_branch_name(&item.name).to_string();
+        let Some(worktree) = worktree_map.get(&key).copied() else {
+            apply_safety_status(item);
+            continue;
+        };
+
+        item.worktree_path = Some(worktree.path.display().to_string());
+        item.has_worktree = matches!(worktree.status, CoreWorktreeStatus::Active);
+        item.has_changes = worktree.has_changes;
+        item.has_unpushed = worktree.has_unpushed;
+        item.worktree_indicator = match worktree.status {
+            CoreWorktreeStatus::Active => 'w',
+            CoreWorktreeStatus::Locked => 'l',
+            CoreWorktreeStatus::Prunable | CoreWorktreeStatus::Missing => 'x',
+        };
+        apply_safety_status(item);
+    }
+}
+
+fn apply_pr_metadata(items: &mut [BranchItem], pr_cache: &PrCache) {
+    for item in items {
+        let key = normalize_branch_name(&item.name);
+        if let Some(pr) = pr_cache.get(key) {
+            item.pr_title = Some(pr.title.clone());
+            item.pr_number = Some(pr.number);
+            item.pr_state = Some(pr.state.to_lowercase());
+        }
+    }
+}
+
+fn apply_safety_status(item: &mut BranchItem) {
+    item.safety_status = if item.is_protected || item.is_current {
+        SafetyStatus::Disabled
+    } else if item.has_changes {
+        SafetyStatus::Danger
+    } else if item.has_unpushed {
+        SafetyStatus::Warning
+    } else {
+        SafetyStatus::Safe
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -754,6 +843,16 @@ fn render_branch_row(
         ));
     }
 
+    spans.push(Span::styled(
+        format!(" {}", branch.worktree_indicator),
+        Style::default().fg(match branch.worktree_indicator {
+            'w' => Color::Green,
+            'l' => Color::Yellow,
+            'x' => Color::Red,
+            _ => Color::DarkGray,
+        }),
+    ));
+
     // Changes indicator
     let changes_char = if branch.has_changes { "*" } else { " " };
     spans.push(Span::styled(
@@ -873,6 +972,7 @@ mod tests {
             session_count: 0,
             running_session_count: 0,
             stopped_session_count: 0,
+            worktree_indicator: '.',
             has_changes: false,
             has_unpushed: false,
             is_protected: is_protected_branch(name, false),
@@ -1320,6 +1420,7 @@ mod tests {
         branch.session_count = 2;
         branch.running_session_count = 1;
         branch.stopped_session_count = 1;
+        branch.worktree_indicator = 'w';
         state.branches = vec![branch];
 
         let backend = TestBackend::new(80, 10);
@@ -1346,6 +1447,27 @@ mod tests {
         );
         assert!(row_text.contains("●1"), "expected running summary in row");
         assert!(row_text.contains("○1"), "expected stopped summary in row");
+        assert!(row_text.contains(" w"), "expected worktree indicator in row");
+    }
+
+    #[test]
+    fn apply_worktree_metadata_updates_safety_and_worktree_flags() {
+        let mut item = make_branch("feature/demo", false);
+        let worktrees = vec![Worktree {
+            path: std::path::PathBuf::from("/tmp/demo"),
+            branch: Some("feature/demo".to_string()),
+            commit: "abc1234".to_string(),
+            status: CoreWorktreeStatus::Active,
+            is_main: false,
+            has_changes: true,
+            has_unpushed: false,
+        }];
+
+        apply_worktree_metadata(std::slice::from_mut(&mut item), &worktrees);
+
+        assert!(item.has_worktree);
+        assert_eq!(item.worktree_indicator, 'w');
+        assert_eq!(item.safety_status, SafetyStatus::Danger);
     }
 
     #[test]

@@ -983,6 +983,7 @@ mod tests {
             session_count: 0,
             running_session_count: 0,
             stopped_session_count: 0,
+            worktree_indicator: 'w',
             has_changes: false,
             has_unpushed: false,
             is_protected: false,
