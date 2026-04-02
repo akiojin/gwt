@@ -75,6 +75,8 @@ pub enum Message {
     Confirm(ConfirmMessage),
     /// Voice input message.
     Voice(VoiceInputMessage),
+    /// Paste file paths from clipboard.
+    PasteFiles,
     /// Open the wizard overlay.
     OpenWizard,
     /// Close the wizard overlay.
@@ -113,6 +115,7 @@ mod tests {
         let _ = Message::Wizard(WizardMessage::MoveUp);
         let _ = Message::Confirm(ConfirmMessage::Toggle);
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
+        let _ = Message::PasteFiles;
         let _ = Message::OpenWizard;
         let _ = Message::CloseWizard;
     }

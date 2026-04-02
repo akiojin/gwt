@@ -139,6 +139,10 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Voice(msg) => {
             crate::input::voice::update(&mut model.voice, msg);
         }
+        Message::PasteFiles => {
+            // Placeholder: actual clipboard access is handled by gwt-clipboard crate.
+            // TUI triggers the action; the event loop will dispatch to clipboard integration.
+        }
         Message::OpenWizard => {
             model.wizard = Some(crate::screens::wizard::WizardState::default());
         }

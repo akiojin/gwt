@@ -93,6 +93,10 @@ impl KeybindRegistry {
                 description: "Start voice input".into(),
             },
             Keybinding {
+                keys: "Ctrl+G, p".into(),
+                description: "Paste file paths".into(),
+            },
+            Keybinding {
                 keys: "Ctrl+G, ?".into(),
                 description: "Show help".into(),
             },
@@ -150,6 +154,7 @@ impl KeybindRegistry {
                     }
                     KeyCode::Char('s') => Some(Message::SwitchManagementTab(ManagementTab::Specs)),
                     KeyCode::Char('i') => Some(Message::SwitchManagementTab(ManagementTab::Issues)),
+                    KeyCode::Char('p') => Some(Message::PasteFiles),
                     KeyCode::Esc => Some(Message::Tick), // Cancel prefix
                     _ => None,                           // Unknown, discard
                 }
@@ -274,5 +279,13 @@ mod tests {
             result,
             Some(Message::SwitchManagementTab(ManagementTab::Issues))
         ));
+    }
+
+    #[test]
+    fn prefix_p_paste_files() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::PasteFiles)));
     }
 }
