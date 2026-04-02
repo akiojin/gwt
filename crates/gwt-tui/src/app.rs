@@ -3002,6 +3002,57 @@ mod tests {
         assert_eq!(entry.mode.as_deref(), Some("Normal"));
     }
 
+    #[test]
+    fn check_codex_hooks_confirm_stores_pending_launch() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut model = Model::new(repo.path().to_path_buf());
+        let wiz_config = crate::screens::wizard::WizardLaunchConfig {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5".to_string()),
+            version: Some("1.2.3".to_string()),
+            branch_name: String::new(),
+            base_branch: None,
+            is_new_branch: false,
+            execution_mode: crate::screens::wizard::WizardExecutionMode::Normal,
+            session_id: None,
+            skip_permissions: true,
+            fast_mode: false,
+            reasoning_level: None,
+        };
+
+        let shown = check_codex_hooks_confirm(&mut model, &wiz_config);
+
+        assert!(shown);
+        assert!(model.pending_codex_launch.is_some());
+        assert!(model.confirm.is_some());
+        assert_eq!(model.overlay_mode, OverlayMode::Confirm);
+    }
+
+    #[test]
+    fn check_codex_hooks_confirm_ignores_non_codex_agents() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut model = Model::new(repo.path().to_path_buf());
+        let wiz_config = crate::screens::wizard::WizardLaunchConfig {
+            agent_id: "claude".to_string(),
+            model: None,
+            version: None,
+            branch_name: String::new(),
+            base_branch: None,
+            is_new_branch: false,
+            execution_mode: crate::screens::wizard::WizardExecutionMode::Normal,
+            session_id: None,
+            skip_permissions: false,
+            fast_mode: false,
+            reasoning_level: None,
+        };
+
+        let shown = check_codex_hooks_confirm(&mut model, &wiz_config);
+
+        assert!(!shown);
+        assert!(model.pending_codex_launch.is_none());
+        assert!(model.confirm.is_none());
+    }
+
     // -- Update tests ---------------------------------------------------------
 
     #[test]
