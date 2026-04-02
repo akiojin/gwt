@@ -11,10 +11,10 @@
 
 ## Phase 1: Branch-First Entry
 
-- [ ] T100: [TDD] `Branches` が primary entry として振る舞う state tests を追加する
-- [ ] T101: ブランチ行の session count 表示を実装する
-- [ ] T102: `Enter` の 3 分岐 (`no session / one session / many sessions`) を実装する
-- [ ] T103: `many sessions` 時の selector UI を実装する
+- [x] T100: [TDD] `Branches` が primary entry として振る舞う state tests を追加する
+- [x] T101: ブランチ行の session count 表示を実装する
+- [x] T102: `Enter` の 3 分岐 (`no session / one session / many sessions`) を実装する
+- [x] T103: `many sessions` 時の selector UI を実装する
 
 ## Phase 2: Permanent Multi-Mode Session Workspace
 

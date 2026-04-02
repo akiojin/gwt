@@ -8,6 +8,7 @@ use std::time::Instant;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::AgentColor;
 
+use crate::screens::branch_session_selector::BranchSessionSelectorState;
 use crate::screens::branches::BranchListState;
 use crate::screens::clone_wizard::CloneWizardState;
 use crate::screens::confirm::ConfirmState;
@@ -158,6 +159,7 @@ pub enum OverlayMode {
     Progress,
     CloneWizard,
     SpecKitWizard,
+    BranchSessionSelector,
 }
 
 // WizardState is re-exported from screens::wizard
@@ -211,6 +213,7 @@ pub struct Model {
     pub error_queue_v2: ErrorQueue,
     pub progress: Option<ProgressState>,
     pub confirm: Option<ConfirmState>,
+    pub branch_session_selector: Option<BranchSessionSelectorState>,
     pub wizard: Option<WizardState>,
     pub clone_wizard: Option<CloneWizardState>,
     pub speckit_wizard: SpecKitState,
@@ -265,6 +268,7 @@ impl Model {
             error_queue_v2: ErrorQueue::new(),
             progress: None,
             confirm: None,
+            branch_session_selector: None,
             wizard: None,
             clone_wizard: None,
             speckit_wizard: SpecKitState::new(),
@@ -289,6 +293,7 @@ impl Model {
         self.active_layer = ActiveLayer::Management;
         self.management_tab = ManagementTab::Specs;
         self.overlay_mode = OverlayMode::None;
+        self.branch_session_selector = None;
         self.clone_wizard = None;
         self.load_all_data();
     }
@@ -302,6 +307,7 @@ impl Model {
         self.issues_state.issues = crate::screens::issues::load_issues(&repo_root);
         self.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
         self.versions_state.tags = crate::screens::versions::load_tags(&repo_root);
+        self.sync_branch_session_counts();
     }
 
     // ---- Session tab helpers ------------------------------------------------
@@ -312,6 +318,7 @@ impl Model {
         self.session_tabs.push(tab);
         self.active_session = self.session_tabs.len() - 1;
         self.active_layer = ActiveLayer::Main;
+        self.sync_branch_session_counts();
     }
 
     /// Close the session at `index`. Returns the removed tab, or `None`.
@@ -340,6 +347,7 @@ impl Model {
         } else if self.active_session >= self.session_tabs.len() {
             self.active_session = self.session_tabs.len() - 1;
         }
+        self.sync_branch_session_counts();
         Some(tab)
     }
 
@@ -505,6 +513,42 @@ impl Model {
         self.active_history_pane_id = None;
         self.active_history_parser = None;
     }
+
+    pub fn sync_branch_session_counts(&mut self) {
+        for branch in &mut self.branches_state.branches {
+            branch.session_count = 0;
+        }
+
+        for tab in &self.session_tabs {
+            let Some(tab_branch) = tab.branch.as_deref() else {
+                continue;
+            };
+            let normalized_tab = normalize_branch_name(tab_branch);
+            for branch in &mut self.branches_state.branches {
+                if normalize_branch_name(&branch.name) == normalized_tab {
+                    branch.session_count += 1;
+                }
+            }
+        }
+    }
+}
+
+fn normalize_branch_name(name: &str) -> &str {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, rest)) = stripped.split_once('/') {
+            return rest;
+        }
+        return stripped;
+    }
+
+    if let Some(stripped) = name.strip_prefix("origin/") {
+        return stripped;
+    }
+    if let Some(stripped) = name.strip_prefix("upstream/") {
+        return stripped;
+    }
+
+    name
 }
 
 fn map_pane_status(status: &gwt_core::terminal::pane::PaneStatus) -> SessionStatus {

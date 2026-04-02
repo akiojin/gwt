@@ -28,6 +28,25 @@
 
 - Begin implementation from the new `Branches` and session workspace model now that the first-pass child/audit sync list is closed
 
+## 2026-04-02: Branch-first entry implementation
+
+### Progress
+
+- Added `session_count` to branch rows and synchronized it from open session tabs
+- Changed branch `Enter` behavior from unconditional wizard-open to `no session / one session / many sessions`
+- Added a `many sessions` overlay selector with `Open existing`, `Add session`, and `Full wizard` actions
+- Added RED/GREEN tests for all three branch-enter paths plus row rendering of session counts
+
+### Done
+
+- Branches now reflects per-branch open session counts
+- Enter on a branch with one matching session jumps straight into that session
+- Enter on a branch with multiple matching sessions opens a selector instead of guessing
+
+### Next
+
+- Implement the session workspace itself: `equal grid`, maximize toggle, and maximize-time tab switching
+
 ## 2026-04-02: Normal-mode virtual terminal viewport
 
 ### Progress

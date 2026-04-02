@@ -84,6 +84,97 @@ fn load_issue_detail_markdown(repo_root: &Path, issue_number: u64) -> String {
     }
 }
 
+fn normalize_branch_name_for_match(name: &str) -> &str {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, rest)) = stripped.split_once('/') {
+            return rest;
+        }
+        return stripped;
+    }
+
+    if let Some(stripped) = name.strip_prefix("origin/") {
+        return stripped;
+    }
+    if let Some(stripped) = name.strip_prefix("upstream/") {
+        return stripped;
+    }
+
+    name
+}
+
+fn matching_session_indices(model: &Model, branch_name: &str) -> Vec<usize> {
+    let normalized = normalize_branch_name_for_match(branch_name);
+    model
+        .session_tabs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, tab)| {
+            let tab_branch = tab.branch.as_deref()?;
+            (normalize_branch_name_for_match(tab_branch) == normalized).then_some(index)
+        })
+        .collect()
+}
+
+fn open_branch_wizard(
+    model: &mut Model,
+    branch_name: &str,
+    worktree_path: Option<&str>,
+    include_history: bool,
+) {
+    let history = if include_history {
+        load_quick_start_history(&model.repo_root, branch_name, worktree_path.map(Path::new))
+    } else {
+        vec![]
+    };
+    model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
+        branch_name,
+        history,
+    ));
+}
+
+fn open_branch_session_selector(
+    model: &mut Model,
+    branch_name: &str,
+    worktree_path: Option<String>,
+    session_indices: Vec<usize>,
+) {
+    let mut options = Vec::with_capacity(session_indices.len() + 2);
+    for index in session_indices {
+        if let Some(session) = model.session_tabs.get(index) {
+            options.push(crate::screens::branch_session_selector::BranchSessionOption {
+                label: format!("Open {}", session.name),
+                choice:
+                    crate::screens::branch_session_selector::BranchSessionSelectorChoice::ExistingSession(
+                        index,
+                    ),
+            });
+        }
+    }
+    options.push(
+        crate::screens::branch_session_selector::BranchSessionOption {
+            label: "Add session".to_string(),
+            choice:
+                crate::screens::branch_session_selector::BranchSessionSelectorChoice::AddSession,
+        },
+    );
+    options.push(
+        crate::screens::branch_session_selector::BranchSessionOption {
+            label: "Full wizard".to_string(),
+            choice:
+                crate::screens::branch_session_selector::BranchSessionSelectorChoice::FullWizard,
+        },
+    );
+
+    model.branch_session_selector = Some(
+        crate::screens::branch_session_selector::BranchSessionSelectorState::new(
+            branch_name.to_string(),
+            worktree_path,
+            options,
+        ),
+    );
+    model.overlay_mode = OverlayMode::BranchSessionSelector;
+}
+
 fn wants_mouse_capture(model: &Model) -> bool {
     model.active_layer == ActiveLayer::Management
         || (model.active_layer == ActiveLayer::Main && !model.session_tabs.is_empty())
@@ -695,6 +786,53 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
+            if let Some(selector) = model.branch_session_selector.as_mut() {
+                match key.code {
+                    crossterm::event::KeyCode::Up => selector.select_prev(),
+                    crossterm::event::KeyCode::Down => selector.select_next(),
+                    crossterm::event::KeyCode::Esc => {
+                        model.branch_session_selector = None;
+                        model.overlay_mode = OverlayMode::None;
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        let Some(choice) = selector.selected_choice().cloned() else {
+                            model.branch_session_selector = None;
+                            model.overlay_mode = OverlayMode::None;
+                            sync_active_terminal_history(model);
+                            return;
+                        };
+                        let branch_name = selector.branch_name.clone();
+                        let worktree_path = selector.worktree_path.clone();
+                        model.branch_session_selector = None;
+                        model.overlay_mode = OverlayMode::None;
+                        match choice {
+                            crate::screens::branch_session_selector::BranchSessionSelectorChoice::ExistingSession(index) => {
+                                model.switch_session(index);
+                                model.active_layer = ActiveLayer::Main;
+                            }
+                            crate::screens::branch_session_selector::BranchSessionSelectorChoice::AddSession => {
+                                open_branch_wizard(
+                                    model,
+                                    &branch_name,
+                                    worktree_path.as_deref(),
+                                    true,
+                                );
+                            }
+                            crate::screens::branch_session_selector::BranchSessionSelectorChoice::FullWizard => {
+                                open_branch_wizard(
+                                    model,
+                                    &branch_name,
+                                    worktree_path.as_deref(),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                sync_active_terminal_history(model);
+                return;
+            }
             // Initialization layer: handle clone wizard keys or Esc to quit
             if model.active_layer == ActiveLayer::Initialization {
                 if key.code == crossterm::event::KeyCode::Esc {
@@ -1045,15 +1183,25 @@ pub fn update(model: &mut Model, msg: Message) {
             // Intercept Enter to open Wizard with selected branch
             if matches!(msg, BranchesMessage::Enter) {
                 if let Some(branch) = model.branches_state.selected_branch().cloned() {
-                    let history = load_quick_start_history(
-                        &model.repo_root,
-                        &branch.name,
-                        branch.worktree_path.as_deref().map(Path::new),
-                    );
-                    model.wizard = Some(crate::screens::wizard::WizardState::open_for_branch(
-                        &branch.name,
-                        history,
-                    ));
+                    let session_indices = matching_session_indices(model, &branch.name);
+                    match session_indices.len() {
+                        0 => open_branch_wizard(
+                            model,
+                            &branch.name,
+                            branch.worktree_path.as_deref(),
+                            true,
+                        ),
+                        1 => {
+                            model.switch_session(session_indices[0]);
+                            model.active_layer = ActiveLayer::Main;
+                        }
+                        _ => open_branch_session_selector(
+                            model,
+                            &branch.name,
+                            branch.worktree_path.clone(),
+                            session_indices,
+                        ),
+                    }
                 }
                 sync_active_terminal_history(model);
                 return;
@@ -1202,6 +1350,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
         // Wizard overlay
         if let Some(ref wizard) = model.wizard {
             crate::screens::wizard::render(buf, area, wizard);
+        }
+
+        if let Some(ref selector) = model.branch_session_selector {
+            crate::screens::branch_session_selector::render(selector, buf, area);
         }
 
         // Error overlay (v2 queue)
@@ -2382,6 +2534,18 @@ mod tests {
         }
     }
 
+    fn test_branch_session(name: &str, branch: &str) -> SessionTab {
+        SessionTab {
+            pane_id: format!("pane-{name}"),
+            name: name.to_string(),
+            tab_type: SessionTabType::Agent,
+            color: AgentColor::Blue,
+            status: SessionStatus::Running,
+            branch: Some(branch.to_string()),
+            spec_id: None,
+        }
+    }
+
     fn test_log_entry(timestamp: &str, message: &str) -> LogEntry {
         LogEntry {
             timestamp: timestamp.to_string(),
@@ -2601,6 +2765,107 @@ mod tests {
         assert_eq!(m.session_tabs.len(), 1);
         update(&mut m, Message::CloseSession);
         assert!(m.session_tabs.is_empty());
+        assert_eq!(m.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn branch_enter_without_sessions_opens_wizard() {
+        let mut m = test_model();
+        m.branches_state.branches = vec![crate::screens::branches::BranchItem {
+            name: "feature/demo".into(),
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/tmp/feature-demo".into()),
+            has_changes: false,
+            has_unpushed: false,
+            is_protected: false,
+            last_tool_usage: None,
+            last_tool_id: None,
+            pr_title: None,
+            pr_number: None,
+            pr_state: None,
+            safety_status: crate::screens::branches::SafetyStatus::Safe,
+            is_remote: false,
+            last_commit_timestamp: None,
+            session_count: 0,
+        }];
+
+        update(
+            &mut m,
+            Message::BranchesMsg(crate::screens::branches::BranchesMessage::Enter),
+        );
+
+        assert!(m.wizard.is_some(), "expected wizard to open");
+        assert!(m.branch_session_selector.is_none());
+    }
+
+    #[test]
+    fn branch_enter_with_one_session_focuses_existing_session() {
+        let mut m = test_model();
+        m.branches_state.branches = vec![crate::screens::branches::BranchItem {
+            name: "feature/demo".into(),
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/tmp/feature-demo".into()),
+            has_changes: false,
+            has_unpushed: false,
+            is_protected: false,
+            last_tool_usage: None,
+            last_tool_id: None,
+            pr_title: None,
+            pr_number: None,
+            pr_state: None,
+            safety_status: crate::screens::branches::SafetyStatus::Safe,
+            is_remote: false,
+            last_commit_timestamp: None,
+            session_count: 1,
+        }];
+        m.add_session(test_branch_session("demo-1", "feature/demo"));
+        m.active_layer = ActiveLayer::Management;
+
+        update(
+            &mut m,
+            Message::BranchesMsg(crate::screens::branches::BranchesMessage::Enter),
+        );
+
+        assert_eq!(m.active_layer, ActiveLayer::Main);
+        assert_eq!(m.active_session, 0);
+        assert!(m.wizard.is_none());
+        assert!(m.branch_session_selector.is_none());
+    }
+
+    #[test]
+    fn branch_enter_with_multiple_sessions_opens_selector() {
+        let mut m = test_model();
+        m.branches_state.branches = vec![crate::screens::branches::BranchItem {
+            name: "feature/demo".into(),
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/tmp/feature-demo".into()),
+            has_changes: false,
+            has_unpushed: false,
+            is_protected: false,
+            last_tool_usage: None,
+            last_tool_id: None,
+            pr_title: None,
+            pr_number: None,
+            pr_state: None,
+            safety_status: crate::screens::branches::SafetyStatus::Safe,
+            is_remote: false,
+            last_commit_timestamp: None,
+            session_count: 2,
+        }];
+        m.add_session(test_branch_session("demo-1", "feature/demo"));
+        m.add_session(test_branch_session("demo-2", "feature/demo"));
+        m.active_layer = ActiveLayer::Management;
+
+        update(
+            &mut m,
+            Message::BranchesMsg(crate::screens::branches::BranchesMessage::Enter),
+        );
+
+        assert!(m.branch_session_selector.is_some(), "expected selector");
+        assert!(m.wizard.is_none());
         assert_eq!(m.active_layer, ActiveLayer::Management);
     }
 

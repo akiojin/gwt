@@ -57,6 +57,7 @@ pub struct BranchItem {
     pub is_current: bool,
     pub has_worktree: bool,
     pub worktree_path: Option<String>,
+    pub session_count: usize,
     pub has_changes: bool,
     pub has_unpushed: bool,
     pub is_protected: bool,
@@ -86,6 +87,7 @@ impl BranchItem {
             is_current: branch.is_current,
             has_worktree: false,
             worktree_path: None,
+            session_count: 0,
             has_changes: false,
             has_unpushed: branch.ahead > 0,
             is_protected,
@@ -765,6 +767,15 @@ fn render_branch_row(
         Style::default().fg(branch.safety_status.color()),
     ));
 
+    spans.push(Span::styled(
+        format!(" s:{}", branch.session_count),
+        Style::default().fg(if branch.session_count > 0 {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        }),
+    ));
+
     // PR info
     if let (Some(number), Some(ref pr_state)) = (branch.pr_number, &branch.pr_state) {
         let pr_color = match pr_state.as_str() {
@@ -842,6 +853,7 @@ mod tests {
             is_current,
             has_worktree: false,
             worktree_path: None,
+            session_count: 0,
             has_changes: false,
             has_unpushed: false,
             is_protected: is_protected_branch(name, false),
@@ -1280,6 +1292,37 @@ mod tests {
                 render(&state, f.buffer_mut(), area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_branch_row_shows_session_count() {
+        let mut state = BranchListState::new();
+        let mut branch = make_branch("feature/demo", false);
+        branch.session_count = 2;
+        state.branches = vec![branch];
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f.buffer_mut(), area);
+            })
+            .unwrap();
+
+        let row_text: String = (0..80)
+            .map(|x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, 2))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+        assert!(
+            row_text.contains("s:2"),
+            "expected session count in row, got: {row_text:?}"
+        );
     }
 
     #[test]

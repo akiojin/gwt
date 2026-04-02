@@ -1,6 +1,7 @@
 //! TUI screens
 
 pub mod agent_pane;
+pub mod branch_session_selector;
 pub mod branches;
 pub mod clone_wizard;
 pub mod confirm;
