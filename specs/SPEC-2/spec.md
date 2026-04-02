@@ -101,8 +101,12 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
   - **SPECs**: SPEC list from the branch's worktree `specs/` directory (worktree-only)
   - **Git Status**: Staged/unstaged/untracked files, recent commits
   - **Sessions**: Active agent/shell sessions on this branch
-  - **Actions**: Launch agent, create worktree, delete worktree
+  - **Actions**: Launch agent (agent select only, no full wizard), Open shell (in worktree cwd), Delete worktree
   - Tab key cycles between sections within the detail view.
+  - Agent launch: shows agent selection list only (branch already determined). No full wizard.
+  - Shell: opens in the branch's worktree directory. Requires worktree to exist.
+  - Worktree creation is automatic (on agent launch). Manual creation not available. Deletion available with confirmation.
+  - PR creation and branch deletion are NOT included (use CLI).
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-009**: Session navigation: Ctrl+G,] (next), Ctrl+G,[ (prev), Ctrl+G,1-9 (direct).

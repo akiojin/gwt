@@ -46,7 +46,7 @@
 - [ ] T027 Implement SPECs section: read specs/ from worktree path, list SPEC metadata
 - [ ] T028 Implement GitStatus section: staged/unstaged/untracked files, recent commits
 - [ ] T029 Implement Sessions section: active sessions on this branch
-- [ ] T030 Implement Actions section: Launch Agent, Create Worktree, Delete Worktree
+- [ ] T030 Implement Actions section: Launch Agent (agent select only), Open Shell (worktree cwd), Delete Worktree (with confirmation)
 - [ ] T031 Wire into branches.rs: Enter on branch → BranchDetail, Esc → back to list
 - [ ] T032 Add BranchDetailState to Model, route messages in app.rs
 - [ ] T033 Write 10+ tests for branch detail state transitions and rendering
