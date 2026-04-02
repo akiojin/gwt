@@ -1,14 +1,17 @@
-# Workspace Shell -- Tasks
+# Workspace Shell — Tasks
 
 ## Phase 0: Implementation Details Documentation
 
-- [x] T-W01 Document complete keybinding map (18 bindings) in spec.md
+- [x] T-W01 Document complete keybinding map (32 bindings) in spec.md
 - [x] T-W02 Document Ctrl+G prefix state machine in spec.md
 - [x] T-W03 Document session persistence TOML schema in spec.md
+- [x] T-W04 Create data-model.md with all state structs
+- [x] T-W05 Create research.md with architecture decisions
+- [x] T-W06 Create quickstart.md with validation flow
 
 ## Phase 1: Help Overlay Auto-Collection
 
-- [ ] T001 [P] Write RED test: help overlay output contains all registered keybindings (Ctrl+G,c / Ctrl+G,x / Ctrl+G,z / etc.).
+- [ ] T001 [P] Write RED test: help overlay output contains all registered keybindings.
 - [ ] T002 [P] Write RED test: help overlay does not contain unregistered key sequences.
 - [ ] T003 Define keybinding registry data structure (key sequence, description, category).
 - [ ] T004 Populate registry from existing keybind.rs match arms.
@@ -30,30 +33,56 @@
 - [ ] T014 [P] Write RED test: Git View tab renders recent commit list from git log.
 - [ ] T015 [P] Write RED test: Git View tab handles empty repository gracefully.
 - [ ] T016 Implement Git View management tab component.
-- [ ] T017 Wire Git View into management panel tab navigation at index 5.
+- [ ] T017 Wire Git View into management panel tab navigation.
 - [ ] T018 Verify Git View tests pass GREEN.
 
-## Phase 4: Branch Detail View + SPECs Tab Removal
+## Phase 4: Branch Detail View (SPECs Tab Removal)
 
-- [ ] T022 Remove ManagementTab::Specs variant from model.rs (7 tabs instead of 8)
+### 4.1: Remove SPECs Tab
+
+- [ ] T022 Remove ManagementTab::Specs variant from model.rs (8→7 tabs)
 - [ ] T023 Remove specs tab routing from app.rs (route_key_to_management, render_management_tab_content)
-- [ ] T024 Create screens/branch_detail.rs with BranchDetailState:
-  - sections: Overview, SPECs, GitStatus, Sessions, Actions
-  - active_section: usize (Tab cycles)
-  - spec_items, files, commits, sessions, pr_status
-- [ ] T025 Add BranchDetailMessage: NextSection, PrevSection, MoveUp, MoveDown, Select, Refresh, Back
-- [ ] T026 Implement Overview section: branch name, head, worktree path, linked Issues, PR
-- [ ] T027 Implement SPECs section: read specs/ from worktree path, list SPEC metadata
-- [ ] T028 Implement GitStatus section: staged/unstaged/untracked files, recent commits
-- [ ] T029 Implement Sessions section: active sessions on this branch
-- [ ] T030 Implement Actions section: Launch Agent (agent select only), Open Shell (worktree cwd), Delete Worktree (with confirmation)
-- [ ] T031 Wire into branches.rs: Enter on branch → BranchDetail, Esc → back to list
-- [ ] T032 Add BranchDetailState to Model, route messages in app.rs
-- [ ] T033 Write 10+ tests for branch detail state transitions and rendering
-- [ ] T034 Update E2E snapshot tests
+- [ ] T024 Update Ctrl+G,s keybind to switch to Settings instead of SPECs
+- [ ] T025 Update E2E tests for 7-tab layout
+
+### 4.2: Branch Detail Split Layout
+
+- [ ] T026 [P] Write RED test: Branches tab renders top 50% list + bottom 50% detail
+- [ ] T027 Modify branches.rs render() to split area vertically (50/50)
+- [ ] T028 Create branch_detail rendering function showing selected branch info
+- [ ] T029 Wire cursor movement to update detail content
+
+### 4.3: Detail Sections
+
+- [ ] T030 [P] Write RED test: detail section cycles through Overview/SPECs/GitStatus/Sessions/Actions with Tab
+- [ ] T031 Implement Overview section: branch name, head, worktree path, linked Issues, PR
+- [ ] T032 Implement SPECs section: read specs/ from branch's worktree, list SPEC metadata
+- [ ] T033 Implement Git Status section: staged/unstaged/untracked files, recent commits
+- [ ] T034 Implement Sessions section: active sessions on this branch
+- [ ] T035 Implement Actions section: Launch Agent (agent select), Open Shell (worktree cwd), Delete Worktree (confirm)
+
+### 4.4: Actions Implementation
+
+- [ ] T036 [P] Write RED test: Agent launch from Actions opens agent selection (no full wizard)
+- [ ] T037 [P] Write RED test: Shell launch opens PTY in worktree directory
+- [ ] T038 [P] Write RED test: Worktree delete shows confirmation, then deletes
+- [ ] T039 Implement agent launch action: show agent list overlay, on select → spawn in worktree
+- [ ] T040 Implement shell launch action: spawn shell PTY with cwd = worktree path
+- [ ] T041 Implement worktree delete action: confirm dialog → git worktree remove
+
+### 4.5: Integration
+
+- [ ] T042 Add BranchDetailState to BranchesState (detail_section, detail_specs, detail_files, etc.)
+- [ ] T043 Add BranchDetailMessage variants to BranchesMessage
+- [ ] T044 Route Tab/Shift+Tab to detail section cycling in route_key_to_management
+- [ ] T045 Route Enter in Actions section to appropriate action handlers
+- [ ] T046 Write 10+ tests for branch detail state transitions and rendering
+- [ ] T047 Update all E2E snapshot tests
 
 ## Phase 5: Regression and Polish
 
-- [ ] T019 Run full existing test suite and verify no regressions.
-- [ ] T020 Run `cargo clippy` and `cargo fmt` on all changed files.
-- [ ] T021 Update SPEC-2 progress artifacts with verification results.
+- [ ] T048 Run full existing test suite and verify no regressions.
+- [ ] T049 Run `cargo clippy` and `cargo fmt` on all changed files.
+- [ ] T050 Verify coverage >= 90%.
+- [ ] T051 Run Skill tool with skill: "simplify".
+- [ ] T052 Update SPEC-2 metadata phase to Done.

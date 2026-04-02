@@ -44,7 +44,7 @@ As a developer, I want to navigate between management tabs so that I can access 
 
 **Acceptance Scenarios**
 
-1. Given the management panel is visible, when I use tab navigation keys, then I can cycle through all 8 tabs: Branches, SPECs, Issues, Profiles, Git View, Versions, Settings, Logs.
+1. Given the management panel is visible, when I use tab navigation keys, then I can cycle through all 7 tabs: Branches, Issues, Profiles, Git View, Versions, Settings, Logs.
 2. Given I am on the Branches tab, when I navigate to Settings, then the Settings content loads and displays.
 3. Given I switch management tabs, when I return to a previous tab, then its scroll position and selection state are preserved.
 
@@ -143,7 +143,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 | `Ctrl+G, v` | Voice input (start recording) | Main layer |
 | `Ctrl+G, p` | Paste file paths from clipboard | Main layer |
 | `Ctrl+G, b` | Switch to Branches tab | Global |
-| `Ctrl+G, s` | Switch to SPECs tab | Global |
+| `Ctrl+G, s` | Switch to Settings tab | Global |
 | `Ctrl+G, i` | Switch to Issues tab | Global |
 | `Ctrl+C, Ctrl+C` | Quit (double-tap, 500ms window) | Global |
 | `Esc` | Close overlay / go back / cancel search | Overlays, Management |

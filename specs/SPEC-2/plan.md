@@ -1,52 +1,62 @@
-# Workspace Shell -- Implementation Plan
+# Implementation Plan: SPEC-2 — Workspace Shell
 
 ## Summary
 
-Complete the partially implemented workspace shell features: help overlay auto-collection from code, session persistence improvement, and Git View tab addition. The core session management, keybind state machine, and management panel are already functional.
+Complete the workspace shell with branch detail view, help overlay, session persistence, and SPECs tab removal. The branch detail view replaces the independent SPECs management tab by integrating SPEC display into a split-layout branch detail panel.
 
 ## Technical Context
 
-- **Architecture**: Elm Architecture -- Model (`model.rs`), Message (`message.rs`), Update (`app.rs`), View (`view.rs`)
-- **Keybind state machine**: `crates/gwt-tui/src/keybind.rs` -- Ctrl+G prefix with 2-second timeout
-- **Session management**: `crates/gwt-tui/src/model.rs` -- session list, active index, display mode
-- **Management panel**: `crates/gwt-tui/src/screens/` -- individual tab implementations
-- **Session persistence**: `~/.gwt/sessions/` -- TOML files for session metadata
+- **Architecture**: Elm Architecture (Model/Message/Update/View) in gwt-tui
+- **Keybind system**: Ctrl+G prefix state machine in `input/keybind.rs`
+- **Screens**: `screens/branches.rs` (primary target for branch detail)
+- **List rendering**: Uses `ListState` + `render_stateful_widget` for scrollable lists
+- **Shared utilities**: `screens/mod.rs` — clamp_index, move_up/down, list_item_style, centered_rect
 
 ## Constitution Check
 
-- Spec before implementation: yes, this SPEC documents all workspace shell requirements.
-- Test-first: help auto-collection and session persistence tests must be RED before implementation.
-- No workaround-first: help overlay uses code introspection, not a manually maintained list.
-- Minimal complexity: each phase is independent and can be implemented/verified separately.
+- Spec before implementation: yes, this SPEC documents all requirements
+- Test-first: all phases start with RED tests
+- No workaround-first: branch detail is a proper implementation, not a hack
+- Minimal complexity: each phase is independent and separately verifiable
 
 ## Complexity Tracking
 
-- Added complexity: keybind auto-collection macro/attribute, Git View tab
-- Mitigation: auto-collection uses existing keybind definitions, no new data flow
+| Risk | Mitigation |
+|------|-----------|
+| Branch detail sections need data from multiple sources | Load on cursor move, cache per branch |
+| SPECs tab removal affects tab indexing and keybinds | Update all ManagementTab references |
+| Agent launch from detail needs simplified wizard | Reuse WizardState with branch pre-filled |
+| Worktree delete is destructive | Confirmation dialog required |
 
 ## Phased Implementation
 
-### Phase 1: Help Overlay Auto-Collection
+### Phase 1: Help Overlay Auto-Collection (6 tasks)
+Implement keybinding registry auto-collection for Ctrl+G,? help overlay.
 
-1. Define a keybinding registry structure that maps key sequences to description strings.
-2. Populate the registry from the existing keybind match arms in `keybind.rs`.
-3. Render the help overlay (Ctrl+G,?) using the registry data.
-4. Add tests: verify all bound keys appear in help output, verify unbound keys are absent.
+### Phase 2: Session Persistence Improvement (7 tasks)
+Extend save/restore to include display_mode, management panel state.
 
-### Phase 2: Session Persistence Improvement
+### Phase 3: Git View Tab (5 tasks)
+Implement Git View management tab component.
 
-1. Audit current session save/restore logic for completeness.
-2. Add missing fields: display mode (tab/split), management panel visibility, active management tab.
-3. Add graceful fallback for corrupted or incompatible persistence files.
-4. Add tests: save/restore round-trip, corrupted file handling, missing directory recovery.
+### Phase 4: Branch Detail View (26 tasks)
+4.1: Remove SPECs tab (4 tasks)
+4.2: Branch detail split layout (4 tasks)
+4.3: Detail sections — Overview/SPECs/GitStatus/Sessions/Actions (6 tasks)
+4.4: Actions — agent launch, shell, worktree delete (6 tasks)
+4.5: Integration and testing (6 tasks)
 
-### Phase 3: Git View Tab
-
-1. Implement Git View management tab showing recent git log and diff summary.
-2. Wire into the management panel tab navigation (tab index 5).
-3. Add tests: Git View renders commit list, handles empty repo, handles detached HEAD.
+### Phase 5: Regression and Polish (5 tasks)
 
 ## Dependencies
 
-- `crates/gwt-core/src/git/` -- git operations for Git View tab
-- `toml` crate -- session persistence serialization (already in use)
+- SPEC-3 (Agent Management): Agent detection for agent launch action
+- SPEC-4 (GitHub): Git status and PR data for detail sections
+- SPEC-10 (Workspace): Worktree management for delete action
+
+## Verification
+
+1. `cargo test -p gwt-tui` — all pass
+2. `cargo test -p gwt-tui --test snapshot_e2e` — all E2E pass
+3. `cargo clippy -p gwt-tui --all-targets -- -D warnings` — clean
+4. Manual: launch gwt-tui, navigate branches, verify detail panel updates on cursor move
