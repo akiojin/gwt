@@ -126,17 +126,31 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 | `Ctrl+G, z` | Toggle Tab/Grid layout | Main layer |
 | `Ctrl+G, c` | New shell session | Global |
 | `Ctrl+G, x` | Close current session | Main layer |
+| `Ctrl+G, q` | Quit | Global |
 | `Ctrl+G, ?` | Show help overlay | Global |
 | `Ctrl+G, n` | Open agent launch wizard | Global |
-| `Ctrl+G, v` | Voice input (hold to record) | Main layer |
+| `Ctrl+G, v` | Voice input (start recording) | Main layer |
 | `Ctrl+G, p` | Paste file paths from clipboard | Main layer |
-| `Ctrl+C, Ctrl+C` | Quit (double-tap) | Global |
-| `Esc` | Close overlay / go back | Overlays |
-| `Enter` | Select / Confirm | Lists, dialogs |
+| `Ctrl+G, b` | Switch to Branches tab | Global |
+| `Ctrl+G, s` | Switch to SPECs tab | Global |
+| `Ctrl+G, i` | Switch to Issues tab | Global |
+| `Ctrl+C, Ctrl+C` | Quit (double-tap, 500ms window) | Global |
+| `Esc` | Close overlay / go back / cancel search | Overlays, Management |
+| `Enter` | Select / Confirm / Toggle detail | Lists, dialogs |
 | `Up/k, Down/j` | Navigate list | Management tabs |
 | `PageUp/PageDown` | Page scroll | Lists, terminal |
-| `/` | Search / Filter | Management tabs |
-| `Tab` | Next field / section | Forms, wizards |
+| `/` | Start search / filter | Management tabs (Branches, Issues, SPECs) |
+| `Tab` | Next category / section | Settings, SPECs detail |
+| `Shift+Tab` | Previous category / section | Settings, SPECs detail |
+| `s` | Toggle sort mode | Branches |
+| `v` | Toggle view mode (All/Local/Remote) | Branches |
+| `r` | Refresh data | All management tabs |
+| `n/a` | New / Add | Profiles |
+| `e` | Edit | Profiles, SPECs |
+| `d` | Delete | Profiles |
+| `Space` | Toggle boolean | Settings |
+| `Shift+S` | Save settings | Settings |
+| `Shift+Enter` | Launch agent from SPEC | SPECs |
 
 ### Ctrl+G Prefix State Machine
 

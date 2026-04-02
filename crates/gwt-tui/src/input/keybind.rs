@@ -175,6 +175,8 @@ impl KeybindRegistry {
                     KeyCode::Char('s') => Some(Message::SwitchManagementTab(ManagementTab::Specs)),
                     KeyCode::Char('i') => Some(Message::SwitchManagementTab(ManagementTab::Issues)),
                     KeyCode::Char('p') => Some(Message::PasteFiles),
+                    KeyCode::Char('n') => Some(Message::OpenWizard),
+                    KeyCode::Char('?') => Some(Message::Tick), // TODO: ShowHelp
                     KeyCode::Esc => Some(Message::Tick), // Cancel prefix
                     _ => None,                           // Unknown, discard
                 }
