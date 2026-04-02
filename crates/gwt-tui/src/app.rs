@@ -47,7 +47,7 @@ fn content_area_rect(cols: u16, rows: u16) -> Rect {
     layout[2]
 }
 
-fn format_issue_detail_markdown(issue: &gwt_core::git::GitHubIssue) -> String {
+fn format_issue_detail_markdown(issue: &crate::compat::GitHubIssue) -> String {
     let mut lines = vec![format!("# Issue #{}: {}", issue.number, issue.title)];
     lines.push(String::new());
     lines.push(format!("- State: `{}`", issue.state));
@@ -77,7 +77,7 @@ fn format_issue_detail_markdown(issue: &gwt_core::git::GitHubIssue) -> String {
 }
 
 fn load_issue_detail_markdown(repo_root: &Path, issue_number: u64) -> String {
-    match gwt_core::git::fetch_issue_detail(repo_root, issue_number) {
+    match crate::compat::fetch_issue_detail(repo_root, issue_number) {
         Ok(issue) => format_issue_detail_markdown(&issue),
         Err(error) => format!(
             "## GitHub Issue\nCould not load issue #{issue_number}.\n\n- Reason: `{error}`\n\nRun `gh issue view {issue_number}` for details.\n"
@@ -201,12 +201,10 @@ fn open_spec_launch(
 }
 
 fn open_issue_launch(model: &mut Model, issue_number: u64) {
-    let existing_branch = gwt_core::git::find_branch_for_issue(&model.repo_root, issue_number)
-        .ok()
-        .flatten();
+    let existing_branch = crate::compat::find_branch_for_issue(&model.repo_root, issue_number);
     let branch_name = existing_branch
         .clone()
-        .unwrap_or_else(|| gwt_core::git::generate_branch_name("feature/", issue_number));
+        .unwrap_or_else(|| crate::compat::generate_branch_name("feature/", issue_number));
     let history = if existing_branch.is_some() {
         load_quick_start_history(&model.repo_root, &branch_name, None)
     } else {
@@ -278,23 +276,22 @@ fn build_history_view_parser(model: &mut Model, pane_id: &str) -> Option<(vt100:
     let cols = viewport.width.max(1);
 
     let pane = model.pane_manager.pane_mut_by_id(pane_id)?;
-    let raw = match pane.read_scrollback_raw() {
-        Ok(raw) if !raw.is_empty() => raw,
-        Ok(_) => return None,
-        Err(error) => {
-            tracing::warn!(
-                message = "flow_failure",
-                category = "ui",
-                event = "load_copy_history_parser",
-                result = "failure",
-                workspace = "default",
-                pane_id,
-                error_code = "SCROLLBACK_READ_FAILED",
-                error_detail = %error,
-            );
-            return None;
-        }
-    };
+    let total = pane.scrollback_len();
+    if total == 0 {
+        return None;
+    }
+    let lines = pane.scrollback_lines(0, total);
+    let raw: Vec<u8> = lines
+        .iter()
+        .flat_map(|line| {
+            let mut bytes = line.text.as_bytes().to_vec();
+            bytes.push(b'\n');
+            bytes
+        })
+        .collect();
+    if raw.is_empty() {
+        return None;
+    }
 
     let line_count = raw.iter().filter(|&&byte| byte == b'\n').count();
     let parser_rows = line_count
@@ -1291,18 +1288,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::PtyOutput { pane_id, data } => {
             if let Some(pane) = model.pane_manager.pane_mut_by_id(&pane_id) {
-                if let Err(error) = pane.process_bytes(&data) {
-                    tracing::warn!(
-                        message = "flow_failure",
-                        category = "ui",
-                        event = "persist_pty_scrollback",
-                        result = "failure",
-                        workspace = "default",
-                        pane_id = pane_id.as_str(),
-                        error_code = "SCROLLBACK_WRITE_FAILED",
-                        error_detail = %error,
-                    );
-                }
+                pane.process_bytes(&data);
             }
 
             // Feed data to VT100 parser
@@ -2014,25 +2000,21 @@ fn handle_logs_msg(model: &mut Model, msg: LogsMessage) {
 // ---------------------------------------------------------------------------
 
 fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Error>> {
-    use gwt_core::agent::launch::ShellLaunchBuilder;
-    use gwt_core::terminal::AgentColor;
+    use crate::compat::agent_launch::ShellLaunchBuilder;
+    use gwt_agent::types::AgentColor;
 
-    let config = ShellLaunchBuilder::new(&model.repo_root).build();
-    let rows = model.terminal_rows.saturating_sub(2);
-    let cols = model.terminal_cols;
+    let config = ShellLaunchBuilder::new(model.repo_root.clone()).build();
 
     let pane_id = model
         .pane_manager
-        .spawn_shell(&model.repo_root, config, rows, cols)?;
+        .spawn_shell(model.repo_root.clone(), config.env)?;
 
     // Start PTY reader thread
     let pane = model
         .pane_manager
-        .panes()
-        .iter()
-        .find(|p| p.pane_id() == pane_id)
+        .get_pane(&pane_id)
         .ok_or("pane not found")?;
-    let mut reader = pane.take_reader()?;
+    let mut reader = pane.reader()?;
     let tx = model
         .pty_tx
         .as_ref()
@@ -2064,6 +2046,8 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
         })?;
 
     // Register VT100 parser
+    let rows = model.terminal_rows.saturating_sub(2);
+    let cols = model.terminal_cols;
     model
         .vt_parsers
         .insert(pane_id.clone(), vt100::Parser::new(rows, cols, 1000));
@@ -2083,31 +2067,17 @@ fn spawn_shell_session(model: &mut Model) -> Result<(), Box<dyn std::error::Erro
     model.active_layer = ActiveLayer::Main;
 
     // Save session entry for branch tool history (agent_id = "shell")
-    let _ = gwt_core::config::save_session_entry(
+    let _ = crate::compat::save_session_entry(
         &model.repo_root,
-        gwt_core::config::ToolSessionEntry {
-            branch: "terminal".to_string(),
-            worktree_path: Some(model.repo_root.to_string_lossy().to_string()),
+        crate::compat::ToolSessionEntry {
             tool_id: "shell".to_string(),
-            tool_label: "Shell".to_string(),
-            session_id: None,
-            mode: None,
-            model: None,
-            reasoning_level: None,
-            skip_permissions: None,
-            tool_version: None,
-            collaboration_modes: None,
-            docker_service: None,
-            docker_force_host: None,
-            docker_recreate: None,
-            docker_build: None,
-            docker_keep: None,
-            docker_container_name: None,
-            docker_compose_args: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
+            branch_name: "terminal".to_string(),
+            agent_label: "Shell".to_string(),
+            started_at: chrono::Local::now().to_rfc3339(),
+            branch: Some("terminal".to_string()),
+            worktree_path: Some(model.repo_root.to_string_lossy().to_string()),
+            tool_label: Some("Shell".to_string()),
+            ..Default::default()
         },
     );
 
@@ -2129,31 +2099,22 @@ fn resolve_branch_working_dir(
     is_new_branch: bool,
     base_branch: Option<&str>,
 ) -> std::path::PathBuf {
-    use gwt_core::error::GwtError;
-    use gwt_core::worktree::WorktreeManager;
-    match WorktreeManager::new(repo_root) {
-        Ok(wt_manager) => {
-            let resolved = if is_new_branch {
-                match wt_manager.create_new_branch(branch_name, base_branch) {
-                    Ok(wt) => Ok(wt),
-                    Err(GwtError::BranchAlreadyExists { .. }) => {
-                        wt_manager.create_for_branch(branch_name)
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                match wt_manager.get_by_branch(branch_name) {
-                    Ok(Some(wt)) => return wt.path,
-                    Ok(None) => wt_manager.create_for_branch(branch_name),
-                    Err(_) => return repo_root.to_path_buf(),
-                }
-            };
-            resolved
-                .map(|wt| wt.path)
-                .unwrap_or_else(|_| repo_root.to_path_buf())
+    use crate::compat::WorktreeManager;
+    let wt_manager = WorktreeManager::new(repo_root);
+    let resolved = if is_new_branch {
+        let base = base_branch.unwrap_or("main");
+        wt_manager.create_new_branch(branch_name, base)
+    } else {
+        // Try to find existing worktree for branch
+        if let Some(worktrees) = wt_manager.list() {
+            if let Some(wt) = worktrees.iter().find(|wt| wt.branch == branch_name) {
+                return wt.path.clone();
+            }
         }
-        Err(_) => repo_root.to_path_buf(),
-    }
+        // Create new worktree for existing branch
+        wt_manager.create_new_branch(branch_name, branch_name)
+    };
+    resolved.unwrap_or_else(|_| repo_root.to_path_buf())
 }
 
 fn resolve_wizard_working_dir(
@@ -2177,12 +2138,15 @@ fn build_agent_session_entry(
     wiz_config: &crate::screens::wizard::WizardLaunchConfig,
     tool_label: String,
     session_id: Option<String>,
-) -> gwt_core::config::ToolSessionEntry {
-    gwt_core::config::ToolSessionEntry {
-        branch: wiz_config.branch_name.clone(),
-        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+) -> crate::compat::ToolSessionEntry {
+    crate::compat::ToolSessionEntry {
         tool_id: wiz_config.agent_id.clone(),
-        tool_label,
+        branch_name: wiz_config.branch_name.clone(),
+        agent_label: tool_label.clone(),
+        started_at: chrono::Local::now().to_rfc3339(),
+        branch: Some(wiz_config.branch_name.clone()),
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        tool_label: Some(tool_label),
         session_id,
         mode: Some(wiz_config.execution_mode.label().to_string()),
         model: wiz_config.model.clone(),
@@ -2192,18 +2156,7 @@ fn build_agent_session_entry(
             .map(|r| r.label().to_string()),
         skip_permissions: Some(wiz_config.skip_permissions),
         tool_version: wiz_config.version.clone(),
-        collaboration_modes: None,
-        docker_service: None,
-        docker_force_host: None,
-        docker_recreate: None,
-        docker_build: None,
-        docker_keep: None,
-        docker_container_name: None,
-        docker_compose_args: None,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0),
+        ..Default::default()
     }
 }
 
@@ -2224,7 +2177,7 @@ fn check_codex_hooks_confirm(
     let working_dir = resolve_wizard_working_dir(&model.repo_root, wiz_config);
 
     let codex_root = working_dir.join(".codex");
-    if gwt_core::config::codex_hooks_needs_update(&codex_root) {
+    if crate::compat::codex_hooks_needs_update(&codex_root) {
         // Store pending launch config and show confirmation dialog (FR-031)
         model.pending_codex_launch = Some(wiz_config.clone());
         model.confirm = Some(crate::screens::confirm::ConfirmState::embed_codex_hooks());
@@ -2240,8 +2193,8 @@ fn spawn_agent_session(
     wiz_config: &crate::screens::wizard::WizardLaunchConfig,
     skip_hooks_registration: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use gwt_core::agent::launch::AgentLaunchBuilder;
-    use gwt_core::config::skill_registration::{
+    use crate::compat::agent_launch::AgentLaunchBuilder;
+    use crate::compat::skill_registration::{
         register_agent_skills_with_settings_at_project_root, SkillAgentType,
     };
 
@@ -2251,12 +2204,11 @@ fn spawn_agent_session(
     // Register managed skills/hooks for this agent (SPEC-1438 FR-REG-001)
     if !skip_hooks_registration {
         if let Some(agent_type) = SkillAgentType::from_agent_id(agent_id) {
-            match gwt_core::config::Settings::load(&working_dir) {
-                Ok(settings) => {
+            {
+                {
                     if let Err(e) = register_agent_skills_with_settings_at_project_root(
+                        &working_dir,
                         agent_type,
-                        &settings,
-                        Some(&working_dir),
                     ) {
                         tracing::warn!(
                             agent = agent_id,
@@ -2265,26 +2217,20 @@ fn spawn_agent_session(
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to load settings for skill registration; continuing with agent launch"
-                    );
-                }
             }
         }
     }
 
-    // Build launch config via gwt-core
-    let mut builder = AgentLaunchBuilder::new(agent_id, &working_dir);
+    // Build launch config via compat layer
+    let mut builder = AgentLaunchBuilder::new(agent_id, working_dir.clone());
     if !wiz_config.branch_name.is_empty() {
         builder = builder.branch_name(&wiz_config.branch_name);
     }
     if let Some(ref m) = wiz_config.model {
-        builder = builder.model(Some(m.as_str()));
+        builder = builder.model(m.as_str());
     }
     if let Some(ref v) = wiz_config.version {
-        builder = builder.agent_version(Some(v.as_str()));
+        builder = builder.agent_version(v.as_str());
     }
     builder = builder.skip_permissions(wiz_config.skip_permissions);
 
@@ -2292,15 +2238,15 @@ fn spawn_agent_session(
     let session_mode = match wiz_config.execution_mode {
         crate::screens::wizard::WizardExecutionMode::Normal
         | crate::screens::wizard::WizardExecutionMode::Convert => {
-            gwt_core::agent::launch::SessionMode::Normal
+            crate::compat::agent_launch::SessionMode::Normal
         }
         crate::screens::wizard::WizardExecutionMode::Resume => {
-            gwt_core::agent::launch::SessionMode::Resume
+            crate::compat::agent_launch::SessionMode::Resume
         }
     };
     builder = builder.session_mode(session_mode);
     if let Some(ref id) = wiz_config.session_id {
-        builder = builder.resume_session_id(id.clone());
+        builder = builder.resume_session_id(id);
     }
 
     // Apply fast mode (Codex)
@@ -2310,27 +2256,26 @@ fn spawn_agent_session(
 
     // Apply reasoning level (Codex)
     if let Some(ref level) = wiz_config.reasoning_level {
-        builder = builder.reasoning_level(Some(level.label()));
+        builder = builder.reasoning_level(level.label());
     }
 
-    let config = builder.build()?;
-
-    let rows = model.terminal_rows.saturating_sub(3);
-    let cols = model.terminal_cols;
+    let config = builder.build();
+    let launch = gwt_terminal::manager::LaunchConfig {
+        command: config.command,
+        args: config.args,
+        env: config.env,
+        cwd: Some(config.working_dir),
+    };
 
     // Spawn PTY via PaneManager
-    let pane_id = model
-        .pane_manager
-        .spawn_shell(&model.repo_root, config, rows, cols)?;
+    let pane_id = model.pane_manager.launch_agent(launch)?;
 
     // Start PTY reader thread
     let pane = model
         .pane_manager
-        .panes()
-        .iter()
-        .find(|p| p.pane_id() == pane_id)
+        .get_pane(&pane_id)
         .ok_or("pane not found")?;
-    let mut reader = pane.take_reader()?;
+    let mut reader = pane.reader()?;
     let tx = model
         .pty_tx
         .as_ref()
@@ -2362,12 +2307,14 @@ fn spawn_agent_session(
         })?;
 
     // Register VT100 parser
+    let rows = model.terminal_rows.saturating_sub(3);
+    let cols = model.terminal_cols;
     model
         .vt_parsers
         .insert(pane_id.clone(), vt100::Parser::new(rows, cols, 1000));
 
     // Determine display name and color
-    let color = gwt_core::agent::launch::agent_color_for(agent_id);
+    let color = crate::compat::agent_launch::agent_color_for(agent_id);
     let display_name = format!("{}: {}", agent_id, wiz_config.branch_name);
 
     // Add session tab
@@ -2389,10 +2336,10 @@ fn spawn_agent_session(
     model.active_layer = ActiveLayer::Main;
 
     // Save session entry for branch tool history (populates Quick Start)
-    let agent_label = gwt_core::agent::launch::find_agent_def(agent_id)
+    let agent_label = crate::compat::agent_launch::find_agent_def(agent_id)
         .map(|d| d.display_name.to_string())
         .unwrap_or_else(|| agent_id.to_string());
-    let _ = gwt_core::config::save_session_entry(
+    let _ = crate::compat::save_session_entry(
         &model.repo_root,
         build_agent_session_entry(
             &working_dir,
@@ -2407,7 +2354,7 @@ fn spawn_agent_session(
         let repo_root = model.repo_root.clone();
         let working_dir = working_dir.clone();
         let tool_id = wiz_config.agent_id.clone();
-        let agent_label_bg = gwt_core::agent::launch::find_agent_def(&tool_id)
+        let agent_label_bg = crate::compat::agent_launch::find_agent_def(&tool_id)
             .map(|d| d.display_name.to_string())
             .unwrap_or_else(|| tool_id.clone());
         let wiz_config_bg = wiz_config.clone();
@@ -2418,9 +2365,9 @@ fn spawn_agent_session(
                 // Wait for the agent to initialize and create a session file
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 if let Some(session_id) =
-                    gwt_core::ai::detect_session_id_for_tool(&tool_id, &working_dir)
+                    crate::compat::detect_session_id_for_tool(&tool_id, &working_dir)
                 {
-                    let _ = gwt_core::config::save_session_entry(
+                    let _ = crate::compat::save_session_entry(
                         &repo_root,
                         build_agent_session_entry(
                             &working_dir,
@@ -2449,25 +2396,25 @@ fn load_quick_start_history(
     branch: &str,
     expected_worktree_path: Option<&std::path::Path>,
 ) -> Vec<crate::screens::wizard::QuickStartEntry> {
-    let history = gwt_core::config::get_branch_tool_history_for_worktree(
+    let _ = expected_worktree_path; // unused in stub
+    let history = crate::compat::get_branch_tool_history_for_worktree(
         repo_root,
         branch,
-        expected_worktree_path,
     );
     // Find the first entry (newest) that has a session_id
     let entry = history.into_iter().find(|e| e.session_id.is_some());
     match entry {
         Some(e) => vec![crate::screens::wizard::QuickStartEntry {
             tool_id: e.tool_id,
-            tool_label: e.tool_label,
+            tool_label: e.tool_label.unwrap_or_default(),
             model: e.model,
             version: e.tool_version,
             session_id: e.session_id,
             skip_permissions: e.skip_permissions,
             reasoning_level: e.reasoning_level,
-            fast_mode: None, // not stored in ToolSessionEntry yet
-            collaboration_modes: e.collaboration_modes,
-            branch: e.branch,
+            fast_mode: None,
+            collaboration_modes: e.collaboration_modes.as_ref().map(|v| !v.is_empty()),
+            branch: e.branch.unwrap_or_default(),
         }],
         None => vec![],
     }
@@ -2605,8 +2552,8 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             background_preload = true,
         );
         // Install develop branch protection hook if not already installed
-        if !gwt_core::git::hooks::is_develop_guard_installed(&repo_root) {
-            if let Err(e) = gwt_core::git::hooks::install_pre_commit_hook(&repo_root) {
+        if !crate::compat::git_hooks::is_develop_guard_installed(&repo_root) {
+            if let Err(e) = crate::compat::git_hooks::install_pre_commit_hook(&repo_root) {
                 tracing::warn!(
                     error = %e,
                     "Failed to install develop branch protection hook"
@@ -2747,8 +2694,8 @@ mod tests {
         KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
         MouseEventKind,
     };
-    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
-    use gwt_core::terminal::AgentColor;
+    use gwt_terminal::manager::LaunchConfig;
+    use gwt_agent::types::AgentColor;
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::OsString;
     use std::path::Path;
@@ -2789,7 +2736,7 @@ mod tests {
     }
 
     fn run_git_in(dir: &Path, args: &[&str]) {
-        let output = gwt_core::process::command("git")
+        let output = std::process::Command::new("git")
             .args(args)
             .current_dir(dir)
             .output()
@@ -2803,7 +2750,7 @@ mod tests {
     }
 
     fn git_stdout(dir: &Path, args: &[&str]) -> String {
-        let output = gwt_core::process::command("git")
+        let output = std::process::Command::new("git")
             .args(args)
             .current_dir(dir)
             .output()
@@ -2924,7 +2871,7 @@ mod tests {
         })
         .expect("pane should be created");
 
-        let reader = pane.take_reader().expect("reader should be available");
+        let reader = pane.reader().expect("reader should be available");
         model
             .pane_manager
             .add_pane(pane)
@@ -3325,7 +3272,7 @@ mod tests {
         let _guard = EnvVarGuard::set("HOME", home.path());
         let repo = create_test_repo();
 
-        let entry = gwt_core::config::ToolSessionEntry {
+        let entry = crate::compat::ToolSessionEntry {
             branch: "feature/demo".to_string(),
             worktree_path: Some("/tmp/feature-demo".to_string()),
             tool_id: "codex-cli".to_string(),
@@ -3346,7 +3293,7 @@ mod tests {
             docker_compose_args: None,
             timestamp: 1_800_000_000_000,
         };
-        gwt_core::config::save_session_entry(repo.path(), entry).unwrap();
+        crate::compat::save_session_entry(repo.path(), entry).unwrap();
 
         let mut m = Model::new(repo.path().to_path_buf());
         m.active_layer = ActiveLayer::Management;
@@ -3383,7 +3330,7 @@ mod tests {
         let _guard = EnvVarGuard::set("HOME", home.path());
         let repo = create_test_repo();
 
-        let entry = gwt_core::config::ToolSessionEntry {
+        let entry = crate::compat::ToolSessionEntry {
             branch: "feature/demo".to_string(),
             worktree_path: Some("/tmp/feature-demo".to_string()),
             tool_id: "codex-cli".to_string(),
@@ -3404,7 +3351,7 @@ mod tests {
             docker_compose_args: None,
             timestamp: 1_800_000_000_000,
         };
-        gwt_core::config::save_session_entry(repo.path(), entry).unwrap();
+        crate::compat::save_session_entry(repo.path(), entry).unwrap();
 
         let mut m = Model::new(repo.path().to_path_buf());
         m.active_layer = ActiveLayer::Management;

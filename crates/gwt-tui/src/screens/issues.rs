@@ -3,10 +3,7 @@
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::git::{
-    fetch_issues_with_options,
-    issue_cache::{IssueExactCache, IssueExactCacheEntry},
-};
+use crate::compat::{fetch_issues_with_options, IssueExactCache, IssueExactCacheEntry};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 

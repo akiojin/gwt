@@ -3,9 +3,78 @@
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::git::LocalSpecDetail;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear};
+
+/// Sections of a local SPEC artifact set.
+#[derive(Debug, Clone, Default)]
+pub struct LocalSpecSections {
+    pub spec: String,
+    pub plan: String,
+    pub tasks: String,
+    pub research: String,
+    pub data_model: String,
+    pub quickstart: String,
+    pub checklists: String,
+    pub contracts: String,
+}
+
+/// Detail data for a single local SPEC directory.
+#[derive(Debug, Clone, Default)]
+pub struct LocalSpecDetail {
+    pub sections: LocalSpecSections,
+}
+
+/// Read SPEC artifact files from `specs/SPEC-{id}/`.
+fn get_local_spec_detail(repo_root: &Path, spec_id: &str) -> Result<LocalSpecDetail, String> {
+    let dir = repo_root.join("specs").join(format!("SPEC-{spec_id}"));
+    if !dir.is_dir() {
+        // Try without prefix in case spec_id already contains it
+        let alt_dir = repo_root.join("specs").join(spec_id);
+        if !alt_dir.is_dir() {
+            return Err(format!("SPEC directory not found: {}", dir.display()));
+        }
+        return read_spec_dir(&alt_dir);
+    }
+    read_spec_dir(&dir)
+}
+
+fn read_spec_dir(dir: &Path) -> Result<LocalSpecDetail, String> {
+    let read = |name: &str| -> String {
+        std::fs::read_to_string(dir.join(name)).unwrap_or_default()
+    };
+    Ok(LocalSpecDetail {
+        sections: LocalSpecSections {
+            spec: read("spec.md"),
+            plan: read("plan.md"),
+            tasks: read("tasks.md"),
+            research: read("research.md"),
+            data_model: read("data-model.md"),
+            quickstart: read("quickstart.md"),
+            checklists: read("checklists.md"),
+            contracts: read_contracts_dir(dir),
+        },
+    })
+}
+
+fn read_contracts_dir(dir: &Path) -> String {
+    let contracts_dir = dir.join("contracts");
+    if !contracts_dir.is_dir() {
+        return String::new();
+    }
+    let mut entries: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&contracts_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    entries.push(content);
+                }
+            }
+        }
+    }
+    entries.join("\n\n---\n\n")
+}
 
 #[derive(Debug, Clone)]
 pub struct SpecItem {
@@ -561,7 +630,7 @@ fn load_spec_detail_result(
     spec_dir_name: &str,
 ) -> Result<Vec<SpecDetailSection>, String> {
     let spec_id = spec_dir_name.strip_prefix("SPEC-").unwrap_or(spec_dir_name);
-    let detail = gwt_core::git::get_local_spec_detail(repo_root, spec_id)?;
+    let detail = get_local_spec_detail(repo_root, spec_id)?;
     Ok(build_detail_sections(&detail))
 }
 
@@ -577,7 +646,7 @@ fn build_detail_sections(detail: &LocalSpecDetail) -> Vec<SpecDetailSection> {
         ("contracts", &detail.sections.contracts),
     ]
     .into_iter()
-    .map(|(label, content)| SpecDetailSection {
+    .map(|(label, content): (&str, &String)| SpecDetailSection {
         label,
         content: if content.trim().is_empty() {
             format!("_No `{label}` artifact yet._")

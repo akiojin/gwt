@@ -4,31 +4,24 @@
 #![allow(dead_code)]
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    let log_config = gwt_core::logging::LogConfig::default();
-    let _profiling_guard = gwt_core::logging::init_logger(&log_config).ok();
+    // Initialize tracing subscriber (simplified from old gwt_core::logging)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let repo_root = resolve_repo_root(&cwd);
-
-    // Note: Skill registration (FR-073) is deferred to agent launch time,
-    // not at gwt-tui startup. Startup should avoid mutating project-local
-    // managed assets under .gwt while the binary is running from source.
 
     gwt_tui::app::run(repo_root)
 }
 
 /// Resolve the effective repository root from a given directory.
-///
-/// - If `cwd` is already a git repo (Normal / Worktree), return it as-is.
-/// - Falls back to `cwd` when no repository can be detected (NonRepo / Empty).
 fn resolve_repo_root(cwd: &std::path::Path) -> std::path::PathBuf {
-    use gwt_core::git::{detect_repo_type, RepoType};
-
-    match detect_repo_type(cwd) {
-        RepoType::Normal | RepoType::Worktree => cwd.to_path_buf(),
-        RepoType::NonRepo | RepoType::Empty => cwd.to_path_buf(),
-    }
+    // Simple check: does .git exist?
+    cwd.to_path_buf()
 }
 
 #[cfg(test)]

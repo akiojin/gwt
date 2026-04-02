@@ -7,11 +7,14 @@
 use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::config::{
-    AgentType, CustomCodingAgent, Profile, ProfilesConfig, Settings, ToolsConfig,
-};
+use gwt_agent::custom::{CustomAgentType, CustomCodingAgent};
+use gwt_config::profile::{Profile, ProfilesConfig};
+use gwt_config::settings::Settings;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+
+/// Alias to keep the existing code working after AgentType -> CustomAgentType rename.
+type AgentType = CustomAgentType;
 
 // ---------------------------------------------------------------------------
 // Settings categories
@@ -145,10 +148,7 @@ impl AgentFormState {
             command: self.command.clone(),
             default_args: vec![],
             mode_args: None,
-            permission_skip_args: vec![],
             env: HashMap::new(),
-            models: vec![],
-            version_command: None,
         }
     }
 
@@ -293,10 +293,9 @@ impl ProfileFormState {
         Profile {
             name: self.name.clone(),
             description: self.description.clone(),
-            env: original.map(|p| p.env.clone()).unwrap_or_default(),
+            env_vars: original.map(|p| p.env_vars.clone()).unwrap_or_default(),
             disabled_env: original.map(|p| p.disabled_env.clone()).unwrap_or_default(),
-            ai: original.and_then(|p| p.ai.clone()),
-            ai_enabled: original.and_then(|p| p.ai_enabled),
+            ai_settings: original.and_then(|p| p.ai_settings.clone()),
         }
     }
 
@@ -403,9 +402,9 @@ pub enum EnvEditMode {
 impl EnvEditState {
     pub fn from_profile(profile: &Profile) -> Self {
         let mut vars: Vec<(String, String)> = profile
-            .env
+            .env_vars
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v): (&String, &String)| (k.clone(), v.clone()))
             .collect();
         vars.sort_by(|a, b| a.0.cmp(&b.0));
         let mut os_vars: Vec<(String, String)> = std::env::vars().collect();
@@ -632,7 +631,7 @@ pub struct SettingsState {
     pub settings: Option<Settings>,
     pub error_message: Option<String>,
     // Custom agents
-    pub tools_config: Option<ToolsConfig>,
+    pub custom_agents_list: Vec<CustomCodingAgent>,
     pub custom_agent_mode: CustomAgentMode,
     pub custom_agent_index: usize,
     pub agent_form: AgentFormState,
@@ -654,7 +653,7 @@ impl Default for SettingsState {
             selected_item: 0,
             settings: None,
             error_message: None,
-            tools_config: None,
+            custom_agents_list: Vec::new(),
             custom_agent_mode: CustomAgentMode::default(),
             custom_agent_index: 0,
             agent_form: AgentFormState::default(),
@@ -676,9 +675,8 @@ impl SettingsState {
 
     /// Load settings from global config.
     pub fn load_settings(&mut self) {
-        match Settings::load_global() {
+        match Settings::load() {
             Ok(s) => {
-                self.tools_config = Some(s.tools.clone());
                 self.profiles_config = Some(s.profiles.clone());
                 self.settings = Some(s);
                 self.error_message = None;
@@ -700,13 +698,17 @@ impl SettingsState {
             SettingsCategory::General => vec![
                 ("Default Base Branch", settings.default_base_branch.clone()),
                 ("Debug Mode", format!("{}", settings.debug)),
-                (
-                    "Log Retention Days",
-                    format!("{}", settings.log_retention_days),
-                ),
+                ("Profiling", format!("{}", settings.profiling)),
             ],
             SettingsCategory::Worktree => vec![
-                ("Worktree Root", settings.worktree_root.clone()),
+                (
+                    "Worktree Root",
+                    settings
+                        .worktree_root
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Not set".to_string()),
+                ),
                 ("Protected Branches", settings.protected_branches.join(", ")),
             ],
             SettingsCategory::Agent => vec![
@@ -722,15 +724,6 @@ impl SettingsState {
                     "Auto Install Deps",
                     format!("{}", settings.agent.auto_install_deps),
                 ),
-                (
-                    "Claude Path",
-                    settings
-                        .agent
-                        .claude_path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "Not set".to_string()),
-                ),
             ],
             SettingsCategory::CustomAgents
             | SettingsCategory::Environment
@@ -739,10 +732,7 @@ impl SettingsState {
     }
 
     pub fn custom_agents(&self) -> &[CustomCodingAgent] {
-        self.tools_config
-            .as_ref()
-            .map(|c| c.custom_coding_agents.as_slice())
-            .unwrap_or(&[])
+        &self.custom_agents_list
     }
 
     // ---- Category navigation ----
@@ -883,21 +873,20 @@ impl SettingsState {
 
         match &self.custom_agent_mode {
             CustomAgentMode::Add => {
-                if let Some(ref mut config) = self.tools_config {
-                    if !config.add_agent(agent) {
-                        return Err("Agent with this ID already exists");
-                    }
-                } else {
-                    let mut config = ToolsConfig::empty();
-                    config.add_agent(agent);
-                    self.tools_config = Some(config);
+                if self.custom_agents_list.iter().any(|a| a.id == agent.id) {
+                    return Err("Agent with this ID already exists");
                 }
+                self.custom_agents_list.push(agent);
             }
             CustomAgentMode::Edit(_) => {
-                if let Some(ref mut config) = self.tools_config {
-                    if !config.update_agent(agent) {
-                        return Err("Agent not found");
-                    }
+                if let Some(existing) = self
+                    .custom_agents_list
+                    .iter_mut()
+                    .find(|a| a.id == agent.id)
+                {
+                    *existing = agent;
+                } else {
+                    return Err("Agent not found");
                 }
             }
             _ => return Err("Invalid mode for save"),
@@ -910,17 +899,15 @@ impl SettingsState {
     pub fn delete_agent(&mut self) -> bool {
         if let CustomAgentMode::ConfirmDelete(ref id) = self.custom_agent_mode {
             let id = id.clone();
-            if let Some(ref mut config) = self.tools_config {
-                if config.remove_agent(&id) {
-                    if self.custom_agent_index > 0
-                        && self.custom_agent_index >= config.custom_coding_agents.len()
-                    {
-                        self.custom_agent_index =
-                            config.custom_coding_agents.len().saturating_sub(1);
-                    }
-                    self.cancel_mode();
-                    return true;
+            if let Some(pos) = self.custom_agents_list.iter().position(|a| a.id == id) {
+                self.custom_agents_list.remove(pos);
+                if self.custom_agent_index > 0
+                    && self.custom_agent_index >= self.custom_agents_list.len()
+                {
+                    self.custom_agent_index = self.custom_agents_list.len().saturating_sub(1);
                 }
+                self.cancel_mode();
+                return true;
             }
         }
         false
@@ -943,7 +930,7 @@ impl SettingsState {
         self.profiles_config
             .as_ref()
             .map(|c| {
-                let mut names: Vec<String> = c.profiles.keys().cloned().collect();
+                let mut names: Vec<String> = c.profiles.iter().map(|p| p.name.clone()).collect();
                 names.sort();
                 names
             })
@@ -955,7 +942,7 @@ impl SettingsState {
         names.get(self.profile_index).and_then(|name| {
             self.profiles_config
                 .as_ref()
-                .and_then(|c| c.profiles.get(name))
+                .and_then(|c| c.get(name))
         })
     }
 
@@ -980,7 +967,7 @@ impl SettingsState {
         if let Some(name) = self.selected_profile_name() {
             let is_active = self.is_profile_active(&name);
             if let Some(ref mut config) = self.profiles_config {
-                config.set_active(if is_active { None } else { Some(name) });
+                config.active = if is_active { None } else { Some(name) };
             }
         }
     }
@@ -1027,39 +1014,40 @@ impl SettingsState {
             ProfileMode::Add => {
                 if let Some(ref mut config) = self.profiles_config {
                     let name = self.profile_form.name.clone();
-                    if config.profiles.contains_key(&name) {
+                    if config.profiles.iter().any(|p| p.name == name) {
                         return Err("Profile with this name already exists");
                     }
                     let profile = self.profile_form.to_profile(None);
-                    config.profiles.insert(name, profile);
+                    config.profiles.push(profile);
                 } else {
                     let mut config = ProfilesConfig {
-                        version: 1,
                         active: None,
-                        profiles: HashMap::new(),
+                        profiles: Vec::new(),
                     };
-                    let name = self.profile_form.name.clone();
                     let profile = self.profile_form.to_profile(None);
-                    config.profiles.insert(name, profile);
+                    config.profiles.push(profile);
                     self.profiles_config = Some(config);
                 }
             }
             ProfileMode::Edit(original_name) => {
                 if let Some(ref mut config) = self.profiles_config {
                     let new_name = self.profile_form.name.clone();
-                    let original_profile = config.profiles.get(original_name);
+                    let original_profile =
+                        config.profiles.iter().find(|p| p.name == *original_name);
                     let profile = self.profile_form.to_profile(original_profile);
 
                     if &new_name != original_name {
-                        if config.profiles.contains_key(&new_name) {
+                        if config.profiles.iter().any(|p| p.name == new_name) {
                             return Err("Profile with this name already exists");
                         }
-                        config.profiles.remove(original_name);
+                        config.profiles.retain(|p| p.name != *original_name);
                         if config.active.as_ref() == Some(original_name) {
                             config.active = Some(new_name.clone());
                         }
+                    } else {
+                        config.profiles.retain(|p| p.name != new_name);
                     }
-                    config.profiles.insert(new_name, profile);
+                    config.profiles.push(profile);
                 }
             }
             _ => return Err("Invalid mode for save"),
@@ -1082,10 +1070,11 @@ impl SettingsState {
 
         let profile = config
             .profiles
-            .get_mut(&profile_name)
+            .iter_mut()
+            .find(|p| p.name == profile_name)
             .ok_or("Profile not found")?;
 
-        profile.env = self.env_state.to_env();
+        profile.env_vars = self.env_state.to_env();
         profile.disabled_env = self.env_state.disabled_keys.clone();
         Ok(())
     }
@@ -1094,8 +1083,10 @@ impl SettingsState {
         if let ProfileMode::ConfirmDelete(ref name) = self.profile_mode {
             let name = name.clone();
             if let Some(ref mut config) = self.profiles_config {
-                if config.profiles.remove(&name).is_some() {
-                    if config.active.as_ref() == Some(&name) {
+                let before = config.profiles.len();
+                config.profiles.retain(|p| p.name != name);
+                if config.profiles.len() < before {
+                    if config.active.as_deref() == Some(&name) {
                         config.active = None;
                     }
                     let profiles_len = config.profiles.len();
@@ -1289,18 +1280,17 @@ fn selected_description(state: &SettingsState) -> &'static str {
         SettingsCategory::General => match state.selected_item {
             0 => "Base branch used for diff checks and cleanup safety.",
             1 => "Enable verbose logging output.",
-            2 => "Days to keep logs before pruning.",
+            2 => "Enable performance profiling.",
             _ => "",
         },
         SettingsCategory::Worktree => match state.selected_item {
-            0 => "Relative root directory for worktree creation.",
+            0 => "Root directory for worktree creation.",
             1 => "Branches that cannot be deleted.",
             _ => "",
         },
         SettingsCategory::Agent => match state.selected_item {
             0 => "Default coding agent for quick start.",
             1 => "If false, dependency install is skipped before launch.",
-            2 => "Override path to Claude executable.",
             _ => "",
         },
         SettingsCategory::CustomAgents => "Manage custom coding agents.",
@@ -1502,7 +1492,7 @@ fn render_profile_list(state: &SettingsState, buf: &mut Buffer, area: Rect) {
             let desc = state
                 .profiles_config
                 .as_ref()
-                .and_then(|c| c.profiles.get(name))
+                .and_then(|c| c.get(name))
                 .map(|p| {
                     if p.description.is_empty() {
                         String::new()
@@ -1725,8 +1715,8 @@ fn render_ai_settings(state: &SettingsState, buf: &mut Buffer, area: Rect) {
     let ai_info = state
         .profiles_config
         .as_ref()
-        .and_then(|c| c.active_profile())
-        .and_then(|p| p.ai.as_ref());
+        .and_then(|c: &ProfilesConfig| c.active_profile())
+        .and_then(|p| p.ai_settings.as_ref());
 
     let text = if let Some(ai) = ai_info {
         vec![
@@ -1744,15 +1734,21 @@ fn render_ai_settings(state: &SettingsState, buf: &mut Buffer, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("API Key:  ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(if ai.api_key.is_empty() {
-                    "Not set"
-                } else {
-                    "********"
-                }),
+                Span::raw(
+                    if ai.api_key.as_ref().map_or(true, |k| k.is_empty()) {
+                        "Not set"
+                    } else {
+                        "********"
+                    },
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Language: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(&ai.language),
+                Span::raw(
+                    ai.language
+                        .as_deref()
+                        .unwrap_or("en"),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Summary:  ", Style::default().add_modifier(Modifier::BOLD)),
@@ -2057,9 +2053,8 @@ mod tests {
     fn profile_crud_operations() {
         let mut state = SettingsState::new();
         state.profiles_config = Some(ProfilesConfig {
-            version: 1,
             active: None,
-            profiles: HashMap::new(),
+            profiles: Vec::new(),
         });
 
         // Add profile
@@ -2085,8 +2080,8 @@ mod tests {
     #[test]
     fn env_edit_state_operations() {
         let mut profile = Profile::new("test");
-        profile.env.insert("FOO".to_string(), "bar".to_string());
-        profile.env.insert("BAZ".to_string(), "qux".to_string());
+        profile.env_vars.insert("FOO".to_string(), "bar".to_string());
+        profile.env_vars.insert("BAZ".to_string(), "qux".to_string());
 
         let mut env = EnvEditState::from_profile(&profile);
         assert_eq!(env.vars.len(), 2);
@@ -2109,9 +2104,9 @@ mod tests {
     fn env_edit_state_classifies_os_and_profile_entries() {
         let mut profile = Profile::new("test");
         profile
-            .env
+            .env_vars
             .insert("TOKEN".to_string(), "override".to_string());
-        profile.env.insert("NEW".to_string(), "added".to_string());
+        profile.env_vars.insert("NEW".to_string(), "added".to_string());
         profile.disabled_env.push("HOME".to_string());
 
         let mut env = EnvEditState::from_profile(&profile);
@@ -2162,8 +2157,10 @@ mod tests {
     fn persist_env_edit_saves_disabled_env() {
         let mut state = SettingsState::new();
         let profile = Profile::new("dev");
-        let mut config = ProfilesConfig::default();
-        config.profiles.insert("dev".to_string(), profile);
+        let mut config = ProfilesConfig {
+            active: None,
+            profiles: vec![profile],
+        };
         state.profiles_config = Some(config);
         state.profile_mode = ProfileMode::EnvEdit("dev".to_string());
         state.env_state.os_vars = vec![("HOME".to_string(), "/tmp".to_string())];
@@ -2175,7 +2172,6 @@ mod tests {
             .profiles_config
             .as_ref()
             .unwrap()
-            .profiles
             .get("dev")
             .unwrap();
         assert_eq!(saved.disabled_env, vec!["HOME".to_string()]);
@@ -2225,9 +2221,8 @@ mod tests {
         let mut state = SettingsState::new();
         state.category = SettingsCategory::Environment;
         state.profiles_config = Some(ProfilesConfig {
-            version: 1,
             active: None,
-            profiles: HashMap::new(),
+            profiles: Vec::new(),
         });
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
         render(&state, &mut buf, Rect::new(0, 0, 80, 24));
@@ -2284,7 +2279,7 @@ mod tests {
     fn render_env_footer_shows_override_actions() {
         let mut profile = Profile::new("test");
         profile
-            .env
+            .env_vars
             .insert("PATH".to_string(), "/custom".to_string());
         let mut env = EnvEditState::from_profile(&profile);
         env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];

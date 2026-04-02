@@ -102,6 +102,7 @@ pub enum AgentColor {
     Yellow,
     Magenta,
     Gray,
+    White,
 }
 
 /// Runtime status of an agent process.

@@ -64,6 +64,11 @@ impl Pane {
         &self.id
     }
 
+    /// Alias for `id()` — used by gwt-tui.
+    pub fn pane_id(&self) -> &str {
+        &self.id
+    }
+
     /// Get a reference to the PTY handle.
     pub fn pty(&self) -> &PtyHandle {
         &self.pty

@@ -31,4 +31,8 @@ pub enum AIError {
     /// The request timed out.
     #[error("timeout: {0}")]
     Timeout(String),
+
+    /// The AI returned an incomplete summary (truncated or empty).
+    #[error("incomplete summary: {0}")]
+    IncompleteSummary(String),
 }

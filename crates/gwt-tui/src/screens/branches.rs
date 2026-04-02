@@ -8,10 +8,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use gwt_core::git::issue_cache::IssueExactCache;
-use gwt_core::git::issue_linkage::WorktreeIssueLinkStore;
-use gwt_core::git::{Branch, PrCache};
-use gwt_core::worktree::{Worktree, WorktreeManager, WorktreeStatus as CoreWorktreeStatus};
+use crate::compat::{
+    Branch, IssueExactCache, PrCache, WorktreeIssueLinkStore, WorktreeManager, WorktreeStatus as CoreWorktreeStatus, Worktree,
+};
 
 // ---------------------------------------------------------------------------
 // Safety status
@@ -573,11 +572,11 @@ pub fn update(state: &mut BranchListState, msg: BranchesMessage) {
 
 /// Load branches from the repository at `repo_root`.
 pub fn load_branches(repo_root: &Path) -> Vec<BranchItem> {
-    let local = Branch::list(repo_root).unwrap_or_default();
-    let remote = Branch::list_remote(repo_root).unwrap_or_default();
+    let local = Branch::list(repo_root);
+    let remote = Branch::list_remote(repo_root);
 
     // Get tool usage map for agent info.
-    let tool_map = gwt_core::config::get_last_tool_usage_map(repo_root);
+    let tool_map = crate::compat::get_last_tool_usage_map(repo_root);
 
     let mut items: Vec<BranchItem> = Vec::with_capacity(local.len() + remote.len());
 
@@ -603,7 +602,7 @@ pub fn load_branches_enriched(repo_root: &Path) -> Vec<BranchItem> {
     let mut items = load_branches(repo_root);
 
     let worktrees = WorktreeManager::new(repo_root)
-        .and_then(|manager| manager.list())
+        .list()
         .unwrap_or_default();
     apply_worktree_metadata(&mut items, &worktrees);
 
@@ -611,7 +610,7 @@ pub fn load_branches_enriched(repo_root: &Path) -> Vec<BranchItem> {
     let issue_cache = IssueExactCache::load(repo_root);
     apply_issue_metadata(&mut items, &issue_links, &issue_cache);
 
-    let mut pr_cache = PrCache::new();
+    let mut pr_cache = PrCache::new(repo_root);
     pr_cache.populate(repo_root);
     apply_pr_metadata(&mut items, &pr_cache);
 
@@ -621,11 +620,12 @@ pub fn load_branches_enriched(repo_root: &Path) -> Vec<BranchItem> {
 fn apply_worktree_metadata(items: &mut [BranchItem], worktrees: &[Worktree]) {
     let worktree_map: HashMap<String, &Worktree> = worktrees
         .iter()
-        .filter_map(|worktree| {
-            worktree
-                .branch
-                .as_ref()
-                .map(|branch| (normalize_branch_name(branch).to_string(), worktree))
+        .filter(|worktree| !worktree.branch.is_empty())
+        .map(|worktree| {
+            (
+                normalize_branch_name(&worktree.branch).to_string(),
+                worktree,
+            )
         })
         .collect();
 
@@ -644,6 +644,7 @@ fn apply_worktree_metadata(items: &mut [BranchItem], worktrees: &[Worktree]) {
             CoreWorktreeStatus::Active => 'w',
             CoreWorktreeStatus::Locked => 'l',
             CoreWorktreeStatus::Prunable | CoreWorktreeStatus::Missing => 'x',
+            _ => '.',
         };
         apply_safety_status(item);
     }
@@ -667,10 +668,10 @@ fn apply_issue_metadata(
 ) {
     for item in items {
         let key = normalize_branch_name(&item.name);
-        if let Some(link) = issue_links.get_link(key) {
-            item.linked_issue_number = Some(link.issue_number);
+        if let Some(issue_number) = issue_links.get_link(key) {
+            item.linked_issue_number = Some(issue_number);
             item.linked_issue_state = issue_cache
-                .get(link.issue_number)
+                .get(issue_number)
                 .map(|entry| entry.state.to_lowercase());
         }
     }
@@ -1570,10 +1571,10 @@ mod tests {
         store.set_link(
             "feature/issue-42-demo",
             42,
-            gwt_core::git::issue_linkage::LinkSource::BranchParse,
+            crate::compat::LinkSource::BranchParse,
         );
         let mut cache = IssueExactCache::default();
-        cache.upsert(gwt_core::git::issue_cache::IssueExactCacheEntry {
+        cache.upsert(crate::compat::IssueExactCacheEntry {
             number: 42,
             title: "Issue 42".to_string(),
             url: "https://example.com/issues/42".to_string(),

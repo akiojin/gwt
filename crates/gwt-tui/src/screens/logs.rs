@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::logging::LogReader;
+use crate::compat::logging::LogReader;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::BTreeMap;
@@ -32,7 +32,7 @@ pub struct LogEntry {
 
 impl LogEntry {
     pub fn from_core_entry(
-        entry: gwt_core::logging::LogEntry,
+        entry: crate::compat::logging::LogEntry,
         workspace_hint: Option<&str>,
     ) -> Self {
         let message = entry.message().to_string();
@@ -47,15 +47,25 @@ impl LogEntry {
         let error_detail = entry.error_detail().map(ToString::to_string);
         let extra = entry
             .fields
-            .extra
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    serde_json::to_string(value).unwrap_or_default(),
-                )
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .filter(|(k, _)| {
+                        !matches!(
+                            k.as_str(),
+                            "category" | "event" | "result" | "workspace"
+                                | "error_code" | "error_detail" | "message"
+                        )
+                    })
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            serde_json::to_string(value).unwrap_or_default(),
+                        )
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         Self {
             timestamp: entry.timestamp,
@@ -826,7 +836,7 @@ mod tests {
     }
 
     fn parse_core_log(line: &str, workspace_hint: Option<&str>) -> LogEntry {
-        let entry: gwt_core::logging::LogEntry = serde_json::from_str(line).unwrap();
+        let entry: crate::compat::logging::LogEntry = serde_json::from_str(line).unwrap();
         LogEntry::from_core_entry(entry, workspace_hint)
     }
 

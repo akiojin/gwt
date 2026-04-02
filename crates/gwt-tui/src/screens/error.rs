@@ -101,16 +101,28 @@ impl ErrorState {
 
     /// Create from GwtError
     pub fn from_gwt_error(err: &gwt_core::error::GwtError) -> Self {
-        let code = err.code();
-        let category = err.category();
-        let suggestions = err.suggestions();
+        let message = err.to_string();
+        let category = match err {
+            gwt_core::error::GwtError::Io(_) => "IO",
+            gwt_core::error::GwtError::Git(_) => "Git",
+            gwt_core::error::GwtError::Config(_) => "Config",
+            gwt_core::error::GwtError::Agent(_) => "Agent",
+            gwt_core::error::GwtError::Terminal(_) => "Terminal",
+            gwt_core::error::GwtError::Docker(_) => "Docker",
+            gwt_core::error::GwtError::Ai(_) => "AI",
+            gwt_core::error::GwtError::Notification(_) => "Notification",
+            gwt_core::error::GwtError::Voice(_) => "Voice",
+            gwt_core::error::GwtError::Clipboard(_) => "Clipboard",
+            gwt_core::error::GwtError::Skill(_) => "Skill",
+            gwt_core::error::GwtError::Other(_) => "Error",
+        };
 
         Self {
-            title: format!("{} Error", category),
-            message: err.to_string(),
-            code: Some(code.to_string()),
+            title: format!("{category} Error"),
+            message,
+            code: None,
             details: Vec::new(),
-            suggestions,
+            suggestions: Vec::new(),
             severity: ErrorSeverity::Error,
             scroll_offset: 0,
         }

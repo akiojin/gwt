@@ -13,7 +13,12 @@ name = "gwt-tui"
 path = "src/main.rs"
 
 [dependencies]
+gwt-agent.workspace = true
+gwt-ai.workspace = true
+gwt-config.workspace = true
 gwt-core.workspace = true
+gwt-git.workspace = true
+gwt-terminal.workspace = true
 crossterm = "0.28"
 ratatui = "0.29"
 vt100 = "0.15"
@@ -23,6 +28,7 @@ tracing-appender.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 dirs.workspace = true
 reqwest.workspace = true
 semver.workspace = true

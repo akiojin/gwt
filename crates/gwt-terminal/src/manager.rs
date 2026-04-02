@@ -105,6 +105,11 @@ impl PaneManager {
         self.panes.get_mut(id)
     }
 
+    /// Alias for `get_pane_mut` — used by gwt-tui.
+    pub fn pane_mut_by_id(&mut self, id: &str) -> Option<&mut Pane> {
+        self.panes.get_mut(id)
+    }
+
     /// List all pane IDs.
     pub fn list_panes(&self) -> Vec<&str> {
         self.panes.keys().map(|s| s.as_str()).collect()
@@ -113,6 +118,16 @@ impl PaneManager {
     /// Number of active panes.
     pub fn pane_count(&self) -> usize {
         self.panes.len()
+    }
+
+    /// Get references to all panes.
+    pub fn panes(&self) -> Vec<&Pane> {
+        self.panes.values().collect()
+    }
+
+    /// Get mutable references to all panes.
+    pub fn panes_mut(&mut self) -> Vec<&mut Pane> {
+        self.panes.values_mut().collect()
     }
 
     /// Resize all panes.
