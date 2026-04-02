@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::logging::LogReader;
+use std::io::BufRead;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::BTreeMap;
@@ -31,45 +31,78 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
-    pub fn from_core_entry(
-        entry: gwt_core::logging::LogEntry,
-        workspace_hint: Option<&str>,
-    ) -> Self {
-        let message = entry.message().to_string();
-        let category = entry.category().map(ToString::to_string);
-        let event = entry.event().map(ToString::to_string);
-        let result = entry.result().map(ToString::to_string);
-        let workspace = entry
-            .workspace()
+    /// Parse a log entry from a JSON line (tracing-subscriber JSON format).
+    pub fn from_json_line(line: &str, workspace_hint: Option<&str>) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        let obj = value.as_object()?;
+
+        let timestamp = obj
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let level = obj
+            .get("level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("INFO")
+            .to_string();
+        let message = obj
+            .get("fields")
+            .and_then(|f| f.get("message"))
+            .and_then(|v| v.as_str())
+            .or_else(|| obj.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let target = obj
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let category = obj
+            .get("fields")
+            .and_then(|f| f.get("category"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let event = obj
+            .get("fields")
+            .and_then(|f| f.get("event"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let result = obj
+            .get("fields")
+            .and_then(|f| f.get("result"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let workspace = obj
+            .get("fields")
+            .and_then(|f| f.get("workspace"))
+            .and_then(|v| v.as_str())
             .map(ToString::to_string)
             .or_else(|| workspace_hint.map(ToString::to_string));
-        let error_code = entry.error_code().map(ToString::to_string);
-        let error_detail = entry.error_detail().map(ToString::to_string);
-        let extra = entry
-            .fields
-            .extra
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    serde_json::to_string(value).unwrap_or_default(),
-                )
-            })
-            .collect();
+        let error_code = obj
+            .get("fields")
+            .and_then(|f| f.get("error_code"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let error_detail = obj
+            .get("fields")
+            .and_then(|f| f.get("error_detail"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
 
-        Self {
-            timestamp: entry.timestamp,
-            level: entry.level,
+        Some(Self {
+            timestamp,
+            level,
             message,
-            target: entry.target,
+            target,
             category,
             event,
             result,
             workspace,
             error_code,
             error_detail,
-            extra,
-        }
+            extra: BTreeMap::new(),
+        })
     }
 
     pub fn searchable_text(&self) -> String {
@@ -750,22 +783,38 @@ fn load_entries_from_dir(log_dir: &Path, workspace_hint: Option<&str>) -> Vec<Lo
         return Vec::new();
     }
 
-    let reader = LogReader::new(log_dir);
-    let files = match reader.list_files() {
-        Ok(files) => files,
+    let mut log_files: Vec<_> = match std::fs::read_dir(log_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "log" || ext == "json" || ext == "jsonl")
+            })
+            .map(|e| e.path())
+            .collect(),
         Err(_) => return Vec::new(),
     };
+    log_files.sort();
+    log_files.reverse();
 
     let mut entries = Vec::new();
-    for file in files.into_iter().take(MAX_LOG_FILES) {
-        let Ok((file_entries, _)) = LogReader::read_entries(&file, 0, MAX_LOG_FILE_LINES) else {
+    for file in log_files.into_iter().take(MAX_LOG_FILES) {
+        let Ok(reader) = std::fs::File::open(&file) else {
             continue;
         };
-        entries.extend(
-            file_entries
-                .into_iter()
-                .map(|entry| LogEntry::from_core_entry(entry, workspace_hint)),
-        );
+        let reader = std::io::BufReader::new(reader);
+        let mut line_count = 0;
+        for line in reader.lines() {
+            if line_count >= MAX_LOG_FILE_LINES {
+                break;
+            }
+            let Ok(line) = line else { continue };
+            if let Some(entry) = LogEntry::from_json_line(&line, workspace_hint) {
+                entries.push(entry);
+            }
+            line_count += 1;
+        }
     }
     entries
 }
@@ -826,8 +875,7 @@ mod tests {
     }
 
     fn parse_core_log(line: &str, workspace_hint: Option<&str>) -> LogEntry {
-        let entry: gwt_core::logging::LogEntry = serde_json::from_str(line).unwrap();
-        LogEntry::from_core_entry(entry, workspace_hint)
+        LogEntry::from_json_line(line, workspace_hint).expect("failed to parse log line")
     }
 
     #[test]

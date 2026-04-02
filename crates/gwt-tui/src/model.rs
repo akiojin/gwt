@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
-use gwt_core::terminal::manager::PaneManager;
-use gwt_core::terminal::AgentColor;
+use gwt_agent::types::AgentColor;
+use gwt_terminal::PaneManager;
 
 use crate::screens::branch_session_selector::BranchSessionSelectorState;
 use crate::screens::branches::BranchListState;
@@ -288,12 +288,11 @@ impl Model {
     /// Detects repo type and starts in Initialization layer if no repo is found,
     /// otherwise starts in Management layer with Branches tab active.
     pub fn new(repo_root: PathBuf) -> Self {
-        use gwt_core::git::{detect_repo_type, RepoType};
-
-        let repo_type = detect_repo_type(&repo_root);
-        let active_layer = match repo_type {
-            RepoType::Normal | RepoType::Worktree => ActiveLayer::Management,
-            RepoType::Empty | RepoType::NonRepo => ActiveLayer::Initialization,
+        let is_git_repo = gwt_git::Repository::open(&repo_root).is_ok();
+        let active_layer = if is_git_repo {
+            ActiveLayer::Management
+        } else {
+            ActiveLayer::Initialization
         };
 
         Self {
@@ -308,7 +307,7 @@ impl Model {
             settings_state: SettingsState::new(),
             logs_state: LogsState::new(),
             versions_state: VersionsState::new(),
-            pane_manager: PaneManager::new(),
+            pane_manager: PaneManager::new(80, 24),
             vt_parsers: HashMap::new(),
             pty_tx: None,
             terminal_viewports: HashMap::new(),
@@ -386,14 +385,7 @@ impl Model {
         self.terminal_viewports.remove(&tab.pane_id);
         self.vt_parsers.remove(&tab.pane_id);
         self.pending_resume_panes.remove(&tab.pane_id);
-        let pane_index = self
-            .pane_manager
-            .panes()
-            .iter()
-            .position(|pane| pane.pane_id() == tab.pane_id);
-        if let Some(pane_index) = pane_index {
-            let _ = self.pane_manager.close_pane(pane_index);
-        }
+        let _ = self.pane_manager.close_pane(&tab.pane_id);
         if self.session_tabs.is_empty() {
             self.active_session = 0;
             self.active_layer = ActiveLayer::Management;
@@ -527,7 +519,7 @@ impl Model {
     // ---- Background update polling -------------------------------------------
 
     pub fn apply_background_updates(&mut self) {
-        use gwt_core::terminal::pane::PaneStatus;
+        use gwt_terminal::PaneStatus;
 
         self.tick_count += 1;
         // Poll branch list updates
@@ -555,18 +547,21 @@ impl Model {
             self.logs_state.entries = update.logs;
         }
 
+        // Collect pane IDs from session tabs for status polling
+        let pane_ids: Vec<String> = self.session_tabs.iter().map(|t| t.pane_id.clone()).collect();
         let mut session_status_updates = Vec::new();
-        for pane in self.pane_manager.panes_mut() {
-            let status = match pane.check_status() {
-                Ok(status) => status.clone(),
-                Err(err) => {
-                    let message = err.to_string();
-                    pane.mark_error(message.clone());
-                    PaneStatus::Error(message)
-                }
-            };
-
-            session_status_updates.push((pane.pane_id().to_string(), map_pane_status(&status)));
+        for pane_id in &pane_ids {
+            if let Some(pane) = self.pane_manager.get_pane_mut(pane_id) {
+                let status = match pane.check_status() {
+                    Ok(status) => status.clone(),
+                    Err(err) => {
+                        let message = err.to_string();
+                        pane.mark_error(message.clone());
+                        PaneStatus::Error(message)
+                    }
+                };
+                session_status_updates.push((pane_id.clone(), map_pane_status(&status)));
+            }
         }
 
         for (pane_id, status) in session_status_updates {
@@ -640,13 +635,11 @@ fn normalize_branch_name(name: &str) -> &str {
     name
 }
 
-fn map_pane_status(status: &gwt_core::terminal::pane::PaneStatus) -> SessionStatus {
+fn map_pane_status(status: &gwt_terminal::PaneStatus) -> SessionStatus {
     match status {
-        gwt_core::terminal::pane::PaneStatus::Running => SessionStatus::Running,
-        gwt_core::terminal::pane::PaneStatus::Completed(code) => SessionStatus::Completed(*code),
-        gwt_core::terminal::pane::PaneStatus::Error(message) => {
-            SessionStatus::Error(message.clone())
-        }
+        gwt_terminal::PaneStatus::Running => SessionStatus::Running,
+        gwt_terminal::PaneStatus::Completed(code) => SessionStatus::Completed(*code),
+        gwt_terminal::PaneStatus::Error(message) => SessionStatus::Error(message.clone()),
     }
 }
 
@@ -654,9 +647,6 @@ fn map_pane_status(status: &gwt_core::terminal::pane::PaneStatus) -> SessionStat
 mod tests {
     use super::*;
     use std::{collections::HashMap, path::PathBuf, thread, time::Duration};
-
-    use gwt_core::git::issue_cache::{IssueExactCache, IssueExactCacheEntry};
-    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
 
     fn test_model() -> Model {
         let mut m = Model::new(PathBuf::from("/tmp/test-repo"));
@@ -676,28 +666,18 @@ mod tests {
         }
     }
 
-    fn attach_test_pane(model: &mut Model, pane_id: &str, command: &str, args: &[&str]) {
-        let pane = TerminalPane::new(PaneConfig {
-            pane_id: pane_id.to_string(),
+    /// Launch a test pane and return its actual pane ID (generated by PaneManager).
+    fn attach_test_pane(model: &mut Model, _hint: &str, command: &str, args: &[&str]) -> String {
+        let config = gwt_terminal::manager::LaunchConfig {
             command: command.to_string(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
-            working_dir: std::env::temp_dir(),
-            branch_name: "test-branch".to_string(),
-            agent_name: "test-agent".to_string(),
-            agent_color: AgentColor::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-            terminal_shell: None,
-            interactive: false,
-            windows_force_utf8: false,
-            project_root: model.repo_root.clone(),
-        })
-        .expect("failed to create test pane");
+            env: HashMap::new(),
+            cwd: Some(std::env::temp_dir()),
+        };
         model
             .pane_manager
-            .add_pane(pane)
-            .expect("failed to attach pane");
+            .launch_agent(config)
+            .expect("failed to launch test pane")
     }
 
     fn wait_for_session_count(model: &mut Model, expected_sessions: usize) {
@@ -852,9 +832,9 @@ mod tests {
     #[test]
     fn apply_background_updates_keeps_completed_agent_session_visible() {
         let mut m = test_model();
-        attach_test_pane(&mut m, "pane-agent", "/usr/bin/true", &[]);
+        let pane_id = attach_test_pane(&mut m, "agent", "/usr/bin/true", &[]);
         m.add_session(SessionTab {
-            pane_id: "pane-agent".to_string(),
+            pane_id: pane_id.clone(),
             name: "agent".to_string(),
             tab_type: SessionTabType::Agent,
             color: AgentColor::Green,
@@ -864,7 +844,7 @@ mod tests {
         });
 
         wait_for_session_count(&mut m, 1);
-        wait_for_session_status(&mut m, "pane-agent", SessionStatus::Completed(0));
+        wait_for_session_status(&mut m, &pane_id, SessionStatus::Completed(0));
 
         assert_eq!(m.active_layer, ActiveLayer::Main);
         assert_eq!(m.session_tabs.len(), 1);
@@ -874,9 +854,9 @@ mod tests {
     #[test]
     fn apply_background_updates_keeps_completed_shell_session_visible() {
         let mut m = test_model();
-        attach_test_pane(&mut m, "pane-shell", "/usr/bin/true", &[]);
+        let pane_id = attach_test_pane(&mut m, "shell", "/usr/bin/true", &[]);
         m.add_session(SessionTab {
-            pane_id: "pane-shell".to_string(),
+            pane_id: pane_id.clone(),
             name: "shell".to_string(),
             tab_type: SessionTabType::Shell,
             color: AgentColor::Green,
@@ -886,7 +866,7 @@ mod tests {
         });
 
         wait_for_session_count(&mut m, 1);
-        wait_for_session_status(&mut m, "pane-shell", SessionStatus::Completed(0));
+        wait_for_session_status(&mut m, &pane_id, SessionStatus::Completed(0));
 
         assert_eq!(m.active_layer, ActiveLayer::Main);
         assert_eq!(m.session_tabs.len(), 1);
@@ -896,9 +876,9 @@ mod tests {
     #[test]
     fn apply_background_updates_keeps_failed_session_visible() {
         let mut m = test_model();
-        attach_test_pane(&mut m, "pane-failed", "/usr/bin/false", &[]);
+        let pane_id = attach_test_pane(&mut m, "failed", "/usr/bin/false", &[]);
         m.add_session(SessionTab {
-            pane_id: "pane-failed".to_string(),
+            pane_id: pane_id.clone(),
             name: "shell".to_string(),
             tab_type: SessionTabType::Shell,
             color: AgentColor::Green,
@@ -908,7 +888,7 @@ mod tests {
         });
 
         wait_for_session_count(&mut m, 1);
-        wait_for_session_status(&mut m, "pane-failed", SessionStatus::Completed(1));
+        wait_for_session_status(&mut m, &pane_id, SessionStatus::Completed(1));
 
         assert_eq!(m.active_layer, ActiveLayer::Main);
         assert_eq!(m.session_tabs.len(), 1);
@@ -918,9 +898,9 @@ mod tests {
     #[test]
     fn apply_background_updates_keeps_completed_session_focused() {
         let mut m = test_model();
-        attach_test_pane(&mut m, "pane-slow", "/bin/sleep", &["60"]);
+        let slow_id = attach_test_pane(&mut m, "slow", "/bin/sleep", &["60"]);
         m.add_session(SessionTab {
-            pane_id: "pane-slow".to_string(),
+            pane_id: slow_id.clone(),
             name: "shell".to_string(),
             tab_type: SessionTabType::Shell,
             color: AgentColor::Green,
@@ -928,9 +908,9 @@ mod tests {
             branch: None,
             spec_id: None,
         });
-        attach_test_pane(&mut m, "pane-done", "/usr/bin/true", &[]);
+        let done_id = attach_test_pane(&mut m, "done", "/usr/bin/true", &[]);
         m.add_session(SessionTab {
-            pane_id: "pane-done".to_string(),
+            pane_id: done_id.clone(),
             name: "agent".to_string(),
             tab_type: SessionTabType::Agent,
             color: AgentColor::Green,
@@ -940,13 +920,13 @@ mod tests {
         });
 
         wait_for_session_count(&mut m, 2);
-        wait_for_session_status(&mut m, "pane-done", SessionStatus::Completed(0));
+        wait_for_session_status(&mut m, &done_id, SessionStatus::Completed(0));
 
         assert_eq!(m.active_layer, ActiveLayer::Main);
         assert_eq!(m.active_session, 1);
-        assert_eq!(m.session_tabs[0].pane_id, "pane-slow");
+        assert_eq!(m.session_tabs[0].pane_id, slow_id);
         assert_eq!(m.session_tabs[0].status, SessionStatus::Running);
-        assert_eq!(m.session_tabs[1].pane_id, "pane-done");
+        assert_eq!(m.session_tabs[1].pane_id, done_id);
         assert_eq!(m.session_tabs[1].status, SessionStatus::Completed(0));
 
         let _ = m.close_active_session();
@@ -1001,39 +981,6 @@ mod tests {
         assert_eq!(m.tick_count, 1);
         m.apply_background_updates();
         assert_eq!(m.tick_count, 2);
-    }
-
-    #[test]
-    fn load_all_data_keeps_specs_and_issues_separate() {
-        let temp = tempfile::tempdir().unwrap();
-        let specs_dir = temp.path().join("specs");
-        std::fs::create_dir_all(specs_dir.join("SPEC-1776")).unwrap();
-        std::fs::write(
-            specs_dir.join("SPEC-1776").join("metadata.json"),
-            r#"{"id":"1776","title":"Spec detail","status":"open","phase":"planning"}"#,
-        )
-        .unwrap();
-
-        let mut cache = IssueExactCache::default();
-        cache.upsert(IssueExactCacheEntry {
-            number: 42,
-            title: "GitHub issue".to_string(),
-            url: "https://example.com/issues/42".to_string(),
-            state: "OPEN".to_string(),
-            labels: vec!["bug".to_string()],
-            updated_at: "2026-04-02T00:00:00Z".to_string(),
-            fetched_at: 0,
-        });
-        cache.save(temp.path()).unwrap();
-
-        let mut model = Model::new(temp.path().to_path_buf());
-        model.load_all_data();
-        wait_for_management_data(&mut model, 1, 1);
-
-        assert_eq!(model.specs_state.specs.len(), 1);
-        assert_eq!(model.issues_state.issues.len(), 1);
-        assert_eq!(model.issues_state.issues[0].number, 42);
-        assert_eq!(model.issues_state.issues[0].title, "GitHub issue");
     }
 
     #[test]

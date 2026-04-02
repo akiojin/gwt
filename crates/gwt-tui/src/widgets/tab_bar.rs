@@ -136,7 +136,7 @@ fn render_management_tabs(model: &Model, buf: &mut Buffer, area: Rect) {
 mod tests {
     use super::*;
     use crate::model::{SessionLayoutMode, SessionStatus, SessionTab, SessionTabType};
-    use gwt_core::terminal::AgentColor;
+    use gwt_agent::AgentColor;
     use std::path::PathBuf;
 
     #[test]

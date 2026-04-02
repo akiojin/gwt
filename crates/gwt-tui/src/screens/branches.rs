@@ -8,10 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use gwt_core::git::issue_cache::IssueExactCache;
-use gwt_core::git::issue_linkage::WorktreeIssueLinkStore;
-use gwt_core::git::{Branch, PrCache};
-use gwt_core::worktree::{Worktree, WorktreeManager, WorktreeStatus as CoreWorktreeStatus};
+use gwt_git::{WorktreeInfo, WorktreeManager};
 
 // ---------------------------------------------------------------------------
 // Safety status
@@ -82,11 +79,11 @@ pub struct BranchItem {
 }
 
 impl BranchItem {
-    /// Create a BranchItem from a gwt-core Branch.
-    pub fn from_branch(branch: &Branch) -> Self {
-        let is_remote = infer_is_remote(branch);
+    /// Create a BranchItem from a gwt-git Branch.
+    pub fn from_branch(branch: &gwt_git::Branch) -> Self {
+        let is_remote = branch.is_remote;
         let is_protected = is_protected_branch(&branch.name, is_remote);
-        let safety = if is_protected || branch.is_current {
+        let safety = if is_protected || branch.is_head {
             SafetyStatus::Disabled
         } else {
             SafetyStatus::Unknown
@@ -94,7 +91,7 @@ impl BranchItem {
 
         Self {
             name: branch.name.clone(),
-            is_current: branch.is_current,
+            is_current: branch.is_head,
             has_worktree: false,
             worktree_path: None,
             session_count: 0,
@@ -114,7 +111,11 @@ impl BranchItem {
             pr_state: None,
             safety_status: safety,
             is_remote,
-            last_commit_timestamp: branch.commit_timestamp,
+            last_commit_timestamp: branch.last_commit_date.as_ref().and_then(|d| {
+                chrono::DateTime::parse_from_str(d, "%Y-%m-%d %H:%M:%S %z")
+                    .ok()
+                    .map(|dt| dt.timestamp())
+            }),
         }
     }
 
@@ -162,9 +163,8 @@ impl BranchItem {
     }
 }
 
-fn infer_is_remote(branch: &Branch) -> bool {
-    branch.name.starts_with("remotes/")
-        || (branch.has_remote && branch.upstream.is_none() && branch.name.contains('/'))
+fn infer_is_remote(name: &str) -> bool {
+    name.starts_with("remotes/") || name.starts_with("origin/")
 }
 
 fn normalize_branch_name(name: &str) -> &str {
@@ -573,53 +573,22 @@ pub fn update(state: &mut BranchListState, msg: BranchesMessage) {
 
 /// Load branches from the repository at `repo_root`.
 pub fn load_branches(repo_root: &Path) -> Vec<BranchItem> {
-    let local = Branch::list(repo_root).unwrap_or_default();
-    let remote = Branch::list_remote(repo_root).unwrap_or_default();
-
-    // Get tool usage map for agent info.
-    let tool_map = gwt_core::config::get_last_tool_usage_map(repo_root);
-
-    let mut items: Vec<BranchItem> = Vec::with_capacity(local.len() + remote.len());
-
-    for branch in &local {
-        let mut item = BranchItem::from_branch(branch);
-        // Enrich with tool usage data.
-        if let Some(entry) = tool_map.get(&branch.name) {
-            item.last_tool_usage = Some(entry.format_tool_usage());
-            item.last_tool_id = Some(entry.tool_id.clone());
-            item.quick_start_available = entry.session_id.is_some();
-        }
-        items.push(item);
-    }
-
-    for branch in &remote {
-        items.push(BranchItem::from_branch(branch));
-    }
-
-    items
+    let branches = gwt_git::branch::list_branches(repo_root).unwrap_or_default();
+    branches.iter().map(BranchItem::from_branch).collect()
 }
 
 pub fn load_branches_enriched(repo_root: &Path) -> Vec<BranchItem> {
     let mut items = load_branches(repo_root);
 
-    let worktrees = WorktreeManager::new(repo_root)
-        .and_then(|manager| manager.list())
-        .unwrap_or_default();
+    let wt_manager = WorktreeManager::new(repo_root);
+    let worktrees = wt_manager.list().unwrap_or_default();
     apply_worktree_metadata(&mut items, &worktrees);
-
-    let issue_links = WorktreeIssueLinkStore::load(repo_root);
-    let issue_cache = IssueExactCache::load(repo_root);
-    apply_issue_metadata(&mut items, &issue_links, &issue_cache);
-
-    let mut pr_cache = PrCache::new();
-    pr_cache.populate(repo_root);
-    apply_pr_metadata(&mut items, &pr_cache);
 
     items
 }
 
-fn apply_worktree_metadata(items: &mut [BranchItem], worktrees: &[Worktree]) {
-    let worktree_map: HashMap<String, &Worktree> = worktrees
+fn apply_worktree_metadata(items: &mut [BranchItem], worktrees: &[WorktreeInfo]) {
+    let worktree_map: HashMap<String, &WorktreeInfo> = worktrees
         .iter()
         .filter_map(|worktree| {
             worktree
@@ -637,42 +606,15 @@ fn apply_worktree_metadata(items: &mut [BranchItem], worktrees: &[Worktree]) {
         };
 
         item.worktree_path = Some(worktree.path.display().to_string());
-        item.has_worktree = matches!(worktree.status, CoreWorktreeStatus::Active);
-        item.has_changes = worktree.has_changes;
-        item.has_unpushed = worktree.has_unpushed;
-        item.worktree_indicator = match worktree.status {
-            CoreWorktreeStatus::Active => 'w',
-            CoreWorktreeStatus::Locked => 'l',
-            CoreWorktreeStatus::Prunable | CoreWorktreeStatus::Missing => 'x',
+        item.has_worktree = !worktree.locked && !worktree.prunable;
+        item.worktree_indicator = if worktree.locked {
+            'l'
+        } else if worktree.prunable {
+            'x'
+        } else {
+            'w'
         };
         apply_safety_status(item);
-    }
-}
-
-fn apply_pr_metadata(items: &mut [BranchItem], pr_cache: &PrCache) {
-    for item in items {
-        let key = normalize_branch_name(&item.name);
-        if let Some(pr) = pr_cache.get(key) {
-            item.pr_title = Some(pr.title.clone());
-            item.pr_number = Some(pr.number);
-            item.pr_state = Some(pr.state.to_lowercase());
-        }
-    }
-}
-
-fn apply_issue_metadata(
-    items: &mut [BranchItem],
-    issue_links: &WorktreeIssueLinkStore,
-    issue_cache: &IssueExactCache,
-) {
-    for item in items {
-        let key = normalize_branch_name(&item.name);
-        if let Some(link) = issue_links.get_link(key) {
-            item.linked_issue_number = Some(link.issue_number);
-            item.linked_issue_state = issue_cache
-                .get(link.issue_number)
-                .map(|entry| entry.state.to_lowercase());
-        }
     }
 }
 
@@ -1090,16 +1032,15 @@ mod tests {
 
     #[test]
     fn from_branch_marks_origin_prefixed_refs_as_remote() {
-        let branch = Branch {
+        let branch = gwt_git::Branch {
             name: "origin/main".to_string(),
-            is_current: false,
-            has_remote: true,
+            is_local: false,
+            is_remote: true,
+            is_head: false,
             upstream: None,
-            commit: "abc1234".to_string(),
             ahead: 0,
             behind: 0,
-            commit_timestamp: None,
-            is_gone: false,
+            last_commit_date: None,
         };
 
         let item = BranchItem::from_branch(&branch);
@@ -1109,16 +1050,15 @@ mod tests {
 
     #[test]
     fn from_branch_keeps_local_refs_local() {
-        let branch = Branch {
+        let branch = gwt_git::Branch {
             name: "feature/auth".to_string(),
-            is_current: false,
-            has_remote: true,
+            is_local: true,
+            is_remote: false,
+            is_head: false,
             upstream: Some("origin/feature/auth".to_string()),
-            commit: "abc1234".to_string(),
             ahead: 0,
             behind: 0,
-            commit_timestamp: None,
-            is_gone: false,
+            last_commit_date: None,
         };
 
         let item = BranchItem::from_branch(&branch);
@@ -1546,47 +1486,17 @@ mod tests {
     #[test]
     fn apply_worktree_metadata_updates_safety_and_worktree_flags() {
         let mut item = make_branch("feature/demo", false);
-        let worktrees = vec![Worktree {
+        let worktrees = vec![WorktreeInfo {
             path: std::path::PathBuf::from("/tmp/demo"),
             branch: Some("feature/demo".to_string()),
-            commit: "abc1234".to_string(),
-            status: CoreWorktreeStatus::Active,
-            is_main: false,
-            has_changes: true,
-            has_unpushed: false,
+            locked: false,
+            prunable: false,
         }];
 
         apply_worktree_metadata(std::slice::from_mut(&mut item), &worktrees);
 
         assert!(item.has_worktree);
         assert_eq!(item.worktree_indicator, 'w');
-        assert_eq!(item.safety_status, SafetyStatus::Danger);
-    }
-
-    #[test]
-    fn apply_issue_metadata_sets_linked_issue_fields() {
-        let mut items = vec![make_branch("feature/issue-42-demo", false)];
-        let mut store = WorktreeIssueLinkStore::default();
-        store.set_link(
-            "feature/issue-42-demo",
-            42,
-            gwt_core::git::issue_linkage::LinkSource::BranchParse,
-        );
-        let mut cache = IssueExactCache::default();
-        cache.upsert(gwt_core::git::issue_cache::IssueExactCacheEntry {
-            number: 42,
-            title: "Issue 42".to_string(),
-            url: "https://example.com/issues/42".to_string(),
-            state: "OPEN".to_string(),
-            labels: vec![],
-            updated_at: "2026-04-02T00:00:00Z".to_string(),
-            fetched_at: 0,
-        });
-
-        apply_issue_metadata(&mut items, &store, &cache);
-
-        assert_eq!(items[0].linked_issue_number, Some(42));
-        assert_eq!(items[0].linked_issue_state.as_deref(), Some("open"));
     }
 
     #[test]

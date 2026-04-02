@@ -5,8 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use gwt_core::ai::{format_error_for_display, AIClient, AIError, ChatMessage};
-use gwt_core::config::ProfilesConfig;
+use gwt_ai::{AIClient, AIError, ChatMessage};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use semver::Version;
@@ -367,11 +366,11 @@ pub fn load_tag_detail(repo_root: &Path, tag_name: &str) -> String {
                 workspace = "default",
                 tag = label.as_str(),
                 error_code = "VERSION_AI_SUMMARY_FAILED",
-                error_detail = %format_error_for_display(&err),
+                error_detail = %err.to_string(),
             );
             Some(format!(
                 "## Summary\nAI summary unavailable. {}",
-                format_error_for_display(&err)
+                err.to_string()
             ))
         }
     };
@@ -418,17 +417,40 @@ fn build_detail_markdown(
 }
 
 fn load_ai_summary(input: &str) -> Result<String, AIError> {
-    let profiles = ProfilesConfig::load().map_err(|err| AIError::ConfigError(err.to_string()))?;
-    let resolved = profiles.resolve_active_ai_settings();
+    let settings = gwt_config::Settings::load()
+        .map_err(|err| AIError::ConfigError(err.to_string()))?;
 
-    if !resolved.summary_enabled {
-        return Ok("## Summary\nAI summary is disabled.\n".to_string());
-    }
+    // Find the active profile's AI settings
+    let ai_settings = settings
+        .profiles
+        .active
+        .as_ref()
+        .and_then(|active_name| {
+            settings
+                .profiles
+                .profiles
+                .iter()
+                .find(|p| p.name == *active_name)
+        })
+        .and_then(|profile| profile.ai_settings.as_ref());
 
-    let settings = resolved
-        .resolved
-        .ok_or_else(|| AIError::ConfigError("Active AI profile is not configured".to_string()))?;
-    let client = AIClient::new(settings)?;
+    let ai = match ai_settings {
+        Some(ai) if ai.is_enabled() => ai,
+        Some(ai) if !ai.summary_enabled => {
+            return Ok("## Summary\nAI summary is disabled.\n".to_string());
+        }
+        _ => {
+            return Err(AIError::ConfigError(
+                "Active AI profile is not configured".to_string(),
+            ));
+        }
+    };
+
+    let client = AIClient::new(
+        &ai.endpoint,
+        ai.api_key.as_deref().unwrap_or(""),
+        &ai.model,
+    )?;
     generate_ai_summary(&client, input)
 }
 
@@ -524,7 +546,7 @@ fn validate_ai_summary_markdown(markdown: &str) -> Result<(), AIError> {
     if has_summary && has_highlights && highlight_bullets >= 1 {
         Ok(())
     } else {
-        Err(AIError::IncompleteSummary)
+        Err(AIError::ParseError("Incomplete summary: missing sections".to_string()))
     }
 }
 
@@ -840,7 +862,7 @@ fn git_log_subjects(
 }
 
 fn git_output(repo_path: &Path, args: &[String]) -> Result<String, String> {
-    let output = gwt_core::process::command("git")
+    let output = std::process::Command::new("git")
         .args(args)
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -921,17 +943,17 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        assert!(gwt_core::process::command("git")
+        assert!(std::process::Command::new("git")
             .args(["init"])
             .current_dir(path)
             .status()
             .unwrap()
             .success());
-        let _ = gwt_core::process::command("git")
+        let _ = std::process::Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path)
             .status();
-        let _ = gwt_core::process::command("git")
+        let _ = std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
             .status();
@@ -939,13 +961,13 @@ mod tests {
 
     fn commit_file(path: &Path, name: &str, content: &str, message: &str) {
         std::fs::write(path.join(name), content).unwrap();
-        assert!(gwt_core::process::command("git")
+        assert!(std::process::Command::new("git")
             .args(["add", name])
             .current_dir(path)
             .status()
             .unwrap()
             .success());
-        assert!(gwt_core::process::command("git")
+        assert!(std::process::Command::new("git")
             .args(["commit", "-m", message])
             .current_dir(path)
             .status()
@@ -1079,7 +1101,7 @@ mod tests {
         init_git_repo(temp.path());
 
         commit_file(temp.path(), "file.txt", "one", "feat: initial release");
-        assert!(gwt_core::process::command("git")
+        assert!(std::process::Command::new("git")
             .args(["tag", "v1.0.0"])
             .current_dir(temp.path())
             .status()
@@ -1087,7 +1109,7 @@ mod tests {
             .success());
 
         commit_file(temp.path(), "file.txt", "two", "fix: patch release");
-        assert!(gwt_core::process::command("git")
+        assert!(std::process::Command::new("git")
             .args(["tag", "v1.1.0"])
             .current_dir(temp.path())
             .status()
@@ -1095,7 +1117,7 @@ mod tests {
             .success());
 
         commit_file(temp.path(), "file.txt", "three", "feat(core): big release");
-        assert!(gwt_core::process::command("git")
+        assert!(std::process::Command::new("git")
             .args(["tag", "v2.0.0"])
             .current_dir(temp.path())
             .status()
@@ -1122,7 +1144,7 @@ mod tests {
                 &format!("content-{patch}"),
                 &format!("fix: patch {patch}"),
             );
-            assert!(gwt_core::process::command("git")
+            assert!(std::process::Command::new("git")
                 .args(["tag", &format!("v1.0.{patch}")])
                 .current_dir(temp.path())
                 .status()

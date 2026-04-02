@@ -3,10 +3,7 @@
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::git::{
-    fetch_issues_with_options,
-    issue_cache::{IssueExactCache, IssueExactCacheEntry},
-};
+use serde::Deserialize;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -466,33 +463,65 @@ fn render_detail(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
 // Data loading
 // ---------------------------------------------------------------------------
 
+/// Intermediate struct for deserializing `gh issue list --json` output.
+#[derive(Deserialize)]
+struct GhIssue {
+    number: u64,
+    title: String,
+    state: String,
+    #[serde(default)]
+    labels: Vec<GhLabel>,
+}
+
+#[derive(Deserialize)]
+struct GhLabel {
+    name: String,
+}
+
 pub fn load_issues(repo_root: &Path) -> Vec<IssueItem> {
-    let cache = IssueExactCache::load(repo_root);
-    let mut items = cache
-        .all_entries()
-        .values()
-        .map(issue_item_from_cache_entry)
-        .collect::<Vec<_>>();
+    let output = std::process::Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--limit",
+            "100",
+            "--state",
+            "open",
+            "--json",
+            "number,title,state,labels",
+        ])
+        .current_dir(repo_root)
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+
+    let issues: Vec<GhIssue> = match serde_json::from_slice(&output) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut items: Vec<IssueItem> = issues
+        .into_iter()
+        .map(|i| IssueItem {
+            number: i.number,
+            title: i.title,
+            state: i.state,
+            labels: i.labels.into_iter().map(|l| l.name).collect(),
+        })
+        .collect();
     items.sort_by(|a, b| b.number.cmp(&a.number));
     items
 }
 
 pub fn refresh_issues(repo_root: &Path) -> Result<Vec<IssueItem>, String> {
-    let result = fetch_issues_with_options(repo_root, 1, 100, "open", false, "issues")?;
-    let mut cache = IssueExactCache::default();
-    for issue in result.issues {
-        cache.upsert(IssueExactCache::entry_from_github_issue(&issue));
-    }
-    cache.save(repo_root)?;
-    Ok(load_issues(repo_root))
-}
-
-fn issue_item_from_cache_entry(entry: &IssueExactCacheEntry) -> IssueItem {
-    IssueItem {
-        number: entry.number,
-        title: entry.title.clone(),
-        state: entry.state.clone(),
-        labels: entry.labels.clone(),
+    let items = load_issues(repo_root);
+    if items.is_empty() {
+        Err("No issues found or gh CLI unavailable".to_string())
+    } else {
+        Ok(items)
     }
 }
 
@@ -833,31 +862,9 @@ mod tests {
     }
 
     #[test]
-    fn load_issues_reads_exact_issue_cache_only() {
+    fn load_issues_returns_empty_for_non_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let specs_dir = dir.path().join("specs").join("SPEC-1776");
-        std::fs::create_dir_all(&specs_dir).unwrap();
-        std::fs::write(
-            specs_dir.join("metadata.json"),
-            r#"{"id":"1776","title":"Spec detail","status":"open","phase":"planning"}"#,
-        )
-        .unwrap();
-
-        let mut cache = IssueExactCache::default();
-        cache.upsert(IssueExactCacheEntry {
-            number: 42,
-            title: "Cache entry".to_string(),
-            url: "https://example.com/issues/42".to_string(),
-            state: "OPEN".to_string(),
-            labels: vec!["bug".to_string()],
-            updated_at: "2026-04-02T00:00:00Z".to_string(),
-            fetched_at: 0,
-        });
-        cache.save(dir.path()).unwrap();
-
         let issues = load_issues(dir.path());
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].number, 42);
-        assert_eq!(issues[0].title, "Cache entry");
+        assert!(issues.is_empty());
     }
 }

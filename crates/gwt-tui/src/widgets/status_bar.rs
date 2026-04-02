@@ -124,7 +124,7 @@ mod tests {
     fn render_main_layer_with_session_no_branch() {
         let mut model = test_model();
         use crate::model::{SessionStatus, SessionTab, SessionTabType};
-        use gwt_core::terminal::AgentColor;
+        use gwt_agent::AgentColor;
         model.add_session(SessionTab {
             pane_id: "p1".into(),
             name: "Shell #1".into(),
@@ -150,7 +150,7 @@ mod tests {
     fn render_main_layer_with_session_and_branch() {
         let mut model = test_model();
         use crate::model::{SessionStatus, SessionTab, SessionTabType};
-        use gwt_core::terminal::AgentColor;
+        use gwt_agent::AgentColor;
         model.add_session(SessionTab {
             pane_id: "p2".into(),
             name: "Agent #1".into(),
@@ -180,7 +180,7 @@ mod tests {
     fn render_management_with_running_agents() {
         let mut model = test_model();
         use crate::model::{SessionStatus, SessionTab, SessionTabType};
-        use gwt_core::terminal::AgentColor;
+        use gwt_agent::AgentColor;
         model.session_tabs.push(SessionTab {
             pane_id: "p1".into(),
             name: "Agent #1".into(),
