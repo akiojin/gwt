@@ -1,0 +1,18 @@
+[package]
+name = "gwt-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Git operations library for gwt"
+publish = false
+
+[dependencies]
+gwt-core = { path = "../gwt-core" }
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
