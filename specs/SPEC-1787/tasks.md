@@ -45,7 +45,7 @@
   - `crates/gwt-tui/src/app.rs` (lines 2062-2086)
   - `crates/gwt-tui/src/model.rs`
 
-- [ ] T014: Implement `Model::reset(new_repo_root: PathBuf)` — update repo_root, clear sessions, call load_all_data, set SPECs tab
+- [ ] T014: Implement `Model::reset(new_repo_root: PathBuf)` — update repo_root, clear sessions, call load_all_data, and land on the rebuilt primary entry while preserving `SPECs` accessibility
   - `crates/gwt-tui/src/model.rs`
 
 - [ ] T015: In `Model::new()`, call `detect_repo_type()` and set `ActiveLayer::Initialization` for NonRepo/Empty
@@ -60,7 +60,7 @@
 - [ ] T018: Add `render_fullscreen()` to Clone Wizard — centered URL input without overlay border
   - `crates/gwt-tui/src/screens/clone_wizard.rs`
 
-- [ ] T019: On clone complete in Initialization mode, call `Model::reset(cloned_path)` to transition to SPECs tab
+- [ ] T019: On clone complete in Initialization mode, call `Model::reset(cloned_path)` to transition to the rebuilt primary entry without demoting `SPECs` as a first-class tab
   - `crates/gwt-tui/src/app.rs`
 
 - [ ] T020: Verify Phase 2 — launch from empty dir shows init screen, clone transitions to SPECs tab (SC-001, SC-003)

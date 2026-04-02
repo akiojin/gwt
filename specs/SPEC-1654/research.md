@@ -1,64 +1,27 @@
-# Research
+# Research: SPEC-1654
 
-## Current shell inventory
+## Decision Log
 
-### Canonical top-level shell surfaces
-- `Agent Canvas`
-- `Branch Browser`
-- `Settings`
-- `Issues`
-- `PRs`
-- `Version History`
-- `Project Index`
-- `Issue Spec`
-- modal / overlay surfaces: `Launch Agent`, `Report`, `Cleanup`, `Migration`, `About`
+### D1: Primary shell entry
 
-### Current execution surfaces
-- `assistant` tile on Agent Canvas
-- `worktree` tiles on Agent Canvas
-- `agent` session tiles on Agent Canvas
-- `terminal` session tiles on Agent Canvas
-- worktree detail popup / assistant detail overlay
+**Decision**: `Branches` is the primary entry.
 
-## E2E suite inventory
+**Why**: This restores the old TUI's orientation and keeps branch state understandable before the user enters a session surface.
 
-Current `gwt-gui/e2e/*.spec.ts`: 20 spec files / 179 tests.
+### D2: Session model
 
-### Headed current-shell suites already migrated and passing
-- `agent-canvas-browser.spec.ts` (3)
-- `agent-terminal.spec.ts` (8)
-- `branch-worktree.spec.ts` (8)
-- `dialogs-common.spec.ts` (11)
-- `project-management.spec.ts` (21)
-- `responsive-performance.spec.ts` (9)
+**Decision**: One permanent multi-session workspace, not tmux and not split hidden-pane modes.
 
-Subtotal: 6 spec files / 60 tests.
+**Why**: `gwt-core` already has a native PTY runtime. The rebuilt shell should reuse it instead of reviving tmux semantics.
 
-### Suites still requiring current-shell migration or coverage review
-- `open-project-smoke.spec.ts` (7)
-- `issue-management.spec.ts` (9)
-- `pr-management.spec.ts` (17)
-- `git-view.spec.ts` (9)
-- `cleanup-migration.spec.ts` (9)
-- `project-mode.spec.ts` (13)
-- `status-bar.spec.ts` (6)
-- `settings-config.spec.ts` (30)
-- `windows-shell-selection.spec.ts` (6)
-- `issue-cache-sync.spec.ts` (3)
-- `pr-unknown-retry.spec.ts` (4)
-- `voice-input-settings.spec.ts` (3)
-- `tab-layout.spec.ts` (3)
-- `tab-switch-performance.spec.ts` (1)
+### D3: Session layout
 
-Subtotal: 14 spec files / 119 tests.
+**Decision**: `equal grid` by default, `maximize + tab switch` when focusing.
 
-## Coverage interpretation
+**Why**: Grid supports concurrent monitoring; maximize supports concentrated work without abandoning the multi-session model.
 
-- A numeric E2E coverage target is not trustworthy until the stale suites above are either migrated to the current shell or explicitly retired.
-- The current-shell headed batch covers the highest-signal shell / dialog / performance surfaces, but it does not represent full-screen/full-case coverage for the whole GUI.
-- Backend hot paths also need non-frontend validation, so `worktree_ops` benchmarks are now part of the validation inventory.
+### D4: Management workspace
 
-## Key gaps still visible
-- Legacy selectors and expectations still exist in stale suites (`branch-item`, `worktree-summary-panel`, old shell flows).
-- Full-suite E2E coverage cannot be claimed until those stale suites are reconciled with the current shell.
-- Backend perf validation is still narrow; branch inventory/worktree fast-path benchmarks exist, but more backend hot paths may need explicit perf fixtures later.
+**Decision**: Keep tabbed management, but limit the initial tabs to `Branches / SPECs / Issues / Profiles`.
+
+**Why**: This keeps information architecture explicit while avoiding the initial sprawl of `Settings / Logs / Versions`.

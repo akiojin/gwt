@@ -5,7 +5,7 @@
 - [x] T001: `SPEC-1776` を「全面移植仕様」から「parent UX spec」へ書き換える
 - [x] T002: `research.md` に cross-spec comparison matrix を追加する
 - [x] T003: `data-model.md` / `quickstart.md` を新しい shell model に合わせて更新する
-- [ ] T004: 主要 sync 対象 SPEC (`SPEC-1654`, `SPEC-1770`, `SPEC-1777`, `SPEC-1782`) の差分メモを作る
+- [x] T004: 主要 sync 対象 SPEC (`SPEC-1654`, `SPEC-1770`, `SPEC-1777`, `SPEC-1782`) の差分メモを作る
 - [x] T005: workflow / persistence / integration 監査対象 (`SPEC-1579`, `SPEC-1787`, `SPEC-1714`, `SPEC-1354`, `SPEC-1643`, `SPEC-1786`, `SPEC-1542`, `SPEC-1656`, `SPEC-1648`, `SPEC-1646`, `SPEC-1644`, `SPEC-1636`, `SPEC-1779`) を `sync required / reference only / deferred` に分類する
 - [x] T006: `gwt-spec-ops` 系 skill contract が `SPEC-1579` / `SPEC-1787` 側で parent UX と矛盾しないか監査メモを残す
 
@@ -43,15 +43,15 @@
 
 ## Phase 5: Child SPEC Synchronization
 
-- [ ] T500: `SPEC-1654` を新 shell model に同期する
-- [ ] T501: `SPEC-1770` を新 shortcut / layout policy に同期する
-- [ ] T502: `SPEC-1777` を parent navigation に同期する
-- [ ] T503: `SPEC-1782` を `1ブランチ = Nセッション` 前提へ同期する
-- [ ] T504: `SPEC-1579` / `SPEC-1787` の workflow entry contract を監査し、必要なら wording を同期する
-- [ ] T505: `SPEC-1714` / `SPEC-1354` / `SPEC-1643` の Issue list/detail/linkage contract を監査する
-- [ ] T506: `SPEC-1786` の hooks confirm が新 launch flow と矛盾しないか確認する
-- [ ] T507: `SPEC-1542` / `SPEC-1656` の `Profiles = Env profiles` wording を同期する
-- [ ] T508: `SPEC-1644` / `SPEC-1646` / `SPEC-1648` / `SPEC-1636` / `SPEC-1779` を reference-only 監査し、親SPECとの矛盾有無を記録する
+- [x] T500: `SPEC-1654` を新 shell model に同期する
+- [x] T501: `SPEC-1770` を新 shortcut / layout policy に同期する
+- [x] T502: `SPEC-1777` を parent navigation に同期する
+- [x] T503: `SPEC-1782` を `1ブランチ = Nセッション` 前提へ同期する
+- [x] T504: `SPEC-1579` / `SPEC-1787` の workflow entry contract を監査し、必要なら wording を同期する
+- [x] T505: `SPEC-1714` / `SPEC-1354` / `SPEC-1643` の Issue list/detail/linkage contract を監査する
+- [x] T506: `SPEC-1786` の hooks confirm が新 launch flow と矛盾しないか確認する
+- [x] T507: `SPEC-1542` / `SPEC-1656` の `Profiles = Env profiles` wording を同期する
+- [x] T508: `SPEC-1644` / `SPEC-1646` / `SPEC-1648` / `SPEC-1636` / `SPEC-1779` を reference-only 監査し、親SPECとの矛盾有無を記録する
 
 ## Deferred
 

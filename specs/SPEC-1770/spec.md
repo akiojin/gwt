@@ -1,76 +1,56 @@
-> **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC has been updated for the gwt-tui migration. Agent Canvas interactions are replaced by TUI mouse and keyboard operations using crossterm events.
-> **Canonical Boundary**: `SPEC-1770` は TUI 上の input interaction policy の正本である。terminal emulation 自体は `SPEC-1541`、TUI 全体構成は `SPEC-1776` が担当する。
+> **Canonical Boundary**: `SPEC-1770` は rebuilt TUI の input interaction policy の正本である。terminal emulation 自体は `SPEC-1541`、shell topology と parent UX は `SPEC-1654` / `SPEC-1776` が担当する。
 
 # TUI マウス・キーボード操作
 
 ## Background
 
-gwt-tui では GUI 時代の Agent Canvas インタラクション（スナップ・リサイズ・ミニマップ・自動整列）をターミナルベースのマウス操作とキーボード操作に置き換える。crossterm のマウスイベントを活用し、TUI 上でのインタラクティブな操作を実現する。
+旧 `Agent Canvas` 前提の interaction spec は現在の rebuilt TUI と一致しない。新しい interaction policy では、`Branches` を起点にした navigation、`equal grid / maximize` session workspace、tabbed management workspace をキーボード中心で扱う。
 
 ## User Stories
 
-### US-1: マウスでタブやペインを操作する
+### US-1: Branches から迷わず移動したい
 
-ユーザーとして、マウスクリックでタブの切り替え、ペインのフォーカス移動を行いたい。
+ユーザーとして、`Branches` 一覧をキーボード中心で移動し、`Enter` で session か launch へ自然に入れるようにしたい。
 
-### US-2: マウスホイールでスクロールする
+### US-2: 複数 session を効率よく切り替えたい
 
-ユーザーとして、マウスホイールでターミナル出力をスクロールしたい。
+ユーザーとして、grid 上の focus 移動、maximize toggle、maximize 時の tab switch を素早く行いたい。
 
-### US-3: マウスドラッグでテキストを選択する
+### US-3: terminal 操作は現行の快適さを維持したい
 
-ユーザーとして、マウスドラッグでターミナル内のテキストを選択し、クリップボードにコピーしたい。
+ユーザーとして、ホイールスクロール、drag-copy、paste、live follow のような現行 PTY UX を失いたくない。
 
-### US-4: キーボードショートカットで効率的に操作する
+### US-4: 管理画面タブへ素早く出入りしたい
 
-ユーザーとして、キーボードショートカットでタブ切り替え、ペイン移動、管理画面アクセスを素早く行いたい。
+ユーザーとして、管理画面を開閉しつつ、`Branches / SPECs / Issues / Profiles` を同じ操作体系で行き来したい。
 
 ## Acceptance Scenarios
 
-### AS-1: マウスによるタブ切り替え
-
-- gwt-tui のタブバーが表示されている状態
-- マウスでタブをクリック
-- クリックしたタブがアクティブになる
-
-### AS-2: マウスホイールスクロール
-
-- ターミナル出力が画面に収まらない状態
-- マウスホイールを回転
-- 出力がスクロールされ過去の内容を参照できる
-
-### AS-3: テキスト選択とコピー
-
-- ターミナル出力が表示されている状態
-- マウスドラッグでテキスト範囲を選択
-- 選択テキストがハイライト表示され、コピー操作が可能
-
-### AS-4: キーボードナビゲーション
-
-- 複数タブが開いている状態
-- Ctrl+G, 1-9 でタブ番号指定切り替え
-- 指定タブが即座にアクティブになる
+1. `Branches` でカーソル移動後、`Enter` が `no/one/many` で分岐する
+2. `many sessions` のとき selector 上で既存 session 選択や追加起動へ移動できる
+3. session workspace で focus session を maximize できる
+4. maximize 時に tab switch で他 session を選べる
+5. 管理画面を開閉しても session workspace の文脈を失わない
+6. terminal 上で wheel scroll、drag-copy、paste が従来通り使える
 
 ## Functional Requirements
 
-- FR-1: crossterm のマウスイベント（クリック、ホイール、ドラッグ）を処理する
-- FR-2: マウスクリックでタブ切り替え、ペインフォーカス移動を行う
-- FR-3: マウスホイールでスクロールバックバッファをスクロールする
-- FR-4: マウスドラッグでテキスト選択し、選択範囲をハイライト表示する
-- FR-5: 選択テキストのクリップボードコピーをサポートする
-- FR-6: キーボードショートカット体系を定義する（Ctrl+G プレフィックス方式）
-- FR-7: マウスイベントを PTY に転送するモード（TUI アプリ用）をサポートする
+- FR-001: interaction はキーボード中心で全主要機能へ到達できなければならない
+- FR-002: `Branches` 一覧は移動・選択・`Enter` 分岐を備えなければならない
+- FR-003: `many sessions` selector はキーボードで完結しなければならない
+- FR-004: session workspace は focus movement と maximize toggle を持たなければならない
+- FR-005: maximize 時は tab switch shortcut を持たなければならない
+- FR-006: 管理画面の open/close と tab navigation を同一体系で扱わなければならない
+- FR-007: terminal 上の wheel scroll、drag-copy、paste、live follow behavior は維持しなければならない
+- FR-008: `hidden pane` や canvas 固有 interaction を前提にしてはならない
 
 ## Non-Functional Requirements
 
-- NFR-1: マウスイベント処理が TUI 描画のパフォーマンスに影響しない
-- NFR-2: マウス操作とキーボード操作の両方で全機能にアクセス可能（マウスなしでも操作可能）
-- NFR-3: マウスイベントの PTY 転送は設定で有効/無効を切り替え可能
+- NFR-001: interaction policy はマウスなしでも操作可能でなければならない
+- NFR-002: マウス操作はキーボード操作の補助であり、主要経路を置き換えてはならない
+- NFR-003: terminal 向け mouse handling は `SPEC-1541` の runtime contract を壊してはならない
 
 ## Success Criteria
 
-- SC-1: マウスクリックでタブ切り替えが動作する
-- SC-2: マウスホイールでスクロールが動作する
-- SC-3: マウスドラッグでテキスト選択とコピーが動作する
-- SC-4: キーボードショートカットで全操作が可能
-- SC-5: TUI アプリ（vi 等）へのマウスイベント転送が動作する
+- SC-001: `Branches`、selector、session workspace、management tabs が一貫した shortcut policy で動く
+- SC-002: terminal UX の快適さを落とさずに rebuilt shell model へ移行できる

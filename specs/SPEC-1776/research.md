@@ -98,6 +98,21 @@ These are considered covered through `SPEC-1579` and `SPEC-1787`. `SPEC-1776` do
   - `SPEC-first workflow` は workflow owner として維持し、UI entry surface の優先順位だけ parent UX に合わせる
   - initialization 後にどのタブへ着地するかも、`Branches` / `SPECs` の方針と整合させて再確認する
 
+## Remaining Audit Conclusions
+
+| SPEC | Conclusion |
+|---|---|
+| `SPEC-1714` | current linkage/cache contract is reusable as-is; no wording change required for the branch-first rebuild |
+| `SPEC-1354` | current Issue detail boundary is already consistent with `SPEC-1776`; no wording change required |
+| `SPEC-1643` | current search/discovery ownership remains valid; no wording change required in this pass |
+| `SPEC-1786` | hooks confirm still fits before agent launch; the new branch selector does not change its canonical contract |
+| `SPEC-1542`, `SPEC-1656` | persistence contract already supports `profiles` as stored env-profile data; no wording change required in this pass |
+| `SPEC-1644` | local git/worktree ownership remains fully reusable as-is |
+| `SPEC-1646` | built-in agent catalog/launch contract remains reusable as-is |
+| `SPEC-1648` | session persistence contract remains reusable as-is |
+| `SPEC-1636` | Assistant interrupt/queue semantics stay outside the current rebuild scope |
+| `SPEC-1779` | custom agent UI remains deferred; no child sync required in this pass |
+
 ## Accepted Product Decisions
 
 - 旧TUIの使いやすさは `branch list` と操作意味にある

@@ -8,7 +8,7 @@ gwt-tui currently has several workflow gaps:
 
 1. **Empty screen on non-repo launch** — No Clone Wizard auto-launch, leaving users with no clear next action
 2. **Unnecessary Bare Clone complexity** — Normal Clone achieves the same functionality with less complexity
-3. **Branch-centric workflow** — Work should start from SPEC/Issue, not from Branches tab branch selection
+3. **Branch-first UX and SPEC-first workflow are misaligned** — the rebuilt TUI wants `Branches` as the primary entry, while SPEC/Issue-driven launch must remain first-class
 4. **No place for SPEC drafting** — Creating SPECs requires a branch, but without SPECs there's no reason to create a branch (chicken-and-egg problem)
 5. **No develop commit protection** — When agents run on develop for brainstorming, accidental commits risk polluting the protected branch
 
@@ -35,7 +35,7 @@ As a developer launching gwt-tui in a directory without a Git repository, I want
 
 1. **Given** gwt-tui is launched in an empty directory, **When** the TUI starts, **Then** a fullscreen initialization screen is displayed (modal, blocking other navigation)
 2. **Given** the initialization screen is displayed, **When** the user enters a repository URL and presses Enter, **Then** a Normal Shallow Clone (`git clone --depth=1 -b develop`) is executed
-3. **Given** the clone completes successfully, **When** the TUI transitions, **Then** the repo_root is switched in-place (no restart) and the SPECs tab is displayed with a guide message
+3. **Given** the clone completes successfully, **When** the TUI transitions, **Then** the repo_root is switched in-place (no restart) and the rebuilt primary entry is shown without losing access to `SPECs` as a first-class tab
 4. **Given** the clone fails (network error, auth failure, invalid URL), **When** the error is shown, **Then** the user is returned to the URL input step to retry
 5. **Given** the initialization screen is displayed, **When** the user presses Esc, **Then** the TUI exits
 6. **Given** gwt-tui is launched in a non-empty non-repo directory, **When** the TUI starts, **Then** the same initialization screen is displayed (same behavior as empty directory)
@@ -53,7 +53,7 @@ As a developer, I want gwt to use Normal Clone instead of Bare Clone so that the
 
 ### User Story 3 - SPEC/Issue-driven agent launch (Priority: P0)
 
-As a developer, I want to launch agents from the SPECs or Issues tab so that work is always traceable to a specification.
+As a developer, I want to launch agents from the SPECs or Issues tab as first-class entry points even though `Branches` remains the rebuilt shell's primary entry, so that work stays traceable to a specification.
 
 **Acceptance Scenarios:**
 
@@ -97,7 +97,7 @@ As a project maintainer, I want develop to be protected from accidental direct c
 - FR-002: Initialization screen must be fullscreen and modal (block Ctrl+G layer switching)
 - FR-003: Clone must use `git clone --depth=1 -b develop <url>`, falling back to `--depth=1` if develop doesn't exist
 - FR-004: After clone, `Model::reset(new_repo_root)` must reload all screen data in-place
-- FR-005: `Model::reset()` must transition to `ActiveLayer::Management` + `ManagementTab::Specs`
+- FR-005: `Model::reset()` must transition to the rebuilt management entry without losing first-class access to `SPECs`
 - FR-006: Bare Clone support must be removed from Clone Wizard (CloneType enum)
 - FR-007: `RepoType::Bare`, `find_bare_repo_in_dir()`, `is_bare_repository()` must be deleted
 - FR-008: `BareProjectConfig` (`bare_project.rs`) must be deleted

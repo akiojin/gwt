@@ -23,7 +23,7 @@ mkdir /tmp/gwt-test-init && cd /tmp/gwt-test-init
 # Launch gwt-tui — should show fullscreen init screen:
 cargo run -p gwt-tui
 
-# Enter a repo URL → clone → SPECs tab should appear
+# Enter a repo URL → clone → rebuilt primary entry should appear
 # Press Esc → TUI should exit
 ```
 
@@ -49,7 +49,7 @@ git commit -m "test"  # Should SUCCEED
 # Launch gwt-tui in a repo with specs/:
 cargo run -p gwt-tui
 
-# Navigate to SPECs tab
+# Navigate to SPECs tab from the rebuilt primary entry
 # Select a SPEC → press Launch Agent key
 # Verify wizard opens with feature/feature-{N} pre-filled
 ```

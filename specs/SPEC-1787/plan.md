@@ -2,7 +2,7 @@
 
 ## Summary
 
-Replace Bare Clone with Normal Clone, add non-repo initialization flow, implement SPEC/Issue-driven agent launch, create SPEC drafting skill, and protect develop branch from direct commits.
+Replace Bare Clone with Normal Clone, add non-repo initialization flow, keep SPEC/Issue-driven launch first-class within a branch-first rebuilt shell, create SPEC drafting skill, and protect develop branch from direct commits.
 
 ## Technical Context
 
@@ -15,7 +15,7 @@ Replace Bare Clone with Normal Clone, add non-repo initialization flow, implemen
 | gwt-core/worktree | `manager.rs` | Remove Sibling strategy |
 | gwt-core/git | `hooks.rs` (new) | Pre-commit hook install |
 | gwt-tui/model | `model.rs` | Add ActiveLayer::Initialization, Model::reset() |
-| gwt-tui/app | `app.rs` | Initialization layer handling, load_all_data() extraction |
+| gwt-tui/app | `app.rs` | Initialization layer handling, load_all_data() extraction, rebuilt primary-entry handoff |
 | gwt-tui/screens | `clone_wizard.rs` | Normal Clone only, fullscreen mode |
 | gwt-tui/screens | `specs.rs` | Launch Agent, New SPEC, guide message |
 | gwt-tui/screens | `issues.rs` | Launch Agent action |
@@ -118,7 +118,7 @@ crates/
 
 ### Phase 2: Initialization Flow (FR-001, FR-002, FR-003, FR-004, FR-005, FR-021)
 
-**Goal**: Non-repo directories show fullscreen initialization screen, clone completes with in-place switch.
+**Goal**: Non-repo directories show fullscreen initialization screen, clone completes with in-place switch, and the rebuilt shell lands on the branch-first primary entry while preserving first-class `SPECs` access.
 
 **Files**:
 1. `crates/gwt-tui/src/model.rs` (lines 29-32, 168-256)

@@ -1,78 +1,39 @@
-# SPECs タブ — 一覧・詳細・検索
+> **Canonical Boundary**: `SPEC-1777` は management workspace における local SPEC viewer と launch entry の正本である。SPEC workflow owner は `SPEC-1579` / `SPEC-1787`、parent navigation は `SPEC-1776` が担当する。
+
+# SPECs タブ — 一覧・詳細・検索・起動導線
 
 ## Background
 
-gwt-tui の管理画面に SPECs タブを追加し、ローカルの `specs/SPEC-*/` ディレクトリをスキャンして SPEC の一覧・詳細・検索を提供する。Issues タブとは完全に分離された独立タブとして実装する。gwt-spec-* スキルはエージェント向けの自動化ツールであり、本 UI は人間が直接 SPEC を閲覧・検索するためのインターフェース。
+`SPECs` タブは local `specs/SPEC-*` artifact の viewer であり、`Issues` タブとは独立して human-facing な閲覧・検索・起動導線を提供する。rebuilt TUI では `SPECs` タブも management workspace の first-class tab として残し、branch-first UX の中で `launch from SPEC` を first-class に維持する。
 
 ## User Stories
 
-### US-1: SPEC 一覧を閲覧する
+### US-1: local SPEC 一覧を見たい
 
-開発者として、管理画面の SPECs タブで全ローカル SPEC の一覧を確認し、状態（open/closed/in-progress）で素早くフィルタしたい。
+### US-2: artifact section を切り替えて詳細を見たい
 
-### US-2: SPEC の詳細をプレビューする
+### US-3: SPEC を検索したい
 
-開発者として、一覧から SPEC を選択し、spec.md の内容をプレビュー表示で確認したい。管理画面内で完結し、外部エディタを開く必要がないこと。
-
-### US-3: SPEC を検索する
-
-開発者として、SPEC のタイトルや内容をキーワード検索し、関連する SPEC を素早く見つけたい。
+### US-4: SPEC から agent launch へ入りたい
 
 ## Acceptance Scenarios
 
-### AS-1: SPEC 一覧の表示
-
-- gwt-tui の管理画面で SPECs タブを選択
-- `specs/SPEC-*/metadata.json` がスキャンされ一覧表示される
-- 各行に SPEC ID、タイトル、ステータス、優先度が表示される
-
-### AS-2: ステータスフィルタ
-
-- SPECs タブで一覧が表示されている状態
-- ステータスフィルタ（All / Open / Closed / In-Progress）を切り替え
-- フィルタに一致する SPEC のみが表示される
-
-### AS-3: spec.md プレビュー
-
-- SPEC 一覧から項目を選択
-- 右ペイン（または詳細ビュー）に spec.md の内容がマークダウンプレビューで表示される
-
-### AS-4: キーワード検索
-
-- 検索フィールドにキーワードを入力
-- タイトルおよび spec.md の内容に一致する SPEC がフィルタ表示される
-
-### AS-5: Issues タブとの独立性
-
-- SPECs タブと Issues タブは完全に分離されたタブ
-- SPECs タブの操作が Issues タブの状態に影響しない
+1. `SPECs` タブで local SPEC 一覧が表示される
+2. detail view で `spec / plan / tasks / research / data-model / quickstart / checklists / contracts` を切り替えられる
+3. 検索で title や ID に一致する SPEC を絞り込める
+4. 選択した SPEC から launch entry に入れる
+5. `Issues` タブとは state と責務を共有しない
 
 ## Functional Requirements
 
-| ID | 要件 |
-|----|------|
-| FR-001 | `specs/SPEC-*/metadata.json` をスキャンして SPEC 一覧を構築する |
-| FR-002 | 一覧に SPEC ID、タイトル、ステータス、優先度、作成日を表示する |
-| FR-003 | ステータス（open / closed / in-progress / all）でフィルタリングする |
-| FR-004 | SPEC 選択時に spec.md の内容をプレビュー表示する |
-| FR-005 | キーワード検索（タイトル + spec.md 内容）をサポートする |
-| FR-006 | Issues タブとは完全に独立したタブとして実装する |
-| FR-007 | 一覧のソート（ID順、ステータス順、優先度順）をサポートする |
-
-## Non-Functional Requirements
-
-| ID | 要件 |
-|----|------|
-| NFR-001 | SPEC が 100 件以上でもスキャン・表示が 500ms 以内に完了する |
-| NFR-002 | spec.md のプレビュー表示は非同期読み込みで TUI をブロックしない |
-| NFR-003 | ファイルシステム監視で SPEC の追加・変更を自動検出する（オプション） |
+- FR-001: local SPEC 一覧を構築する
+- FR-002: artifact section 切替 detail を提供する
+- FR-003: title / ID ベースの検索を提供する
+- FR-004: selected SPEC から launch entry へ進める
+- FR-005: `Issues` タブと責務分離を維持する
+- FR-006: workflow owner は `SPEC-1579` / `SPEC-1787` であり、本タブは viewer / entry role のみを持つ
 
 ## Success Criteria
 
-| ID | 基準 |
-|----|------|
-| SC-001 | 管理画面に SPECs タブが表示され、SPEC 一覧が正しく表示される |
-| SC-002 | ステータスフィルタが機能し、フィルタ結果が正しい |
-| SC-003 | SPEC 選択時に spec.md がプレビュー表示される |
-| SC-004 | キーワード検索で関連 SPEC が見つかる |
-| SC-005 | Issues タブと SPECs タブが独立して動作する |
+- SC-001: `SPECs` タブが rebuilt management workspace の first-class tab として成立する
+- SC-002: detail, search, launch entry が parent UX と矛盾しない

@@ -19,11 +19,14 @@
 - `tasks.md` now starts with child-spec-aware implementation phases instead of full-feature migration
 - `tasks.md` also includes explicit audit tasks for workflow, persistence, issue, hooks, and profile-related specs
 - `research.md` now includes a concrete `gwt-spec-ops` coverage audit and identifies `SPEC-1787` as the first workflow wording conflict
+- `SPEC-1654`, `SPEC-1770`, `SPEC-1777`, and `SPEC-1782` have been rewritten to match the parent UX direction
+- `SPEC-1787` has been reworded so branch-first primary entry and SPEC-first workflow are no longer framed as mutually exclusive
+- `SPEC-1654` support artifacts (`research`, `data-model`, `quickstart`, checklists) are now consistent with the rebuilt shell model
+- First-pass audit conclusions are now recorded for issue, hooks, persistence, launch, and assistant-related specs that did not require wording changes
 
 ### Next
 
-- Sync child specs that now conflict with the parent direction, starting with `SPEC-1654`, `SPEC-1770`, `SPEC-1777`, and `SPEC-1782`
-- Begin implementation from the new `Branches` and session workspace model after the child sync list is closed
+- Begin implementation from the new `Branches` and session workspace model now that the first-pass child/audit sync list is closed
 
 ## 2026-04-02: Normal-mode virtual terminal viewport
 

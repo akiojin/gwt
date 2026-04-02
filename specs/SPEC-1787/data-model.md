@@ -55,7 +55,7 @@ Resets the entire Model state for a new repository:
 - Clears `self.session_tabs`
 - Calls `load_all_data()` to reload branches, specs, issues, versions, logs, settings
 - Sets `active_layer = ActiveLayer::Management`
-- Sets `management_tab = ManagementTab::Specs`
+- Lands on the rebuilt primary entry while preserving first-class access to `SPECs`
 
 ### Model::load_all_data(repo_root: &Path)
 
