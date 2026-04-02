@@ -45,7 +45,12 @@ pub struct Keybinding {
 pub struct KeybindRegistry {
     pub prefix_state: PrefixState,
     bindings: Vec<Keybinding>,
+    /// Track last Ctrl+C time for double-tap quit.
+    last_ctrl_c: Option<Instant>,
 }
+
+/// Window for double-tap Ctrl+C detection.
+const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);
 
 impl Default for KeybindRegistry {
     fn default() -> Self {
@@ -105,6 +110,7 @@ impl KeybindRegistry {
         Self {
             prefix_state: PrefixState::Idle,
             bindings,
+            last_ctrl_c: None,
         }
     }
 
@@ -120,6 +126,20 @@ impl KeybindRegistry {
         if self.prefix_state.is_expired() {
             self.prefix_state = PrefixState::Idle;
         }
+
+        // Ctrl+C double-tap quit (works in any state)
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if let Some(last) = self.last_ctrl_c {
+                if last.elapsed() < DOUBLE_TAP_WINDOW {
+                    self.last_ctrl_c = None;
+                    return Some(Message::Quit);
+                }
+            }
+            self.last_ctrl_c = Some(Instant::now());
+            return None; // Single Ctrl+C: forward to PTY
+        }
+        // Any non-Ctrl+C key resets the double-tap tracker
+        self.last_ctrl_c = None;
 
         match &self.prefix_state {
             PrefixState::Idle => {
