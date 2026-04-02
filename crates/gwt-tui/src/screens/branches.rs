@@ -8,6 +8,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+use gwt_core::git::issue_cache::IssueExactCache;
+use gwt_core::git::issue_linkage::WorktreeIssueLinkStore;
 use gwt_core::git::{Branch, PrCache};
 use gwt_core::worktree::{Worktree, WorktreeManager, WorktreeStatus as CoreWorktreeStatus};
 
@@ -68,6 +70,8 @@ pub struct BranchItem {
     pub is_protected: bool,
     pub last_tool_usage: Option<String>,
     pub last_tool_id: Option<String>,
+    pub linked_issue_number: Option<u64>,
+    pub linked_issue_state: Option<String>,
     pub pr_title: Option<String>,
     pub pr_number: Option<u64>,
     pub pr_state: Option<String>,
@@ -101,6 +105,8 @@ impl BranchItem {
             is_protected,
             last_tool_usage: None,
             last_tool_id: None,
+            linked_issue_number: None,
+            linked_issue_state: None,
             pr_title: None,
             pr_number: None,
             pr_state: None,
@@ -598,6 +604,10 @@ pub fn load_branches_enriched(repo_root: &Path) -> Vec<BranchItem> {
         .unwrap_or_default();
     apply_worktree_metadata(&mut items, &worktrees);
 
+    let issue_links = WorktreeIssueLinkStore::load(repo_root);
+    let issue_cache = IssueExactCache::load(repo_root);
+    apply_issue_metadata(&mut items, &issue_links, &issue_cache);
+
     let mut pr_cache = PrCache::new();
     pr_cache.populate(repo_root);
     apply_pr_metadata(&mut items, &pr_cache);
@@ -643,6 +653,22 @@ fn apply_pr_metadata(items: &mut [BranchItem], pr_cache: &PrCache) {
             item.pr_title = Some(pr.title.clone());
             item.pr_number = Some(pr.number);
             item.pr_state = Some(pr.state.to_lowercase());
+        }
+    }
+}
+
+fn apply_issue_metadata(
+    items: &mut [BranchItem],
+    issue_links: &WorktreeIssueLinkStore,
+    issue_cache: &IssueExactCache,
+) {
+    for item in items {
+        let key = normalize_branch_name(&item.name);
+        if let Some(link) = issue_links.get_link(key) {
+            item.linked_issue_number = Some(link.issue_number);
+            item.linked_issue_state = issue_cache
+                .get(link.issue_number)
+                .map(|entry| entry.state.to_lowercase());
         }
     }
 }
@@ -892,6 +918,25 @@ fn render_branch_row(
         ));
     }
 
+    if let Some(number) = branch.linked_issue_number {
+        let issue_color = match branch.linked_issue_state.as_deref() {
+            Some(state) if state.eq_ignore_ascii_case("open") => Color::Green,
+            Some(state) if state.eq_ignore_ascii_case("closed") => Color::Red,
+            _ => Color::DarkGray,
+        };
+        let state_label = branch
+            .linked_issue_state
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase();
+        let issue_text = if state_label.is_empty() {
+            format!(" #{number}")
+        } else {
+            format!(" #{number} {state_label}")
+        };
+        spans.push(Span::styled(issue_text, Style::default().fg(issue_color)));
+    }
+
     // PR info
     if let (Some(number), Some(ref pr_state)) = (branch.pr_number, &branch.pr_state) {
         let pr_color = match pr_state.as_str() {
@@ -978,6 +1023,8 @@ mod tests {
             is_protected: is_protected_branch(name, false),
             last_tool_usage: None,
             last_tool_id: None,
+            linked_issue_number: None,
+            linked_issue_state: None,
             pr_title: None,
             pr_number: None,
             pr_state: None,
@@ -1421,6 +1468,8 @@ mod tests {
         branch.running_session_count = 1;
         branch.stopped_session_count = 1;
         branch.worktree_indicator = 'w';
+        branch.linked_issue_number = Some(42);
+        branch.linked_issue_state = Some("open".to_string());
         state.branches = vec![branch];
 
         let backend = TestBackend::new(80, 10);
@@ -1448,6 +1497,7 @@ mod tests {
         assert!(row_text.contains("●1"), "expected running summary in row");
         assert!(row_text.contains("○1"), "expected stopped summary in row");
         assert!(row_text.contains(" w"), "expected worktree indicator in row");
+        assert!(row_text.contains("#42 open"), "expected linked issue in row");
     }
 
     #[test]
@@ -1468,6 +1518,28 @@ mod tests {
         assert!(item.has_worktree);
         assert_eq!(item.worktree_indicator, 'w');
         assert_eq!(item.safety_status, SafetyStatus::Danger);
+    }
+
+    #[test]
+    fn apply_issue_metadata_sets_linked_issue_fields() {
+        let mut items = vec![make_branch("feature/issue-42-demo", false)];
+        let mut store = WorktreeIssueLinkStore::default();
+        store.set_link("feature/issue-42-demo", 42, gwt_core::git::issue_linkage::LinkSource::BranchParse);
+        let mut cache = IssueExactCache::default();
+        cache.upsert(gwt_core::git::issue_cache::IssueExactCacheEntry {
+            number: 42,
+            title: "Issue 42".to_string(),
+            url: "https://example.com/issues/42".to_string(),
+            state: "OPEN".to_string(),
+            labels: vec![],
+            updated_at: "2026-04-02T00:00:00Z".to_string(),
+            fetched_at: 0,
+        });
+
+        apply_issue_metadata(&mut items, &store, &cache);
+
+        assert_eq!(items[0].linked_issue_number, Some(42));
+        assert_eq!(items[0].linked_issue_state.as_deref(), Some("open"));
     }
 
     #[test]
