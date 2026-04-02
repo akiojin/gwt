@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
     Frame,
 };
 
@@ -110,6 +110,16 @@ pub struct BranchItem {
     pub category: BranchCategory,
 }
 
+/// Number of detail sections in the branch detail view.
+const DETAIL_SECTION_COUNT: usize = 5;
+
+/// Labels for the detail sections.
+const DETAIL_SECTION_LABELS: [&str; DETAIL_SECTION_COUNT] =
+    ["Overview", "SPECs", "Git", "Sessions", "Actions"];
+
+/// Action labels in the Actions detail section.
+const ACTION_LABELS: [&str; 3] = ["Launch Agent", "Open Shell", "Delete Worktree"];
+
 /// State for the branches screen.
 #[derive(Debug, Clone, Default)]
 pub struct BranchesState {
@@ -120,6 +130,16 @@ pub struct BranchesState {
     pub(crate) search_query: String,
     pub(crate) search_active: bool,
     pub(crate) detail_view: bool,
+    /// Active detail section: 0=Overview, 1=SPECs, 2=Git, 3=Sessions, 4=Actions.
+    pub(crate) detail_section: usize,
+    /// Selected action index within the Actions section.
+    pub(crate) detail_action_selected: usize,
+    /// Flag: caller should open agent selection.
+    pub(crate) pending_launch_agent: bool,
+    /// Flag: caller should spawn shell in worktree cwd.
+    pub(crate) pending_open_shell: bool,
+    /// Flag: caller should show worktree delete confirmation.
+    pub(crate) pending_delete_worktree: bool,
 }
 
 impl BranchesState {
@@ -174,6 +194,20 @@ pub enum BranchesMessage {
     SearchClear,
     Refresh,
     SetBranches(Vec<BranchItem>),
+    /// Cycle to the next detail section.
+    NextDetailSection,
+    /// Cycle to the previous detail section.
+    PrevDetailSection,
+    /// Move down within the Actions section.
+    DetailActionDown,
+    /// Move up within the Actions section.
+    DetailActionUp,
+    /// Launch agent action from the Actions section.
+    LaunchAgent,
+    /// Open shell action from the Actions section.
+    OpenShell,
+    /// Delete worktree action from the Actions section.
+    DeleteWorktree,
 }
 
 /// Update branches state in response to a message.
@@ -226,24 +260,56 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             state.branches = branches;
             state.clamp_selected();
         }
+        BranchesMessage::NextDetailSection => {
+            state.detail_section = (state.detail_section + 1) % DETAIL_SECTION_COUNT;
+        }
+        BranchesMessage::PrevDetailSection => {
+            state.detail_section = if state.detail_section == 0 {
+                DETAIL_SECTION_COUNT - 1
+            } else {
+                state.detail_section - 1
+            };
+        }
+        BranchesMessage::DetailActionDown => {
+            super::move_down(&mut state.detail_action_selected, ACTION_LABELS.len());
+        }
+        BranchesMessage::DetailActionUp => {
+            super::move_up(&mut state.detail_action_selected, ACTION_LABELS.len());
+        }
+        BranchesMessage::LaunchAgent => {
+            state.pending_launch_agent = true;
+        }
+        BranchesMessage::OpenShell => {
+            state.pending_open_shell = true;
+        }
+        BranchesMessage::DeleteWorktree => {
+            state.pending_delete_worktree = true;
+        }
     }
 }
 
-/// Render the branches screen.
+/// Render the branches screen with split layout: top = list, bottom = detail.
 pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
+    // Split vertically: top 50% for list, bottom 50% for detail
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    // Top half: header + branch list
+    let list_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header: view/sort/search
             Constraint::Min(0),    // Branch list
         ])
-        .split(area);
+        .split(main_chunks[0]);
 
-    // Header
-    render_header(state, frame, chunks[0]);
+    render_header(state, frame, list_chunks[0]);
+    render_branch_list(state, frame, list_chunks[1]);
 
-    // Branch list
-    render_branch_list(state, frame, chunks[1]);
+    // Bottom half: branch detail
+    render_branch_detail(state, frame, main_chunks[1]);
 }
 
 /// Render the header bar with view mode, sort mode, and search.
@@ -320,6 +386,124 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+/// Render the branch detail panel (bottom half).
+fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Section tabs
+            Constraint::Min(0),    // Section content
+        ])
+        .split(area);
+
+    // Section tab bar
+    let titles: Vec<Line> = DETAIL_SECTION_LABELS
+        .iter()
+        .map(|label| Line::from(*label))
+        .collect();
+    let tabs = Tabs::new(titles)
+        .block(Block::default().borders(Borders::ALL).title("Detail"))
+        .select(state.detail_section)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(tabs, chunks[0]);
+
+    // Section content
+    match state.detail_section {
+        0 => render_detail_overview(state, frame, chunks[1]),
+        1 => render_detail_specs(state, frame, chunks[1]),
+        2 => render_detail_git_status(state, frame, chunks[1]),
+        3 => render_detail_sessions(frame, chunks[1]),
+        4 => render_detail_actions(state, frame, chunks[1]),
+        _ => {}
+    }
+}
+
+/// Overview section: branch name, HEAD indicator, category.
+fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let content = match state.selected_branch() {
+        Some(branch) => {
+            let head = if branch.is_head { " (HEAD)" } else { "" };
+            let locality = if branch.is_local { "Local" } else { "Remote" };
+            format!(
+                " Branch: {}{}\n Category: {}\n Type: {}",
+                branch.name,
+                head,
+                branch.category.label(),
+                locality,
+            )
+        }
+        None => " No branch selected".to_string(),
+    };
+
+    let block = Block::default().borders(Borders::ALL).title("Overview");
+    let paragraph = Paragraph::new(content)
+        .block(block)
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(paragraph, area);
+}
+
+/// SPECs section: placeholder list.
+fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let content = match state.selected_branch() {
+        Some(branch) => format!(" SPECs for branch: {}\n\n No SPECs loaded", branch.name),
+        None => " No branch selected".to_string(),
+    };
+
+    let block = Block::default().borders(Borders::ALL).title("SPECs");
+    let paragraph = Paragraph::new(content)
+        .block(block)
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(paragraph, area);
+}
+
+/// Git Status section: placeholder.
+fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let content = match state.selected_branch() {
+        Some(branch) => format!(" Git status for {}", branch.name),
+        None => " No branch selected".to_string(),
+    };
+
+    let block = Block::default().borders(Borders::ALL).title("Git Status");
+    let paragraph = Paragraph::new(content)
+        .block(block)
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(paragraph, area);
+}
+
+/// Sessions section: placeholder.
+fn render_detail_sessions(frame: &mut Frame, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title("Sessions");
+    let paragraph = Paragraph::new(" No active sessions")
+        .block(block)
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(paragraph, area);
+}
+
+/// Actions section: selectable action list.
+fn render_detail_actions(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let items: Vec<ListItem> = ACTION_LABELS
+        .iter()
+        .enumerate()
+        .map(|(idx, label)| {
+            let style = super::list_item_style(idx == state.detail_action_selected);
+            let prefix = if idx == state.detail_action_selected {
+                "\u{25B6} "
+            } else {
+                "  "
+            };
+            ListItem::new(Line::from(Span::styled(format!("{prefix}{label}"), style)))
+        })
+        .collect();
+
+    let block = Block::default().borders(Borders::ALL).title("Actions");
+    let list = List::new(items).block(block);
+    frame.render_widget(list, area);
 }
 
 #[cfg(test)]
@@ -669,5 +853,224 @@ mod tests {
         update(&mut state, BranchesMessage::ToggleView);
         assert_eq!(state.view_mode, ViewMode::Remote);
         assert_eq!(state.selected, 0); // clamped
+    }
+
+    // ---- Branch detail tests ----
+
+    #[test]
+    fn detail_section_defaults_to_zero() {
+        let state = BranchesState::default();
+        assert_eq!(state.detail_section, 0);
+    }
+
+    #[test]
+    fn next_detail_section_cycles_through_all() {
+        let mut state = BranchesState::default();
+        for expected in 1..=4 {
+            update(&mut state, BranchesMessage::NextDetailSection);
+            assert_eq!(state.detail_section, expected);
+        }
+        // Wraps back to 0
+        update(&mut state, BranchesMessage::NextDetailSection);
+        assert_eq!(state.detail_section, 0);
+    }
+
+    #[test]
+    fn prev_detail_section_wraps_from_zero() {
+        let mut state = BranchesState::default();
+        assert_eq!(state.detail_section, 0);
+        update(&mut state, BranchesMessage::PrevDetailSection);
+        assert_eq!(state.detail_section, 4);
+    }
+
+    #[test]
+    fn prev_detail_section_decrements() {
+        let mut state = BranchesState::default();
+        state.detail_section = 3;
+        update(&mut state, BranchesMessage::PrevDetailSection);
+        assert_eq!(state.detail_section, 2);
+    }
+
+    #[test]
+    fn detail_action_selected_defaults_to_zero() {
+        let state = BranchesState::default();
+        assert_eq!(state.detail_action_selected, 0);
+    }
+
+    #[test]
+    fn detail_action_down_cycles() {
+        let mut state = BranchesState::default();
+        update(&mut state, BranchesMessage::DetailActionDown);
+        assert_eq!(state.detail_action_selected, 1);
+        update(&mut state, BranchesMessage::DetailActionDown);
+        assert_eq!(state.detail_action_selected, 2);
+        update(&mut state, BranchesMessage::DetailActionDown);
+        assert_eq!(state.detail_action_selected, 0); // wraps
+    }
+
+    #[test]
+    fn detail_action_up_wraps() {
+        let mut state = BranchesState::default();
+        update(&mut state, BranchesMessage::DetailActionUp);
+        assert_eq!(state.detail_action_selected, 2); // wraps to last
+    }
+
+    #[test]
+    fn launch_agent_sets_flag() {
+        let mut state = BranchesState::default();
+        assert!(!state.pending_launch_agent);
+        update(&mut state, BranchesMessage::LaunchAgent);
+        assert!(state.pending_launch_agent);
+    }
+
+    #[test]
+    fn open_shell_sets_flag() {
+        let mut state = BranchesState::default();
+        assert!(!state.pending_open_shell);
+        update(&mut state, BranchesMessage::OpenShell);
+        assert!(state.pending_open_shell);
+    }
+
+    #[test]
+    fn delete_worktree_sets_flag() {
+        let mut state = BranchesState::default();
+        assert!(!state.pending_delete_worktree);
+        update(&mut state, BranchesMessage::DeleteWorktree);
+        assert!(state.pending_delete_worktree);
+    }
+
+    #[test]
+    fn render_with_detail_split_does_not_panic() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("Branches"));
+    }
+
+    #[test]
+    fn render_detail_overview_shows_branch_info() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 0; // Overview
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Check bottom half contains Overview content
+        let mut found_overview = false;
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains("Overview") {
+                found_overview = true;
+                break;
+            }
+        }
+        assert!(found_overview, "Detail panel should contain 'Overview'");
+    }
+
+    #[test]
+    fn render_detail_actions_shows_action_list() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 4; // Actions
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut found_actions = false;
+        let mut found_launch = false;
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains("Actions") {
+                found_actions = true;
+            }
+            if line.contains("Launch Agent") {
+                found_launch = true;
+            }
+        }
+        assert!(found_actions, "Should contain 'Actions' title");
+        assert!(found_launch, "Should contain 'Launch Agent' action");
+    }
+
+    #[test]
+    fn render_detail_sections_shows_correct_tab_labels() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut full_text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                full_text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(
+            full_text.contains("SPECs"),
+            "Tab bar should contain 'SPECs'"
+        );
+        assert!(
+            full_text.contains("Sessions"),
+            "Tab bar should contain 'Sessions'"
+        );
+    }
+
+    #[test]
+    fn render_no_selected_branch_shows_placeholder() {
+        let state = BranchesState::default(); // empty branches
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut found_no_branch = false;
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains("No branch selected") {
+                found_no_branch = true;
+                break;
+            }
+        }
+        assert!(
+            found_no_branch,
+            "Should show 'No branch selected' when empty"
+        );
     }
 }

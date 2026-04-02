@@ -17,7 +17,6 @@ use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
 use crate::screens::service_select::ServiceSelectState;
 use crate::screens::settings::SettingsState;
-use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
 use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
@@ -46,7 +45,6 @@ pub enum SessionLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementTab {
     Branches,
-    Specs,
     Issues,
     PrDashboard,
     Profiles,
@@ -58,9 +56,8 @@ pub enum ManagementTab {
 
 impl ManagementTab {
     /// All tabs in display order.
-    pub const ALL: [ManagementTab; 9] = [
+    pub const ALL: [ManagementTab; 8] = [
         ManagementTab::Branches,
-        ManagementTab::Specs,
         ManagementTab::Issues,
         ManagementTab::PrDashboard,
         ManagementTab::Profiles,
@@ -74,7 +71,6 @@ impl ManagementTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Branches => "Branches",
-            Self::Specs => "Specs",
             Self::Issues => "Issues",
             Self::PrDashboard => "PRs",
             Self::Profiles => "Profiles",
@@ -118,6 +114,14 @@ pub struct SessionTab {
 pub struct PendingPtyInput {
     pub session_id: String,
     pub bytes: Vec<u8>,
+}
+
+/// Pending session conversion selected from the overlay flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSessionConversion {
+    pub session_index: usize,
+    pub target_agent_id: String,
+    pub target_display_name: String,
 }
 
 /// Minimal vt100 screen state wrapper.
@@ -182,8 +186,6 @@ pub struct Model {
     pub(crate) git_view: GitViewState,
     /// PR dashboard screen state.
     pub(crate) pr_dashboard: PrDashboardState,
-    /// Specs screen state.
-    pub(crate) specs: SpecsState,
     /// Settings screen state.
     pub(crate) settings: SettingsState,
     /// Logs screen state.
@@ -200,6 +202,8 @@ pub struct Model {
     pub(crate) port_select: Option<PortSelectState>,
     /// Confirmation dialog state.
     pub(crate) confirm: ConfirmState,
+    /// Pending session conversion awaiting confirmation.
+    pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
     /// Voice input state.
     pub(crate) voice: VoiceInputState,
     /// Buffered PTY input generated from forwarded key events.
@@ -218,10 +222,6 @@ impl Model {
             vt: VtState::new(24, 80),
         };
         let (notification_bus, notification_receiver) = NotificationBus::new();
-        let specs = SpecsState {
-            spec_root: Some(repo_path.clone()),
-            ..SpecsState::default()
-        };
 
         Self {
             current_notification: None,
@@ -243,7 +243,6 @@ impl Model {
             issues: IssuesState::default(),
             git_view: GitViewState::default(),
             pr_dashboard: PrDashboardState::default(),
-            specs,
             settings: SettingsState::default(),
             logs: LogsState::default(),
             versions: VersionsState::default(),
@@ -252,6 +251,7 @@ impl Model {
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),
+            pending_session_conversion: None,
             voice: VoiceInputState::default(),
             pending_pty_inputs: VecDeque::new(),
             initialization: None,
@@ -324,6 +324,16 @@ impl Model {
     /// Current branches search query.
     pub fn branches_search_query(&self) -> &str {
         &self.branches.search_query
+    }
+
+    /// Active detail section index for the branches screen.
+    pub fn branches_detail_section(&self) -> usize {
+        self.branches.detail_section
+    }
+
+    /// Whether the branch detail launch-agent action is pending.
+    pub fn branches_pending_launch_agent(&self) -> bool {
+        self.branches.pending_launch_agent
     }
 
     /// Filtered branch names in display order.
@@ -428,8 +438,8 @@ mod tests {
     }
 
     #[test]
-    fn management_tab_all_has_nine_entries() {
-        assert_eq!(ManagementTab::ALL.len(), 9);
+    fn management_tab_all_has_eight_entries() {
+        assert_eq!(ManagementTab::ALL.len(), 8);
     }
 
     #[test]

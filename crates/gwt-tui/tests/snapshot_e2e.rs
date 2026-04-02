@@ -144,15 +144,6 @@ fn snapshot_branches_tab() {
 }
 
 #[test]
-fn snapshot_specs_tab() {
-    let mut model = test_model();
-    model.active_layer = ActiveLayer::Management;
-    model.management_tab = ManagementTab::Specs;
-    let output = render_to_string(&model, 80, 24);
-    insta::assert_snapshot!("specs_tab", output);
-}
-
-#[test]
 fn snapshot_issues_tab() {
     let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
@@ -464,7 +455,7 @@ fn e2e_management_tab_switch_via_ctrl_g_s() {
     send_key(&mut model, &mut kb, ctrl('g'));
     send_key(&mut model, &mut kb, press(KeyCode::Char('s')));
 
-    assert_eq!(model.management_tab, ManagementTab::Specs);
+    assert_eq!(model.management_tab, ManagementTab::Settings);
     assert_eq!(model.active_layer, ActiveLayer::Management);
 }
 
@@ -523,12 +514,105 @@ fn e2e_full_flow_snapshot_after_key_sequence() {
     send_key(&mut model, &mut kb, ctrl('g'));
     send_key(&mut model, &mut kb, press(KeyCode::Char('g')));
 
-    // Ctrl+G,s → SPECs tab
+    // Ctrl+G,s → Settings tab
     send_key(&mut model, &mut kb, ctrl('g'));
     send_key(&mut model, &mut kb, press(KeyCode::Char('s')));
 
-    assert_eq!(model.management_tab, ManagementTab::Specs);
+    assert_eq!(model.management_tab, ManagementTab::Settings);
 
     let output = render_to_string(&model, 80, 24);
-    insta::assert_snapshot!("e2e_key_flow_specs", output);
+    insta::assert_snapshot!("e2e_key_flow_settings", output);
+}
+
+// ============================================================
+// Branch Detail View E2E Tests
+// ============================================================
+
+#[test]
+fn snapshot_branches_with_detail_split() {
+    let mut model = test_model();
+    model.active_layer = ActiveLayer::Management;
+    model.management_tab = ManagementTab::Branches;
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("branches_detail_split", output);
+}
+
+#[test]
+fn e2e_branch_detail_tab_cycles_sections() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
+
+    // Default section is 0 (Overview)
+    assert_eq!(model.branches_detail_section(), 0);
+
+    // Tab -> section 1
+    send_key(&mut model, &mut kb, press(KeyCode::Tab));
+    assert_eq!(model.branches_detail_section(), 1);
+
+    // Tab -> section 2
+    send_key(&mut model, &mut kb, press(KeyCode::Tab));
+    assert_eq!(model.branches_detail_section(), 2);
+
+    // Shift+Tab -> section 1
+    send_key(
+        &mut model,
+        &mut kb,
+        KeyEvent {
+            code: KeyCode::BackTab,
+            modifiers: KeyModifiers::SHIFT,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        },
+    );
+    assert_eq!(model.branches_detail_section(), 1);
+}
+
+#[test]
+fn snapshot_branches_detail_actions_section() {
+    let mut model = test_model();
+    model.active_layer = ActiveLayer::Management;
+    model.management_tab = ManagementTab::Branches;
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
+    // Switch to Actions section (Tab x4 to get to section 4)
+    for _ in 0..4 {
+        app::update(
+            &mut model,
+            Message::Branches(BranchesMessage::NextDetailSection),
+        );
+    }
+    assert_eq!(model.branches_detail_section(), 4);
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("branches_detail_actions", output);
+}
+
+#[test]
+fn e2e_enter_in_actions_section_triggers_launch_agent() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
+    // Switch to Actions section (Tab x4)
+    for _ in 0..4 {
+        app::update(
+            &mut model,
+            Message::Branches(BranchesMessage::NextDetailSection),
+        );
+    }
+    assert_eq!(model.branches_detail_section(), 4);
+
+    send_key(&mut model, &mut kb, press(KeyCode::Enter));
+    assert!(model.branches_pending_launch_agent());
 }

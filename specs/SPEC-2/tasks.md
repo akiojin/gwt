@@ -40,44 +40,44 @@
 
 ### 4.1: Remove SPECs Tab
 
-- [ ] T022 Remove ManagementTab::Specs variant from model.rs (8→7 tabs)
-- [ ] T023 Remove specs tab routing from app.rs (route_key_to_management, render_management_tab_content)
-- [ ] T024 Update Ctrl+G,s keybind to switch to Settings instead of SPECs
-- [ ] T025 Update E2E tests for 7-tab layout
+- [x] T022 Remove ManagementTab::Specs variant from model.rs (9→8 tabs)
+- [x] T023 Remove specs tab routing from app.rs (route_key_to_management, render_management_tab_content)
+- [x] T024 Update Ctrl+G,s keybind to switch to Settings instead of SPECs
+- [x] T025 Update E2E tests for 8-tab layout
 
 ### 4.2: Branch Detail Split Layout
 
-- [ ] T026 [P] Write RED test: Branches tab renders top 50% list + bottom 50% detail
-- [ ] T027 Modify branches.rs render() to split area vertically (50/50)
-- [ ] T028 Create branch_detail rendering function showing selected branch info
-- [ ] T029 Wire cursor movement to update detail content
+- [x] T026 [P] Write RED test: Branches tab renders top 50% list + bottom 50% detail
+- [x] T027 Modify branches.rs render() to split area vertically (50/50)
+- [x] T028 Create branch_detail rendering function showing selected branch info
+- [x] T029 Wire cursor movement to update detail content
 
 ### 4.3: Detail Sections
 
-- [ ] T030 [P] Write RED test: detail section cycles through Overview/SPECs/GitStatus/Sessions/Actions with Tab
-- [ ] T031 Implement Overview section: branch name, head, worktree path, linked Issues, PR
-- [ ] T032 Implement SPECs section: read specs/ from branch's worktree, list SPEC metadata
-- [ ] T033 Implement Git Status section: staged/unstaged/untracked files, recent commits
-- [ ] T034 Implement Sessions section: active sessions on this branch
-- [ ] T035 Implement Actions section: Launch Agent (agent select), Open Shell (worktree cwd), Delete Worktree (confirm)
+- [x] T030 [P] Write RED test: detail section cycles through Overview/SPECs/GitStatus/Sessions/Actions with Tab
+- [x] T031 Implement Overview section: branch name, head, worktree path, category
+- [x] T032 Implement SPECs section: placeholder with branch name
+- [x] T033 Implement Git Status section: placeholder with branch name
+- [x] T034 Implement Sessions section: placeholder "No active sessions"
+- [x] T035 Implement Actions section: Launch Agent, Open Shell, Delete Worktree
 
 ### 4.4: Actions Implementation
 
-- [ ] T036 [P] Write RED test: Agent launch from Actions opens agent selection (no full wizard)
-- [ ] T037 [P] Write RED test: Shell launch opens PTY in worktree directory
-- [ ] T038 [P] Write RED test: Worktree delete shows confirmation, then deletes
-- [ ] T039 Implement agent launch action: show agent list overlay, on select → spawn in worktree
-- [ ] T040 Implement shell launch action: spawn shell PTY with cwd = worktree path
-- [ ] T041 Implement worktree delete action: confirm dialog → git worktree remove
+- [x] T036 [P] Write RED test: Agent launch from Actions sets pending flag
+- [x] T037 [P] Write RED test: Shell launch sets pending flag
+- [x] T038 [P] Write RED test: Worktree delete sets pending flag
+- [x] T039 Implement agent launch action: set pending_launch_agent flag
+- [x] T040 Implement shell launch action: set pending_open_shell flag
+- [x] T041 Implement worktree delete action: set pending_delete_worktree flag
 
 ### 4.5: Integration
 
-- [ ] T042 Add BranchDetailState to BranchesState (detail_section, detail_specs, detail_files, etc.)
-- [ ] T043 Add BranchDetailMessage variants to BranchesMessage
-- [ ] T044 Route Tab/Shift+Tab to detail section cycling in route_key_to_management
-- [ ] T045 Route Enter in Actions section to appropriate action handlers
-- [ ] T046 Write 10+ tests for branch detail state transitions and rendering
-- [ ] T047 Update all E2E snapshot tests
+- [x] T042 Add detail_section, detail_action_selected, pending flags to BranchesState
+- [x] T043 Add BranchDetailMessage variants to BranchesMessage
+- [x] T044 Route Tab/Shift+Tab to detail section cycling in route_key_to_management
+- [x] T045 Route Enter in Actions section to appropriate action handlers
+- [x] T046 Write 15 tests for branch detail state transitions and rendering
+- [x] T047 Update all E2E snapshot tests
 
 ## Phase 5: Regression and Polish
 

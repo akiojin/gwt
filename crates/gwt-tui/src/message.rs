@@ -17,7 +17,6 @@ use crate::screens::pr_dashboard::PrDashboardMessage;
 use crate::screens::profiles::ProfilesMessage;
 use crate::screens::service_select::ServiceSelectMessage;
 use crate::screens::settings::SettingsMessage;
-use crate::screens::specs::SpecsMessage;
 use crate::screens::versions::VersionsMessage;
 use crate::screens::wizard::WizardMessage;
 
@@ -68,8 +67,6 @@ pub enum Message {
     GitView(GitViewMessage),
     /// PR dashboard screen message.
     PrDashboard(PrDashboardMessage),
-    /// Specs screen message.
-    Specs(SpecsMessage),
     /// Settings screen message.
     Settings(SettingsMessage),
     /// Logs screen message.
@@ -90,6 +87,8 @@ pub enum Message {
     Voice(VoiceInputMessage),
     /// Initialization screen message.
     Initialization(InitializationMessage),
+    /// Open active agent session conversion flow.
+    OpenSessionConversion,
     /// Paste file paths from clipboard.
     PasteFiles,
     /// Open the wizard overlay.
@@ -130,7 +129,6 @@ mod tests {
         let _ = Message::Issues(IssuesMessage::MoveUp);
         let _ = Message::GitView(GitViewMessage::MoveUp);
         let _ = Message::PrDashboard(PrDashboardMessage::MoveUp);
-        let _ = Message::Specs(SpecsMessage::MoveUp);
         let _ = Message::Settings(SettingsMessage::MoveUp);
         let _ = Message::Logs(LogsMessage::MoveUp);
         let _ = Message::Versions(VersionsMessage::MoveUp);
@@ -141,6 +139,7 @@ mod tests {
         let _ = Message::Confirm(ConfirmMessage::Toggle);
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
         let _ = Message::Initialization(InitializationMessage::Exit);
+        let _ = Message::OpenSessionConversion;
         let _ = Message::PasteFiles;
         let _ = Message::OpenWizard;
         let _ = Message::OpenWizardWithSpec("SPEC-1".into(), "Title".into());

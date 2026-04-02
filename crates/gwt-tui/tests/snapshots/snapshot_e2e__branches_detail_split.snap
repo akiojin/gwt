@@ -9,20 +9,20 @@ expression: output
 │ View: All | Sort: Default            ││                                      │
 └──────────────────────────────────────┘│                                      │
 ┌──────────────────────────────────────┐│                                      │
-│No branches loaded                    ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│── Main ──                            ││                                      │
+│* [L] main                            ││                                      │
+│── Feature ──                         ││                                      │
+│  [L] feature/api                     ││                                      │
+│  [L] feature/app-shell               ││                                      │
+│── Other ──                           ││                                      │
 └──────────────────────────────────────┘│                                      │
 ┌Detail────────────────────────────────┐│                                      │
 │ Overview │ SPECs │ Git │ Sessions │ A││                                      │
 └──────────────────────────────────────┘│                                      │
 ┌Overview──────────────────────────────┐│                                      │
-│ No branch selected                   ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│ Branch: main (HEAD)                  ││                                      │
+│ Category: Main                       ││                                      │
+│ Type: Local                          ││                                      │
 │                                      ││                                      │
 │                                      │└──────────────────────────────────────┘
 └──────────────────────────────────────┘ ▣ Shell  [Mgmt]  /tmp/test-repo  Ctrl+G

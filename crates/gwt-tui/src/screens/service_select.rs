@@ -11,9 +11,34 @@ use ratatui::{
 /// State for the service selection overlay.
 #[derive(Debug, Clone, Default)]
 pub struct ServiceSelectState {
+    pub title: String,
     pub services: Vec<String>,
+    pub values: Vec<String>,
     pub selected: usize,
     pub visible: bool,
+}
+
+impl ServiceSelectState {
+    pub fn with_options(
+        title: impl Into<String>,
+        services: Vec<String>,
+        values: Vec<String>,
+    ) -> Self {
+        debug_assert_eq!(services.len(), values.len());
+        Self {
+            title: title.into(),
+            services,
+            values,
+            selected: 0,
+            visible: true,
+        }
+    }
+
+    pub fn current_selection(&self) -> Option<(&str, &str)> {
+        let service = self.services.get(self.selected)?;
+        let value = self.values.get(self.selected)?;
+        Some((service.as_str(), value.as_str()))
+    }
 }
 
 /// Messages for the service selection overlay.
@@ -46,6 +71,7 @@ pub fn update(state: &mut ServiceSelectState, msg: ServiceSelectMessage) {
             state.visible = false;
         }
         ServiceSelectMessage::SetServices(services) => {
+            state.values = services.clone();
             state.services = services;
             state.selected = 0;
         }
@@ -68,7 +94,11 @@ pub fn render(state: &ServiceSelectState, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Select Service")
+        .title(if state.title.is_empty() {
+            "Select Service"
+        } else {
+            state.title.as_str()
+        })
         .border_style(Style::default().fg(Color::Cyan));
 
     let inner = block.inner(dialog);
@@ -125,6 +155,7 @@ mod tests {
     fn default_state() {
         let state = ServiceSelectState::default();
         assert!(state.services.is_empty());
+        assert!(state.values.is_empty());
         assert_eq!(state.selected, 0);
         assert!(!state.visible);
     }
@@ -140,6 +171,7 @@ mod tests {
             ServiceSelectMessage::SetServices(sample_services()),
         );
         assert_eq!(state.services.len(), 4);
+        assert_eq!(state.values, sample_services());
         assert_eq!(state.selected, 0);
     }
 
@@ -198,6 +230,7 @@ mod tests {
     #[test]
     fn select_hides_overlay() {
         let mut state = ServiceSelectState {
+            title: "Select Service".into(),
             visible: true,
             ..ServiceSelectState::default()
         };
@@ -208,6 +241,7 @@ mod tests {
     #[test]
     fn cancel_hides_overlay() {
         let mut state = ServiceSelectState {
+            title: "Select Service".into(),
             visible: true,
             ..ServiceSelectState::default()
         };

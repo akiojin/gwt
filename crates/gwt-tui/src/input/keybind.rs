@@ -98,6 +98,10 @@ impl KeybindRegistry {
                 description: "Start voice input".into(),
             },
             Keybinding {
+                keys: "Ctrl+G, a".into(),
+                description: "Convert active agent session".into(),
+            },
+            Keybinding {
                 keys: "Ctrl+G, p".into(),
                 description: "Paste file paths".into(),
             },
@@ -167,10 +171,13 @@ impl KeybindRegistry {
                         Some(Message::SwitchSession(idx))
                     }
                     KeyCode::Char('v') => Some(Message::Voice(VoiceInputMessage::StartRecording)),
+                    KeyCode::Char('a') => Some(Message::OpenSessionConversion),
                     KeyCode::Char('b') => {
                         Some(Message::SwitchManagementTab(ManagementTab::Branches))
                     }
-                    KeyCode::Char('s') => Some(Message::SwitchManagementTab(ManagementTab::Specs)),
+                    KeyCode::Char('s') => {
+                        Some(Message::SwitchManagementTab(ManagementTab::Settings))
+                    }
                     KeyCode::Char('i') => Some(Message::SwitchManagementTab(ManagementTab::Issues)),
                     KeyCode::Char('p') => Some(Message::PasteFiles),
                     KeyCode::Char('n') => Some(Message::OpenWizard),
@@ -307,5 +314,13 @@ mod tests {
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Char('p'), KeyModifiers::NONE));
         assert!(matches!(result, Some(Message::PasteFiles)));
+    }
+
+    #[test]
+    fn prefix_a_opens_session_conversion() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::OpenSessionConversion)));
     }
 }

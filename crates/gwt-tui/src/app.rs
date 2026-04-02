@@ -23,7 +23,9 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::{
     input::voice::VoiceInputMessage,
     message::Message,
-    model::{ActiveLayer, ManagementTab, Model, SessionLayout, SessionTabType},
+    model::{
+        ActiveLayer, ManagementTab, Model, PendingSessionConversion, SessionLayout, SessionTabType,
+    },
     screens,
 };
 
@@ -120,6 +122,10 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
+            if route_overlay_key(model, key) {
+                return;
+            }
+
             if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
@@ -146,18 +152,6 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::PrDashboard(msg) => {
             screens::pr_dashboard::update(&mut model.pr_dashboard, msg);
         }
-        Message::Specs(msg) => {
-            if matches!(msg, screens::specs::SpecsMessage::LaunchAgent) {
-                let spec_context = model
-                    .specs
-                    .selected_spec()
-                    .map(|spec| (spec.id.clone(), spec.title.clone()));
-                if let Some((spec_id, title)) = spec_context {
-                    update(model, Message::OpenWizardWithSpec(spec_id, title));
-                }
-            }
-            screens::specs::update(&mut model.specs, msg);
-        }
         Message::Settings(msg) => {
             screens::settings::update(&mut model.settings, msg);
         }
@@ -182,11 +176,36 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::ServiceSelect(msg) => {
+            let selected_conversion =
+                if matches!(msg, screens::service_select::ServiceSelectMessage::Select) {
+                    model.service_select.as_ref().and_then(|state| {
+                        state
+                            .current_selection()
+                            .map(|(service, value)| PendingSessionConversion {
+                                session_index: model.active_session,
+                                target_agent_id: value.to_string(),
+                                target_display_name: service.to_string(),
+                            })
+                    })
+                } else {
+                    None
+                };
+            let cancelled = matches!(msg, screens::service_select::ServiceSelectMessage::Cancel);
             if let Some(ref mut state) = model.service_select {
                 screens::service_select::update(state, msg);
                 if !state.visible {
                     model.service_select = None;
                 }
+            }
+            if cancelled {
+                model.pending_session_conversion = None;
+            }
+            if let Some(pending) = selected_conversion {
+                model.confirm = screens::confirm::ConfirmState::with_message(format!(
+                    "Convert session to {}?",
+                    pending.target_display_name
+                ));
+                model.pending_session_conversion = Some(pending);
             }
         }
         Message::PortSelect(msg) => {
@@ -198,7 +217,36 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::Confirm(msg) => {
+            let should_apply_session_conversion =
+                matches!(msg, screens::confirm::ConfirmMessage::Accept)
+                    && model.confirm.accepted()
+                    && model.pending_session_conversion.is_some();
+            let dismisses_session_conversion =
+                matches!(msg, screens::confirm::ConfirmMessage::Cancel)
+                    || (matches!(msg, screens::confirm::ConfirmMessage::Accept)
+                        && !model.confirm.accepted());
             screens::confirm::update(&mut model.confirm, msg);
+            if should_apply_session_conversion {
+                if let Some(pending) = model.pending_session_conversion.take() {
+                    let target_display_name = pending.target_display_name.clone();
+                    match apply_pending_session_conversion(model, pending) {
+                        Ok(()) => apply_notification(
+                            model,
+                            Notification::new(
+                                Severity::Info,
+                                "session",
+                                format!("Converted session to {target_display_name}"),
+                            ),
+                        ),
+                        Err(err) => apply_notification(
+                            model,
+                            Notification::new(Severity::Error, "session", err),
+                        ),
+                    }
+                }
+            } else if dismisses_session_conversion {
+                model.pending_session_conversion = None;
+            }
         }
         Message::Voice(msg) => {
             let voice_enabled = Settings::load()
@@ -241,6 +289,9 @@ pub fn update(model: &mut Model, msg: Message) {
                 push_input_to_active_session(model, bytes);
             }
         }
+        Message::OpenSessionConversion => {
+            open_session_conversion(model);
+        }
         Message::OpenWizard => {
             open_wizard(model, None);
         }
@@ -277,36 +328,6 @@ pub fn load_initial_data(model: &mut Model) {
         screens::branches::update(
             &mut model.branches,
             screens::branches::BranchesMessage::SetBranches(items),
-        );
-    }
-
-    // -- Specs (from specs/ directory metadata.json files) --
-    model.specs.spec_root = Some(model.repo_path.clone());
-    let specs_dir = model.repo_path.join("specs");
-    if specs_dir.is_dir() {
-        let mut spec_items: Vec<screens::specs::SpecItem> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&specs_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let meta_path = path.join("metadata.json");
-                    if let Ok(content) = std::fs::read_to_string(&meta_path) {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                            spec_items.push(screens::specs::SpecItem {
-                                id: v["id"].as_str().unwrap_or("").to_string(),
-                                title: v["title"].as_str().unwrap_or("").to_string(),
-                                phase: v["phase"].as_str().unwrap_or("").to_string(),
-                                status: v["status"].as_str().unwrap_or("").to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        spec_items.sort_by(|a, b| a.id.cmp(&b.id));
-        screens::specs::update(
-            &mut model.specs,
-            screens::specs::SpecsMessage::SetSpecs(spec_items),
         );
     }
 
@@ -361,6 +382,43 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
     }
 }
 
+fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
+    if model.service_select.is_some() {
+        let msg = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                Some(screens::service_select::ServiceSelectMessage::MoveDown)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                Some(screens::service_select::ServiceSelectMessage::MoveUp)
+            }
+            KeyCode::Enter => Some(screens::service_select::ServiceSelectMessage::Select),
+            KeyCode::Esc => Some(screens::service_select::ServiceSelectMessage::Cancel),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            update(model, Message::ServiceSelect(msg));
+            return true;
+        }
+    }
+
+    if model.confirm.visible {
+        let msg = match key.code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                Some(screens::confirm::ConfirmMessage::Toggle)
+            }
+            KeyCode::Enter => Some(screens::confirm::ConfirmMessage::Accept),
+            KeyCode::Esc => Some(screens::confirm::ConfirmMessage::Cancel),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            update(model, Message::Confirm(msg));
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
@@ -370,7 +428,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::pr_dashboard::PrDashboardMessage;
     use screens::profiles::ProfilesMessage;
     use screens::settings::SettingsMessage;
-    use screens::specs::SpecsMessage;
     use screens::versions::VersionsMessage;
 
     // Global management keys: tab switching with Left/Right arrows
@@ -413,7 +470,18 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             let msg = match key.code {
                 KeyCode::Char('j') | KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Char('k') | KeyCode::Up => Some(BranchesMessage::MoveUp),
-                KeyCode::Enter => Some(BranchesMessage::Select),
+                KeyCode::Enter => {
+                    // In Actions section, dispatch the selected action
+                    if model.branches.detail_section == 4 {
+                        Some(match model.branches.detail_action_selected {
+                            0 => BranchesMessage::LaunchAgent,
+                            1 => BranchesMessage::OpenShell,
+                            _ => BranchesMessage::DeleteWorktree,
+                        })
+                    } else {
+                        Some(BranchesMessage::Select)
+                    }
+                }
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
                 KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
                 KeyCode::Char('/') => Some(BranchesMessage::SearchStart),
@@ -421,6 +489,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     load_initial_data(model);
                     return;
                 }
+                KeyCode::Tab => Some(BranchesMessage::NextDetailSection),
+                KeyCode::BackTab => Some(BranchesMessage::PrevDetailSection),
                 KeyCode::Esc => Some(BranchesMessage::SearchClear),
                 _ => None,
             };
@@ -451,74 +521,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::issues::update(&mut model.issues, m);
-            }
-        }
-        ManagementTab::Specs => {
-            if model.specs.detail_editing {
-                let msg = match key.code {
-                    KeyCode::Enter => Some(SpecsMessage::SaveSectionEdit),
-                    KeyCode::Esc => Some(SpecsMessage::CancelSectionEdit),
-                    KeyCode::Backspace => Some(SpecsMessage::SectionEditBackspace),
-                    _ => search_input_char(&key).map(SpecsMessage::SectionEditInput),
-                };
-                if let Some(m) = msg {
-                    update(model, Message::Specs(m));
-                }
-                return;
-            }
-
-            if model.specs.editing {
-                let msg = match key.code {
-                    KeyCode::Enter => Some(SpecsMessage::SaveEdit),
-                    KeyCode::Esc => Some(SpecsMessage::CancelEdit),
-                    KeyCode::Backspace => Some(SpecsMessage::EditBackspace),
-                    _ => search_input_char(&key).map(SpecsMessage::EditInput),
-                };
-                if let Some(m) = msg {
-                    update(model, Message::Specs(m));
-                }
-                return;
-            }
-
-            if model.specs.search_active {
-                let msg = match key.code {
-                    KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
-                    _ => search_input_char(&key).map(SpecsMessage::SearchInput),
-                };
-                if let Some(m) = msg {
-                    update(model, Message::Specs(m));
-                    return;
-                }
-            }
-
-            let msg = match key.code {
-                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    Some(SpecsMessage::LaunchAgent)
-                }
-                KeyCode::Char('j') | KeyCode::Down => Some(SpecsMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(SpecsMessage::MoveUp),
-                KeyCode::Enter => Some(SpecsMessage::ToggleDetail),
-                KeyCode::Tab => Some(SpecsMessage::NextSection),
-                KeyCode::BackTab => Some(SpecsMessage::PrevSection),
-                KeyCode::Char('e') => Some(if model.specs.detail_view {
-                    SpecsMessage::StartSectionEdit
-                } else {
-                    SpecsMessage::StartEdit
-                }),
-                KeyCode::Char('/') => Some(SpecsMessage::SearchStart),
-                KeyCode::Char('r') => {
-                    load_initial_data(model);
-                    return;
-                }
-                KeyCode::Esc => Some(if model.specs.detail_view {
-                    SpecsMessage::ToggleDetail
-                } else {
-                    SpecsMessage::SearchClear
-                }),
-                _ => None,
-            };
-            if let Some(m) = msg {
-                update(model, Message::Specs(m));
             }
         }
         ManagementTab::Settings => {
@@ -816,6 +818,41 @@ fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecCont
     schedule_wizard_version_cache_refresh(cache_path, refresh_targets);
 }
 
+fn open_session_conversion(model: &mut Model) {
+    open_session_conversion_with(model, AgentDetector::detect_all());
+}
+
+fn open_session_conversion_with(model: &mut Model, detected_agents: Vec<DetectedAgent>) {
+    let Some(session) = model.active_session_tab() else {
+        return;
+    };
+    let SessionTabType::Agent { agent_id, .. } = &session.tab_type else {
+        return;
+    };
+
+    let (services, values): (Vec<_>, Vec<_>) = detected_agents
+        .into_iter()
+        .filter(|detected| detected.agent_id.command() != agent_id)
+        .map(|detected| {
+            (
+                detected.agent_id.display_name().to_string(),
+                detected.agent_id.command().to_string(),
+            )
+        })
+        .unzip();
+
+    if services.is_empty() {
+        return;
+    }
+
+    model.pending_session_conversion = None;
+    model.service_select = Some(screens::service_select::ServiceSelectState::with_options(
+        "Select Agent",
+        services,
+        values,
+    ));
+}
+
 fn schedule_startup_version_cache_refresh() {
     schedule_startup_version_cache_refresh_with(
         wizard_version_cache_path(),
@@ -997,6 +1034,62 @@ fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
     clipboard_payload_to_bytes(&[], &text)
 }
 
+fn apply_pending_session_conversion(
+    model: &mut Model,
+    pending: PendingSessionConversion,
+) -> Result<(), String> {
+    apply_pending_session_conversion_with(model, pending, AgentDetector::detect_all())
+}
+
+fn apply_pending_session_conversion_with(
+    model: &mut Model,
+    pending: PendingSessionConversion,
+    detected_agents: Vec<DetectedAgent>,
+) -> Result<(), String> {
+    let original_session = model
+        .sessions
+        .get(pending.session_index)
+        .cloned()
+        .ok_or_else(|| format!("Session index {} is out of bounds", pending.session_index))?;
+
+    if !matches!(original_session.tab_type, SessionTabType::Agent { .. }) {
+        return Err("Active session is not an agent session".to_string());
+    }
+
+    let detected = detected_agents
+        .into_iter()
+        .find(|candidate| candidate.agent_id.command() == pending.target_agent_id)
+        .ok_or_else(|| {
+            format!(
+                "Target agent `{}` is not available",
+                pending.target_agent_id
+            )
+        })?;
+
+    let session = model
+        .sessions
+        .get_mut(pending.session_index)
+        .ok_or_else(|| format!("Session index {} is out of bounds", pending.session_index))?;
+    session.name = pending.target_display_name;
+    session.tab_type = SessionTabType::Agent {
+        agent_id: detected.agent_id.command().to_string(),
+        color: tui_agent_color(detected.agent_id.default_color()),
+    };
+
+    Ok(())
+}
+
+fn tui_agent_color(color: gwt_agent::AgentColor) -> crate::model::AgentColor {
+    match color {
+        gwt_agent::AgentColor::Green => crate::model::AgentColor::Green,
+        gwt_agent::AgentColor::Blue => crate::model::AgentColor::Blue,
+        gwt_agent::AgentColor::Cyan => crate::model::AgentColor::Cyan,
+        gwt_agent::AgentColor::Yellow => crate::model::AgentColor::Yellow,
+        gwt_agent::AgentColor::Magenta => crate::model::AgentColor::Magenta,
+        gwt_agent::AgentColor::Gray => crate::model::AgentColor::Gray,
+    }
+}
+
 fn clipboard_payload_to_bytes(paths: &[PathBuf], fallback_text: &str) -> Option<Vec<u8>> {
     if !paths.is_empty() {
         let payload = paths
@@ -1052,9 +1145,6 @@ fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
         ManagementTab::Issues => model.issues.search_active,
-        ManagementTab::Specs => {
-            model.specs.search_active || model.specs.editing || model.specs.detail_editing
-        }
         ManagementTab::Settings => model.settings.editing,
         _ => false,
     }
@@ -1154,7 +1244,6 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
 fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
     match model.management_tab {
         ManagementTab::Branches => screens::branches::render(&model.branches, frame, area),
-        ManagementTab::Specs => screens::specs::render(&model.specs, frame, area),
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -1299,6 +1388,22 @@ mod tests {
             agent_id,
             version: version.map(|value| value.to_string()),
             path: PathBuf::from("/tmp/fake-agent"),
+        }
+    }
+
+    fn agent_session_tab(
+        name: &str,
+        agent_id: &str,
+        color: crate::model::AgentColor,
+    ) -> crate::model::SessionTab {
+        crate::model::SessionTab {
+            id: "agent-0".to_string(),
+            name: name.to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: agent_id.to_string(),
+                color,
+            },
+            vt: crate::model::VtState::new(30, 100),
         }
     }
 
@@ -1588,38 +1693,173 @@ mod tests {
     }
 
     #[test]
-    fn route_key_to_management_specs_launch_agent_opens_wizard() {
+    fn open_session_conversion_with_opens_picker_for_alternative_agents() {
         let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-9".into(),
-            title: "Docker wizard".into(),
-            phase: "implementation".into(),
-            status: "open".into(),
-        }];
+        model.sessions[0] =
+            agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
 
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+        open_session_conversion_with(
+            &mut model,
+            vec![
+                detected_agent(AgentId::ClaudeCode, Some("1.0.55")),
+                detected_agent(AgentId::Codex, Some("0.5.1")),
+                detected_agent(AgentId::Gemini, Some("0.2.0")),
+            ],
+        );
 
-        let wizard = model.wizard.as_ref().unwrap();
-        assert_eq!(wizard.spec_context.as_ref().unwrap().spec_id, "SPEC-9");
-        assert_eq!(wizard.spec_context.as_ref().unwrap().title, "Docker wizard");
+        let picker = model.service_select.as_ref().unwrap();
+        assert!(picker.visible);
+        assert_eq!(picker.title, "Select Agent");
+        assert_eq!(
+            picker.services,
+            vec!["Codex".to_string(), "Gemini CLI".to_string()]
+        );
+        assert_eq!(
+            picker.values,
+            vec!["codex".to_string(), "gemini".to_string()]
+        );
     }
 
     #[test]
-    fn route_key_to_management_specs_start_phase_edit() {
+    fn apply_pending_session_conversion_with_updates_active_session_and_preserves_repo_path() {
         let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-3".into(),
-            title: "Voice commands".into(),
-            phase: "draft".into(),
-            status: "open".into(),
-        }];
+        model.sessions[0] =
+            agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
+        let original_repo_path = model.repo_path.clone();
 
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
+        apply_pending_session_conversion_with(
+            &mut model,
+            PendingSessionConversion {
+                session_index: 0,
+                target_agent_id: "codex".to_string(),
+                target_display_name: "Codex".to_string(),
+            },
+            vec![detected_agent(AgentId::Codex, Some("0.5.1"))],
+        )
+        .unwrap();
 
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.edit_field, "draft");
+        let converted = &model.sessions[0];
+        assert_eq!(converted.name, "Codex");
+        assert_eq!(
+            converted.tab_type,
+            SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            }
+        );
+        assert_eq!(converted.vt.rows(), 30);
+        assert_eq!(converted.vt.cols(), 100);
+        assert_eq!(model.repo_path, original_repo_path);
+    }
+
+    #[test]
+    fn apply_pending_session_conversion_with_preserves_original_session_on_failure() {
+        let mut model = test_model();
+        model.sessions[0] =
+            agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
+        let original = model.sessions[0].clone();
+
+        let err = apply_pending_session_conversion_with(
+            &mut model,
+            PendingSessionConversion {
+                session_index: 0,
+                target_agent_id: "gemini".to_string(),
+                target_display_name: "Gemini CLI".to_string(),
+            },
+            vec![detected_agent(AgentId::Codex, Some("0.5.1"))],
+        )
+        .unwrap_err();
+
+        assert!(err.contains("gemini"));
+        assert_eq!(model.sessions[0].name, original.name);
+        assert_eq!(model.sessions[0].tab_type, original.tab_type);
+    }
+
+    #[test]
+    fn update_open_session_conversion_for_agent_session_opens_picker() {
+        let mut model = test_model();
+        model.sessions[0] =
+            agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
+
+        open_session_conversion_with(
+            &mut model,
+            vec![
+                detected_agent(AgentId::ClaudeCode, Some("1.0.55")),
+                detected_agent(AgentId::Codex, Some("0.5.1")),
+            ],
+        );
+
+        assert!(model.service_select.is_some());
+        assert!(model.pending_session_conversion.is_none());
+    }
+
+    #[test]
+    fn update_confirm_accept_applies_pending_session_conversion_and_logs_info() {
+        let mut model = test_model();
+        model.sessions[0] =
+            agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
+        model.pending_session_conversion = Some(PendingSessionConversion {
+            session_index: 0,
+            target_agent_id: "codex".to_string(),
+            target_display_name: "Codex".to_string(),
+        });
+        model.confirm = screens::confirm::ConfirmState::with_message("Convert?");
+        model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
+
+        let target = detected_agent(AgentId::Codex, Some("0.5.1"));
+        let target_name = target.agent_id.display_name().to_string();
+        let target_command = target.agent_id.command().to_string();
+        let target_color = tui_agent_color(target.agent_id.default_color());
+        apply_pending_session_conversion_with(&mut model, model.pending_session_conversion.clone().unwrap(), vec![target]).unwrap();
+
+        assert!(model.pending_session_conversion.is_some());
+        model.pending_session_conversion = Some(PendingSessionConversion {
+            session_index: 0,
+            target_agent_id: target_command.clone(),
+            target_display_name: target_name.clone(),
+        });
+        model.confirm = screens::confirm::ConfirmState::with_message("Convert?");
+        model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
+        update(
+            &mut model,
+            Message::Confirm(screens::confirm::ConfirmMessage::Accept),
+        );
+
+        assert_eq!(model.sessions[0].name, target_name);
+        assert_eq!(
+            model.sessions[0].tab_type,
+            SessionTabType::Agent {
+                agent_id: target_command,
+                color: target_color,
+            }
+        );
+        assert_eq!(model.logs.entries.last().unwrap().source, "session");
+        assert!(model.current_notification.is_some());
+    }
+
+    #[test]
+    fn update_confirm_accept_conversion_failure_routes_error_queue() {
+        let mut model = test_model();
+        model.sessions[0] =
+            agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
+        let original = model.sessions[0].clone();
+        model.pending_session_conversion = Some(PendingSessionConversion {
+            session_index: 0,
+            target_agent_id: "missing-agent".to_string(),
+            target_display_name: "Missing Agent".to_string(),
+        });
+        model.confirm = screens::confirm::ConfirmState::with_message("Convert?");
+        model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
+
+        update(
+            &mut model,
+            Message::Confirm(screens::confirm::ConfirmMessage::Accept),
+        );
+
+        assert_eq!(model.sessions[0].name, original.name);
+        assert_eq!(model.sessions[0].tab_type, original.tab_type);
+        assert_eq!(model.error_queue.len(), 1);
+        assert!(model.logs.entries.last().unwrap().message.contains("missing-agent"));
     }
 
     #[test]
@@ -1899,15 +2139,34 @@ mod tests {
     }
 
     #[test]
-    fn route_key_to_management_routes_search_input_for_specs() {
+    fn update_key_input_routes_to_service_select_overlay() {
         let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.search_active = true;
+        model.service_select = Some(screens::service_select::ServiceSelectState {
+            title: "Select Agent".into(),
+            services: vec!["claude".into(), "codex".into()],
+            values: vec!["claude".into(), "codex".into()],
+            selected: 0,
+            visible: true,
+        });
 
-        route_key_to_management(&mut model, key(KeyCode::Char('s'), KeyModifiers::NONE));
-        route_key_to_management(&mut model, key(KeyCode::Char('p'), KeyModifiers::NONE));
-        route_key_to_management(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Down, KeyModifiers::NONE)),
+        );
 
-        assert_eq!(model.specs.search_query, "s");
+        assert_eq!(model.service_select.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn update_key_input_routes_to_confirm_overlay() {
+        let mut model = test_model();
+        model.confirm = screens::confirm::ConfirmState::with_message("Convert?");
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+
+        assert!(model.confirm.accepted());
     }
 }

@@ -3,7 +3,7 @@ source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
 ┌Management────────────────────────────┐  ▶ Shell
-│ Branches │ Specs │ Issues │ PRs │ Pro│┌Shell─────────────────────────────────┐
+│ Branches │ Issues │ PRs │ Profiles │ │┌Shell─────────────────────────────────┐
 └──────────────────────────────────────┘│Session: Shell (80x24)                │
 ┌Branches──────────────────────────────┐│                                      │
 │ View: All | Sort: Default            ││                                      │
@@ -15,12 +15,12 @@ expression: output
 │               │                                              │               │
 │               │Press Enter or Esc to dismiss                 │               │
 │               │                                              │               │
-│               │                                              │               │
-│               └──────────────────────────────────────────────┘               │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+└───────────────│                                              │               │
+┌Detail─────────└──────────────────────────────────────────────┘               │
+│ Overview │ SPECs │ Git │ Sessions │ A││                                      │
+└──────────────────────────────────────┘│                                      │
+┌Overview──────────────────────────────┐│                                      │
+│ No branch selected                   ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
