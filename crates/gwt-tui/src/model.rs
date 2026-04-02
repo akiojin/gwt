@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use gwt_core::terminal::manager::PaneManager;
@@ -190,6 +190,32 @@ pub struct ManagementDataUpdate {
     pub logs: Vec<crate::screens::logs::LogEntry>,
 }
 
+fn spawn_management_data_preload(repo_root: PathBuf) -> Receiver<ManagementDataUpdate> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let issues = crate::screens::issues::load_issues(&repo_root);
+        let specs = crate::screens::specs::load_specs(&repo_root);
+        let versions = crate::screens::versions::load_tags(&repo_root);
+        let logs = crate::screens::logs::load_log_entries(&repo_root);
+        let _ = tx.send(ManagementDataUpdate {
+            issues,
+            specs,
+            versions,
+            logs,
+        });
+    });
+    rx
+}
+
+fn spawn_branch_list_enrichment(repo_root: PathBuf) -> Receiver<BranchListUpdate> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let branches = crate::screens::branches::load_branches_enriched(&repo_root);
+        let _ = tx.send(BranchListUpdate { branches });
+    });
+    rx
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -324,11 +350,9 @@ impl Model {
         let repo_root = self.repo_root.clone();
         self.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
         self.settings_state.load_settings();
-        self.logs_state.entries = crate::screens::logs::load_log_entries(&repo_root);
-        self.issues_state.issues = crate::screens::issues::load_issues(&repo_root);
-        self.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
-        self.versions_state.tags = crate::screens::versions::load_tags(&repo_root);
         self.sync_branch_session_counts();
+        self.branch_list_rx = Some(spawn_branch_list_enrichment(repo_root.clone()));
+        self.management_data_rx = Some(spawn_management_data_preload(repo_root));
     }
 
     // ---- Session tab helpers ------------------------------------------------
@@ -700,6 +724,25 @@ mod tests {
         panic!("expected {pane_id} to reach status {:?}", expected);
     }
 
+    fn wait_for_management_data(model: &mut Model, expected_specs: usize, expected_issues: usize) {
+        for _ in 0..50 {
+            model.apply_background_updates();
+            if model.specs_state.specs.len() == expected_specs
+                && model.issues_state.issues.len() == expected_issues
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "expected specs={}, issues={}, got specs={}, issues={}",
+            expected_specs,
+            expected_issues,
+            model.specs_state.specs.len(),
+            model.issues_state.issues.len()
+        );
+    }
+
     #[test]
     fn initial_state_starts_in_management_branches() {
         let m = test_model();
@@ -975,6 +1018,7 @@ mod tests {
 
         let mut model = Model::new(temp.path().to_path_buf());
         model.load_all_data();
+        wait_for_management_data(&mut model, 1, 1);
 
         assert_eq!(model.specs_state.specs.len(), 1);
         assert_eq!(model.issues_state.issues.len(), 1);

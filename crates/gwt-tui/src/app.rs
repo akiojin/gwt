@@ -2567,11 +2567,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             result = "start",
             workspace = "default",
         );
-        model.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
-        model.settings_state.load_settings();
-        model.sync_branch_session_counts();
-        model.branch_list_rx = Some(spawn_branch_list_enrichment(repo_root.clone()));
-        model.management_data_rx = Some(spawn_management_data_preload(repo_root.clone()));
+        model.load_all_data();
         tracing::info!(
             message = "flow_success",
             category = "ui",
