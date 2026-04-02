@@ -1,3 +1,5 @@
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+
 - [ ] T001 [S] [US-2] Pty.Net NuGet パッケージの Unity プロジェクトへの導入・動作確認（MVP必須）
 - [ ] T002 [F] [US-2] IPtyAdapter アダプタ層の設計・実装（Process版→Pty.Net版の切替ポイント）
 - [ ] T003 [F] [US-3] Pty.Net版 IPtyAdapter 実装（forkpty/ConPTY によるネイティブPTY）

@@ -8,11 +8,13 @@ mod commit;
 pub mod diff;
 pub mod gh_cli;
 pub mod graphql;
+pub mod hooks;
 mod issue;
 pub mod issue_cache;
 pub mod issue_linkage;
 mod issue_spec;
 pub mod local_spec;
+pub mod pr_status;
 mod pullrequest;
 mod remote;
 mod repository;
@@ -20,7 +22,7 @@ pub mod stash;
 mod submodule;
 
 pub use branch::{Branch, DivergenceStatus};
-pub use clone::{clone_bare, extract_repo_name, CloneConfig};
+pub use clone::{extract_repo_name, CloneConfig};
 pub use commit::{
     BranchMeta, BranchSummary, ChangeStats, CommitEntry, LoadingState, SectionErrors,
 };
@@ -58,9 +60,8 @@ pub use pullrequest::{
 };
 pub use remote::Remote;
 pub use repository::{
-    detect_repo_type, find_bare_repo_in_dir, get_header_context, get_main_repo_root,
-    is_bare_repository, is_empty_dir, is_git_repo, is_inside_worktree, HeaderContext, RepoType,
-    Repository, WorktreeInfo,
+    detect_repo_type, get_header_context, get_main_repo_root, is_empty_dir, is_git_repo,
+    is_inside_worktree, HeaderContext, RepoType, Repository, WorktreeInfo,
 };
 pub use stash::{get_stash_list, StashEntry};
 pub use submodule::{has_submodules, init_submodules, list_submodules};

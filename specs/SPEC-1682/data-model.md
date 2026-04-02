@@ -1,1 +1,0 @@
-- startup analysis cache file under project-local `.gwt/assistant/` namespace

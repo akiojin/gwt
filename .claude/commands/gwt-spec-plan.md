@@ -16,7 +16,7 @@ Use this command after `spec.md` is clarification-ready.
 
 ## Steps
 
-1. Load `skills/gwt-spec-plan/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-spec-plan/SKILL.md` and follow the workflow.
 2. Read `.gwt/memory/constitution.md` and the target `spec.md` artifact.
 3. Generate or update `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, and `contract:*` artifacts.
 4. Record constitution findings in `plan.md`.

@@ -1,56 +1,51 @@
-### 背景
-AIエージェントの検出・起動・ライフサイクル・バージョン管理を行う。複数エージェント（Claude Code, Codex, Gemini, OpenCode, Copilot）に対応。エージェント異常はAssistant Modeの監視対象。Studio時代の #1545（エージェント管理・セッション）の機能概念を現行スタックで再定義。
+# エージェント検出・起動・ライフサイクル
 
-### ユーザーシナリオとテスト
+> **Canonical Boundary**: 本 SPEC はビルトインエージェントの catalog / detection / version / launch contract を扱う。Assistant 送信制御は `SPEC-1636`、Custom Agent 登録は `SPEC-1779` が担当する。
 
-**S1: エージェント自動検出**
-- Given: Claude Codeがシステムにインストール済み
-- When: プロジェクトを開く
-- Then: Claude Codeが検出され利用可能として表示される
+## Background
 
-**S2: エージェント起動**
-- Given: エージェントが検出済み
-- When: エージェント起動操作を行う
-- Then: PTYセッション内でエージェントが起動する
+- gwt は Claude Code / Codex / Gemini / OpenCode / Copilot を launch target として扱う。
+- 既存の SPEC-1646 は Assistant Mode 監視や UI 全体まで含み、`SPEC-1636` と `SPEC-1779` と責務が重なっている。
+- 本 SPEC はビルトインエージェントの検出、利用可能バージョン、起動引数契約に範囲を絞る。
 
-**S3: バージョン管理**
-- Given: エージェントが検出済み
-- When: バージョン情報を表示
-- Then: 現在のバージョンと最新バージョンが表示される
+## User Stories
 
-**S4: 異常検出**
-- Given: エージェントが実行中
-- When: エージェントがスタックまたはアイドル状態になる
-- Then: Assistant Modeが異常を検出し通知する
+### US-1: 利用可能なエージェントを検出する
 
-**S5: 複数エージェント切替**
-- Given: 複数エージェントが検出済み
-- When: エージェント切替操作を行う
-- Then: 選択したエージェントに切り替わる
+開発者として、ローカル環境で利用可能なエージェントとバージョンを一覧で把握したい。
 
-### 機能要件
+### US-2: 選択したエージェントを正しい引数で起動する
 
-**FR-01: エージェント検出**
-- 対応エージェント: Claude Code, Codex, Gemini, OpenCode, Copilot
-- パス検出・バージョン確認
+開発者として、model / version / permissions / collaboration mode などを正しい CLI 契約で渡したい。
 
-**FR-02: ライフサイクル管理**
-- 起動・停止・再起動
-- PTYセッション連携
+### US-3: 起動失敗を原因つきで扱う
 
-**FR-03: バージョン管理**
-- 現在バージョン表示
-- 更新確認
+開発者として、エージェントが見つからない、バージョン不正、起動失敗などを明確に知りたい。
 
-**FR-04: 異常監視**
-- スタック検出
-- アイドル検出
-- Assistant Mode連携
+## Acceptance Scenarios
 
-### 成功基準
+1. 起動ウィザードでビルトインエージェント一覧が表示される。
+2. 各エージェントの version / model 選択肢が CLI 契約に沿って表示される。
+3. 起動時に選択内容が launch builder へ反映される。
+4. エージェント未検出や起動失敗時に原因つきエラーが UI とログへ残る。
+5. Custom Agent は別カテゴリとして表示されても、本 SPEC の validation / persistence 要件には含めない。
 
-1. 対応エージェントの自動検出が動作する
-2. エージェントの起動・停止が正常に動作する
-3. 異常検出がAssistant Modeに通知される
+## Edge Cases
 
----
+- 検出済みバージョンが古く、新しい引数契約に対応していない。
+- Default モデルを選んだ場合に余計な `--model` を渡さない。
+- Agent ごとに利用可能な reasoning / fast mode が異なる。
+
+## Functional Requirements
+
+- FR-001: ビルトインエージェントの検出とバージョン確認を提供する。
+- FR-002: Agent ごとの launch contract（model/version/permissions/session mode）を定義する。
+- FR-003: 起動失敗を構造化エラーとして扱い、UI とログへ反映する。
+- FR-004: Built-in agent の UI 表示名と内部 ID の対応を維持する。
+- FR-005: Custom Agent の登録・永続化は本 SPEC の対象外とする。
+
+## Success Criteria
+
+- 各ビルトイン Agent の検出と起動契約が 1 つの SPEC にまとまる。
+- Agent launch builder の責務境界が明確になる。
+- 起動 UI と gwt-core の Agent 定義が同期する。

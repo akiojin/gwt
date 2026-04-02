@@ -1,5 +1,0 @@
-- [x] `cargo test -p gwt-core skill_registration` pass
-- [x] `cargo test -p gwt-tauri sessions` pass
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` pass
-- [x] 手動確認: launch target worktree で `gwt-*` skill が見える
-- [x] shared `info/exclude` に generated local asset 用 gwt managed block が入る

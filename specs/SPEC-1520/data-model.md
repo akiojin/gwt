@@ -1,2 +1,0 @@
-- Files / Issues index data は `project_root/.gwt/index` 配下の `chroma.sqlite3` と segment files で永続化される
-- crashing DB を quarantine するときは `project_root/.gwt/index.crashed-<uuid>` へ退避する

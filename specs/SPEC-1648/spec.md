@@ -1,51 +1,55 @@
-### 背景
-セッションの保存・復元・永続化機能を提供する。~/.gwt/ディレクトリ管理、config.toml、セッションデータを統合管理する。Assistant Modeの記憶もプロジェクト単位で永続化する。Studio時代の #1542（データ永続化レイヤー）と #1545（エージェント管理・セッション）の機能概念を現行スタックで再定義。
+# セッション保存・復元
 
-### ユーザーシナリオとテスト
+> **Canonical Boundary**: 本 SPEC はセッション metadata と restore contract の正本である。設定ファイル全般は `SPEC-1542`、タブ構成は `SPEC-1654`、一時 PTY scrollback は永続化対象外とする。
 
-**S1: セッション保存**
-- Given: ユーザーが作業中の状態がある
-- When: アプリケーションを閉じる
-- Then: セッション状態が~/.gwt/に保存される
+## Background
 
-**S2: セッション復元**
-- Given: 前回のセッションデータが存在
-- When: アプリケーションを起動
-- Then: 前回の状態が復元される（開いていたタブ、ターミナル等）
+- gwt は Shell / Agent タブの session metadata、session id、設定を保存し、次回起動時の復元に利用する。
+- 既存の SPEC-1648 は raw terminal state の完全復元まで含むように読め、現在の実装境界とズレている。
+- 本 SPEC は永続化するデータを session metadata に限定し、terminal transcript の長期保存は扱わない。
 
-**S3: 設定の永続化**
-- Given: ユーザーが設定を変更
-- When: config.tomlに書き込み
-- Then: 次回起動時に設定が反映される
+## User Stories
 
-**S4: Assistant記憶の永続化**
-- Given: Assistant Modeがプロジェクト情報を学習
-- When: アプリケーションを再起動
-- Then: プロジェクト単位の記憶が復元される
+### US-1: 起動時に前回のセッション metadata を復元する
 
-### 機能要件
+開発者として、再起動後に開いていたタブや関連 session id を回復したい。
 
-**FR-01: データディレクトリ管理**
-- ~/.gwt/ディレクトリ構造管理
-- プロジェクト別サブディレクトリ
+### US-2: 設定と履歴を分けて管理する
 
-**FR-02: 設定管理**
-- config.toml読み書き
-- デフォルト値管理
+開発者として、config / session history / agent history を役割ごとに分けて扱いたい。
 
-**FR-03: セッション保存・復元**
-- タブ状態
-- ターミナル状態
-- ウィンドウ位置・サイズ
+### US-3: 永続化しないデータを明確にしたい
 
-**FR-04: Assistant記憶永続化**
-- プロジェクト単位の記憶保存
-- コンテキスト復元
+開発者として、raw PTY transcript のような一時データを誤って復元対象としないようにしたい。
 
-### 成功基準
+## Acceptance Scenarios
 
-1. アプリ再起動後にセッションが復元される
-2. 設定変更が永続化される
-3. Assistant Modeの記憶が再起動後も利用可能
+1. gwt 再起動後に session metadata から Shell / Agent タブが再構成される。
+2. 復元時、Agent は保存済み session id を使って resume/continue できる。
+3. 設定ファイルと session history が別ファイルとして管理される。
+4. raw PTY scrollback は session lifetime の一時データとして扱われ、再起動後の必須復元対象には含めない。
+5. 不正データや古い schema は安全に無視または移行できる。
+6. branch-targeted launch で worktree が materialize された場合、session metadata は repository root ではなく実際に起動した worktree path を保存し、その path を session-id detection / resume の基準に使う。
+7. branch 名は一致しても worktree path が一致しない stale session metadata は Resume 候補として採用されない。
 
----
+## Edge Cases
+
+- session file はあるが実 worktree が削除されている。
+- resume 先の agent session id が既に無効化されている。
+- 古い設定 schema と新しい session schema が混在する。
+
+## Functional Requirements
+
+- FR-001: session metadata と設定ファイルを分離して永続化する。
+- FR-002: 起動時に session metadata を読み込み、タブ構成を再生成する。
+- FR-003: Agent resume に必要な session id / tool / branch 情報を保存する。
+- FR-004: raw PTY transcript は永続化対象外とする。
+- FR-005: schema 変更時に後方互換または安全な読み飛ばしを提供する。
+- FR-006: session metadata は actual launched worktree path を保持し、repository root alias に置き換えてはならない。
+- FR-007: Resume 候補の選定は branch 名だけでなく actual worktree path も照合し、不一致の stale 履歴を除外しなければならない。
+
+## Success Criteria
+
+- 再起動後の session restore 契約が明確になる。
+- 一時データと永続データの境界がぶれない。
+- Session store / profile store / logs の責務が重ならない。

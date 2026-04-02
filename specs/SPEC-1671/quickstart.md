@@ -1,3 +1,0 @@
-- Open project
-- Open Assistant tab
-- Confirm the first assistant guidance appears without a manual user prompt

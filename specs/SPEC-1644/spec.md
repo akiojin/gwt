@@ -1,4 +1,7 @@
-# Local Git Backend Domain（Ref / Worktree・Inventory・Cleanup）
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+> **Status Note**: この SPEC は実装完了により closed。現行の local Git backend 契約参照として保持し、追加変更は新規 child SPEC で管理する。
+
+# ローカル Git バックエンドドメイン
 
 ## Background
 

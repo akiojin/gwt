@@ -1,3 +1,0 @@
-- RED: `gwt-gui/src/lib/components/AssistantPanel.test.ts` reproduces the IME confirm Enter path and asserts that `assistant_send_message` is not called for IME-specific keydown events.
-- GREEN: adjust `AssistantPanel.svelte` key handling until the IME guard tests pass while plain Enter send and Shift+Enter non-send behavior still pass.
-- VERIFY: run `pnpm test src/lib/components/AssistantPanel.test.ts` and `npx svelte-check --tsconfig ./tsconfig.json`.

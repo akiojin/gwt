@@ -1,16 +1,21 @@
-### 背景
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+> **Canonical Boundary**: `SPEC-1643` は GitHub discovery / search / version history の正本である。Issue detail rendering は `SPEC-1354`、cache / linkage は `SPEC-1714`、`gwt-pr-check` 出力は `SPEC-1775` が担当する。
+
+# GitHub 連携（探索・検索・バージョン履歴）
+
+## Background
 GitHub Issue/Spec 探索、PR 管理、Release/Tag 表示、VersionHistoryPanel、gh CLI 連携を包含する GitHub 連携機能。Studio 時代の #1544（GitHub連携）の機能概念を現行スタックで再定義する。
 
 `#1684` で分離されていた GitHub Issue 検索責務は、本 Issue を canonical spec として再統合する。現行実装に独立した PR index は存在せず、ユーザー導線として必要なのは Git 側からの Issue/Spec 探索である。Project Index の files/index/recovery は `#1520` が正本とし、Issue タイトル解決・local cache・GitHub linkage は `#1714` が正本とする。
 
 Issue/Spec の detail rendering contract は `#1354` が正本であり、本 Issue は discovery/search 導線と検索基盤のみを扱う。
 
-### 境界
+## Boundaries
 - local Git backend（git CLI wrapper、branch/ref/worktree inventory、local projection/cache invalidation）は `#1644` が正本
 - Issue title lookup / exact cache / GitHub linkage は `#1714` が正本
 - 本仕様は GitHub API を使う discovery/search/version history/release-tag 導線だけを扱う
 
-### ユーザーシナリオとテスト
+## User Stories
 
 **S1: Issue/Spec 一覧表示**
 - Given: GitHub リポジトリが接続済み
@@ -37,7 +42,7 @@ Issue/Spec の detail rendering contract は `#1354` が正本であり、本 Is
 - When: VersionHistoryPanel を表示する
 - Then: GitHub Releases/Tags が時系列で表示される
 
-### 機能要件
+## Functional Requirements
 
 **FR-01: Issue/Spec discovery**
 - Issue/Spec 一覧表示と detail view への遷移導線
@@ -70,7 +75,7 @@ Issue/Spec の detail rendering contract は `#1354` が正本であり、本 Is
 - gh コマンド統合
 - 認証管理
 
-### 成功基準
+## Success Criteria
 
 1. Issue/Spec 探索が Git 側の単一導線で完結する
 2. Files index の正本が `#1520` に固定され、責務が混ざらない

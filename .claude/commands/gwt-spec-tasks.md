@@ -16,7 +16,7 @@ Use this command after planning artifacts exist.
 
 ## Steps
 
-1. Load `skills/gwt-spec-tasks/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-spec-tasks/SKILL.md` and follow the workflow.
 2. Read `spec.md`, `plan.md`, and supporting artifacts.
 3. Generate `tasks.md` with phases, user story mapping, `[P]` markers, and exact paths.
 4. Ensure verification tasks exist for each acceptance scenario.

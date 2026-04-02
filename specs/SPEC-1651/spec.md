@@ -1,51 +1,51 @@
-### 背景
-トースト通知、OS通知、エラーバス、統合通知アーキテクチャを提供する。Assistantの提案はチャットタイムライン内のアクション付きカードとして表示される。Studio時代の #1548（HUD＆UIシステム）の通知関連機能を現行スタックで再定義。
+# 通知とエラーバス
 
-### ユーザーシナリオとテスト
+> **Canonical Boundary**: 本 SPEC は gwt-tui の status bar / modal / log 連携による通知経路を扱う。Tauri OS 通知前提は捨て、TUI 内の可観測性を正本とする。
 
-**S1: トースト通知**
-- Given: 操作が完了する
-- When: 成功/警告/エラーの通知が発生
-- Then: トースト通知が表示され自動で消える
+## Background
 
-**S2: OS通知**
-- Given: アプリがバックグラウンドにある
-- When: 重要な通知が発生（CI失敗等）
-- Then: OS通知が表示される
+- gwt-tui では status bar、error queue、confirm/modal、structured logs が通知経路として存在する。
+- 既存の SPEC-1651 は Tauri 時代の toast / OS 通知を前提にしており、現行 TUI 実装と一致していない。
+- 本 SPEC は「どのイベントをどの UI レイヤへ出すか」を定義し、通知とエラーの責務を統一する。
 
-**S3: エラーバス**
-- Given: エラーが発生する
-- When: エラーイベントが発火
-- Then: 統合エラーバスで集約され適切に表示される
+## User Stories
 
-**S4: Assistant提案通知**
-- Given: Assistantが提案を生成
-- When: 提案が準備完了
-- Then: チャットタイムライン内にアクション付きカードとして表示される
+### US-1: 軽微な通知を status bar で確認する
 
-### 機能要件
+開発者として、保存成功や軽微な警告を作業を中断せず確認したい。
 
-**FR-01: トースト通知**
-- success/warning/error/infoタイプ
-- 自動消去（タイムアウト設定可能）
-- 手動消去
+### US-2: 重大な失敗を modal または error queue で確認する
 
-**FR-02: OS通知**
-- Tauri通知API連携
-- バックグラウンド時のみ
+開発者として、Agent 起動失敗や destructive action の失敗を見逃したくない。
 
-**FR-03: エラーバス**
-- 統合エラーハンドリング
-- エラー集約・表示
+### US-3: 失敗を Logs タブで追跡する
 
-**FR-04: 統合アーキテクチャ**
-- 通知チャネルの統一
-- 優先度管理
+開発者として、UI 通知だけでなく structured log から根本原因を調査したい。
 
-### 成功基準
+## Acceptance Scenarios
 
-1. トースト通知が正しく表示・消去される
-2. OS通知がバックグラウンド時に機能する
-3. エラーバスでエラーが適切に集約される
+1. 軽微な成功/警告は status bar や一時的メッセージで表示される。
+2. 重大な失敗は modal または error queue に残り、即座に消えない。
+3. 同じ失敗は structured logs にも記録され、Logs タブから追跡できる。
+4. 通知表示中でも PTY 出力や管理画面操作が壊れない。
+5. OS 通知がなくても gwt 内部だけで失敗調査が完結する。
 
----
+## Edge Cases
+
+- 短時間に大量の warning/error が発生する。
+- 同一失敗が UI と log のどちらか片方にしか出ない。
+- 終了済みセッションの最後のエラーを読む前に UI から消える。
+
+## Functional Requirements
+
+- FR-001: 軽微な通知は status bar など非モーダル経路へ出す。
+- FR-002: 重大な失敗は modal または error queue に残す。
+- FR-003: UI へ出した失敗は Logs タブでも追跡可能にする。
+- FR-004: 通知 severity の基準を gwt-core / gwt-tui 間で一致させる。
+- FR-005: Tauri 依存の OS 通知は本 SPEC の正本要件に含めない。
+
+## Success Criteria
+
+- 通知経路が TUI 実装と一致する。
+- 重大エラーを見失わない。
+- UI 通知と Logs の役割分担が明確になる。

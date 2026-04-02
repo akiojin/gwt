@@ -1,2 +1,0 @@
-- 既存実装は `.btn-peek-apikey::before/::after`, `.btn-copy-apikey::before/::after` の疑似要素描画に依存している。
-- Tauri(WebKit/Windows WebView2)差異を避けるため、実体SVG描画へ置換する。

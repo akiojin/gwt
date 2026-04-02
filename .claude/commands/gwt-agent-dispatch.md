@@ -16,7 +16,7 @@ Use this command to dispatch instructions from Assistant to Agent panes.
 
 ## Steps
 
-1. Load `skills/gwt-agent-dispatch/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-agent-dispatch/SKILL.md` and follow the workflow.
 2. Inspect active panes first (`list_terminals`) before sending instructions.
 3. Prefer targeted routing (`send_keys_to_pane`) over broadcast when possible.
 4. Confirm progress by reading pane output (`capture_scrollback_tail`).

@@ -1,2 +1,0 @@
-- PR #1617 の実装では overlay Paste は clipboard image staging を担当し、plain text paste は keyboard shortcut / native paste event 経路で維持されている
-- 視認性改善に必要だった差分は `TerminalView.svelte` の style token のみで、voice state machine や backend command 変更は不要だった

@@ -1,7 +1,0 @@
-- [ ] gwt-spec Issue が作成されている
-- [ ] `TerminalPane` に `project_root` が追加され、ペーン作成時に設定される
-- [ ] `list_terminals` がプロジェクトで絞り込まれる
-- [ ] 異プロジェクトペーンへの `send_keys_to_pane` がエラーになる
-- [ ] 4つの SKILL.md が `GWT_PROJECT_ROOT` を参照
-- [ ] 重複スキルが削除済み
-- [ ] `cargo test` パス、`cargo clippy` 警告なし、markdownlint エラーなし

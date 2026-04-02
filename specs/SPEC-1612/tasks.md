@@ -1,8 +1,0 @@
-- [x] T001 [F] [S1] PR #1617 以降の overlay 実装を監査し、SPEC の stale な前提を特定する
-- [x] T002 [F] [S1] overlay Paste を image staging 前提に SPEC 本文へ同期する
-- [x] T003 [U] [S6] `TerminalView.test.ts` に visibility contract の RED/GREEN テストを追加する
-- [x] T004 [U] [S6] `TerminalView.svelte` の icon size を `16px -> 24px` に更新する
-- [x] T005 [U] [S6] `TerminalView.svelte` の min-size / padding / gap / color / background / border を調整する
-- [x] T006 [U] [S3,S4] 既存の disabled / active / busy state と pointer-events 構成を維持する
-- [x] T007 [FIN] [S6] `pnpm exec vitest run src/lib/terminal/TerminalView.test.ts` を通過させる
-- [x] T008 [FIN] [S6] `pnpm exec svelte-check --tsconfig ./tsconfig.json` を 0 error で通過させる

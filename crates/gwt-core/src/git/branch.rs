@@ -522,7 +522,7 @@ impl Branch {
 
         let output = run_for_each_ref_with_repair(
             repo_path,
-            "--format=%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
+            "--format=%(refname)%09%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
             "refs/remotes/",
         )?;
 
@@ -531,18 +531,20 @@ impl Branch {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 3 {
-                // Skip HEAD refs
-                if parts[0].ends_with("/HEAD") {
+            if parts.len() >= 4 {
+                let full_ref = parts[0];
+                let short_ref = parts[1];
+                // Skip symbolic remote HEAD aliases like refs/remotes/origin/HEAD.
+                if full_ref.ends_with("/HEAD") {
                     continue;
                 }
-                let commit_timestamp = parts[2].parse::<i64>().ok();
+                let commit_timestamp = parts[3].parse::<i64>().ok();
                 branches.push(Branch {
-                    name: parts[0].to_string(),
+                    name: short_ref.to_string(),
                     is_current: false,
                     has_remote: true,
                     upstream: None,
-                    commit: parts[1].to_string(),
+                    commit: parts[2].to_string(),
                     ahead: 0,
                     behind: 0,
                     commit_timestamp,
@@ -1414,6 +1416,33 @@ mod tests {
         );
         // ls-remote doesn't provide committer timestamp
         assert!(remotes.iter().all(|b| b.commit_timestamp.is_none()));
+    }
+
+    #[test]
+    fn test_list_remote_skips_remote_head_alias_entry() {
+        let temp = create_test_repo();
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare"]);
+
+        let branch = Branch::current(temp.path()).unwrap().unwrap().name;
+        run_git(
+            temp.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        run_git(temp.path(), &["push", "-u", "origin", &branch]);
+        run_git(temp.path(), &["remote", "set-head", "origin", "-a"]);
+
+        let remotes = Branch::list_remote(temp.path()).unwrap();
+
+        assert!(
+            remotes.iter().any(|b| b.name == format!("origin/{branch}")),
+            "expected real remote branch to be present"
+        );
+        assert!(
+            !remotes.iter().any(|b| b.name == "origin"),
+            "remote HEAD alias should not be surfaced as a branch: {:?}",
+            remotes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

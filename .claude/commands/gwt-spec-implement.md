@@ -16,7 +16,7 @@ Use this command after a SPEC is execution-ready.
 
 ## Steps
 
-1. Load `skills/gwt-spec-implement/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-spec-implement/SKILL.md` and follow the workflow.
 2. Read `spec.md`, `plan.md`, `tasks.md`, and the latest analysis result for the target `gwt-spec`.
 3. Execute the next incomplete task slice in phase order, writing tests before code where behavior changes.
 4. Update task/progress tracking and run the relevant verification commands.

@@ -1,8 +1,8 @@
 {
   "id": "1654",
-  "title": "gwt-spec: ワークスペースシェル（Agent Canvas・Branch Browser・マルチウィンドウ実行セッション）",
+  "title": "ワークスペースシェル",
   "status": "open",
-  "phase": "in",
+  "phase": "draft",
   "created_at": "2026-03-17T03:41:24Z",
-  "updated_at": "2026-03-23T17:35:25Z"
+  "updated_at": "2026-04-02T00:00:00Z"
 }

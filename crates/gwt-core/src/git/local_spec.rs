@@ -208,7 +208,7 @@ fn write_artifact_content(
 
 /// Read all sections from local files into a `SpecIssueSections`.
 fn read_all_sections(repo_path: &Path, spec_id: &str) -> SpecIssueSections {
-    SpecIssueSections {
+    let mut sections = SpecIssueSections {
         spec: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "spec.md"),
         plan: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "plan.md"),
         tasks: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Doc, "tasks.md"),
@@ -236,9 +236,45 @@ fn read_all_sections(repo_path: &Path, spec_id: &str) -> SpecIssueSections {
             SpecIssueArtifactKind::Doc,
             "quickstart.md",
         ),
-        contracts: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Contract, ""),
-        checklists: read_artifact_content(repo_path, spec_id, SpecIssueArtifactKind::Checklist, ""),
+        contracts: String::new(),
+        checklists: String::new(),
+    };
+    let artifacts = list_local_spec_artifacts(repo_path, spec_id, None).unwrap_or_default();
+    let mut contracts = Vec::new();
+    let mut checklists = Vec::new();
+
+    for artifact in artifacts {
+        match artifact.kind {
+            SpecIssueArtifactKind::Doc => {}
+            SpecIssueArtifactKind::Contract => {
+                contracts.push(render_named_artifact_block(
+                    artifact.kind,
+                    &artifact.artifact_name,
+                    &artifact.content,
+                ));
+            }
+            SpecIssueArtifactKind::Checklist => {
+                if artifact.artifact_name.eq_ignore_ascii_case("tdd.md") {
+                    sections.tdd = artifact.content;
+                } else {
+                    checklists.push(render_named_artifact_block(
+                        artifact.kind,
+                        &artifact.artifact_name,
+                        &artifact.content,
+                    ));
+                }
+            }
+        }
     }
+
+    if !contracts.is_empty() {
+        sections.contracts = contracts.join("\n\n");
+    }
+    if !checklists.is_empty() {
+        sections.checklists = checklists.join("\n\n");
+    }
+
+    sections
 }
 
 /// Write sections to local files. Only writes non-empty sections.
@@ -592,6 +628,31 @@ impl LocalSpecArtifact {
     }
 }
 
+fn artifact_kind_token(kind: SpecIssueArtifactKind) -> &'static str {
+    match kind {
+        SpecIssueArtifactKind::Doc => "doc",
+        SpecIssueArtifactKind::Contract => "contract",
+        SpecIssueArtifactKind::Checklist => "checklist",
+    }
+}
+
+fn render_named_artifact_block(
+    kind: SpecIssueArtifactKind,
+    artifact_name: &str,
+    content: &str,
+) -> String {
+    let trimmed_name = artifact_name.trim();
+    let trimmed_content = content.trim();
+    if trimmed_content.is_empty() {
+        format!("### {}:{trimmed_name}", artifact_kind_token(kind))
+    } else {
+        format!(
+            "### {}:{trimmed_name}\n\n{trimmed_content}",
+            artifact_kind_token(kind)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -703,6 +764,56 @@ mod tests {
             list_local_spec_artifacts(repo, &created.id, Some(SpecIssueArtifactKind::Contract))
                 .unwrap();
         assert_eq!(artifacts.len(), 0);
+    }
+
+    #[test]
+    fn get_local_spec_detail_aggregates_contracts_and_checklists() {
+        let tmp = setup();
+        let repo = tmp.path();
+
+        let created = create_local_spec(repo, "Aggregated", &SpecIssueSections::default()).unwrap();
+
+        upsert_local_spec_artifact(
+            repo,
+            &created.id,
+            SpecIssueArtifactKind::Contract,
+            "issue-spec-artifacts.md",
+            "# Contract\ncontent",
+        )
+        .unwrap();
+        upsert_local_spec_artifact(
+            repo,
+            &created.id,
+            SpecIssueArtifactKind::Checklist,
+            "acceptance.md",
+            "- [ ] acceptance",
+        )
+        .unwrap();
+        upsert_local_spec_artifact(
+            repo,
+            &created.id,
+            SpecIssueArtifactKind::Checklist,
+            "tdd.md",
+            "- [x] red\n- [x] green",
+        )
+        .unwrap();
+
+        let detail = get_local_spec_detail(repo, &created.id).unwrap();
+        assert!(
+            detail
+                .sections
+                .contracts
+                .contains("### contract:issue-spec-artifacts.md"),
+            "contracts should be aggregated into the detail view"
+        );
+        assert!(
+            detail
+                .sections
+                .checklists
+                .contains("### checklist:acceptance.md"),
+            "non-TDD checklists should be aggregated into the detail view"
+        );
+        assert_eq!(detail.sections.tdd.trim(), "- [x] red\n- [x] green");
     }
 
     #[test]

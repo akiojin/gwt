@@ -1,4 +1,8 @@
-### 背景
+> **Historical Status**: この closed SPEC は旧 Unity/C# 実装前提の履歴仕様である。未完了 task は旧 backlog の保存であり、現行の完了条件ではない。現行の GitHub discovery/search は `SPEC-1643`、cache/linkage は `SPEC-1714` を参照する。
+
+# GitHub 連携基盤
+
+## Background
 
 現在の gwt は `gh` CLI を介して全 GitHub 操作を実行している。Unity 6 移行に伴い、これらの GitHub 操作を C# で再実装する必要がある。
 
@@ -6,7 +10,7 @@
 
 gh CLI は外部依存であるため、未インストール・未認証時のフォールバックとガイダンス表示も重要な要件となる。
 
-#### gh CLI ラッパーパターン
+### gh CLI ラッパーパターン
 
 ```csharp
 public async UniTask> ListIssues(string repo, CancellationToken ct)
@@ -16,21 +20,21 @@ public async UniTask> ListIssues(string repo, CancellationToken ct)
 }
 ```
 
-#### Lead PR操作権限
+### Lead PR操作権限
 
 - LeadはPR作成・merge操作を自律的に実行する権限を持つ
 - これは #1574（Lead自律ワークツリー管理）のワークフロー（worktree作成→push→PR作成→merge→worktree削除）の一環として必要
 - PR作成時のタイトルフォーマット: `[Lead] {task.Title}`
 - merge判定: `PrStatusInfo.Mergeable == "MERGEABLE"` の場合のみ実行
 
-#### クラッシュレポート: GitHub Issue自動作成
+### クラッシュレポート: GitHub Issue自動作成
 
 - アプリケーションクラッシュ時にGitHub Issueを自動作成する機能を提供する
 - **オプトイン方式**: ユーザーが明示的に有効化した場合のみ動作（デフォルトOFF）
 - クラッシュログ・スタックトレース・環境情報を含むIssueを自動生成
 - プライバシー配慮: 送信前にユーザーが内容を確認・編集できるUIを提供
 
-#### 再実装対象コマンド
+### 再実装対象コマンド
 
 | カテゴリ | コマンド |
 |---------|---------|
@@ -40,7 +44,7 @@ public async UniTask> ListIssues(string repo, CancellationToken ct)
 | Auth | `check_gh_cli_status`, `check_gh_available` |
 | Crash Report | `create_crash_report_issue` (新規) |
 
-#### 主要データ型
+### 主要データ型
 
 | 型名 | フィールド |
 |------|-----------|
@@ -56,14 +60,14 @@ public async UniTask> ListIssues(string repo, CancellationToken ct)
 | `FetchPrListResponse` | prs, total_count, has_next_page |
 | `CrashReportPayload` | title, body, labels, stack_trace, environment_info, user_notes |
 
-#### インタビュー確定事項（2026-03-10追記）
+## Interview Notes
 
 **アプリ内認証ガイド:**
 - gh CLI未認証時のガイダンスは**アプリ内ガイド**として実装
 - 外部ドキュメントへのリンクではなく、アプリ内でステップバイステップの `gh auth login` 手順を表示
 - ターミナルオーバーレイで直接 `gh auth login` を実行可能にする
 
-### ユーザーシナリオ
+## User Stories
 
 - **US-1** [P0]: 2D スタジオ内で GitHub Issues が浮遊マーカーとして表示され、クリックで詳細が見られる
   - テスト: Issues 一覧がスタジオ内に浮遊マーカーとして配置されること
@@ -85,7 +89,7 @@ public async UniTask> ListIssues(string repo, CancellationToken ct)
   - テスト: オプトイン設定ON時にクラッシュレポートIssueが正しいフォーマットで作成されること
   - テスト: 送信前にユーザーが内容を確認・編集できること
 
-### 機能要件
+## Functional Requirements
 
 - **FR-001**: gh CLI をプロセス実行して全 GitHub 操作を行う C# ラッパーを実装する
 - **FR-002**: GitHub Issues の取得・詳細表示・ブランチリンクをサポートする
@@ -100,7 +104,7 @@ public async UniTask> ListIssues(string repo, CancellationToken ct)
 - **FR-011**: Lead向けPR操作（PR作成・merge）を自律的に実行可能にする（#1574 Lead自律ワークツリー管理と連携）
 - **FR-012**: クラッシュレポートのGitHub Issue自動作成機能をオプトインで提供する（クラッシュログ・スタックトレース・環境情報を含む）
 
-### 非機能要件
+## Non-Functional Requirements
 
 - **NFR-001**: gh CLI 呼び出しは非同期（`async/await`）で実行し、Unity メインスレッドをブロックしない
 - **NFR-002**: GitHub API のレートリミットを考慮し、キャッシュ戦略を実装する（TTL: Issues 60秒、PR ステータス 30秒）
@@ -108,7 +112,7 @@ public async UniTask> ListIssues(string repo, CancellationToken ct)
 - **NFR-004**: 未認証時のガイダンスメッセージをユーザーに提示する
 - **NFR-005**: ページネーション対応（大量 Issue/PR リポジトリでの安定動作）
 
-### 成功基準
+## Success Criteria
 
 - **SC-001**: 現在の gwt（Rust 版）と同等の GitHub 操作が全て実行可能
 - **SC-002**: gh CLI 未認証時に適切なガイダンスを表示する

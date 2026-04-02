@@ -1,11 +1,16 @@
-### 背景
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+> **Canonical Boundary**: `SPEC-1647` は `SPEC-1787` に superseded された履歴 SPEC である。現行の workspace initialization と SPEC-first workflow は `SPEC-1787` を参照する。
+
+# プロジェクト管理（旧仕様）
+
+## Background
 プロジェクトの開閉・作成・マイグレーション・最近のプロジェクト管理を行う。Studio時代の #1557（プロジェクトライフサイクル管理）と #1558（マルチプロジェクト切替）の機能概念を現行スタックで再定義。
 
-### 境界
+## Boundaries
 - Local Git backend semantics（branch/ref/worktree inventory、cleanup、local Git cache invalidation）は `#1644` が正本
 - 本仕様は project open/close/create/switch と recent project lifecycle の orchestration のみを扱う
 
-### ユーザーシナリオとテスト
+## User Stories
 
 **S1: プロジェクトを開く**
 - Given: ユーザーがプロジェクトディレクトリを選択
@@ -27,7 +32,7 @@
 - When: 別プロジェクトに切替
 - Then: 対象プロジェクトのウィンドウが前面に来る
 
-### 機能要件
+## Functional Requirements
 
 **FR-01: プロジェクト開閉**
 - ディレクトリ選択による開始
@@ -45,7 +50,7 @@
 **FR-04: マイグレーション**
 - 古い設定形式からの移行
 
-### 成功基準
+## Success Criteria
 
 1. プロジェクトの開閉が正常に動作する
 2. 最近のプロジェクトが正しく管理される

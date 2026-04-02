@@ -414,7 +414,7 @@ const PROJECT_LOCAL_MANAGED_ASSETS: &[ManagedAsset] = &[ManagedAsset {
     relative_path: "memory/constitution.md",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../memory/constitution.md"
+        "/../../.gwt/memory/constitution.md"
     )),
     executable: false,
     rewrite_for_project: false,
@@ -629,6 +629,54 @@ const CLAUDE_HOOK_ASSETS: &[ManagedAsset] = &[
     },
 ];
 
+const CODEX_HOOK_ASSETS: &[ManagedAsset] = &[
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-forward-hook.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-forward-hook.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-git-branch-ops.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-git-branch-ops.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-cd-command.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-cd-command.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-file-ops.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-file-ops.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+    ManagedAsset {
+        relative_path: "hooks/scripts/gwt-block-git-dir-override.mjs",
+        body: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.codex/hooks/scripts/gwt-block-git-dir-override.mjs"
+        )),
+        executable: false,
+        rewrite_for_project: false,
+    },
+];
+
 const LEGACY_MANAGED_ASSET_PATHS: &[&str] = &[
     "skills/gwt-fix-issue",
     "skills/gwt-fix-pr",
@@ -652,6 +700,7 @@ const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_END_MARKER: &str = "# END gwt managed 
 const PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES: &[&str] = &[
     "/.gwt/",
     "/.codex/skills/gwt-*/",
+    "/.codex/hooks/scripts/gwt-*.mjs",
     "/.gemini/skills/gwt-*/",
     "/.claude/skills/gwt-*/",
     "/.claude/commands/gwt-*.md",
@@ -707,6 +756,21 @@ impl SkillAgentType {
             SkillAgentType::Claude => "Claude Code",
             SkillAgentType::Codex => "Codex",
             SkillAgentType::Gemini => "Gemini",
+        }
+    }
+
+    /// Resolve a `SkillAgentType` from an agent identifier string
+    /// (e.g. `"claude-code"`, `"codex-cli"`, `"gemini-cli"`).
+    pub fn from_agent_id(agent_id: &str) -> Option<Self> {
+        let lower = agent_id.to_lowercase();
+        if lower.contains("claude") {
+            Some(SkillAgentType::Claude)
+        } else if lower.contains("codex") {
+            Some(SkillAgentType::Codex)
+        } else if lower.contains("gemini") {
+            Some(SkillAgentType::Gemini)
+        } else {
+            None
         }
     }
 }
@@ -835,7 +899,6 @@ fn project_local_managed_asset_display_path(relative_path: &str) -> String {
 
 fn project_local_managed_asset_exists(project_root: &Path, relative_path: &str) -> bool {
     project_local_managed_asset_path(project_root, relative_path).exists()
-        || legacy_project_local_managed_asset_path(project_root, relative_path).exists()
 }
 
 fn claude_root_for(project_root: Option<&Path>) -> Option<PathBuf> {
@@ -850,6 +913,20 @@ fn claude_settings_path_for(project_root: Option<&Path>) -> Option<PathBuf> {
 fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
     write_managed_assets(root, PROJECT_SKILL_ASSETS.iter(), ".codex")?;
     register_project_local_managed_assets(root)
+}
+
+fn register_codex_assets_at(project_root: &Path) -> Result<(), GwtError> {
+    let root = project_root.join(".codex");
+
+    // Write skill + hook script assets
+    write_managed_assets(
+        &root,
+        PROJECT_SKILL_ASSETS.iter().chain(CODEX_HOOK_ASSETS.iter()),
+        ".codex",
+    )?;
+
+    // Write hooks.json
+    write_managed_codex_hooks(&root)
 }
 
 fn register_claude_assets_at(project_root: &Path) -> Result<(), GwtError> {
@@ -945,6 +1022,10 @@ fn remove_legacy_project_local_managed_asset(
         return Ok(());
     }
 
+    if legacy_project_local_asset_is_repo_tracked(project_root, legacy_path) {
+        return Ok(());
+    }
+
     if legacy_path.is_dir() {
         std::fs::remove_dir_all(legacy_path).map_err(|e| GwtError::ConfigWriteError {
             reason: format!(
@@ -991,6 +1072,20 @@ fn remove_legacy_project_local_managed_asset(
     }
 
     Ok(())
+}
+
+fn legacy_project_local_asset_is_repo_tracked(project_root: &Path, legacy_path: &Path) -> bool {
+    let Ok(relative_path) = legacy_path.strip_prefix(project_root) else {
+        return false;
+    };
+
+    crate::process::command("git")
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(relative_path)
+        .current_dir(project_root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn write_managed_asset(root: &Path, asset: &ManagedAsset, root_name: &str) -> Result<(), GwtError> {
@@ -1237,6 +1332,275 @@ fn hook_script_command(script: &str, args: &str) -> String {
     } else {
         format!("{base}{script}\" {args}")
     }
+}
+
+/// Build a Codex hook command that resolves the git repository root at runtime.
+/// Same pattern as Claude but uses `.codex/hooks/scripts/` path.
+fn codex_hook_script_command(script: &str, args: &str) -> String {
+    let base = "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/";
+    if args.is_empty() {
+        format!("{base}{script}\"")
+    } else {
+        format!("{base}{script}\" {args}")
+    }
+}
+
+/// Codex hooks definition for 5 supported events:
+/// SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop.
+///
+/// Notification is not supported by Codex (FR-HOOK-004).
+fn managed_codex_hooks_definition() -> Value {
+    serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "SessionStart")
+                }]
+            }],
+            "UserPromptSubmit": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "UserPromptSubmit")
+                }]
+            }],
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": codex_hook_script_command("gwt-forward-hook.mjs", "PreToolUse")
+                    }]
+                },
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-git-branch-ops.mjs", "")
+                        },
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-cd-command.mjs", "")
+                        },
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-file-ops.mjs", "")
+                        },
+                        {
+                            "type": "command",
+                            "command": codex_hook_script_command("gwt-block-git-dir-override.mjs", "")
+                        }
+                    ]
+                }
+            ],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "PostToolUse")
+                }]
+            }],
+            "Stop": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": codex_hook_script_command("gwt-forward-hook.mjs", "Stop")
+                }]
+            }]
+        }
+    })
+}
+
+/// Merge managed Codex hooks into an existing hooks JSON value.
+///
+/// 1. Walk each event array and remove entries whose `hooks` commands are all
+///    managed (`gwt-` prefixed scripts).
+/// 2. Append the latest managed hook entries for each event.
+/// 3. Preserve user-defined entries untouched.
+fn merge_managed_codex_hooks(existing: &Value, managed: &Value) -> Value {
+    let managed_hooks_map = match managed.get("hooks").and_then(|v| v.as_object()) {
+        Some(m) => m,
+        None => return existing.clone(),
+    };
+    let managed_hook_commands = managed_hook_commands_from_map(managed_hooks_map);
+
+    // Start from the existing value, defaulting to an empty hooks object.
+    let mut result = if existing.is_object() {
+        existing.clone()
+    } else {
+        serde_json::json!({ "hooks": {} })
+    };
+
+    // Ensure result has a "hooks" object.
+    if !result.get("hooks").map(|v| v.is_object()).unwrap_or(false) {
+        result
+            .as_object_mut()
+            .expect("result must be object")
+            .insert("hooks".to_string(), serde_json::json!({}));
+    }
+
+    let hooks_map = result
+        .get_mut("hooks")
+        .and_then(|v| v.as_object_mut())
+        .expect("hooks must be object after normalization");
+
+    // Prune managed entries from all events (including events not in the new managed set,
+    // to handle removed events on version upgrade).
+    for value in hooks_map.values_mut() {
+        prune_managed_hook_entries(value, &managed_hook_commands);
+    }
+
+    // Add new managed entries for each event.
+    for (event, managed_event_entries) in managed_hooks_map {
+        let mut merged_entries: Vec<Value> = match hooks_map.get(event) {
+            Some(existing_val) => existing_val
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![existing_val.clone()]),
+            None => Vec::new(),
+        };
+
+        if let Some(entries) = managed_event_entries.as_array() {
+            merged_entries.extend(entries.iter().cloned());
+        } else {
+            merged_entries.push(managed_event_entries.clone());
+        }
+
+        hooks_map.insert(event.clone(), Value::Array(merged_entries));
+    }
+
+    // Remove events that became empty arrays after pruning (cleanup).
+    let empty_events: Vec<String> = hooks_map
+        .iter()
+        .filter(|(_, v)| v.as_array().map(|a| a.is_empty()).unwrap_or(false))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in empty_events {
+        hooks_map.remove(&key);
+    }
+
+    result
+}
+
+/// Check whether `.codex/hooks.json` needs to be updated with managed hooks.
+///
+/// Returns `true` when:
+/// - The file does not exist
+/// - The file exists but the merge result differs from the current content
+/// - The file contains invalid JSON
+pub fn codex_hooks_needs_update(codex_root: &Path) -> bool {
+    let hooks_path = codex_root.join("hooks.json");
+
+    let existing_content = match std::fs::read_to_string(&hooks_path) {
+        Ok(content) => content,
+        Err(_) => return true, // File doesn't exist or unreadable
+    };
+
+    let existing: Value = match serde_json::from_str(&existing_content) {
+        Ok(v) => v,
+        Err(_) => return true, // Invalid JSON
+    };
+
+    let managed = managed_codex_hooks_definition();
+    let merged = merge_managed_codex_hooks(&existing, &managed);
+
+    let merged_output = match serde_json::to_string_pretty(&merged) {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
+
+    existing_content != merged_output
+}
+
+/// Write `.codex/hooks.json` with managed hooks merged with user-defined hooks.
+///
+/// - Reads the existing file and merges managed hooks, preserving user entries.
+/// - If the merge result matches the current file content, skips writing (FR-030).
+/// - If the existing file is invalid JSON, backs it up to `.bak` (FR-010).
+fn write_managed_codex_hooks(codex_root: &Path) -> Result<(), GwtError> {
+    let hooks_path = codex_root.join("hooks.json");
+
+    if let Some(parent) = hooks_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to create Codex directory {}: {}",
+                parent.display(),
+                e
+            ),
+        })?;
+    }
+
+    let managed = managed_codex_hooks_definition();
+
+    let existing = if hooks_path.exists() {
+        match std::fs::read_to_string(&hooks_path) {
+            Ok(content) => match serde_json::from_str::<Value>(&content) {
+                Ok(v) => Some((content, v)),
+                Err(e) => {
+                    // FR-010: invalid JSON — backup and create fresh
+                    warn!(
+                        category = "skills",
+                        path = %hooks_path.display(),
+                        error = %e,
+                        "Codex hooks.json contains invalid JSON; backing up"
+                    );
+                    let bak_path = hooks_path.with_extension("json.bak");
+                    if let Err(bak_err) = std::fs::rename(&hooks_path, &bak_path) {
+                        warn!(
+                            category = "skills",
+                            path = %bak_path.display(),
+                            error = %bak_err,
+                            "Failed to backup invalid hooks.json"
+                        );
+                    }
+                    None
+                }
+            },
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let merged = match &existing {
+        Some((_, parsed)) => merge_managed_codex_hooks(parsed, &managed),
+        None => managed,
+    };
+
+    let output = serde_json::to_string_pretty(&merged).map_err(|e| GwtError::ConfigWriteError {
+        reason: e.to_string(),
+    })?;
+
+    // FR-030: skip write if content is identical (byte-for-byte)
+    if let Some((original_content, _)) = &existing {
+        if *original_content == output {
+            info!(
+                category = "skills",
+                path = %hooks_path.display(),
+                "Codex hooks.json is up-to-date; skipping write"
+            );
+            return Ok(());
+        }
+    }
+
+    std::fs::write(&hooks_path, &output).map_err(|e| GwtError::ConfigWriteError {
+        reason: format!(
+            "Failed to write Codex hooks {}: {}",
+            hooks_path.display(),
+            e
+        ),
+    })?;
+
+    info!(
+        category = "skills",
+        path = %hooks_path.display(),
+        "Wrote Codex hooks.json (merged with user-defined hooks)"
+    );
+
+    Ok(())
 }
 
 fn managed_hooks_definition() -> Value {
@@ -1650,7 +2014,8 @@ pub fn register_agent_skills_with_settings_at_project_root(
 
     match agent {
         SkillAgentType::Claude => register_claude_assets_at(project_root),
-        SkillAgentType::Codex | SkillAgentType::Gemini => {
+        SkillAgentType::Codex => register_codex_assets_at(project_root),
+        SkillAgentType::Gemini => {
             let Some(root) = agent_root_for(agent, Some(project_root)) else {
                 return Err(GwtError::ConfigWriteError {
                     reason: format!("{} asset root could not be resolved.", agent.label()),
@@ -3006,7 +3371,48 @@ OPENAI_API_KEY = "legacy-key"
     }
 
     #[test]
-    fn status_accepts_legacy_project_local_asset_during_migration() {
+    fn registration_writes_repo_constitution_body_to_project_local_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = registration_settings();
+        init_test_git_dir(temp.path());
+
+        register_all_skills_with_settings_at_project_root(&settings, Some(temp.path())).unwrap();
+
+        let written =
+            std::fs::read_to_string(project_local_constitution_path(temp.path())).unwrap();
+        assert_eq!(written, PROJECT_LOCAL_MANAGED_ASSETS[0].body);
+    }
+
+    #[test]
+    fn registration_preserves_tracked_legacy_repo_constitution_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("memory")).unwrap();
+        std::fs::write(
+            repo_root.join("memory").join("constitution.md"),
+            "repo constitution",
+        )
+        .unwrap();
+
+        run_git(temp.path(), &["init", repo_root.to_str().unwrap()]);
+        run_git(&repo_root, &["config", "user.name", "Test User"]);
+        run_git(&repo_root, &["config", "user.email", "test@example.com"]);
+        run_git(&repo_root, &["add", "memory/constitution.md"]);
+        run_git(&repo_root, &["commit", "-m", "test: track constitution"]);
+
+        let settings = registration_settings();
+        register_all_skills_with_settings_at_project_root(&settings, Some(&repo_root)).unwrap();
+
+        assert!(repo_root.join("memory").join("constitution.md").exists());
+        assert!(project_local_constitution_path(&repo_root).exists());
+        assert_eq!(
+            std::fs::read_to_string(repo_root.join("memory").join("constitution.md")).unwrap(),
+            "repo constitution"
+        );
+    }
+
+    #[test]
+    fn status_requires_gwt_project_local_asset_instead_of_legacy_root() {
         let temp = tempfile::tempdir().unwrap();
         let settings = registration_settings();
 
@@ -3024,7 +3430,7 @@ OPENAI_API_KEY = "legacy-key"
             .iter()
             .find(|agent| agent.agent_id == "codex")
             .unwrap();
-        assert!(!codex
+        assert!(codex
             .missing_skills
             .contains(&".gwt/memory/constitution.md".to_string()));
     }
@@ -3336,6 +3742,353 @@ custom-pattern
         assert!(
             err.to_string().contains("missing end marker"),
             "unexpected error: {err}"
+        );
+    }
+
+    // =========================================================================
+    // SPEC-1786: Codex hooks.json merge tests
+    // =========================================================================
+
+    #[test]
+    fn merge_managed_codex_hooks_preserves_user_hooks() {
+        let managed = managed_codex_hooks_definition();
+        let user_hook = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "my-custom-validator.sh"
+                    }]
+                }]
+            }
+        });
+
+        let merged = merge_managed_codex_hooks(&user_hook, &managed);
+
+        // User hook must be preserved
+        let pre_tool = merged["hooks"]["PreToolUse"].as_array().unwrap();
+        let user_entries: Vec<_> = pre_tool
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("my-custom-validator"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(user_entries.len(), 1, "user hook must be preserved");
+
+        // Managed hooks must also be present
+        let managed_entries: Vec<_> = pre_tool
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("gwt-"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !managed_entries.is_empty(),
+            "managed hooks must be present in PreToolUse"
+        );
+    }
+
+    #[test]
+    fn merge_managed_codex_hooks_from_empty() {
+        let managed = managed_codex_hooks_definition();
+        let empty = serde_json::json!({});
+
+        let merged = merge_managed_codex_hooks(&empty, &managed);
+
+        // All managed events should be present
+        let hooks = merged["hooks"].as_object().unwrap();
+        assert!(hooks.contains_key("SessionStart"));
+        assert!(hooks.contains_key("PreToolUse"));
+        assert!(hooks.contains_key("PostToolUse"));
+        assert!(hooks.contains_key("Stop"));
+        assert!(hooks.contains_key("UserPromptSubmit"));
+    }
+
+    #[test]
+    fn merge_managed_codex_hooks_is_idempotent() {
+        let managed = managed_codex_hooks_definition();
+        let empty = serde_json::json!({});
+
+        let first = merge_managed_codex_hooks(&empty, &managed);
+        let second = merge_managed_codex_hooks(&first, &managed);
+
+        let first_str = serde_json::to_string_pretty(&first).unwrap();
+        let second_str = serde_json::to_string_pretty(&second).unwrap();
+        assert_eq!(first_str, second_str, "merge must be idempotent");
+    }
+
+    #[test]
+    fn merge_managed_codex_hooks_replaces_current_managed_and_adds_new() {
+        // Start with the current managed hooks already installed, plus a user hook
+        let managed = managed_codex_hooks_definition();
+        let mut existing = merge_managed_codex_hooks(&serde_json::json!({}), &managed);
+
+        // Add a user hook to PreToolUse
+        let pre_tool = existing["hooks"]["PreToolUse"].as_array_mut().unwrap();
+        pre_tool.insert(
+            0,
+            serde_json::json!({
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": "my-custom-validator.sh"
+                }]
+            }),
+        );
+
+        // Re-merge should prune old managed entries and re-add them,
+        // while preserving the user hook
+        let merged = merge_managed_codex_hooks(&existing, &managed);
+
+        // User hook on PreToolUse must survive
+        let pre_tool_result = merged["hooks"]["PreToolUse"].as_array().unwrap();
+        let user_entries: Vec<_> = pre_tool_result
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("my-custom-validator"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(user_entries.len(), 1, "user hook must survive re-merge");
+
+        // Managed hooks should not be duplicated
+        let managed_entries: Vec<_> = pre_tool_result
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .map(|c| c.contains("gwt-"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        // The managed definition has 2 PreToolUse entries (matcher:* and matcher:Bash)
+        let expected_managed_pre_tool = managed["hooks"]["PreToolUse"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(
+            managed_entries.len(),
+            expected_managed_pre_tool,
+            "managed hooks should not be duplicated after re-merge"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_true_when_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            codex_hooks_needs_update(tmp.path()),
+            "should return true when hooks.json does not exist"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_false_when_up_to_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_path = tmp.path().join("hooks.json");
+
+        // Write the expected merged output
+        let managed = managed_codex_hooks_definition();
+        let merged = merge_managed_codex_hooks(&serde_json::json!({}), &managed);
+        let output = serde_json::to_string_pretty(&merged).unwrap();
+        std::fs::write(&hooks_path, &output).unwrap();
+
+        assert!(
+            !codex_hooks_needs_update(tmp.path()),
+            "should return false when file is up-to-date"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_true_when_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_path = tmp.path().join("hooks.json");
+
+        // Write stale content
+        std::fs::write(&hooks_path, r#"{"hooks":{}}"#).unwrap();
+
+        assert!(
+            codex_hooks_needs_update(tmp.path()),
+            "should return true when hooks.json differs from merge result"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_needs_update_true_for_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_path = tmp.path().join("hooks.json");
+
+        std::fs::write(&hooks_path, "not valid json!!!").unwrap();
+
+        assert!(
+            codex_hooks_needs_update(tmp.path()),
+            "should return true for invalid JSON"
+        );
+    }
+
+    #[test]
+    fn write_managed_codex_hooks_creates_backup_for_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_root = tmp.path();
+        let hooks_path = codex_root.join("hooks.json");
+        let bak_path = codex_root.join("hooks.json.bak");
+
+        std::fs::write(&hooks_path, "not valid json!!!").unwrap();
+
+        write_managed_codex_hooks(codex_root).unwrap();
+
+        // Backup should exist with the old content
+        assert!(bak_path.exists(), "backup file should be created");
+        let bak_content = std::fs::read_to_string(&bak_path).unwrap();
+        assert_eq!(bak_content, "not valid json!!!");
+
+        // New file should be valid JSON
+        let new_content = std::fs::read_to_string(&hooks_path).unwrap();
+        let parsed: Value = serde_json::from_str(&new_content).unwrap();
+        assert!(parsed["hooks"].is_object());
+    }
+
+    #[test]
+    fn write_managed_codex_hooks_skips_write_when_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_root = tmp.path();
+        let hooks_path = codex_root.join("hooks.json");
+
+        // First write
+        write_managed_codex_hooks(codex_root).unwrap();
+        let mtime_1 = std::fs::metadata(&hooks_path).unwrap().modified().unwrap();
+
+        // Small delay to ensure mtime would change if file were rewritten
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Second write — should be skipped (FR-030)
+        write_managed_codex_hooks(codex_root).unwrap();
+        let mtime_2 = std::fs::metadata(&hooks_path).unwrap().modified().unwrap();
+
+        assert_eq!(
+            mtime_1, mtime_2,
+            "file should not be rewritten when unchanged"
+        );
+    }
+
+    #[test]
+    fn write_managed_codex_hooks_preserves_user_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_root = tmp.path();
+        let hooks_path = codex_root.join("hooks.json");
+
+        // Write a file with user hooks
+        let user_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "my-custom-linter.sh"
+                    }]
+                }]
+            }
+        });
+        std::fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&user_content).unwrap(),
+        )
+        .unwrap();
+
+        write_managed_codex_hooks(codex_root).unwrap();
+
+        let result: Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        let pre_tool = result["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // User hook must survive
+        let has_user = pre_tool.iter().any(|e| {
+            e["hooks"]
+                .as_array()
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .map(|c| c.contains("my-custom-linter"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_user, "user hook must be preserved after write");
+
+        // Managed hooks must be present
+        let has_managed = pre_tool.iter().any(|e| {
+            e["hooks"]
+                .as_array()
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .map(|c| c.contains("gwt-"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_managed, "managed hooks must be present after write");
+    }
+
+    #[test]
+    fn is_managed_hook_command_recognizes_codex_scripts() {
+        let managed = managed_codex_hooks_definition();
+        let managed_map = managed["hooks"].as_object().unwrap();
+        let commands = managed_hook_commands_from_map(managed_map);
+
+        // Verify that each generated command is recognized as managed
+        for cmd in &commands {
+            assert!(
+                is_managed_hook_command(cmd, &commands),
+                "command should be recognized as managed: {cmd}"
+            );
+        }
+
+        // User command should NOT be recognized as managed
+        assert!(
+            !is_managed_hook_command("my-custom-tool.sh", &commands),
+            "user command should not be recognized as managed"
         );
     }
 }

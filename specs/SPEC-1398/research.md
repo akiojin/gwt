@@ -1,2 +1,0 @@
-- `WorktreeSummaryPanel.svelte` は `resolvedPrNumber = latestBranchPr?.number ?? prNumber ?? null` で過去PRを優先していた。
-- `PrStatusSection` は受け取ったPR詳細に従って `Merged` / `Checks warning` を表示するため、対象PR選定の誤りがUI誤表示に直結する。

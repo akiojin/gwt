@@ -22,7 +22,7 @@ For new work registration with no existing Issue yet, use `gwt-issue-register` i
 
 ## Steps
 
-1. Load `skills/gwt-issue-resolve/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-issue-resolve/SKILL.md` and follow the workflow.
 2. Run the inspection script to gather issue data and extract context.
 3. If the issue is already a spec issue, switch to `gwt-spec-ops`.
 4. Otherwise decide the execution path:

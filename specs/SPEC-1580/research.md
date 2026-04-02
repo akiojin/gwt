@@ -1,6 +1,0 @@
-- Modern Office 家具 singles: 339 点、各 32×48 px (16x16 セル換算で 2×3)
-- Modern Office tilesheet: 256×848 px (16 列 × 53 行)
-- UI_16x16.png: 288×256 px (18 列 × 16 行)
-- キャラクタースプライトシート: 896×656 px (56 列 × 41 行)
-- アニメーション行マッピング: idle(行1), walk+sleep(行2), sit(行3-4), phone(行5)
-- ターゲット解像度: 16×16 (Spec #1539 決定済み)

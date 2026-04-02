@@ -1,5 +1,0 @@
-- `Gwt.Agent` assembly は `Gwt.Lifecycle` を参照していないため、`IProjectLifecycleService` は直接利用不可。プロジェクト情報は `LeadSessionData.ProjectRoot` + `IGitService` で代替する設計を採用。
-- `AIResponse.Text` が正しいプロパティ名（`Content` ではない）
-- `PrStatusInfo.Mergeable` は `string` 型。`"MERGEABLE"` との文字列比較で判定する
-- `Settings` に `AI` プロパティは存在しない。`Settings.Profiles.DefaultAI` (AISettings) から手動で `ResolvedAISettings` を構築する
-- `DetectedAgentType` enum: Claude, Codex, Gemini, OpenCode, GithubCopilot, Custom

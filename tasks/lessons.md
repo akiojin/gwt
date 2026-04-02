@@ -31,3 +31,108 @@
    定数文字列の存在チェックは Rust の `assert!(SCRIPT.contains("..."))` で書ける。
    「Python だからテストしにくい」は誤り。
 3. 計画（Plan）実行時に「仕様策定・TDD は済んでいるか？」を必ずチェックリストで確認してから実装に着手する。
+
+## 2026-04-01 — fix: PTY スクロールとコピーの両立
+
+### 事象
+
+Logs タブのスクロール修正後も、ユーザーが求めていたのはメイン PTY の trackpad / mouse wheel scroll だった。さらに、常時 mouse capture を有効にすると terminal-native copy が壊れた。
+
+### 原因
+
+- 「どの画面でスクロールしたいのか」を最初に切り分けず、管理画面の Logs とメイン PTY を同じ問題として扱った。
+- crossterm の mouse capture 制約により、フルスクリーン TUI の PTY で「常時ホイールスクロール」と「端末エミュレータの通常選択コピー」は両立しない前提を、先に設計へ反映していなかった。
+
+### 再発防止策
+
+1. スクロール不具合は、まず「管理画面のリスト」か「メイン PTY」かを分離して再現確認する。
+2. PTY でマウス UX を追加する場合は、先に `mouse capture` のオン/オフと terminal-native copy の両立可否を確認する。
+3. 両立しない場合は、常時 capture を避け、tmux 風の一時 copy mode など明示的な操作モードへ寄せる。
+
+## 2026-04-02 — fix: Agent-first UX では常時仮想ビューを優先する
+
+### 事象
+
+copy mode を追加したあと、通常モードのまま scroll / drag-copy したいという要件が明確になり、modal な操作モデル自体が UX と合わなくなった。
+
+### 原因
+
+- 前回は terminal-native copy との両立を優先しすぎて、Agent 常用 UX より `mouse capture` の制約回避を優先していた。
+- 今回の前提では `vim` / `less` など PTY 内アプリのマウス互換は不要だったため、より単純な「常時仮想ビュー」案を最初から選ぶべきだった。
+
+### 再発防止策
+
+1. PTY 操作 UX の設計では、最初に「Agent-first か」「PTY 内アプリ互換を残すか」を確認する。
+2. Agent-first で PTY 内アプリのマウス互換が不要なら、copy mode より先に「通常モード常時仮想ビュー」を比較対象へ入れる。
+3. transcript-backed viewport を採る場合は、`follow_live`、viewport freeze、drag-copy、`End` での live 復帰を最初からセットで設計する。
+
+## 2026-04-01 — fix: PTY paste は key input と別経路で扱う
+
+### 事象
+
+Main PTY で通常キー入力は動くのに、Terminal.app からのペーストが安定せず、改行を含む payload が期待通りに届かなかった。
+
+### 原因
+
+- `Enter` は `key_event_to_bytes()` で `\r` に正規化していた一方、ターミナルの `Event::Paste(String)` はイベントループで無視していた。
+- そのため、paste は key input の延長として扱われず、専用経路が欠落していた。
+
+### 再発防止策
+
+1. PTY 入力の不具合では、まず `Key` と `Paste` が同じ経路か別経路かを確認する。
+2. `crossterm` を使う場合は `EnableBracketedPaste` の有無と `Event::Paste` の処理有無を必ず点検する。
+3. 改行を含む paste は `/bin/cat` など実 PTY を使ったテストで payload 全体を検証する。
+
+## 2026-04-01 — fix: constitution の正本パスは compile-time / runtime で一致させる
+
+### 事象
+
+運用上の正本は `.gwt/memory/constitution.md` だったが、`gwt-core` の managed asset 埋め込みだけが `memory/constitution.md` を読んでいた。そのため、ローカル検証で legacy ファイルを補わないとビルド前提が崩れる状態になっていた。
+
+### 原因
+
+- runtime の canonical path と compile-time `include_str!` の参照元を別々に管理していた。
+- status 判定も legacy root path を許容しており、「移行用互換」と「現在の正本」が混ざっていた。
+
+### 再発防止策
+
+1. managed asset の正本パスを変える場合は、`include_str!`・status 判定・cleanup/migration テストを同時に点検する。
+2. migration 用の legacy path は cleanup 専用に留め、登録済み判定の成功条件には使わない。
+3. compile-time と runtime の canonical path が一致していることを RED テストで確認してから実装する。
+
+## 2026-04-02 — fix: compile-time asset は canonical path で tracked にする
+
+### 事象
+
+`Clippy & Rustfmt` の CI で `crates/gwt-core/src/config/skill_registration.rs` の
+`include_str!(../../.gwt/memory/constitution.md)` が読み込めず、ローカルでは通るのに
+GitHub Actions だけが compile error になった。
+
+### 原因
+
+- `.gwt/memory/constitution.md` はローカルには存在していたが、tracked file ではなかった。
+- そのため compile-time asset を `include_str!` で参照していても、CI checkout には存在しなかった。
+- canonical path を `.gwt/memory/constitution.md` に揃えるだけでは不十分で、repo に含まれる asset である必要があった。
+
+### 再発防止策
+
+1. `include_str!` で読む canonical asset は、必ず tracked file として repo に含める。
+2. local exclude / `.gitignore` / worktree-local generated file に依存して compile-time asset を置かない。
+3. compile-time asset を canonical path に移す変更では、`git ls-files <path>` でも存在を確認してから push する。
+
+## 2026-04-01 — fix: 終了済みセッションを自動 close すると最終エラーを観測できない
+
+### 事象
+
+Agent / Shell の PTY が短時間で終了すると、`Model::apply_background_updates()` がセッションタブを即 close し、最終出力やエラーメッセージを読む前に Branches へ戻ってしまった。
+
+### 原因
+
+- セッション終了検知を「自動 cleanup」の責務として実装し、失敗調査に必要な transcript 可視性を考慮していなかった。
+- completed / error 状態を `SessionTab.status` に反映せず、終了 = close と短絡していた。
+
+### 再発防止策
+
+1. PTY 終了監視を入れるときは、まず「終了後に transcript を読む必要があるか」を確認する。
+2. UI から観測したい失敗は、自動 close ではなく status 遷移で扱う。
+3. 自動 cleanup を入れる場合でも、completed / error セッションが可視のまま残る RED テストを先に書く。

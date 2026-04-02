@@ -1,3 +1,0 @@
-- [ ] README.md に PAT 要件セクションが存在
-- [ ] README.ja.md に PAT 要件セクションが存在
-- [ ] markdownlint でエラー・警告なし

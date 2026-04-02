@@ -1,4 +1,0 @@
-- Current repo implementation and existing tests must be compared against this spec before changes land.
-- Dependency / plugin / asset constraints specific to `機能仕様: HUD＆UIシステム (RTS風コンソール・通知・設定メニュー)` should be captured here as they are validated.
-- Any divergence between the issue body and the current code should be recorded here before implementation.
-- **GFM パーサー自前実装の設計調査**: CommonMark / GFM 仕様の範囲、TextMeshPro リッチテキストタグへのマッピング方式、パッケージ化に向けた分離設計

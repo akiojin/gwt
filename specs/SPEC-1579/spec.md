@@ -1,7 +1,10 @@
+> **🔄 TUI MIGRATION (SPEC-1776)**: This SPEC requires adaptation for the gwt-tui migration. GUI-specific references (gwt-tauri, Svelte, xterm.js) should be read as gwt-tui equivalents. See SPEC-1776 for the migration plan.
+> **Canonical Boundary**: `SPEC-1579` は gwt-spec workflow / storage / completion gate の正本である。ワークスペース初期化と SPEC 起点導線は `SPEC-1787` が担当する。
+
 <!-- GWT_SPEC_ARTIFACT:doc:spec.md -->
 doc:spec.md
 
-# Feature Specification: gwt-spec system — workflow, storage/API, and completion gate
+# ワークフロー・ストレージ/API・完了ゲート統合仕様
 
 ## Background
 
@@ -13,7 +16,7 @@ doc:spec.md
 - The current runtime can contain helper skills that exist on disk but are not present in the user-visible skill catalog. User-facing workflow guidance must not point directly at hidden skills.
 - The older storage design treated the GitHub Issue body as the canonical spec bundle with `Spec/Plan/Tasks/TDD/...` sections embedded directly in the body. The embedded skill workflow is now restructured around local file-based storage where `specs/SPEC-{N}/` directories hold the real content (`spec.md`, `plan.md`, `tasks.md`, and supporting artifacts) and the local SPEC directory is the canonical source.
 - The current workflow only defined a pre-implementation `CLEAR` gate. #1654 exposed a missing completion gate: `tasks.md` and progress comments were marked complete while the implementation still diverged from `doc:spec.md`, `checklist:acceptance.md`, and `checklist:tdd.md`.
-- This spec is the single canonical reference for the gwt-spec system: embedded workflow, storage/API, artifact CRUD, completion gate, registration contract, and GitHub transport policy. Issue-tab detail rendering lives in #1354.
+- This spec is the single canonical reference for the gwt-spec system: embedded workflow, storage/API, artifact CRUD, completion gate, registration contract, and GitHub transport policy. Local SPEC viewing lives in `SPEC-1776` (`SPECs` tab), while `#1354` remains only for GitHub Issue detail / legacy issue-body compatibility during migration.
 
 ## User Stories
 
@@ -177,9 +180,9 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **FR-005**: `gwt-spec-implement` must own execution after `CLEAR`, including test-first task execution, progress updates, and PR handoff.
 - **FR-006**: `gwt-pr` and `gwt-pr-fix` must auto-merge `origin/<base>` using merge, not rebase, when the merge is behaviorally clear.
 - **FR-007**: PR and SPEC skills must ask the user only for ambiguous conflicts, unresolved product decisions, missing auth, or risky destructive migration scope.
-- **FR-008**: This spec is the single canonical reference for gwt-spec workflow, storage/API, and completion gate. #1354 remains the Issue detail/viewer canonical.
+- **FR-008**: This spec is the single canonical reference for gwt-spec workflow, storage/API, and completion gate. Local SPEC viewer ownership is `SPEC-1776`; `#1354` is limited to GitHub Issue detail / legacy issue-body compatibility.
 - **FR-009**: Migration is part of the redesign scope and must cover both local legacy specs and old body-canonical GitHub spec issues.
-- **FR-010**: The repo-level constitution (`memory/constitution.md`) must remain part of the planning gate.
+- **FR-010**: The repo-level constitution (`.gwt/memory/constitution.md`) must remain part of the planning gate.
 - **FR-011**: GitHub-backed embedded skills must prefer REST for PR/Issue metadata, PR create/update, CI/check reads, reviews, review comments, and comment operations where GitHub REST provides practical coverage.
 - **FR-012**: GraphQL may be used only for operations where GitHub REST does not provide practical coverage, specifically unresolved PR review thread discovery and thread reply/resolve mutations unless a future REST equivalent is adopted.
 - **FR-013**: REST-first GitHub skills must support direct token-based auth probes using `GH_TOKEN` first and `GITHUB_TOKEN` second, and must not depend solely on `gh auth status` as their readiness gate.
@@ -217,7 +220,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 ## Success Criteria
 
 - **SC-001**: Embedded skills describe one ordered artifact-first workflow from registration through analysis and implementation.
-- **SC-002**: Ownership is explicit: #1579 workflow/storage/API/completion, #1354 viewer, #1643 search.
+- **SC-002**: Ownership is explicit: #1579 workflow/storage/API/completion, `SPEC-1776` local SPEC viewer, #1354 GitHub Issue detail / legacy compatibility, #1643 search.
 - **SC-003**: `gwt-spec-implement` exists as the implementation owner and `gwt-spec-ops` no longer stops at normal handoff boundaries.
 - **SC-004**: `gwt-pr` and `gwt-pr-fix` auto-handle routine base merges and high-confidence PR fixes while escalating only ambiguous cases.
 - **SC-005**: Migration is explicitly in scope for both local specs and body-canonical issues.
@@ -343,13 +346,13 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **概要**: clarify 済みの `spec.md` から実装準備可能なプランニングアーティファクト群（`plan.md` / `research.md` / `data-model.md` / `quickstart.md` / `contract:*`）を生成する。
 - **トリガー条件**: `gwt-spec-ops` が clarify 完了後にプランニングフェーズへ遷移した場合、またはユーザーが直接プラン生成を要求した場合。
 - **ワークフロー**:
-  1. `spec.md` と `memory/constitution.md` を読み込み
+  1. `spec.md` と `.gwt/memory/constitution.md` を読み込み
   2. 技術コンテキスト（影響ファイル・モジュール・外部制約）を特定
   3. Constitution Check を実行（違反があればリデザインまたは Complexity Tracking に記録）
   4. サポートアーティファクト生成: `research.md`（未知事項・トレードオフ）、`data-model.md`（エンティティ・ライフサイクル）、`quickstart.md`（最小検証フロー）、`contract:*`（インターフェース契約）
   5. `plan.md` を作成（Summary / Technical Context / Constitution Check / Project Structure / Complexity Tracking / Phased Implementation）
   6. `gwt-spec-ops` へ返却、またはフロー継続中なら `gwt-spec-tasks` へ直接進行
-- **入力/出力**: 入力: `doc:spec.md`、`memory/constitution.md`。出力: `doc:plan.md` 他サポートアーティファクト群
+- **入力/出力**: 入力: `doc:spec.md`、`.gwt/memory/constitution.md`。出力: `doc:plan.md` 他サポートアーティファクト群
 - **依存スキル**: `gwt-spec-clarify`（spec.md にギャップがある場合の事前処理）、`gwt-spec-tasks`（後続）
 - **操作**: `spec_artifact.py --upsert` で各アーティファクトを Issue コメントとして作成/更新
 - **停止条件**: `spec.md` が存在しない、またはユーザー判断がプランニングをブロックしている場合
@@ -372,7 +375,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 
 ### gwt-spec-analyze
 
-- **概要**: 実装前の最終ゲートとして `spec.md` / `plan.md` / `tasks.md` / `memory/constitution.md` のアーティファクトセットを完全性・一貫性の観点で分析する。自動修復可能なギャップと真の判断ブロッカーを区別する。
+- **概要**: 実装前の最終ゲートとして `spec.md` / `plan.md` / `tasks.md` / `.gwt/memory/constitution.md` のアーティファクトセットを完全性・一貫性の観点で分析する。自動修復可能なギャップと真の判断ブロッカーを区別する。
 - **トリガー条件**: `gwt-spec-ops` がタスク生成完了後に分析ゲートへ遷移した場合、またはユーザーが直接分析を要求した場合。
 - **ワークフロー**:
   1. 必須アーティファクトセット（`spec.md` / `plan.md` / `tasks.md` / `constitution.md`）を読み込み

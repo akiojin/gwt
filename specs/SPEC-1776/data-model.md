@@ -1,91 +1,61 @@
-# Data Model: SPEC-1776 — TUI Migration
+# Data Model: SPEC-1776 — Parent UX Model
 
-## Core State
+## Core Runtime Surfaces
 
-### TuiState
+| Surface | Responsibility |
+|---|---|
+| `BranchDashboardState` | primary entry としての branch list、session count、selection、quick actions |
+| `SessionWorkspaceState` | session index、equal grid / maximize layout、focus、tab switch |
+| `ManagementWorkspaceState` | `Branches / SPECs / Issues / Profiles / Settings / Versions / Logs` の active tab と tab-local state |
+| `LaunchFlowState` | branch enter selector、Quick Start、full Wizard、hooks confirm |
+| `EnvProfilesState` | env profile の一覧、編集、切替、OS env 参照・置換 |
+| `SettingsTabState` | env を除く global settings categories の表示・選択 |
 
-Central application state for gwt-tui.
+## Branch Dashboard
 
-```
-TuiState
-  tabs: Vec<TabInfo>           -- Ordered list of open tabs
-  active_tab: usize            -- Index of currently focused tab
-  layout: LayoutTree           -- Split pane layout (binary tree)
-  management_visible: bool     -- Management panel toggle
-  management_focus: Section    -- Which management section has focus
-  prefix_active: bool          -- Ctrl+G prefix key state
-  prefix_timeout: Instant      -- When prefix expires (2s)
-  pane_manager: PaneManager    -- gwt-core pane lifecycle (owned)
-```
+| Entity | Fields |
+|---|---|
+| `BranchRowInfo` | `branch_name`, `session_count`, `pr_status`, `divergence`, `quick_start_available` |
+| `BranchEnterAction` | `OpenSingleSession`, `ShowSessionSelector`, `OpenWizard` |
+| `BranchSessionSelector` | `branch_name`, `session_ids`, `actions = [existing, add, full_wizard]` |
 
-### TabInfo
+## Session Workspace
 
-Metadata for a single tab.
+| Entity | Fields |
+|---|---|
+| `SessionRecord` | `session_id`, `pane_id`, `branch_name`, `tool_id`, `status`, `last_active_at` |
+| `SessionLayoutMode` | `EqualGrid` or `Maximized` |
+| `SessionWorkspaceState` | `records`, `focused_session_id`, `layout_mode`, `management_open`, `last_non_management_layout` |
+| `SessionGridState` | visible session ordering for `4+` sessions |
+| `SessionTabsState` | maximized 時の tab order と active tab |
 
-```
-TabInfo
-  pane_id: String              -- Maps to TerminalPane in PaneManager
-  tab_type: TabType            -- Agent | Shell
-  label: String                -- Display name in tab bar
-  branch: Option<String>       -- Git branch (agents only)
-  spec_id: Option<String>      -- Associated SPEC (agents only)
-  agent_type: Option<String>   -- "claude" | "codex" | "gemini"
-  color: AgentColor            -- Tab color indicator
-```
+## Management Workspace
 
-### LayoutTree
+| Entity | Fields |
+|---|---|
+| `ManagementTab` | `Branches`, `SPECs`, `Issues`, `Profiles`, `Settings`, `Versions`, `Logs` |
+| `ManagementWorkspaceState` | `active_tab`, `last_tab`, `tab_states` |
+| `SettingsCategory` | `General`, `Worktree`, `Agent`, `CustomAgents`, `Environment`, `AISettings` |
+| `SettingsManagementCategory` | visible subset = `General`, `Worktree`, `Agent`, `CustomAgents`, `AISettings` |
 
-Binary tree for split pane layout.
+## Env Profiles
 
-```
-LayoutNode
-  Leaf { pane_id: String }
-  Split { direction: H|V, ratio: f64, first: Node, second: Node }
-```
+| Entity | Fields |
+|---|---|
+| `EnvProfileSummary` | `name`, `is_active`, `entry_count` |
+| `EnvEntry` | `key`, `value`, `source_kind = literal or os_reference` |
+| `EnvProfilesState` | `profiles`, `selected_profile`, `editor_mode`, `os_env_catalog` |
 
-### ManagementState
+## Persistence Boundaries
 
-State for the management panel overlay.
+| Concern | Canonical Owner |
+|---|---|
+| session persistence | `gwt-core` session store / watcher |
+| env profile persistence | `ProfilesConfig` and related config persistence |
+| SPEC artifact storage | local SPEC storage (`SPEC-1579`) |
+| Issue cache / linkage | issue exact cache and linkage (`SPEC-1714`) |
 
-```
-ManagementState
-  selected_agent: usize        -- Cursor position in agent list
-  active_section: Section      -- AgentList | Detail | PrDashboard | Issues
-  pr_cache: Vec<PrStatus>      -- Cached PR statuses
-  issue_cache: Vec<IssueInfo>  -- Cached Issue list
-  summary_cache: Map<String, String>  -- pane_id -> AI summary
-```
+## Explicit Non-Goals in This Parent Model
 
-## Lifecycle
-
-```
-App start
-  -> Create PaneManager
-  -> Open default shell tab (or restore previous session)
-  -> Enter event loop
-
-Event loop (100ms tick)
-  -> Poll crossterm events (key, mouse, resize)
-  -> Poll PTY output from all panes
-  -> Render active frame
-
-Tab create (agent)
-  -> PaneManager::launch_agent() with BuiltinLaunchConfig
-  -> Auto-create worktree if branch specified
-  -> Add TabInfo to tabs vector
-  -> Switch to new tab
-
-Tab create (shell)
-  -> PaneManager::spawn_shell()
-  -> Add TabInfo to tabs vector
-
-Tab close
-  -> PaneManager::close_pane()
-  -> Worktree cleanup (if agent tab with auto-created worktree)
-  -> Remove TabInfo
-  -> Adjust active_tab index
-
-App shutdown
-  -> PaneManager::kill_all()
-  -> Save session state for restore
-```
+- `AI summary` data model
+- tmux pane data structures

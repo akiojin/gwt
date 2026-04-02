@@ -1,3 +1,0 @@
-- `crates/gwt-core/src/agent/codex.rs::CodexAgent::detect()` が env のみ参照
-- `crates/gwt-tauri/src/commands/agents.rs` fallback も env のみ参照
-- `crates/gwt-tauri/src/commands/terminal.rs::merge_profile_env()` は `profile.env` のみ反映し、`profile.ai.api_key` を env へ反映しない

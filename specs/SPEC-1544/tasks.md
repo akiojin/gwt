@@ -1,3 +1,5 @@
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+
 - [ ] T001 [S] [US-1] `IGitHubService` インターフェース定義
 - [ ] T002 [S] [US-1] データ型定義（GitHubIssueInfo, PrStatusInfo, PrPreflightResult, ReviewInfo, WorkflowRunInfo, CrashReportPayload 等）
 - [ ] T003 [F] [US-1] `GhCommandRunner` 基盤クラス実装（`System.Diagnostics.Process` + UniTask + JSON パース・エラーハンドリング）

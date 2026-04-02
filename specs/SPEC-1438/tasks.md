@@ -1,8 +1,36 @@
-- [x] T001 launch 時 registration を launch target worktree へ切り替える
-- [x] T002 Codex/Gemini の bundle を Claude 相当の gwt skill/assets まで拡張する
-- [x] T003 `gwt-spec-to-issue-migration` の migration script を skill bundle へ移す
-- [x] T004 sidebar の spec task 取得を最新 `gwt-spec` Issue ベースへ切り替える
-- [x] T005 scanner / prompt builder から local `specs/` 依存を除去する
-- [x] T006 `specs/specs.md` と `specs/archive/` を削除する
-- [x] T007 launch target worktree での手動確認を完了する
-- [x] T008 project-local generated asset 用の shared `info/exclude` managed block 自動補完を実装する
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+
+# SPEC-1438 Codex Hooks 対応 — タスク一覧
+
+## Phase 1: アセット準備
+
+- [ ] `.codex/hooks/scripts/gwt-forward-hook.mjs` 作成（Claude版コピー、コメント調整）
+- [ ] `.codex/hooks/scripts/gwt-block-git-branch-ops.mjs` 作成
+- [ ] `.codex/hooks/scripts/gwt-block-cd-command.mjs` 作成
+- [ ] `.codex/hooks/scripts/gwt-block-file-ops.mjs` 作成
+- [ ] `.codex/hooks/scripts/gwt-block-git-dir-override.mjs` 作成
+- [ ] `crates/gwt-core/build.rs` に `.codex/hooks/scripts` 監視追加
+
+## Phase 2: skill_registration.rs 拡張
+
+- [ ] `CODEX_HOOK_ASSETS` 定数追加（5 スクリプト、`include_str!` で埋め込み）
+- [ ] `codex_hook_script_command()` 関数追加（`.codex/hooks/scripts/` 向け）
+- [ ] `managed_codex_hooks_definition()` 関数追加（5 イベント: SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop）
+- [ ] `merge_managed_codex_hooks()` 関数追加（`.codex/hooks.json` へ書き出し）
+- [ ] `register_agent_skills_with_settings_at_project_root()` の Codex 分岐を `register_codex_assets_at()` に変更
+- [ ] `PROJECT_LOCAL_MANAGED_ASSET_EXCLUDE_LINES` に `/.codex/hooks.json` と `/.codex/hooks/scripts/gwt-*.mjs` 追加
+
+## Phase 3: Hook イベント処理
+
+- [ ] `codex_hook_events.rs` 新規作成（SessionStart→Running 追加、Notification 除外）
+- [ ] `config.rs` にモジュール登録 + `pub use`
+
+## Phase 4: セッション管理
+
+- [ ] `session.rs` の `agent_has_hook_support()` に codex 追加
+
+## Phase 5: 検証
+
+- [ ] `cargo test -p gwt-core -p gwt-tui`
+- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] `cargo fmt`

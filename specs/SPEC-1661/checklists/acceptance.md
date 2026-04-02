@@ -1,6 +1,0 @@
-- [ ] macOS (WKWebView) で IME 確定 Enter が送信をトリガーしない
-- [ ] Windows (WebView2) で IME 確定 Enter が送信をトリガーしない
-- [ ] Linux (WebKitGTK) で IME 確定 Enter が送信をトリガーしない
-- [ ] IME 非使用時の Enter による送信が正常に動作する
-- [ ] Shift+Enter による改行が正常に動作する
-- [x] vitest テスト追加・通過

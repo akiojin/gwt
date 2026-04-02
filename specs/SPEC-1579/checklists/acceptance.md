@@ -1,5 +1,5 @@
 - [x] #1579 is clearly the workflow/storage/API/completion canonical spec
-- [x] #1354 is clearly the viewer/detail canonical spec
+- [x] `SPEC-1776` is clearly the local SPEC viewer canonical spec, and `#1354` is limited to GitHub Issue detail / legacy issue-body compatibility
 - [x] #1643 is clearly the search canonical spec
 - [x] migration scope includes local specs and body-canonical issues
 - [x] #1579 explicitly states REST-first / GraphQL-only-where-needed for embedded GitHub skills

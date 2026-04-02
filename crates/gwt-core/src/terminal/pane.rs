@@ -216,6 +216,14 @@ impl TerminalPane {
         Self::read_tail_bytes_at_path(&path, max_bytes)
     }
 
+    /// Flush scrollback then read the entire raw transcript (ANSI preserved).
+    pub fn read_scrollback_raw(&mut self) -> Result<Vec<u8>, TerminalError> {
+        self.scrollback.flush()?;
+        std::fs::read(self.scrollback.file_path()).map_err(|e| TerminalError::ScrollbackError {
+            details: format!("failed to read scrollback file: {e}"),
+        })
+    }
+
     fn read_tail_bytes_at_path(path: &Path, max_bytes: usize) -> Result<Vec<u8>, TerminalError> {
         ScrollbackFile::read_tail_bytes_at(path, max_bytes)
     }
@@ -459,6 +467,25 @@ mod tests {
         let raw_str = String::from_utf8_lossy(&raw);
         assert!(raw_str.contains("\x1b[31m"), "Expected ANSI color code");
         assert!(raw_str.contains("hi "), "Expected plain text");
+    }
+
+    #[test]
+    fn test_read_scrollback_raw_returns_full_ansi_transcript() {
+        let config = make_config("/bin/echo", vec!["hello"]);
+        let mut pane = TerminalPane::new(config).expect("Failed to create pane");
+
+        pane.process_bytes(b"\x1b[31mold\x1b[0m line\n")
+            .expect("Failed to process first chunk");
+        pane.process_bytes(b"plain line\n")
+            .expect("Failed to process second chunk");
+
+        let raw = pane
+            .read_scrollback_raw()
+            .expect("Failed to read full raw scrollback");
+
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(raw_str.contains("\x1b[31mold\x1b[0m line"));
+        assert!(raw_str.contains("plain line"));
     }
 
     // 8. Kill test

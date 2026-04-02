@@ -1,8 +1,0 @@
-- [x] T001 [F] [US1] Add AssistantPanel tests covering multiline rendering, immediate optimistic user display, and failed-send rollback.
-- [x] T002 [F] [US1] Update AssistantPanel message rendering to preserve line breaks without forcing horizontal overflow.
-- [x] T003 [F] [US3] Update AssistantPanel send flow so the user message appears immediately, then synchronizes with backend state on success.
-- [x] T004 [FIN] [US3] Restore the input and remove the optimistic transcript entry on send failure.
-- [x] T005 [FIN] [US1] Run targeted frontend verification and record the result.
-- [x] T006 [F] [US4] Add AssistantPanel tests covering `ArrowUp` / `ArrowDown`, boundary-only history navigation, and draft restoration.
-- [x] T007 [F] [US4] Add session-local sent-input history state and composer keyboard handling to AssistantPanel.
-- [x] T008 [FIN] [US4] Re-run targeted frontend verification and reflect the result in the spec.

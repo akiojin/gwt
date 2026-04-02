@@ -1,7 +1,7 @@
 ## Canonical Ownership Model
 
 - Workflow/Storage/API/Completion canonical: #1579
-- Viewer / Issue detail rendering: #1354
+- Viewer / detail rendering: `SPEC-1776` for local SPEC viewing, `#1354` for GitHub Issue detail / legacy issue-body compatibility
 - Search / discovery: #1643
 
 ## Lifecycle Order

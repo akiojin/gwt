@@ -1,4 +1,8 @@
-### 背景
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+
+# プロジェクトローカル資産管理
+
+## Background
 
 gwt はプロジェクトを開いた際、AI エージェント（Claude Code, Codex, Gemini 等）用のスキル・コマンド・フック・設定ファイルを対象プロジェクトのローカルディレクトリに自動配置する。これらのファイルはユーザーのリポジトリに直接書き込まれるが、**リポジトリの Git 履歴には含めるべきでない**（gwt 固有のファイルであり、プロジェクトのソースコードではない）。
 
@@ -6,7 +10,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 
 **現行 Rust 実装**: `crates/gwt-core/src/config/skill_registration.rs` の `ensure_project_local_exclude_rules` 関数で実装済み。Unity C# への移植が必要。
 
-### 現行の除外パターン
+## Current Exclude Patterns
 
 ```text
 # BEGIN gwt managed local assets
@@ -19,7 +23,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 # END gwt managed local assets
 ```
 
-### レガシーパターン（移行時に除去）
+## Legacy Patterns
 
 ```text
 .gwt/
@@ -27,7 +31,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 /.codex/skills/gwt-*/**
 ```
 
-### ユーザーシナリオ
+## User Stories
 
 | ID | シナリオ | 優先度 |
 |----|---------|--------|
@@ -69,7 +73,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 2. `ensure_project_local_exclude_rules` がエラーを返す（`Malformed managed exclude block`）
 3. ファイルは変更されない（安全側に倒す）
 
-### 機能要件
+## Functional Requirements
 
 | ID | 要件 | 関連US |
 |----|------|--------|
@@ -112,7 +116,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 | `.codex/skills/gwt-*/SKILL.md` | Codex 用スキル定義 | なし |
 | `.gemini/skills/gwt-*/SKILL.md` | Gemini 用スキル定義 | なし |
 
-### 非機能要件
+## Non-Functional Requirements
 
 | ID | 要件 |
 |----|------|
@@ -120,7 +124,7 @@ gwt はプロジェクトを開いた際、AI エージェント（Claude Code, 
 | NFR-002 | ファイル書き込みはアトミック性を考慮（途中失敗でも既存ファイルを壊さない） |
 | NFR-003 | `.git/info/exclude` のパーミッションを元のファイルと同等に維持する |
 
-### 成功基準
+## Success Criteria
 
 | ID | 基準 | 検証方法 |
 |----|------|----------|

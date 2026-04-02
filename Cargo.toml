@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     "crates/gwt-core",
-    "crates/gwt-tauri",
+    "crates/gwt-tui",
 ]
 default-members = [
-    "crates/gwt-tauri",
+    "crates/gwt-tui",
 ]
 
 [workspace.package]
@@ -28,7 +28,7 @@ semver = "1"
 # Self-update payload extraction
 flate2 = "1.0"
 tar = "0.4"
-zip = "8.3"
+zip = "8.2"
 
 # Git operations
 gix = { version = "0.80", default-features = false, features = [
@@ -69,14 +69,11 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 
-# HTTP server (axum – lightweight IPC for offloading WKWebView main thread)
-axum = { version = "0.8", features = ["json"] }
-
 # HTTP client (blocking)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 # WebSocket
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.28"
 futures-util = "0.3"
 
 # Base64 encoding

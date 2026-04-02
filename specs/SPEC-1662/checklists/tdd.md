@@ -1,4 +1,0 @@
-- RED: extend `AssistantPanel.test.ts` so the suite fails unless multiline content is preserved in rendering, user messages appear before `assistant_send_message` resolves, and failed sends restore the composer state.
-- GREEN: update `AssistantPanel.svelte` CSS and send-state handling until the targeted suite passes while existing IME/Enter behavior tests continue to pass.
-- RED: add history-navigation tests that fail until `ArrowUp` / `ArrowDown` can traverse sent user inputs and restore the draft at the latest position.
-- VERIFY: run `pnpm test src/lib/components/AssistantPanel.test.ts` and `npx svelte-check --tsconfig ./tsconfig.json`.

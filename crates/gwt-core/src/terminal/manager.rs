@@ -14,6 +14,7 @@ use tracing::instrument;
 
 use super::{
     pane::{PaneConfig, TerminalPane},
+    scrollback::ScrollbackFile,
     BuiltinLaunchConfig, TerminalError,
 };
 
@@ -47,7 +48,9 @@ impl PaneManager {
             return None;
         }
         let mut pane = self.panes.remove(index);
+        let pane_id = pane.pane_id().to_string();
         let _ = pane.kill();
+        let _ = ScrollbackFile::cleanup(&pane_id);
         // Adjust active_index so it stays in bounds.
         if !self.panes.is_empty() {
             if self.active_index >= self.panes.len() {
@@ -124,6 +127,7 @@ impl PaneManager {
     /// Remove a pane by its ID (does not kill it first).
     pub fn remove_pane(&mut self, pane_id: &str) {
         self.panes.retain(|p| p.pane_id() != pane_id);
+        let _ = ScrollbackFile::cleanup(pane_id);
         // Clamp active index
         if !self.panes.is_empty() && self.active_index >= self.panes.len() {
             self.active_index = self.panes.len() - 1;
@@ -922,6 +926,26 @@ mod tests {
         assert_eq!(mgr.active_index(), 1);
         let active = mgr.active_pane().unwrap();
         assert_eq!(active.pane_id(), pane_id);
+    }
+
+    #[test]
+    fn test_close_pane_cleans_up_scrollback_file() {
+        let mut mgr = PaneManager::new();
+        let pane = create_test_pane("scrollback-cleanup");
+        let scrollback_path = ScrollbackFile::scrollback_path_for_pane("scrollback-cleanup")
+            .expect("scrollback path");
+
+        mgr.add_pane(pane).unwrap();
+        assert!(
+            scrollback_path.exists(),
+            "scrollback file should exist while pane is alive"
+        );
+
+        let _ = mgr.close_pane(0);
+        assert!(
+            !scrollback_path.exists(),
+            "scrollback file should be removed when pane closes"
+        );
     }
 
     // --- 32. panes_for_project filters by project root ---

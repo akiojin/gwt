@@ -20,6 +20,8 @@ Hard routing rule:
 - If this skill determines that a new SPEC is required, create it through
   `gwt-spec-register`, then continue through `gwt-spec-ops`.
 - Do not create both a plain Issue and a SPEC for the same request.
+- A local SPEC directory is not a GitHub Issue. When a SPEC is needed, create or reuse the
+  local SPEC as the source of truth and treat any Issue as an optional related record.
 
 ## Mandatory preflight: search existing issues first
 
@@ -60,7 +62,9 @@ Create a new local SPEC directory when the request includes any of these:
 - cross-cutting or multi-subsystem changes
 - non-trivial technical or product tradeoffs
 
-When the need for a SPEC is clear, do not create a plain Issue first. Create the SPEC through `gwt-spec-register` and continue through `gwt-spec-ops`.
+When the need for a SPEC is clear, do not create a plain Issue first. Create the SPEC through
+`gwt-spec-register` and continue through `gwt-spec-ops`. Only create a plain Issue too when the
+user explicitly asks for separate GitHub tracking.
 
 ## Title rules for plain Issues
 

@@ -1,4 +1,8 @@
-### 背景
+> **Historical Status**: この closed SPEC は旧 Unity/C# 実装前提の履歴仕様である。未完了 task は旧 backlog の保存であり、現行の完了条件ではない。現行の terminal emulation は `SPEC-1541` と `SPEC-1776` を参照する。
+
+# PTY 管理基盤
+
+## Background
 
 現行の gwt-core は Rust の `portable-pty` クレートで PTY（疑似端末）管理を実装している。Unity 6 / C# への全面移行に伴い、クロスプラットフォーム PTY 管理を C# で再実装する必要がある。
 
@@ -23,7 +27,7 @@
 | `PtySession.cs` | Process ラッパー。`OutputReceived` / `ProcessExited` イベント、`IObservable` の `OutputStream` を提供 |
 | `PlatformShellDetector.cs` | `IPlatformShellDetector` 実装。macOS/Windows/Linux のデフォルトシェルを検出 |
 
-### ユーザーシナリオ
+## User Stories
 
 - **US-1 [P0]**: アプリ起動時に OS 上の利用可能なシェル（bash, zsh, PowerShell, fish 等）を検出し、一覧を返せる — 実装済み (`PlatformShellDetector`)
 - **US-2 [P0]**: 指定シェルで PTY を生成し、入出力を UniTask ベースで非同期ストリーミングできる — 実装済み (`PtyService.SpawnAsync` + `PtySession.OutputStream`)
@@ -32,7 +36,7 @@
 - **US-5 [P1]**: 環境変数キャプチャモード（`login_shell` / `process_env`）を切り替えてシェルを起動できる — 未実装
 - **US-6 [P0]**: アプリ終了時に稼働中エージェントがあれば確認ダイアログが表示され、承認後に全 PTY が graceful shutdown される — 未実装
 
-### 機能要件
+## Functional Requirements
 
 | ID | 要件 | 実装状態 |
 |---|---|---|
@@ -59,7 +63,7 @@ IPtyService:
   - GetStatus(sessionId) → PtySessionStatus
 ```
 
-### 非機能要件
+## Non-Functional Requirements
 
 | ID | 要件 | 実装状態 |
 |---|---|---|
@@ -70,7 +74,7 @@ IPtyService:
 | NFR-005 | PtyManager は VContainer で Singleton ライフタイムとして DI 登録する（`builder.RegisterEntryPoint(Lifetime.Singleton)`） | ✅ 実装済み |
 | NFR-006 | 全ての非同期 PTY 操作は CancellationToken を受け取り、適切にキャンセル可能とする | ✅ 実装済み |
 
-### 成功基準
+## Success Criteria
 
 | ID | 基準 | 実装状態 |
 |---|---|---|
@@ -81,14 +85,14 @@ IPtyService:
 | SC-005 | アプリ終了時の確認ダイアログ→graceful shutdown フローが動作する | 🔲 未実装 |
 | SC-006 | Pty.Net移行後、`isatty()=true` かつネイティブSIGWINCHが動作する | 🔲 未実装（MVP前に検証必須） |
 
-### 既知の制約事項
+## Known Constraints
 
 | 制約 | 影響 | 対応方針 |
 |---|---|---|
 | `isatty()=false`（現行Process実装） | 一部 CLI ツール（git, npm 等）が非インタラクティブモードで動作。プログレスバー等が表示されない場合がある | **Pty.Net移行で解消予定（MVP必須）**。移行までは `FORCE_COLOR=1` 等の環境変数で緩和 |
 | ネイティブ PTY リサイズ不可（現行Process実装） | シェル側に SIGWINCH が送信されないため、vim 等のフルスクリーンアプリでリサイズが反映されない | **Pty.Net移行で解消予定（MVP必須）**。forkpty/ConPTYによるネイティブリサイズ対応 |
 
-### インタビュー確定事項（2026-03-10追記）
+## Interview Notes
 
 **リサイズ戦略:**
 - PTYリサイズは200msデバウンス + 即時初回実行

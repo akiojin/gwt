@@ -1,3 +1,5 @@
+> **Status Note**: この SPEC は実装完了により closed。task は履歴として保持する。
+
 # Tasks
 
 - [x] Add Assistant runtime state for active run tracking and FIFO queued inputs

@@ -1,204 +1,125 @@
-# Implementation Plan: SPEC-1776 — Migrate from Tauri GUI to ratatui TUI
+# Plan: SPEC-1776 — 旧TUI UX を基準にした ratatui TUI 再設計
 
 ## Summary
 
-Replace gwt's Tauri v2 + Svelte 5 GUI with a ratatui + crossterm TUI. Create a new `gwt-tui` crate that serves as the frontend, using gwt-core's existing terminal/git/agent/config APIs unchanged. Delete `gwt-tauri` and `gwt-gui` after migration.
+`SPEC-1776` は「旧TUIの UX を現行 backend 上で再構成する親 SPEC」として扱う。単純な `gwt-cli` 復元は採らず、`gwt-core` の `native PTY`、hooks、SPEC/Issue integration を再利用しながら、`branch list` 中心の UX、常設マルチモード、管理画面タブ、`Profiles = Env profiles` を再設計する。
 
-## Technical Context
+## Cross-Spec Inventory
 
-### Existing Infrastructure (gwt-core)
+| Concern | Canonical SPEC | Plan での扱い |
+|---|---|---|
+| Parent UX / migration sequencing | `SPEC-1776` | 比較マトリクス、初回完成条件、child sync 順序を持つ |
+| Terminal emulation | `SPEC-1541` | `native PTY + vt100` を維持し、scrollback / selection / resize 契約を流用 |
+| Interaction policy | `SPEC-1770` | `Enter`、管理画面トグル、grid/maximize 操作へ再配線 |
+| Workspace shell | `SPEC-1654` | `tab-first` 記述を `branch-first + permanent multi-mode` に同期する follow-up を切る |
+| Local git / worktree | `SPEC-1644` | branch-first UX でも local git/worktree owner はそのまま参照する |
+| Agent catalog / launch contract | `SPEC-1646` | Wizard / launch selector は child contract を参照する |
+| Session persistence | `SPEC-1648` | `1ブランチ = Nセッション` でも persistence owner は変えない |
+| SPECs tab | `SPEC-1777` | tab form 維持。一覧・詳細・launch entry の親遷移だけ合わせる |
+| Quick Start | `SPEC-1782` | Branches 起点の再開導線を維持し、multi-session selector に接続する |
+| Hooks merge | `SPEC-1786` | launch flow の child 契約として接続 |
+| SPEC workflow / storage | `SPEC-1579` | local artifact 正本を維持 |
+| Workspace initialization | `SPEC-1787` | Branches / SPEC-first 導線との整合を確認 |
+| Issue detail | `SPEC-1354` | Issues detail rendering は child 正本を維持する |
+| Issue search / discovery | `SPEC-1643` | Issues list/search の parent dependency として監査する |
+| Issue linkage / cache | `SPEC-1714` | Branch row / Issues detail の source of truth として再利用 |
+| Profiles persistence | `SPEC-1542`, `SPEC-1656` | env profile 保存形を再利用 |
+| Assistant semantics | `SPEC-1636` | Shell/Assistant interrupt semantics を上書きしない |
+| Custom agents | `SPEC-1779` | 初回は後続だが owner として inventory に含める |
 
-- **PaneManager**: Multi-pane lifecycle management with `launch_agent()`, `spawn_shell()`, tab navigation, resize
-- **TerminalPane**: PTY I/O via `write_input()`/`process_bytes()`, status tracking, scrollback persistence
-- **PtyHandle**: Cross-platform PTY via portable-pty v0.9 (macOS, Linux, Windows ConPTY)
-- **AgentColor**: Color enum with named colors + RGB + indexed (maps directly to ratatui::Color)
-- **Git/Worktree**: Full worktree management, branch operations, Issue linking
-- **Agent**: Claude/Codex/Gemini integration, session store, scanner
-- **Config**: Settings, profiles, skills, recent projects
+## Design Decisions
 
-### New Dependencies
+- 旧TUIの価値は `branch list` を中心に置いた情報設計と操作意味にある
+- `tmux` の実装は捨てるが、複数セッション運用の価値は `permanent multi-mode` に置換する
+- Session surface は通常時 `equal grid`、集中時 `maximize + tab switch`
+- 管理画面は `tabbed management workspace` を採用し、初回は `Branches / SPECs / Issues / Profiles` に絞る
+- `Profiles` は環境変数プロファイル専用とし、一般設定は後続 `Settings` フェーズへ回す
+- branch-first core の安定後は、既存実装を活かして `Settings`、`Versions`、`Logs` を順次再露出する
+- `Profiles` は env 専任のまま維持し、`Settings` には environment category を戻さない
+- `AI summary` は引き続き後続フェーズ
 
-- `ratatui` (latest): TUI rendering framework
-- `crossterm` (latest): Terminal I/O backend
-- `vt100` (existing in gwt-core): VT100 emulator for PTY output parsing
+## Architecture Direction
 
-### Key Decision
+### gwt-core reuse
 
-gwt-tui is a thin UI layer. All business logic lives in gwt-core. Logic currently in gwt-tauri's command handlers that belongs in core (agent launch flow, PR polling, session summary triggers) will be extracted to gwt-core modules.
+- `terminal::*`
+- `agent::launch`
+- `session_store` / `session_watcher`
+- `config::skill_registration`
+- `git::issue` / `git::issue_spec` / `git::local_spec`
+- `ProfilesConfig` と関連 persistence
 
-## Constitution Check
+### gwt-tui redesign targets
 
-No `memory/constitution.md` found. Checked against CLAUDE.md rules:
-
-- **Simplicity**: TUI is simpler than Tauri GUI (no IPC, no web stack, no Svelte). Compliant.
-- **TDD**: Each phase starts with tests. Compliant.
-- **SPEC required**: This SPEC satisfies the requirement. Compliant.
-- **No workarounds**: Clean replacement, not a patch. Compliant.
-- **Existing file maintenance**: gwt-core files are maintained, not duplicated. Compliant.
-
-## Project Structure
-
-```text
-crates/
-  gwt-core/         # Unchanged (except business logic extracted from gwt-tauri)
-  gwt-tui/          # NEW — replaces gwt-tauri
-    Cargo.toml
-    src/
-      main.rs
-      app.rs
-      state.rs
-      event.rs
-      renderer.rs
-      ui/
-        mod.rs
-        tab_bar.rs
-        terminal_view.rs
-        status_bar.rs
-        split_layout.rs
-        management/
-          mod.rs
-          agent_list.rs
-          detail_panel.rs
-          pr_dashboard.rs
-          issue_panel.rs
-          launch_dialog.rs
-      input/
-        mod.rs
-        keybind.rs
-        voice.rs
-  gwt-tauri/         # DELETED in Phase 6
-gwt-gui/             # DELETED in Phase 6
-```
-
-## Complexity Tracking
-
-| Risk | Mitigation |
-|------|-----------|
-| VT100→ratatui rendering fidelity | Reuse v6.x proven pattern; extensive snapshot tests |
-| Ctrl+G prefix key vs PTY passthrough | Strict state machine; never forward Ctrl+G |
-| Cross-platform PTY differences | Already handled by gwt-core portable-pty |
-| Business logic extraction from gwt-tauri | Incremental; each moved piece gets its own test |
-| Split pane resize math | Dedicated module with property-based tests |
+- `branch list` を中心にした entry surface
+- `1ブランチ = Nセッション` を扱う selector と session index
+- `equal grid / maximize` を持つ session workspace
+- `tabbed management workspace`
+- `Profiles` 独立タブ
 
 ## Phased Implementation
 
-### Phase 0: Scaffold (FR-001)
+### Phase 0: Parent Spec Reset
 
-**Goal**: gwt-tui crate exists in workspace, compiles, shows empty TUI.
+- `SPEC-1776` の spec / plan / tasks / research / data-model / quickstart を新前提へ更新
+- `旧TUI / 現行 gwt-tui / 現行 gwt-core / 新目標` の比較マトリクスを作る
+- child SPEC へ波及する更新箇所を inventory 化する
+- workflow / persistence / integration 系を含め、関連 SPEC を `sync required / reference only / deferred` に分類する
 
-- Add `crates/gwt-tui/` to Cargo workspace
-- Cargo.toml with dependencies: ratatui, crossterm, tokio, gwt-core
-- `main.rs`: Initialize crossterm raw mode, create ratatui Terminal, run event loop
-- `app.rs`: App struct with empty render cycle
-- Verify: `cargo build -p gwt-tui` succeeds, `cargo run -p gwt-tui` shows blank TUI
+### Phase 1: Branch-First Shell Model
 
-### Phase 1: Minimal TUI (FR-002, FR-003, FR-007, FR-009, FR-010, FR-016)
+- `Branches` を唯一の primary entry に戻す
+- ブランチ行の session count 表示を追加する
+- `Enter` を `no session / one session / many sessions` の 3 分岐へ作り直す
+- `hidden pane` なしの session index を作る
 
-**Goal**: Single shell tab works with full PTY rendering.
+### Phase 2: Permanent Multi-Mode Session Workspace
 
-- `renderer.rs`: VT100 Cell → ratatui Cell conversion (color mapping, attributes)
-- `ui/terminal_view.rs`: Render PTY output buffer to ratatui Frame
-- `ui/tab_bar.rs`: Tab bar with name, branch, status color
-- `ui/status_bar.rs`: Current tab info
-- `state.rs`: TuiState with tabs vector, active index
-- `event.rs`: Key input → PTY write, PTY output → process_bytes, resize events
-- `input/keybind.rs`: Ctrl+G prefix key detection (passthrough vs intercept)
-- Shell tab: Ctrl+G,s spawns shell via PaneManager::spawn_shell()
-- Scrollback: Scroll mode via Ctrl+G,PgUp
-- Verify: Launch gwt-tui, open shell tab, type commands, see output with colors
+- `equal grid` を通常レイアウトにする
+- `4件以上` を前提に layout rules を作る
+- focus session の maximize toggle を作る
+- maximize 時の tab switch を作る
+- 管理画面開閉と layout restore を接続する
 
-### Phase 2: Agent Tabs + Management Panel (FR-004, FR-005, FR-006, FR-015)
+### Phase 3: Management Workspace Core
 
-**Goal**: Launch agents, toggle management panel.
+- `Branches / SPECs / Issues / Profiles` の 4 タブへ整理する
+- `SPECs / Issues` は一覧・詳細・launch entry を維持する
+- `Profiles` は env profile 管理に絞る
+- `Settings` は non-env categories (`General / Worktree / Agent / Custom / AI`) を扱う
 
-- `ui/management/launch_dialog.rs`: Agent type selector, branch/Issue input, directory picker
-- `ui/management/agent_list.rs`: Agent list with status indicators
-- `ui/management/detail_panel.rs`: Selected agent detail (branch, worktree, status, uptime)
-- `ui/management/mod.rs`: Panel layout orchestration
-- Ctrl+G toggle management panel visibility
-- Agent launch: Ctrl+G,n opens dialog → PaneManager::launch_agent() with auto-worktree
-- Quick actions: kill (k), restart (r), switch to tab (Enter)
-- Extract agent launch parameter builder from gwt-tauri to gwt-core
-- Verify: Launch agent, see in management panel, kill/restart, auto-worktree works
+### Phase 4: Launch Flow Integration
 
-### Phase 3: Split Panes (FR-008)
+- multi-session aware な branch enter flow を作る
+- `既存へ入る / 追加起動 / フルWizard` selector を作る
+- `Quick Start` を新しい selector と両立させる
+- hooks confirm と skill registration を launch path へ再接続する
 
-**Goal**: Side-by-side terminal views.
+### Phase 5: Child SPEC Synchronization
 
-- `ui/split_layout.rs`: LayoutTree (binary tree of splits)
-- Ctrl+G,v for vertical split, Ctrl+G,h for horizontal split
-- Pane focus switching within splits
-- Resize proportional distribution
-- Verify: Split two agents side by side, both render correctly, resize works
+- `SPEC-1654` を新 shell model に合わせる
+- `SPEC-1770` を新 shortcut / layout policy に合わせる
+- `SPEC-1777` を management tabs と launch entry に同期する
+- `SPEC-1782` を `1ブランチ = Nセッション` 前提へ同期する
+- `SPEC-1579` / `SPEC-1787` の workflow entry contract が branch-first UX と矛盾しないか監査する
+- `SPEC-1714` / `SPEC-1354` / `SPEC-1643` の Issue list/detail/linkage contract を監査する
+- `SPEC-1786` の hooks confirm が新しい branch enter selector と矛盾しないか監査する
+- 必要に応じて `SPEC-1542` / `SPEC-1656` の profile wording を見直す
+- `SPEC-1636` / `SPEC-1779` / `SPEC-1648` / `SPEC-1646` / `SPEC-1644` は reference-only 監査対象として整合確認する
 
-### Phase 4: Extended Features (FR-011, FR-012, FR-013)
+### Deferred Phase
 
-**Goal**: PR dashboard, Issue/SPEC panel, AI summaries.
+- `AI summary`
+- custom agent UI refresh
 
-- Extract PR status polling from gwt-tauri to gwt-core::git (new module)
-- Extract session summary trigger from gwt-tauri to gwt-core::ai
-- `ui/management/pr_dashboard.rs`: PR status, CI checks, merge state
-- `ui/management/issue_panel.rs`: Issue/SPEC search and list
-- AI summary: Display in detail panel, periodically updated from scrollback
-- Verify: PR status shows in panel, Issues searchable, summaries generate
+## Verification Baseline
 
-### Phase 5: Voice Input (FR-014)
-
-**Goal**: Voice input works in TUI.
-
-- Extract voice runtime from gwt-tauri to gwt-core (new module)
-- `input/voice.rs`: Hotkey activation, audio capture, Qwen3-ASR transcription
-- Transcribed text injected into active PTY
-- Verify: Hold hotkey, speak, text appears in terminal
-
-### Phase 6: Cleanup + Release (SC-007, SC-008)
-
-**Goal**: Remove old code, update all CI/CD pipelines.
-
-#### Code Removal
-
-- Delete `crates/gwt-tauri/`
-- Delete `gwt-gui/` (includes Playwright E2E, vitest, Svelte components)
-- Delete `installers/` (macOS .dmg builder, Windows .msi builder)
-- Delete `tauri.conf.json`
-- Update `Cargo.toml` workspace members
-
-#### CI/CD Pipeline Updates
-
-**test.yml** (currently: cargo test + vitest + Playwright E2E):
-- Keep: `cargo test -p gwt-core -p gwt-tui`
-- Remove: vitest job (no frontend)
-- Remove: Playwright E2E job (no web UI)
-- Remove: Tauri WebDriver E2E job (no Tauri)
-- Add: TUI snapshot tests via `cargo test -p gwt-tui`
-
-**release.yml** (currently: Tauri build → .dmg/.msi/.AppImage):
-- Replace: `cargo tauri build` → `cargo build --release -p gwt-tui`
-- Remove: pnpm/Node.js installation steps
-- Remove: macOS code signing + notarization (`build-installer.sh`)
-- Remove: Windows MSI builder (`build-msi.ps1`)
-- Add: Cross-compile for Linux (x86_64, aarch64), macOS (universal), Windows (x86_64)
-- Artifacts: plain binaries (gwt-tui / gwt-tui.exe), no installers
-
-**lint.yml** (currently: Clippy + svelte-check + markdownlint + commitlint):
-- Keep: Clippy, Rustfmt, markdownlint, commitlint
-- Remove: `svelte-check` job
-
-**coverage.yml** (currently: Rust LCOV + Frontend LCOV):
-- Keep: `cargo llvm-cov` for Rust coverage
-- Remove: vitest coverage job
-- Update: Codecov flags (remove `frontend` flag)
-
-#### Documentation
-
-- Update README.md / README.ja.md (installation = download binary, no Tauri)
-- Update CLAUDE.md (remove Tauri/GUI references, add TUI dev instructions)
-
-#### TUI E2E Testing Strategy
-
-Since Playwright E2E (22 test files) is deleted, TUI testing uses:
-1. **ratatui TestBackend snapshot tests** — verify rendered screen output
-2. **PTY integration tests** — spawn gwt-tui subprocess, send keystrokes via stdin, verify stdout
-3. **gwt-core tests** — unchanged, provide coverage for terminal/git/agent logic
-
-Verify: Full CI passes, release produces correct cross-platform binaries
+- artifact update: `markdownlint` と diff review
+- implementation start gate:
+  - comparison matrix が揃っている
+  - child sync list が揃っている
+  - `Branches / Session / Wizard / SPECs / Issues / Profiles` の受け入れ条件が tasks に落ちている
+- code verification when implementation starts:
+  - `cargo test -p gwt-core -p gwt-tui`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - Branches → Session → Wizard → SPECs/Issues → Profiles の manual walkthrough

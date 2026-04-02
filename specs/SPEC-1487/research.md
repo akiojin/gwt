@@ -1,5 +1,0 @@
-- `gwt-project-search` の skill 実体は repo に存在する: [plugins/gwt/skills/gwt-project-search/SKILL.md](https://github.com/akiojin/gwt/blob/develop/plugins/gwt/skills/gwt-project-search/SKILL.md)
-- `gwt-project-search` command も存在する: [plugins/gwt/commands/gwt-project-search.md](https://github.com/akiojin/gwt/blob/develop/plugins/gwt/commands/gwt-project-search.md)
-- managed skill registration にも含まれている: [crates/gwt-core/src/config/skill_registration.rs](https://github.com/akiojin/gwt/blob/develop/crates/gwt-core/src/config/skill_registration.rs)
-- それにもかかわらず、実セッションの available skills 一覧には露出していなかった
-- 現行 `gwt-project-search` SKILL.md の `index-issues` 例は `--project-root` を省略しており、実装 CLI と齟齬がある可能性がある

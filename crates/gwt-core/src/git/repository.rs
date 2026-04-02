@@ -41,8 +41,6 @@ fn strip_extended_length_prefix(path: &str) -> Cow<'_, str> {
 pub enum RepoType {
     /// Normal git repository (.git/ is a directory)
     Normal,
-    /// Bare repository (is-bare-repository = true)
-    Bare,
     /// Inside a worktree (normal or bare-based)
     Worktree,
     /// Empty directory (no files including hidden)
@@ -62,7 +60,7 @@ pub struct HeaderContext {
     pub branch_name: Option<String>,
     /// Repository type
     pub repo_type: RepoType,
-    /// Bare repository name (for worktrees in bare-based projects)
+    /// Parent repository name (for worktrees)
     pub bare_name: Option<String>,
 }
 
@@ -76,7 +74,6 @@ impl HeaderContext {
     pub fn format_display(&self) -> String {
         let path = self.working_dir.display();
         match self.repo_type {
-            RepoType::Bare => format!("{} [bare]", path),
             RepoType::Worktree if self.bare_name.is_some() => {
                 format!(
                     "{} [{}] ({})",
@@ -108,49 +105,11 @@ pub fn is_git_repo(path: &Path) -> bool {
     matches!(output, Ok(o) if o.status.success())
 }
 
-/// Check if a repository is bare (gwt-spec issue)
-pub fn is_bare_repository(path: &Path) -> bool {
-    let output = crate::process::command("git")
-        .args(["rev-parse", "--is-bare-repository"])
-        .current_dir(path)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() == "true",
-        _ => false,
-    }
-}
-
 /// Check if inside a worktree (not the main repo) (gwt-spec issue)
 pub fn is_inside_worktree(path: &Path) -> bool {
     // A worktree has a .git file (not directory) pointing to the main repo
     let git_path = path.join(".git");
     git_path.is_file()
-}
-
-/// Find a bare repository (*.git directory) in the given directory (gwt-spec issue)
-///
-/// Returns the path to the first bare repository found, if any.
-/// This is used to detect bare repos when gwt is started from the parent directory.
-pub fn find_bare_repo_in_dir(path: &Path) -> Option<std::path::PathBuf> {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(_) => return None,
-    };
-
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        if entry_path.is_dir() {
-            // Check if it's a *.git directory and is a bare repository
-            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                if name.ends_with(".git") && is_bare_repository(&entry_path) {
-                    return Some(entry_path);
-                }
-            }
-        }
-    }
-
-    None
 }
 
 /// Detect the repository type at a given path (gwt-spec issue)
@@ -165,12 +124,7 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
         return RepoType::NonRepo;
     }
 
-    // 3. Check if it's a bare repository
-    if is_bare_repository(path) {
-        return RepoType::Bare;
-    }
-
-    // 4. Check if inside a worktree
+    // 3. Check if inside a worktree
     if is_inside_worktree(path) {
         return RepoType::Worktree;
     }
@@ -181,11 +135,7 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
 /// Get header context for display (gwt-spec issue)
 pub fn get_header_context(path: &Path) -> HeaderContext {
     let repo_type = detect_repo_type(path);
-    let branch_name = if repo_type != RepoType::Bare {
-        get_current_branch(path)
-    } else {
-        None
-    };
+    let branch_name = get_current_branch(path);
 
     let bare_name = if repo_type == RepoType::Worktree {
         detect_bare_parent_name(path)
@@ -233,13 +183,14 @@ fn detect_bare_parent_name(path: &Path) -> Option<String> {
     // Format: "gitdir: /path/to/repo.git/worktrees/branch-name"
     let gitdir = content.strip_prefix("gitdir: ")?.trim();
 
-    // Extract the bare repo path (remove /worktrees/xxx suffix)
+    // Extract the repo path (remove /worktrees/xxx suffix)
     let bare_path = PathBuf::from(gitdir);
     let parent = bare_path.parent()?.parent()?; // Go up from worktrees/branch
 
-    // Check if it's actually a bare repo
-    if is_bare_repository(parent) {
-        parent.file_name()?.to_str().map(String::from)
+    // Check if it looks like a bare repo (name ends with .git)
+    let name = parent.file_name()?.to_str()?;
+    if name.ends_with(".git") {
+        Some(name.to_string())
     } else {
         None
     }
@@ -1478,18 +1429,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_repo_type_bare() {
-        let temp = TempDir::new().unwrap();
-        crate::process::command("git")
-            .args(["init", "--bare"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        let result = detect_repo_type(temp.path());
-        assert_eq!(result, RepoType::Bare);
-    }
-
-    #[test]
     fn test_detect_repo_type_worktree() {
         let (temp, repo) = create_test_repo_with_commit();
 
@@ -1561,23 +1500,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_bare_repository_true() {
-        let temp = TempDir::new().unwrap();
-        crate::process::command("git")
-            .args(["init", "--bare"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        assert!(is_bare_repository(temp.path()));
-    }
-
-    #[test]
-    fn test_is_bare_repository_false() {
-        let (temp, _repo) = create_test_repo();
-        assert!(!is_bare_repository(temp.path()));
-    }
-
-    #[test]
     fn test_is_git_repo_true() {
         let (temp, _repo) = create_test_repo();
         assert!(is_git_repo(temp.path()));
@@ -1607,71 +1529,7 @@ mod tests {
         assert!(!is_inside_worktree(temp.path()));
     }
 
-    #[test]
-    fn test_is_inside_worktree_false_for_bare() {
-        let temp = TempDir::new().unwrap();
-        crate::process::command("git")
-            .args(["init", "--bare"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        assert!(!is_inside_worktree(temp.path()));
-    }
-
-    #[test]
-    fn test_find_bare_repo_in_dir_found() {
-        let temp = TempDir::new().unwrap();
-        // Create a bare repository with .git suffix
-        let bare_path = temp.path().join("my-repo.git");
-        std::fs::create_dir(&bare_path).unwrap();
-        crate::process::command("git")
-            .args(["init", "--bare"])
-            .current_dir(&bare_path)
-            .output()
-            .unwrap();
-
-        // Should find the bare repo from the parent directory
-        let result = find_bare_repo_in_dir(temp.path());
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), bare_path);
-    }
-
-    #[test]
-    fn test_find_bare_repo_in_dir_not_found() {
-        let temp = TempDir::new().unwrap();
-        // Create a regular file
-        std::fs::write(temp.path().join("file.txt"), "content").unwrap();
-
-        // Should not find any bare repo
-        let result = find_bare_repo_in_dir(temp.path());
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_find_bare_repo_in_dir_ignores_non_bare() {
-        let temp = TempDir::new().unwrap();
-        // Create a directory with .git suffix but NOT a bare repo
-        let fake_git = temp.path().join("fake.git");
-        std::fs::create_dir(&fake_git).unwrap();
-        std::fs::write(fake_git.join("file.txt"), "content").unwrap();
-
-        // Should not find it (not a bare repo)
-        let result = find_bare_repo_in_dir(temp.path());
-        assert!(result.is_none());
-    }
-
     // --- HeaderContext::format_display ---
-
-    #[test]
-    fn header_context_format_bare() {
-        let ctx = HeaderContext {
-            working_dir: PathBuf::from("/repo"),
-            branch_name: None,
-            repo_type: RepoType::Bare,
-            bare_name: None,
-        };
-        assert_eq!(ctx.format_display(), "/repo [bare]");
-    }
 
     #[test]
     fn header_context_format_normal_with_branch() {
@@ -1768,8 +1626,7 @@ mod tests {
     #[test]
     fn repo_type_equality() {
         assert_eq!(RepoType::Normal, RepoType::Normal);
-        assert_ne!(RepoType::Normal, RepoType::Bare);
-        assert_ne!(RepoType::Bare, RepoType::Worktree);
+        assert_ne!(RepoType::Normal, RepoType::Worktree);
         assert_ne!(RepoType::Empty, RepoType::NonRepo);
     }
 

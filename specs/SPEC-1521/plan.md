@@ -1,5 +1,0 @@
-- `SettingsPanel` の API Key input に paste 専用同期を追加する。
-- Save 前に `SettingsData` / `ProfilesConfig` を plain data 化してから IPC に渡す。
-- unit test を RED で追加し、実装後に GREEN にする。
-- Playwright E2E を追加して GUI 上の paste 経路を固定する。
-- bug issue #1480 に進捗をコメントする。

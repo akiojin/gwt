@@ -3,10 +3,10 @@
 //! App settings are stored in TOML, centered on `~/.gwt/config.toml`.
 
 mod agent_config;
-mod bare_project;
 mod claude_hook_events;
 mod claude_hooks;
 mod claude_plugins;
+mod codex_hook_events;
 pub mod migration;
 pub mod os_env;
 mod profile;
@@ -19,7 +19,6 @@ pub mod tools;
 mod ts_session;
 
 pub use agent_config::{AgentConfig, ClaudeAgentConfig, ClaudeAgentProvider, ClaudeGlmConfig};
-pub use bare_project::BareProjectConfig;
 pub use claude_hook_events::process_claude_hook_event;
 pub use claude_hooks::is_gwt_hooks_registered;
 pub use claude_plugins::{
@@ -31,6 +30,7 @@ pub use claude_plugins::{
     setup_gwt_plugin, setup_gwt_plugin_at, GWT_MARKETPLACE_NAME, GWT_MARKETPLACE_REPO,
     GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
 };
+pub use codex_hook_events::process_codex_hook_event;
 pub use migration::{backup_broken_file, ensure_config_dir, write_atomic};
 pub use os_env::{capture_login_shell_env, EnvSource, OsEnvResult, ShellType};
 pub use profile::{
@@ -44,16 +44,18 @@ pub use session::{
 };
 pub use settings::{Settings, SkillRegistrationPreferences};
 pub use skill_registration::{
-    generate_managed_skills_block, get_skill_registration_status_with_settings_at_project_root,
-    inject_managed_skills_block, register_agent_skills_with_settings_at_project_root,
+    codex_hooks_needs_update, generate_managed_skills_block,
+    get_skill_registration_status_with_settings_at_project_root, inject_managed_skills_block,
+    register_agent_skills_with_settings_at_project_root,
     register_all_skills_with_settings_at_project_root,
     repair_skill_registration_with_settings_at_project_root, SkillAgentRegistrationStatus,
     SkillAgentType, SkillRegistrationStatus,
 };
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
-    get_branch_tool_history, get_last_tool_usage_map, get_ts_session_path,
-    get_ts_session_toml_path, load_ts_session, save_session_entry, ToolSessionEntry, TsSessionData,
+    get_branch_tool_history, get_branch_tool_history_for_worktree, get_last_tool_usage_map,
+    get_ts_session_path, get_ts_session_toml_path, load_ts_session, save_session_entry,
+    ToolSessionEntry, TsSessionData,
 };
 
 #[cfg(test)]

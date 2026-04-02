@@ -7,6 +7,9 @@ description: "Local SPEC directory orchestration. Use an existing or newly creat
 
 Local SPEC directories (`specs/SPEC-{id}/`) are the single source of truth for specs.
 
+GitHub Issues are optional related records. They are not spec containers and must not be treated
+as the canonical source for SPEC detail, planning artifacts, or completion state.
+
 `gwt-spec-ops` starts after the target SPEC has already been identified.
 
 - If the user starts from a plain Issue, use `gwt-issue-resolve` first.
@@ -173,7 +176,8 @@ Execution-oriented spec maintenance procedure:
 3. Fill missing details from the source Issue, existing comments, current implementation context before asking the user.
 4. Mark unresolved blockers with `[NEEDS CLARIFICATION: ...]` only when they truly block execution.
 5. Explicitly document edge cases and error handling that affect implementation or testing.
-6. When integrating new work into an existing SPEC, explain the integration choice and reference the related Issue numbers.
+6. When integrating new work into an existing SPEC, explain the integration choice and reference the related Issue numbers when they exist.
+7. Treat `plan.md`, `tasks.md`, `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`, and `progress.md` as the local artifact set that downstream viewers and completion gates consume.
 
 ### 2. Clarify blocking ambiguity
 

@@ -1,7 +1,0 @@
-- [x] T001 [S] `#1464` Spec/Plan/Tasks/TDD を作成
-- [x] T002 [U] RED: `profile.rs` に default profile 必須化テストを追加
-- [x] T003 [U] RED: `profile.rs` に default.ai 必須化テストを追加
-- [x] T004 [U] `ensure_defaults` を拡張し `default` / `default.ai` 補完を実装
-- [x] T005 [U] `save()` でも正規化を適用
-- [x] T006 [FIN] 対象テスト実行で GREEN を確認
-- [x] T007 [FIN] Issue / tasks/todo / PR 反映

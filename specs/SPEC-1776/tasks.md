@@ -1,174 +1,62 @@
-# Tasks: SPEC-1776 — Migrate from Tauri GUI to ratatui TUI
+# Tasks: SPEC-1776 — 旧TUI UX を基準にした ratatui TUI 再設計
 
-## Phase 0: Setup
+## Phase 0: Parent SPEC Reset
 
-- [ ] T001: Add `crates/gwt-tui/` to Cargo workspace members in `Cargo.toml`
-- [ ] T002: Create `crates/gwt-tui/Cargo.toml` with dependencies: ratatui, crossterm, tokio, gwt-core
-- [ ] T003: Create `crates/gwt-tui/src/main.rs` — crossterm raw mode init, ratatui Terminal, empty event loop, graceful shutdown
-- [ ] T004: Verify `cargo build -p gwt-tui` and `cargo clippy -p gwt-tui` pass
+- [x] T001: `SPEC-1776` を「全面移植仕様」から「parent UX spec」へ書き換える
+- [x] T002: `research.md` に cross-spec comparison matrix を追加する
+- [x] T003: `data-model.md` / `quickstart.md` を新しい shell model に合わせて更新する
+- [x] T004: 主要 sync 対象 SPEC (`SPEC-1654`, `SPEC-1770`, `SPEC-1777`, `SPEC-1782`) の差分メモを作る
+- [x] T005: workflow / persistence / integration 監査対象 (`SPEC-1579`, `SPEC-1787`, `SPEC-1714`, `SPEC-1354`, `SPEC-1643`, `SPEC-1786`, `SPEC-1542`, `SPEC-1656`, `SPEC-1648`, `SPEC-1646`, `SPEC-1644`, `SPEC-1636`, `SPEC-1779`) を `sync required / reference only / deferred` に分類する
+- [x] T006: `gwt-spec-ops` 系 skill contract が `SPEC-1579` / `SPEC-1787` 側で parent UX と矛盾しないか監査メモを残す
 
-## Phase 1: Foundational — Minimal TUI (US1, US3)
+## Phase 1: Branch-First Entry
 
-### Renderer (FR-016)
+- [x] T100: [TDD] `Branches` が primary entry として振る舞う state tests を追加する
+- [x] T101: ブランチ行の session count 表示を実装する
+- [x] T102: `Enter` の 3 分岐 (`no session / one session / many sessions`) を実装する
+- [x] T103: `many sessions` 時の selector UI を実装する
 
-- [ ] T010: Write tests for VT100 Cell → ratatui Cell color mapping in `crates/gwt-tui/src/renderer.rs` (named, indexed, RGB colors + bold/italic/underline/inverse attributes)
-- [ ] T011: Implement `renderer.rs` — convert vt100::Screen grid to ratatui Buffer
-- [ ] T012: [P] Write snapshot tests for renderer with multi-color PTY output samples
+## Phase 2: Permanent Multi-Mode Session Workspace
 
-### State & Event Loop
+- [x] T200: [TDD] `equal grid` layout model の tests を追加する
+- [x] T201: `4件以上` を前提にした session grid を実装する
+- [x] T202: focus session の maximize toggle を実装する
+- [x] T203: maximize 時の tab switch を実装する
+- [x] T204: 管理画面開閉後の layout restore を実装する
+- [x] T205: `hidden pane` 依存を削除する
 
-- [ ] T020: Write tests for `crates/gwt-tui/src/state.rs` — TuiState tab add/remove/switch, active index bounds
-- [ ] T021: Implement `state.rs` — TuiState struct with tabs, active_tab, layout, prefix state
-- [ ] T022: Write tests for `crates/gwt-tui/src/event.rs` — event polling, PTY output channel dispatch
-- [ ] T023: Implement `event.rs` — crossterm event reader + PTY output channel + tick timer (100ms)
+## Phase 3: Management Workspace Core
 
-### Key Binding (FR-004)
+- [x] T300: 管理画面タブを `Branches / SPECs / Issues / Profiles` に整理する
+- [x] T301: `SPECs` 一覧・詳細・launch entry を parent flow に同期する
+- [x] T302: `Issues` 一覧・詳細・launch entry を parent flow に同期する
+- [x] T303: `Profiles` タブを env profile 専用 UI として作り直す
+- [x] T304: `Profiles` で env profile の作成・編集・削除・切替を実装する
+- [x] T305: `Profiles` で OS 環境変数参照・置換を実装する
 
-- [ ] T030: Write tests for `crates/gwt-tui/src/input/keybind.rs` — Ctrl+G prefix detection, timeout, action dispatch, passthrough
-- [ ] T031: Implement `input/keybind.rs` — prefix state machine (Idle → PrefixActive → action/timeout/cancel)
+## Phase 4: Launch Flow Integration
 
-### UI Components (FR-002, FR-003, FR-009, FR-010)
+- [x] T400: branch enter selector と `Quick Start` の接続方針をテストで固定する
+- [x] T401: `既存へ入る / 追加起動 / フルWizard` を実装する
+- [x] T402: hooks confirm (`SPEC-1786`) を新 launch flow に再接続する
+- [x] T403: skill registration と session persistence を新 launch flow に再接続する
 
-- [ ] T040: [P] Implement `crates/gwt-tui/src/ui/tab_bar.rs` — tab names, status colors (AgentColor mapping), active indicator
-- [ ] T041: [P] Implement `crates/gwt-tui/src/ui/terminal_view.rs` — render VT100 buffer via renderer to Frame area
-- [ ] T042: [P] Implement `crates/gwt-tui/src/ui/status_bar.rs` — tab index, agent state, branch, SPEC ID
-- [ ] T043: Write snapshot tests for tab_bar, terminal_view, status_bar using ratatui TestBackend
+## Phase 5: Child SPEC Synchronization
 
-### App Integration (FR-007)
+- [x] T500: `SPEC-1654` を新 shell model に同期する
+- [x] T501: `SPEC-1770` を新 shortcut / layout policy に同期する
+- [x] T502: `SPEC-1777` を parent navigation に同期する
+- [x] T503: `SPEC-1782` を `1ブランチ = Nセッション` 前提へ同期する
+- [x] T504: `SPEC-1579` / `SPEC-1787` の workflow entry contract を監査し、必要なら wording を同期する
+- [x] T505: `SPEC-1714` / `SPEC-1354` / `SPEC-1643` の Issue list/detail/linkage contract を監査する
+- [x] T506: `SPEC-1786` の hooks confirm が新 launch flow と矛盾しないか確認する
+- [x] T507: `SPEC-1542` / `SPEC-1656` の `Profiles = Env profiles` wording を同期する
+- [x] T508: `SPEC-1644` / `SPEC-1646` / `SPEC-1648` / `SPEC-1636` / `SPEC-1779` を reference-only 監査し、親SPECとの矛盾有無を記録する
 
-- [ ] T050: Implement `crates/gwt-tui/src/app.rs` — App struct orchestrating state + event + UI render cycle
-- [ ] T051: Wire shell tab creation (Ctrl+G,s) via PaneManager::spawn_shell()
-- [ ] T052: Wire PTY I/O: key input → write_input(), PTY reader → process_bytes() → render
-- [ ] T053: Wire terminal resize event → PaneManager::resize_all() + re-render
-- [ ] T054: Implement scrollback scroll mode (Ctrl+G,PgUp to enter, Escape to exit)
+## Deferred
 
-### Phase 1 Verification
-
-- [ ] T060: Integration test — launch gwt-tui, open shell tab, verify PTY output renders with ANSI colors
-- [ ] T061: Verify `cargo test -p gwt-tui` and `cargo test -p gwt-core` both pass
-
-## Phase 2: Agent Tabs + Management Panel (US2, US4)
-
-### Business Logic Extraction
-
-- [ ] T100: Extract agent launch parameter builder from `crates/gwt-tauri/src/commands/terminal.rs` to `crates/gwt-core/src/agent/launch.rs`
-- [ ] T101: Write tests for extracted launch builder in gwt-core
-- [ ] T102: [P] Extract session completion watcher from `crates/gwt-tauri/src/session_watcher.rs` to `crates/gwt-core/src/agent/session_watcher.rs`
-
-### Launch Dialog (FR-006)
-
-- [ ] T110: Write tests for `crates/gwt-tui/src/ui/management/launch_dialog.rs` — field navigation, agent type selection, input validation
-- [ ] T111: Implement `launch_dialog.rs` — agent type selector, branch/Issue input, directory picker, confirm/cancel
-
-### Management Panel (FR-005)
-
-- [ ] T120: Write tests for `crates/gwt-tui/src/ui/management/agent_list.rs` — list rendering, cursor navigation, status indicators
-- [ ] T121: Implement `agent_list.rs` — agent list with status color (running/idle/error), selection cursor
-- [ ] T122: [P] Write tests for `crates/gwt-tui/src/ui/management/detail_panel.rs` — detail fields display
-- [ ] T123: [P] Implement `detail_panel.rs` — agent name, branch, worktree path, SPEC, status, uptime, PR link
-- [ ] T124: Implement `crates/gwt-tui/src/ui/management/mod.rs` — panel layout (left list + right detail), Ctrl+G toggle
-
-### Agent Tab Lifecycle (FR-015)
-
-- [ ] T130: Wire Ctrl+G,n → launch_dialog → PaneManager::launch_agent() with auto-worktree
-- [ ] T131: Wire management panel quick actions: k (kill), r (restart), Enter (switch to tab)
-- [ ] T132: Implement worktree auto-cleanup on agent tab close (with uncommitted changes safety check)
-
-### Phase 2 Verification
-
-- [ ] T140: Integration test — launch agent, verify appears in management panel, kill via panel, worktree cleaned up
-- [ ] T141: Verify all tests pass: `cargo test -p gwt-tui && cargo test -p gwt-core`
-
-## Phase 3: Split Panes (US5)
-
-### Split Layout (FR-008)
-
-- [ ] T200: Write tests for `crates/gwt-tui/src/ui/split_layout.rs` — LayoutTree insert split, remove leaf, resize ratio, area calculation
-- [ ] T201: Implement `split_layout.rs` — binary tree layout with H/V splits, ratio-based area subdivision
-- [ ] T202: Wire Ctrl+G,v (vertical split) and Ctrl+G,h (horizontal split)
-- [ ] T203: Implement pane focus switching within split layout (Ctrl+G,arrow keys)
-- [ ] T204: Wire terminal resize → recalculate all split pane areas
-
-### Phase 3 Verification
-
-- [ ] T210: Snapshot test — two panes in vertical split render correct areas
-- [ ] T211: Integration test — split, resize terminal, verify both panes update
-
-## Phase 4: Extended Features (US6, US7)
-
-### PR Dashboard (FR-011)
-
-- [ ] T300: [P] Extract PR status polling from `crates/gwt-tauri/src/commands/` to `crates/gwt-core/src/git/pr_status.rs`
-- [ ] T301: [P] Write tests for PR status module in gwt-core
-- [ ] T302: Implement `crates/gwt-tui/src/ui/management/pr_dashboard.rs` — PR list, CI check badges, merge state
-
-### Issue/SPEC Panel (FR-012)
-
-- [ ] T310: [P] Implement `crates/gwt-tui/src/ui/management/issue_panel.rs` — Issue/SPEC list with search input
-- [ ] T311: Wire Issue search to gwt-core's ChromaDB index (existing gwt-issue-search infrastructure)
-
-### AI Session Summaries (FR-013)
-
-- [ ] T320: [P] Extract summary trigger from gwt-tauri to `crates/gwt-core/src/ai/summary_trigger.rs`
-- [ ] T321: Display AI summary in management detail panel, updated periodically from scrollback
-
-### Phase 4 Verification
-
-- [ ] T330: Verify PR status displays in management panel
-- [ ] T331: Verify Issue search returns results
-- [ ] T332: Verify AI summary generates from agent scrollback
-
-## Phase 5: Voice Input (US8)
-
-### Voice Runtime (FR-014)
-
-- [ ] T400: Extract voice runtime from `crates/gwt-tauri/src/commands/voice.rs` to `crates/gwt-core/src/voice/runtime.rs`
-- [ ] T401: Write tests for voice runtime initialization and transcription pipeline
-- [ ] T402: Implement `crates/gwt-tui/src/input/voice.rs` — hotkey activation, audio capture, inject transcribed text to active PTY
-
-### Phase 5 Verification
-
-- [ ] T410: Manual test — voice input hotkey → speak → text appears in terminal
-
-## Phase 6: Cleanup + Release (SC-007, SC-008)
-
-### Code Removal
-
-- [ ] T500: Delete `crates/gwt-tauri/` directory
-- [ ] T501: Delete `gwt-gui/` directory
-- [ ] T502: Update `Cargo.toml` workspace members (remove gwt-tauri, keep gwt-tui)
-- [ ] T503: Remove Tauri-specific dependencies from workspace Cargo.toml
-- [ ] T504: Update binary target in Cargo.toml to point to gwt-tui
-
-### CI/CD Pipeline Updates
-
-- [ ] T510: Update `.github/workflows/test.yml` — remove vitest job, remove Playwright E2E job, remove Tauri WebDriver E2E job, keep `cargo test -p gwt-core -p gwt-tui`
-- [ ] T511: [P] Update `.github/workflows/release.yml` — replace `cargo tauri build` with `cargo build --release -p gwt-tui`, remove pnpm/Node steps, remove macOS signing/notarization, remove Windows MSI builder, add cross-compile (Linux x86_64/aarch64, macOS universal, Windows x86_64)
-- [ ] T512: [P] Update `.github/workflows/lint.yml` — remove `svelte-check` job, keep Clippy/Rustfmt/markdownlint/commitlint
-- [ ] T513: [P] Update `.github/workflows/coverage.yml` — remove frontend coverage job, remove `frontend` Codecov flag, keep Rust `cargo llvm-cov`
-- [ ] T514: Update `.github/workflows/voice-eval.yml` — update paths if gwt-tui changes affect voice module location
-- [ ] T515: Remove `tauri.conf.json` and related Tauri config files
-- [ ] T516: Delete `installers/` directory (macOS .dmg builder, Windows .msi builder)
-
-### Playwright E2E Removal + TUI Test Replacement
-
-- [ ] T517: Delete `gwt-gui/e2e/` (22 Playwright test files)
-- [ ] T518: Delete `gwt-gui/e2e-tauri/` (Tauri WebDriver tests)
-- [ ] T519: Delete `gwt-gui/playwright.config.ts`
-- [ ] T520: Add ratatui TestBackend snapshot tests for all TUI screens (welcome, single pane, split, management panel)
-- [ ] T521: Add PTY integration tests — spawn gwt-tui subprocess, send keystrokes, verify output
-
-### Documentation
-
-- [ ] T530: [P] Update `README.md` — installation = download binary, remove Tauri/GUI references
-- [ ] T531: [P] Update `README.ja.md` — same changes in Japanese
-- [ ] T532: Update `CLAUDE.md` — remove Tauri/GUI references, add TUI development instructions, update build/test commands
-
-### Phase 6 Verification
-
-- [ ] T540: `cargo build -p gwt-tui` succeeds as the sole frontend
-- [ ] T541: `cargo test` (all crates) passes
-- [ ] T542: `cargo clippy --all-targets --all-features -- -D warnings` passes
-- [ ] T543: CI pipeline runs successfully on all platforms
-- [ ] T544: Release workflow produces correct cross-platform binary artifacts
-- [ ] T545: TUI snapshot tests cover all defined screens
+- [x] T900: `Settings` を戻す
+- [x] T901: `Logs` を戻す
+- [x] T902: `Versions` を戻す
+- [ ] T903: `AI summary` を再導入する
+- [ ] T904: custom agent UI を再設計する

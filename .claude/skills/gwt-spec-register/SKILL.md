@@ -28,6 +28,32 @@ Required behavior:
 
 Do not create a new SPEC when an existing canonical SPEC clearly owns the scope.
 
+## SPEC vs Issue decision (granularity gate)
+
+Before creating a SPEC, determine whether the work is a SPEC or an Issue:
+
+| Criteria | → SPEC | → Issue |
+|----------|--------|---------|
+| Adds new user-facing functionality | Yes | — |
+| Defines architecture or design | Yes | — |
+| Fixes a bug in existing functionality | — | Yes (link to parent SPEC) |
+| One-off task or chore | — | Yes |
+| Requires 3-15 tasks to complete | Yes | — |
+| Can be described in a single commit | — | Yes |
+
+**Never create a SPEC for a bug fix.** File a GitHub Issue and link it to the relevant SPEC.
+
+## Granularity check
+
+A well-scoped SPEC should:
+- Be decomposable into **3-15 tasks** (fewer → merge into parent, more → split)
+- Have **2-5 user stories** (fewer → too narrow, more → too broad)
+- Belong to **exactly one category** (see constitution.md §6)
+- Not overlap with another SPEC's scope (verify via `gwt-spec-search`)
+
+If the proposed scope is too small, suggest merging into an existing SPEC.
+If too large, suggest splitting with clear scope boundaries per child SPEC.
+
 ## SPEC ID and directory
 
 - SPEC ID = sequential number (e.g., `SPEC-1776`)

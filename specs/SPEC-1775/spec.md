@@ -1,4 +1,7 @@
-# Feature Specification: gwt-pr-check 統合ステータスレポート
+> **ℹ️ TUI MIGRATION NOTE**: This SPEC describes backend/gwt-core functionality unaffected by the gwt-tui migration (SPEC-1776). No changes required.
+> **Canonical Boundary**: `SPEC-1775` は `gwt-pr-check` の出力契約だけを扱う。GitHub discovery/search/version history の正本は `SPEC-1643` である。
+
+# gwt-pr-check — 統合ステータスレポート
 
 ## Background
 
