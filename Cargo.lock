@@ -2375,6 +2375,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-ai"
+version = "8.17.2"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gwt-core"
 version = "8.17.2"
 dependencies = [

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/gwt-ai",
     "crates/gwt-core",
     "crates/gwt-tauri",
 ]
