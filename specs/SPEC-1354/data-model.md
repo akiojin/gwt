@@ -1,3 +1,5 @@
+> Local SPEC detail rendering moved to `SPEC-1776`. The shapes below remain relevant only for GitHub Issue detail / legacy issue-body compatibility.
+
 ## Detail View Data Model
 
 - `SpecIssueArtifactKind`

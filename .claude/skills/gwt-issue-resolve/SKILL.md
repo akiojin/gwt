@@ -27,7 +27,8 @@ Use gh to inspect a GitHub Issue and:
 - Fetch all comments
 - Fetch linked PRs via timeline events
 - Extract error messages, stack traces, file references, code blocks, and cross-references
-- Detect whether the issue is already a spec issue (has a corresponding local SPEC directory, or body contains spec section structure)
+- Detect whether the issue already maps to a local SPEC directory; legacy issue-body spec
+  structure is migration-only evidence and must not be treated as the normal source of truth
 - Classify the work as BUG / FEATURE / ENHANCEMENT / DOCUMENTATION / QUESTION / UNCLASSIFIED
 - Search the codebase for relevant files
 - Decide whether to fix directly, update an existing SPEC, or register a new SPEC
@@ -141,7 +142,8 @@ python3 ".claude/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." -
    - Check file existence for extracted file references.
 
 4. **Already-SPEC path.**
-   - If a corresponding local SPEC directory exists (check `specs/` directory), or the body clearly follows the `## Spec` / `## Plan` / `## Tasks` / `## TDD` structure, stop generic issue handling.
+   - If a corresponding local SPEC directory exists (check `specs/` directory), stop generic issue handling.
+   - Treat Issue-body spec sections only as legacy migration hints; do not treat the Issue body as the current SPEC source of truth.
    - Hand off to `gwt-spec-ops` with the SPEC ID and current context.
 
 5. **Direct-fix vs spec-needed decision.**
@@ -161,6 +163,7 @@ python3 ".claude/skills/gwt-issue-resolve/scripts/inspect_issue.py" --repo "." -
    - Search with at least 2 semantic queries derived from the Issue.
    - If a canonical existing SPEC is found, update that destination and continue with `gwt-spec-ops`.
    - If no suitable SPEC exists, create a new local SPEC directory through `gwt-spec-register`.
+   - Do not "convert the Issue into the SPEC"; the Issue remains an Issue and the SPEC remains a local artifact set.
    - After the target SPEC exists, continue with `gwt-spec-ops`, which owns clarify/plan/tasks/analyze and then implementation.
 
 8. **Produce Issue Analysis Report for non-SPEC issues before execution.**

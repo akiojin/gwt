@@ -116,14 +116,10 @@ fn is_separator_row(line: &str) -> bool {
     if !is_table_row(t) {
         return false;
     }
-    t[1..t.len() - 1]
-        .split('|')
-        .all(|cell| {
-            let c = cell.trim();
-            !c.is_empty()
-                && c.chars()
-                    .all(|ch| ch == '-' || ch == ':' || ch == ' ')
-        })
+    t[1..t.len() - 1].split('|').all(|cell| {
+        let c = cell.trim();
+        !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+    })
 }
 
 fn parse_table_cells(line: &str) -> Vec<String> {
@@ -144,7 +140,11 @@ fn render_table_block(rows: &[&str], _start: usize) -> Vec<Line<'static>> {
         .collect();
 
     // Calculate column widths
-    let col_count = parsed.iter().map(|(cells, _)| cells.len()).max().unwrap_or(0);
+    let col_count = parsed
+        .iter()
+        .map(|(cells, _)| cells.len())
+        .max()
+        .unwrap_or(0);
     let mut col_widths = vec![0usize; col_count];
     for (cells, is_sep) in &parsed {
         if *is_sep {
@@ -197,7 +197,10 @@ fn render_table_block(rows: &[&str], _start: usize) -> Vec<Line<'static>> {
                 spans.push(Span::styled(" │ ", sep_style));
             }
             let text = cells.get(j).map(|s| s.as_str()).unwrap_or("");
-            spans.push(Span::styled(format!("{:<width$}", text, width = w), cell_style));
+            spans.push(Span::styled(
+                format!("{:<width$}", text, width = w),
+                cell_style,
+            ));
         }
         lines.push(Line::from(spans));
     }
@@ -287,7 +290,10 @@ mod tests {
         let row2 = line_text(&buf, area, 2);
 
         // Header row contains column names
-        assert!(row0.contains("Name"), "header should contain 'Name': {row0}");
+        assert!(
+            row0.contains("Name"),
+            "header should contain 'Name': {row0}"
+        );
         assert!(row0.contains("Age"), "header should contain 'Age': {row0}");
 
         // Separator row contains box-drawing chars

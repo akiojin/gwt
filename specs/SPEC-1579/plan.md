@@ -24,7 +24,7 @@ Unified plan for the gwt-spec system: embedded-skill autonomy, local file-based 
 ## Project Structure
 
 - Workflow/Storage/API/Completion canonical: #1579
-- Viewer canonical: #1354
+- Viewer canonical: `SPEC-1776` for local SPEC viewing, `#1354` for GitHub Issue detail / legacy issue-body compatibility
 - Search canonical: #1643
 - Skill docs: `.claude/skills/*`
 - Command docs: `.claude/commands/*`

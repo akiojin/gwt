@@ -1,5 +1,5 @@
 1. Use #1579 to reason about workflow order, registration, storage/API, and completion gate.
-2. Use #1354 to reason about Issue detail rendering.
+2. Use `SPEC-1776` to reason about local SPEC viewing and `#1354` only for GitHub Issue detail / legacy issue-body compatibility.
 3. Use #1643 to reason about search and discovery only.
 4. Treat migration as part of the redesign, not a separate cleanup task.
 5. For embedded GitHub skills, choose REST first for metadata/check/comment paths, and keep GraphQL only for unresolved review-thread operations that still lack practical REST coverage.

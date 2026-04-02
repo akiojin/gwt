@@ -204,6 +204,25 @@
 
 - Manual E2E: launch an agent or shell that exits immediately, confirm the final output stays visible in the tab, then close it with `Ctrl+G,x`
 
+## 2026-04-02: Separate local SPEC viewer from GitHub Issues
+
+### Progress
+
+- Replaced the old `Issues` tab behavior that mixed local SPEC rows into GitHub Issue results
+- Switched `SPECs` detail from `spec.md`-only rendering to a sectioned artifact viewer backed by the local SPEC loader
+- Fixed `gwt-core` local SPEC aggregation so contracts/checklists are visible to the detail viewer instead of being dropped from `LocalSpecDetail.sections`
+- Updated the canonical docs and skill guidance so local SPEC artifacts remain the source of truth and GitHub Issues stay an optional related record
+
+### Done
+
+- `Issues` now loads GitHub Issue cache / refresh results only
+- `SPECs` detail now exposes `spec / plan / tasks / research / data-model / quickstart / checklists / contracts`
+- Local SPEC detail aggregation includes named contract/checklist artifacts
+
+### Next
+
+- Manual E2E: open `SPECs` detail and verify section switching, then refresh `Issues` against a repo with cached/open GitHub issues
+
 ## 2026-03-27: Phase 0 + Phase 1 Core Implementation
 
 ### Progress

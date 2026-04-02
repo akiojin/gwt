@@ -16,7 +16,7 @@ doc:spec.md
 - The current runtime can contain helper skills that exist on disk but are not present in the user-visible skill catalog. User-facing workflow guidance must not point directly at hidden skills.
 - The older storage design treated the GitHub Issue body as the canonical spec bundle with `Spec/Plan/Tasks/TDD/...` sections embedded directly in the body. The embedded skill workflow is now restructured around local file-based storage where `specs/SPEC-{N}/` directories hold the real content (`spec.md`, `plan.md`, `tasks.md`, and supporting artifacts) and the local SPEC directory is the canonical source.
 - The current workflow only defined a pre-implementation `CLEAR` gate. #1654 exposed a missing completion gate: `tasks.md` and progress comments were marked complete while the implementation still diverged from `doc:spec.md`, `checklist:acceptance.md`, and `checklist:tdd.md`.
-- This spec is the single canonical reference for the gwt-spec system: embedded workflow, storage/API, artifact CRUD, completion gate, registration contract, and GitHub transport policy. Issue-tab detail rendering lives in #1354.
+- This spec is the single canonical reference for the gwt-spec system: embedded workflow, storage/API, artifact CRUD, completion gate, registration contract, and GitHub transport policy. Local SPEC viewing lives in `SPEC-1776` (`SPECs` tab), while `#1354` remains only for GitHub Issue detail / legacy issue-body compatibility during migration.
 
 ## User Stories
 
@@ -180,7 +180,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 - **FR-005**: `gwt-spec-implement` must own execution after `CLEAR`, including test-first task execution, progress updates, and PR handoff.
 - **FR-006**: `gwt-pr` and `gwt-pr-fix` must auto-merge `origin/<base>` using merge, not rebase, when the merge is behaviorally clear.
 - **FR-007**: PR and SPEC skills must ask the user only for ambiguous conflicts, unresolved product decisions, missing auth, or risky destructive migration scope.
-- **FR-008**: This spec is the single canonical reference for gwt-spec workflow, storage/API, and completion gate. #1354 remains the Issue detail/viewer canonical.
+- **FR-008**: This spec is the single canonical reference for gwt-spec workflow, storage/API, and completion gate. Local SPEC viewer ownership is `SPEC-1776`; `#1354` is limited to GitHub Issue detail / legacy issue-body compatibility.
 - **FR-009**: Migration is part of the redesign scope and must cover both local legacy specs and old body-canonical GitHub spec issues.
 - **FR-010**: The repo-level constitution (`.gwt/memory/constitution.md`) must remain part of the planning gate.
 - **FR-011**: GitHub-backed embedded skills must prefer REST for PR/Issue metadata, PR create/update, CI/check reads, reviews, review comments, and comment operations where GitHub REST provides practical coverage.
@@ -220,7 +220,7 @@ As a workflow maintainer, I want checklist artifacts to be structured and curren
 ## Success Criteria
 
 - **SC-001**: Embedded skills describe one ordered artifact-first workflow from registration through analysis and implementation.
-- **SC-002**: Ownership is explicit: #1579 workflow/storage/API/completion, #1354 viewer, #1643 search.
+- **SC-002**: Ownership is explicit: #1579 workflow/storage/API/completion, `SPEC-1776` local SPEC viewer, #1354 GitHub Issue detail / legacy compatibility, #1643 search.
 - **SC-003**: `gwt-spec-implement` exists as the implementation owner and `gwt-spec-ops` no longer stops at normal handoff boundaries.
 - **SC-004**: `gwt-pr` and `gwt-pr-fix` auto-handle routine base merges and high-confidence PR fixes while escalating only ambiguous cases.
 - **SC-005**: Migration is explicitly in scope for both local specs and body-canonical issues.

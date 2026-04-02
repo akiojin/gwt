@@ -1,7 +1,7 @@
 ## Findings
 
 - #1579 now owns the embedded skill workflow, storage/API, and completion gate as a single canonical spec.
-- #1354 owns Issue tab detail rendering.
+- `SPEC-1776` owns local SPEC viewing in the `SPECs` tab. `#1354` only covers GitHub Issue detail / legacy issue-body compatibility.
 - #1643 owns search/discovery only.
 - Migration is currently implemented only for local specs and needs to be treated as a broader redesign concern.
 - Current `issue_spec.rs` still documents the Issue body as canonical.

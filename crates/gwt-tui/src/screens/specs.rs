@@ -1,6 +1,9 @@
 //! SPECs tab — browse and search local SPEC files
 
+use std::path::Path;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use gwt_core::git::LocalSpecDetail;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear};
 
@@ -14,6 +17,12 @@ pub struct SpecItem {
     pub branches: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecDetailSection {
+    pub label: &'static str,
+    pub content: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpecsState {
     pub specs: Vec<SpecItem>,
@@ -23,6 +32,8 @@ pub struct SpecsState {
     pub offset: usize,
     pub detail_mode: bool,
     pub detail_content: String,
+    pub detail_sections: Vec<SpecDetailSection>,
+    pub detail_section_selected: usize,
     pub detail_scroll: usize,
     pub confirm_launch: bool,
     pub confirm_spec_index: usize,
@@ -47,6 +58,8 @@ impl SpecsState {
             offset: 0,
             detail_mode: false,
             detail_content: String::new(),
+            detail_sections: Vec::new(),
+            detail_section_selected: 0,
             detail_scroll: 0,
             confirm_launch: false,
             confirm_spec_index: 0,
@@ -71,6 +84,21 @@ impl SpecsState {
                 .collect()
         }
     }
+
+    pub fn set_detail_sections(&mut self, sections: Vec<SpecDetailSection>) {
+        self.detail_sections = sections;
+        self.detail_section_selected = 0;
+        self.detail_scroll = 0;
+        self.sync_detail_content();
+    }
+
+    fn sync_detail_content(&mut self) {
+        self.detail_content = self
+            .detail_sections
+            .get(self.detail_section_selected)
+            .map(|section| section.content.clone())
+            .unwrap_or_default();
+    }
 }
 
 pub enum SpecsMessage {
@@ -83,6 +111,8 @@ pub enum SpecsMessage {
     CloseDetail,
     ScrollDetailUp,
     ScrollDetailDown,
+    SelectDetailPrevSection,
+    SelectDetailNextSection,
     LaunchAgent,
     ConfirmLaunch,
     CancelLaunch,
@@ -126,6 +156,8 @@ pub fn handle_key(state: &SpecsState, key: &KeyEvent) -> Option<SpecsMessage> {
             KeyCode::Esc => Some(SpecsMessage::CloseDetail),
             KeyCode::Up | KeyCode::Char('k') => Some(SpecsMessage::ScrollDetailUp),
             KeyCode::Down | KeyCode::Char('j') => Some(SpecsMessage::ScrollDetailDown),
+            KeyCode::Left | KeyCode::Char('h') => Some(SpecsMessage::SelectDetailPrevSection),
+            KeyCode::Right | KeyCode::Char('l') => Some(SpecsMessage::SelectDetailNextSection),
             KeyCode::Enter if shift => Some(SpecsMessage::LaunchAgent),
             _ => None,
         };
@@ -182,12 +214,13 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
             if !state.visible_specs().is_empty() {
                 state.detail_mode = true;
                 state.detail_scroll = 0;
-                // detail_content is populated by app.rs intercept
             }
         }
         SpecsMessage::CloseDetail => {
             state.detail_mode = false;
             state.detail_content.clear();
+            state.detail_sections.clear();
+            state.detail_section_selected = 0;
             state.detail_scroll = 0;
         }
         SpecsMessage::ScrollDetailUp => {
@@ -195,6 +228,25 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         }
         SpecsMessage::ScrollDetailDown => {
             state.detail_scroll = state.detail_scroll.saturating_add(1);
+        }
+        SpecsMessage::SelectDetailPrevSection => {
+            if !state.detail_sections.is_empty() {
+                if state.detail_section_selected == 0 {
+                    state.detail_section_selected = state.detail_sections.len() - 1;
+                } else {
+                    state.detail_section_selected -= 1;
+                }
+                state.detail_scroll = 0;
+                state.sync_detail_content();
+            }
+        }
+        SpecsMessage::SelectDetailNextSection => {
+            if !state.detail_sections.is_empty() {
+                state.detail_section_selected =
+                    (state.detail_section_selected + 1) % state.detail_sections.len();
+                state.detail_scroll = 0;
+                state.sync_detail_content();
+            }
         }
         SpecsMessage::LaunchAgent => {
             // Handled by app.rs
@@ -331,18 +383,44 @@ fn render_detail(state: &SpecsState, buf: &mut Buffer, area: Rect) {
 
     let layout = Layout::vertical([
         Constraint::Length(1), // Header
+        Constraint::Length(1), // Section tabs
         Constraint::Min(1),    // Content
     ])
     .split(area);
 
     // Header
-    let header = format!(" {spec_id} - {spec_title}  [S-Enter] Launch  [Esc] Back");
+    let header = format!(
+        " {spec_id} - {spec_title}  [h/l \u{2190}/\u{2192}] Section  [S-Enter] Launch  [Esc] Back"
+    );
     let header_span = Span::styled(header, Style::default().fg(Color::Cyan).bold());
     buf.set_span(layout[0].x, layout[0].y, &header_span, layout[0].width);
 
+    let tab_spans = state
+        .detail_sections
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, section)| {
+            let style = if idx == state.detail_section_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            [
+                Span::styled(format!(" {} ", section.label), style),
+                Span::raw(" "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    buf.set_line(
+        layout[1].x,
+        layout[1].y,
+        &Line::from(tab_spans),
+        layout[1].width,
+    );
+
     crate::widgets::markdown::render_markdown(
         buf,
-        layout[1],
+        layout[2],
         &state.detail_content,
         state.detail_scroll,
     );
@@ -466,6 +544,50 @@ pub fn save_spec_branch(repo_root: &std::path::Path, spec_dir_name: &str, branch
     }
 }
 
+pub fn load_spec_detail(repo_root: &Path, spec_dir_name: &str) -> Vec<SpecDetailSection> {
+    match load_spec_detail_result(repo_root, spec_dir_name) {
+        Ok(sections) => sections,
+        Err(error) => vec![SpecDetailSection {
+            label: "error",
+            content: format!(
+                "## Error\nCould not load `{spec_dir_name}`.\n\n- Reason: `{error}`\n"
+            ),
+        }],
+    }
+}
+
+fn load_spec_detail_result(
+    repo_root: &Path,
+    spec_dir_name: &str,
+) -> Result<Vec<SpecDetailSection>, String> {
+    let spec_id = spec_dir_name.strip_prefix("SPEC-").unwrap_or(spec_dir_name);
+    let detail = gwt_core::git::get_local_spec_detail(repo_root, spec_id)?;
+    Ok(build_detail_sections(&detail))
+}
+
+fn build_detail_sections(detail: &LocalSpecDetail) -> Vec<SpecDetailSection> {
+    [
+        ("spec", &detail.sections.spec),
+        ("plan", &detail.sections.plan),
+        ("tasks", &detail.sections.tasks),
+        ("research", &detail.sections.research),
+        ("data-model", &detail.sections.data_model),
+        ("quickstart", &detail.sections.quickstart),
+        ("checklists", &detail.sections.checklists),
+        ("contracts", &detail.sections.contracts),
+    ]
+    .into_iter()
+    .map(|(label, content)| SpecDetailSection {
+        label,
+        content: if content.trim().is_empty() {
+            format!("_No `{label}` artifact yet._")
+        } else {
+            content.to_string()
+        },
+    })
+    .collect()
+}
+
 /// Load SPEC items from specs/ directory
 pub fn load_specs(repo_root: &std::path::Path) -> Vec<SpecItem> {
     let specs_dir = repo_root.join("specs");
@@ -580,6 +702,8 @@ mod tests {
         assert!(s.search_query.is_empty());
         assert!(!s.search_mode);
         assert_eq!(s.offset, 0);
+        assert!(s.detail_sections.is_empty());
+        assert_eq!(s.detail_section_selected, 0);
     }
 
     // -- visible_specs() --
@@ -947,10 +1071,17 @@ mod tests {
         s.specs = sample_specs();
         s.detail_mode = true;
         s.detail_content = "some content".into();
+        s.detail_sections = vec![SpecDetailSection {
+            label: "spec",
+            content: "some content".into(),
+        }];
+        s.detail_section_selected = 1;
         s.detail_scroll = 5;
         update(&mut s, SpecsMessage::CloseDetail);
         assert!(!s.detail_mode);
         assert!(s.detail_content.is_empty());
+        assert!(s.detail_sections.is_empty());
+        assert_eq!(s.detail_section_selected, 0);
         assert_eq!(s.detail_scroll, 0);
     }
 
@@ -993,6 +1124,14 @@ mod tests {
             handle_key(&s, &key(KeyCode::Down)),
             Some(SpecsMessage::ScrollDetailDown)
         ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Right)),
+            Some(SpecsMessage::SelectDetailNextSection)
+        ));
+        assert!(matches!(
+            handle_key(&s, &key(KeyCode::Left)),
+            Some(SpecsMessage::SelectDetailPrevSection)
+        ));
     }
 
     #[test]
@@ -1009,7 +1148,16 @@ mod tests {
         let mut s = SpecsState::new();
         s.specs = sample_specs();
         s.detail_mode = true;
-        s.detail_content = "# SPEC-1\n\nTest content\nLine 2".to_string();
+        s.set_detail_sections(vec![
+            SpecDetailSection {
+                label: "spec",
+                content: "# SPEC-1\n\nTest content\nLine 2".to_string(),
+            },
+            SpecDetailSection {
+                label: "plan",
+                content: "_No `plan` artifact yet._".to_string(),
+            },
+        ]);
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render(&s, &mut buf, area);
@@ -1020,17 +1168,81 @@ mod tests {
         let mut s = SpecsState::new();
         s.specs = sample_specs();
         s.detail_mode = true;
-        s.detail_content = "# SPEC-1\n\n- Bullet item".to_string();
+        s.set_detail_sections(vec![
+            SpecDetailSection {
+                label: "spec",
+                content: "# SPEC-1\n\n- Bullet item".to_string(),
+            },
+            SpecDetailSection {
+                label: "plan",
+                content: "_No `plan` artifact yet._".to_string(),
+            },
+        ]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
 
         render(&s, &mut buf, area);
 
-        let first_content_line = line_text(&buf, area, 1);
+        let first_content_line = line_text(&buf, area, 2);
         assert!(
             !first_content_line.contains('#'),
             "markdown heading marker should not be rendered literally: {first_content_line:?}"
         );
+    }
+
+    #[test]
+    fn render_detail_shows_section_tabs() {
+        let mut s = SpecsState::new();
+        s.specs = sample_specs();
+        s.detail_mode = true;
+        s.set_detail_sections(vec![
+            SpecDetailSection {
+                label: "spec",
+                content: "# SPEC-1\n\nTest content".to_string(),
+            },
+            SpecDetailSection {
+                label: "plan",
+                content: "_No `plan` artifact yet._".to_string(),
+            },
+        ]);
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+
+        render(&s, &mut buf, area);
+
+        let tabs_line = line_text(&buf, area, 1);
+        assert!(
+            tabs_line.to_lowercase().contains("spec"),
+            "detail view should show artifact section tabs"
+        );
+        assert!(
+            tabs_line.to_lowercase().contains("plan"),
+            "detail view should expose at least the standard SPEC sections"
+        );
+    }
+
+    #[test]
+    fn update_detail_section_switches_active_content() {
+        let mut s = SpecsState::new();
+        s.set_detail_sections(vec![
+            SpecDetailSection {
+                label: "spec",
+                content: "spec body".to_string(),
+            },
+            SpecDetailSection {
+                label: "plan",
+                content: "plan body".to_string(),
+            },
+        ]);
+        s.detail_mode = true;
+
+        update(&mut s, SpecsMessage::SelectDetailNextSection);
+        assert_eq!(s.detail_section_selected, 1);
+        assert_eq!(s.detail_content, "plan body");
+
+        update(&mut s, SpecsMessage::SelectDetailPrevSection);
+        assert_eq!(s.detail_section_selected, 0);
+        assert_eq!(s.detail_content, "spec body");
     }
 
     // -- T001: branches field tests --

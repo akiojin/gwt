@@ -46,52 +46,41 @@ fn content_area_rect(cols: u16, rows: u16) -> Rect {
     layout[2]
 }
 
-fn markdown_read_error(path: &Path, err: &std::io::Error) -> String {
-    format!(
-        "## Error\nCould not read `{}`.\n\n- Reason: `{}`\n",
-        path.display(),
-        err
-    )
+fn format_issue_detail_markdown(issue: &gwt_core::git::GitHubIssue) -> String {
+    let mut lines = vec![format!("# Issue #{}: {}", issue.number, issue.title)];
+    lines.push(String::new());
+    lines.push(format!("- State: `{}`", issue.state));
+    if !issue.updated_at.trim().is_empty() {
+        lines.push(format!("- Updated: `{}`", issue.updated_at));
+    }
+    if !issue.labels.is_empty() {
+        let labels = issue
+            .labels
+            .iter()
+            .map(|label| format!("`{}`", label.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("- Labels: {labels}"));
+    }
+    if !issue.html_url.trim().is_empty() {
+        lines.push(format!("- URL: {}", issue.html_url));
+    }
+    if let Some(body) = issue.body.as_deref() {
+        if !body.trim().is_empty() {
+            lines.push(String::new());
+            lines.push(body.trim().to_string());
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
 }
 
-fn read_detail_markdown(path: &Path, event: &str, detail_kind: &str) -> String {
-    tracing::info!(
-        message = "flow_start",
-        category = "ui",
-        event = event,
-        result = "start",
-        workspace = "default",
-        detail_kind = detail_kind,
-        path = %path.display(),
-    );
-
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            tracing::info!(
-                message = "flow_success",
-                category = "ui",
-                event = event,
-                result = "success",
-                workspace = "default",
-                detail_kind = detail_kind,
-                path = %path.display(),
-            );
-            content
-        }
-        Err(err) => {
-            tracing::warn!(
-                message = "flow_failure",
-                category = "ui",
-                event = event,
-                result = "failure",
-                workspace = "default",
-                detail_kind = detail_kind,
-                path = %path.display(),
-                error_code = "DETAIL_READ_FAILED",
-                error_detail = %err,
-            );
-            markdown_read_error(path, &err)
-        }
+fn load_issue_detail_markdown(repo_root: &Path, issue_number: u64) -> String {
+    match gwt_core::git::fetch_issue_detail(repo_root, issue_number) {
+        Ok(issue) => format_issue_detail_markdown(&issue),
+        Err(error) => format!(
+            "## GitHub Issue\nCould not load issue #{issue_number}.\n\n- Reason: `{error}`\n\nRun `gh issue view {issue_number}` for details.\n"
+        ),
     }
 }
 
@@ -795,32 +784,16 @@ pub fn update(model: &mut Model, msg: Message) {
                             // Intercept OpenDetail to load content
                             if let Some(crate::screens::issues::IssuesMessage::OpenDetail) = &msg {
                                 if let Some(issue) = model.issues_state.selected_issue().cloned() {
-                                    if issue.is_spec {
-                                        let spec_id = issue.spec_id.as_deref().unwrap_or("");
-                                        let spec_path = model
-                                            .repo_root
-                                            .join("specs")
-                                            .join(spec_id)
-                                            .join("spec.md");
-                                        model.issues_state.detail_content = read_detail_markdown(
-                                            &spec_path,
-                                            "open_issue_spec_detail",
-                                            "issue_spec",
-                                        );
-                                    } else {
-                                        model.issues_state.detail_content = format!(
-                                            "## GitHub Issue\nFull GitHub issue content is not loaded in the TUI.\n\nRun `gh issue view {}` for details.\n",
-                                            issue.number
-                                        );
-                                        tracing::info!(
-                                            message = "flow_success",
-                                            category = "ui",
-                                            event = "open_github_issue_detail",
-                                            result = "success",
-                                            workspace = "default",
-                                            issue_number = issue.number,
-                                        );
-                                    }
+                                    model.issues_state.detail_content =
+                                        load_issue_detail_markdown(&model.repo_root, issue.number);
+                                    tracing::info!(
+                                        message = "flow_success",
+                                        category = "ui",
+                                        event = "open_github_issue_detail",
+                                        result = "success",
+                                        workspace = "default",
+                                        issue_number = issue.number,
+                                    );
                                 }
                             }
                             msg.map(Message::IssuesMsg)
@@ -831,16 +804,12 @@ pub fn update(model: &mut Model, msg: Message) {
                                 if matches!(m, crate::screens::specs::SpecsMessage::OpenDetail) {
                                     let visible = model.specs_state.visible_specs();
                                     if let Some(spec) = visible.get(model.specs_state.selected) {
-                                        let spec_path = model
-                                            .repo_root
-                                            .join("specs")
-                                            .join(&spec.dir_name)
-                                            .join("spec.md");
-                                        model.specs_state.detail_content = read_detail_markdown(
-                                            &spec_path,
-                                            "open_spec_detail",
-                                            "spec",
-                                        );
+                                        let detail_sections =
+                                            crate::screens::specs::load_spec_detail(
+                                                &model.repo_root,
+                                                &spec.dir_name,
+                                            );
+                                        model.specs_state.set_detail_sections(detail_sections);
                                     }
                                 }
                                 crate::screens::specs::update(&mut model.specs_state, m);
@@ -1090,9 +1059,35 @@ pub fn update(model: &mut Model, msg: Message) {
             }
             crate::screens::branches::update(&mut model.branches_state, msg);
         }
-        Message::IssuesMsg(msg) => {
-            crate::screens::issues::update(&mut model.issues_state, msg);
-        }
+        Message::IssuesMsg(msg) => match msg {
+            crate::screens::issues::IssuesMessage::Refresh => {
+                crate::screens::issues::update(
+                    &mut model.issues_state,
+                    crate::screens::issues::IssuesMessage::Refresh,
+                );
+                match crate::screens::issues::refresh_issues(&model.repo_root) {
+                    Ok(issues) => crate::screens::issues::update(
+                        &mut model.issues_state,
+                        crate::screens::issues::IssuesMessage::Loaded(issues),
+                    ),
+                    Err(error) => {
+                        model.push_error(ErrorEntry {
+                            message: format!("Failed to refresh issues: {error}"),
+                            severity: ErrorSeverity::Minor,
+                        });
+                        crate::screens::issues::update(
+                            &mut model.issues_state,
+                            crate::screens::issues::IssuesMessage::Loaded(
+                                crate::screens::issues::load_issues(&model.repo_root),
+                            ),
+                        );
+                    }
+                }
+            }
+            other => {
+                crate::screens::issues::update(&mut model.issues_state, other);
+            }
+        },
         Message::VersionsMsg(_) => {
             // Versions messages are handled inline via the key handler
         }
@@ -2992,7 +2987,7 @@ mod tests {
         std::fs::create_dir(&spec_dir).unwrap();
         std::fs::write(
             spec_dir.join("metadata.json"),
-            r#"{"id":"100","title":"Numeric id spec","status":"open","phase":"planning"}"#,
+            r#"{"id":"100","title":"Numeric id spec","status":"open","phase":"planning","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}"#,
         )
         .unwrap();
         std::fs::write(spec_dir.join("spec.md"), "# Heading\n\nBody line\n").unwrap();

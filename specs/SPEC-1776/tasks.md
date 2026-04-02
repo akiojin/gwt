@@ -66,7 +66,7 @@
 ### Issues/SPECs タブ
 
 - [x] T110: [TDD] screens/issues.rs のテスト — Issue/SPEC 一覧、検索
-- [x] T111: screens/issues.rs 実装 — GitHub Issue + ローカル SPEC 表示、検索
+- [x] T111: screens/issues.rs 実装 — GitHub Issue 一覧、検索
 - [ ] T112: Issue → ブランチ作成 → エージェント起動フロー
 
 ### Settings タブ (gwt-cli settings.rs 移植)
@@ -99,6 +99,9 @@
 - [x] T152: [TDD] Main PTY 通常モードを transcript-backed viewport に切り替え、PgUp/PgDn・trackpad/wheel・drag-copy・live follow freeze を検証
 - [x] T153: Main PTY 常時仮想ビュー化 — Main layer で mouse capture を常時有効化し、copy mode UI を廃止して通常モード scroll / drag-copy へ統一
 - [x] T154: [TDD] 履歴表示中でも PTY へ送るキー入力 / paste で即座に live follow へ復帰し、状態ラベルを非表示化
+- [x] T155: [TDD] `Issues` タブを GitHub Issue 専用に分離し、local SPEC 一覧は `SPECs` タブのみに限定
+- [x] T156: [TDD] `SPECs` detail を local artifact section 切替ビューへ変更
+- [x] T157: SPEC / Issue の責務分離に合わせて canonical SPEC / skill docs を同期
 
 ## Phase 3: Wizard + Agent Launch [P]
 

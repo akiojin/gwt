@@ -3,7 +3,7 @@
 - `issue_spec.rs` still documents the Issue body as the canonical spec bundle.
 - `IssueSpecPanel.svelte` renders `detail.sections.*` directly and does not know how to resolve artifact comments by itself.
 - `list_spec_issue_artifact_comments_cmd` and the underlying core API already exist, but are oriented around contract/checklist artifacts today.
-- `#1643` is the canonical Git-side search spec; `#1354` is the Issue tab detail spec.
+- `#1643` is the canonical Git-side search spec; `#1354` is limited to GitHub Issue detail / legacy issue-body compatibility, while `SPEC-1776` owns local SPEC viewing.
 
 ## Implication
 

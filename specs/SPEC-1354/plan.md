@@ -1,6 +1,8 @@
+> **Legacy Boundary Note (2026-04-02)**: local SPEC viewing moved to `SPEC-1776`. This plan now applies only to GitHub Issue detail / legacy issue-body compatibility.
+
 ## Summary
 
-Move Issue-tab spec detail rendering from body-canonical assumptions to artifact-first reconstruction while preserving legacy fallback. Search ownership stays in `#1643`, and local cache/linkage ownership stays in `#1714`.
+Preserve GitHub Issue detail rendering while keeping legacy issue-body compatibility readable during migration. Search ownership stays in `#1643`, local SPEC viewing stays in `SPEC-1776`, and local cache/linkage ownership stays in `#1714`.
 
 ## Technical Context
 

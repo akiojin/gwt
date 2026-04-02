@@ -90,9 +90,11 @@ As a developer, I want to edit global settings, profiles, environment variables,
 
 As a developer, I want gwt to detect docker-compose.yml/DevContainer configs and launch agents inside containers, with service selection, port conflict detection, and volume mounting.
 
-### US8 - Issue/SPEC management (P2)
+### US8 - Issue / SPEC management (P2)
 
-As a developer, I want to see GitHub Issues and local SPECs in the Issues tab, with search, and launch agents linked to issues (auto-branch creation).
+As a developer, I want to browse local SPECs in the `SPECs` tab and GitHub Issues in the
+`Issues` tab, with search and clear boundaries, and launch agents linked to issues
+(auto-branch creation).
 
 ### US9 - Session conversion (P2)
 
@@ -143,10 +145,10 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 21. Docker compose 検出 → サービス選択 → コンテナ内でエージェント起動
 22. 管理画面内で Tab キーで Branches/SPECs/Issues/Versions/Settings/Logs を切替
 23. 管理画面でマウスクリックによりブランチを選択でき、Logs ではスクロールで履歴を辿れる
-24. SPECs タブで Enter → spec.md の詳細ビューが表示、Esc で戻る
-25. Issues タブで Enter → SPEC の場合は spec.md、それ以外は gh コマンド案内を表示
+24. SPECs タブで Enter → `spec / plan / tasks / research / data-model / quickstart / checklists / contracts` を section 切替で表示、Esc で戻る
+25. Issues タブで Enter → GitHub Issue detail を表示し、取得失敗時は fallback guidance を表示する
 26. Versions タブで最新 10 件の git version tags を表示し、range / commit count / summary preview を一覧表示、Enter で Markdown 詳細を開ける
-27. SPECs / Issues の詳細ビューでは Markdown が見出し・箇条書き・コードブロック付きで表示される
+27. SPECs / Issues の詳細ビューでは、それぞれの正本に基づく Markdown が見出し・箇条書き・コードブロック付きで表示される
 28. Logs タブでは category / event / result / workspace / error_code を含む構造化ログを検索・詳細表示できる
 29. 管理画面のステータスバーに実行中セッション数を表示
 30. エラー発生 → 重大エラーはモーダル、軽微はステータスバーに表示
@@ -223,7 +225,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 
 ### Management Panel — Issues Tab
 
-- FR-040: GitHub Issues and local SPECs list with search
+- FR-040: `Issues` タブは GitHub Issues のみを一覧表示し、local SPEC は `SPECs` タブだけで扱う
 - FR-041: Issue → branch creation → agent launch flow
 
 ### Management Panel — Settings Tab
@@ -252,7 +254,7 @@ As a developer, I want to paste files from clipboard to the agent via a dedicate
 - FR-078: Versions tab — latest 10 semantic version tags with range label, commit count, changelog-derived summary preview, and Markdown detail view
 - FR-079: Session history saving (ToolSessionEntry) on agent/shell spawn
 - FR-083: Quit confirmation dialog when running agents exist (Ctrl+C×2)
-- FR-081: SPECs/Issues detail view — Enter to view `spec.md` or issue guidance, Esc to return, with Markdown rendering for headings/lists/code fences/tables
+- FR-081: `SPECs` detail view は local SPEC artifact 群を section 切替で表示し、`Issues` detail view は GitHub Issue detail を個別に表示する。どちらも Esc で戻れ、Markdown の headings/lists/code fences/tables を描画する
 - FR-082: Status bar shows running agent session count in management layer
 
 ### npm Distribution

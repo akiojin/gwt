@@ -1,6 +1,12 @@
-//! Issues/SPECs screen — list GitHub Issues and local SPECs with search
+//! Issues screen — list GitHub Issues with search
+
+use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use gwt_core::git::{
+    fetch_issues_with_options,
+    issue_cache::{IssueExactCache, IssueExactCacheEntry},
+};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -13,14 +19,12 @@ use ratatui::widgets::Paragraph;
 pub struct IssueItem {
     pub number: u64,
     pub title: String,
-    pub is_spec: bool,
-    pub spec_id: Option<String>,
     pub state: String,
     pub labels: Vec<String>,
 }
 
 impl IssueItem {
-    /// Matches search query against issue number, title, labels, or spec_id.
+    /// Matches search query against issue number, title, or labels.
     pub fn matches_search(&self, query: &str) -> bool {
         if query.is_empty() {
             return true;
@@ -31,11 +35,6 @@ impl IssueItem {
         }
         if self.title.to_lowercase().contains(&q) {
             return true;
-        }
-        if let Some(ref sid) = self.spec_id {
-            if sid.to_lowercase().contains(&q) {
-                return true;
-            }
         }
         self.labels.iter().any(|l| l.to_lowercase().contains(&q))
     }
@@ -382,20 +381,6 @@ fn render_issue_row(
     };
     spans.push(Span::styled(sel, sel_style));
 
-    // SPEC badge
-    if issue.is_spec {
-        spans.push(Span::styled(
-            " SPEC",
-            Style::default().fg(Color::Cyan).bold(),
-        ));
-        if let Some(ref sid) = issue.spec_id {
-            spans.push(Span::styled(
-                format!(" {sid}"),
-                Style::default().fg(Color::Cyan),
-            ));
-        }
-    }
-
     // Issue number
     spans.push(Span::styled(
         format!(" #{}", issue.number),
@@ -481,57 +466,34 @@ fn render_detail(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
 // Data loading
 // ---------------------------------------------------------------------------
 
-/// Scan `specs/SPEC-*/metadata.json` to populate the issue list with local SPECs.
-pub fn load_specs(repo_root: &std::path::Path) -> Vec<IssueItem> {
-    let specs_dir = repo_root.join("specs");
-    let mut items = Vec::new();
-
-    let entries = match std::fs::read_dir(&specs_dir) {
-        Ok(e) => e,
-        Err(_) => return items,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        if !name.starts_with("SPEC-") {
-            continue;
-        }
-
-        let metadata_path = path.join("metadata.json");
-        let title = std::fs::read_to_string(&metadata_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v["title"].as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| name.clone());
-
-        let status = std::fs::read_to_string(&metadata_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v["status"].as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "open".to_string());
-
-        let number = name.trim_start_matches("SPEC-").parse::<u64>().unwrap_or(0);
-
-        items.push(IssueItem {
-            number,
-            title,
-            is_spec: true,
-            spec_id: Some(name),
-            state: status,
-            labels: vec!["spec".to_string()],
-        });
-    }
-
+pub fn load_issues(repo_root: &Path) -> Vec<IssueItem> {
+    let cache = IssueExactCache::load(repo_root);
+    let mut items = cache
+        .all_entries()
+        .values()
+        .map(issue_item_from_cache_entry)
+        .collect::<Vec<_>>();
     items.sort_by(|a, b| b.number.cmp(&a.number));
     items
+}
+
+pub fn refresh_issues(repo_root: &Path) -> Result<Vec<IssueItem>, String> {
+    let result = fetch_issues_with_options(repo_root, 1, 100, "open", false, "issues")?;
+    let mut cache = IssueExactCache::default();
+    for issue in result.issues {
+        cache.upsert(IssueExactCache::entry_from_github_issue(&issue));
+    }
+    cache.save(repo_root)?;
+    Ok(load_issues(repo_root))
+}
+
+fn issue_item_from_cache_entry(entry: &IssueExactCacheEntry) -> IssueItem {
+    IssueItem {
+        number: entry.number,
+        title: entry.title.clone(),
+        state: entry.state.clone(),
+        labels: entry.labels.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -548,21 +510,8 @@ mod tests {
         IssueItem {
             number,
             title: title.to_string(),
-            is_spec: false,
-            spec_id: None,
             state: state.to_string(),
             labels: Vec::new(),
-        }
-    }
-
-    fn make_spec_issue(number: u64, title: &str, spec_id: &str) -> IssueItem {
-        IssueItem {
-            number,
-            title: title.to_string(),
-            is_spec: true,
-            spec_id: Some(spec_id.to_string()),
-            state: "open".to_string(),
-            labels: vec!["gwt-spec".to_string()],
         }
     }
 
@@ -581,13 +530,6 @@ mod tests {
         let issue = make_issue(42, "Some issue", "open");
         assert!(issue.matches_search("42"));
         assert!(!issue.matches_search("99"));
-    }
-
-    #[test]
-    fn issue_matches_search_by_spec_id() {
-        let issue = make_spec_issue(10, "SPEC title", "SPEC-1776");
-        assert!(issue.matches_search("1776"));
-        assert!(issue.matches_search("SPEC"));
     }
 
     #[test]
@@ -782,7 +724,7 @@ mod tests {
         let mut state = IssuePanelState::new();
         state.issues = vec![
             make_issue(1, "Fix auth bug", "open"),
-            make_spec_issue(2, "SPEC: New feature", "SPEC-1776"),
+            make_issue(2, "Add spec links", "open"),
             make_issue(3, "Closed issue", "closed"),
         ];
 
@@ -888,5 +830,34 @@ mod tests {
                 render(&state, f.buffer_mut(), area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn load_issues_reads_exact_issue_cache_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let specs_dir = dir.path().join("specs").join("SPEC-1776");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("metadata.json"),
+            r#"{"id":"1776","title":"Spec detail","status":"open","phase":"planning"}"#,
+        )
+        .unwrap();
+
+        let mut cache = IssueExactCache::default();
+        cache.upsert(IssueExactCacheEntry {
+            number: 42,
+            title: "Cache entry".to_string(),
+            url: "https://example.com/issues/42".to_string(),
+            state: "OPEN".to_string(),
+            labels: vec!["bug".to_string()],
+            updated_at: "2026-04-02T00:00:00Z".to_string(),
+            fetched_at: 0,
+        });
+        cache.save(dir.path()).unwrap();
+
+        let issues = load_issues(dir.path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 42);
+        assert_eq!(issues[0].title, "Cache entry");
     }
 }

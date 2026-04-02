@@ -31,12 +31,13 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
 - `plan.md`
 - `tasks.md`
 - latest analysis result of `CLEAR`
-- optional supporting artifacts: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`
+- `progress.md` when present
+- supporting artifacts: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`
 
 ## Workflow
 
 1. **Read the execution context.**
-   - Load the SPEC directory, the three core artifacts, and any supporting contracts/checklists.
+   - Load the SPEC directory, the three core artifacts, `progress.md` when present, and any supporting contracts/checklists.
    - Identify the next incomplete task slice in phase order.
 
 2. **Execute tasks in dependency order.**
@@ -75,6 +76,7 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
    - Reconcile the implemented behavior against `spec.md`, `tasks.md`, `checklists/acceptance.md`, `checklists/tdd.md`, latest progress files, and executed verification.
    - If these artifacts disagree, return to `gwt-spec-ops` and repair the artifact set or rollback false completion markers.
    - Only after reconciliation passes may the workflow declare the SPEC complete.
+   - Do not treat GitHub Issue bodies or Issue comments as completion authority; they are contextual references only.
 
 ## Stop Conditions
 

@@ -299,7 +299,7 @@ impl Model {
         self.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
         self.settings_state.load_settings();
         self.logs_state.entries = crate::screens::logs::load_log_entries(&repo_root);
-        self.issues_state.issues = crate::screens::issues::load_specs(&repo_root);
+        self.issues_state.issues = crate::screens::issues::load_issues(&repo_root);
         self.specs_state.specs = crate::screens::specs::load_specs(&repo_root);
         self.versions_state.tags = crate::screens::versions::load_tags(&repo_root);
     }
@@ -522,6 +522,7 @@ mod tests {
     use super::*;
     use std::{collections::HashMap, path::PathBuf, thread, time::Duration};
 
+    use gwt_core::git::issue_cache::{IssueExactCache, IssueExactCacheEntry};
     use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
 
     fn test_model() -> Model {
@@ -844,5 +845,37 @@ mod tests {
         assert_eq!(m.tick_count, 1);
         m.apply_background_updates();
         assert_eq!(m.tick_count, 2);
+    }
+
+    #[test]
+    fn load_all_data_keeps_specs_and_issues_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let specs_dir = temp.path().join("specs");
+        std::fs::create_dir_all(specs_dir.join("SPEC-1776")).unwrap();
+        std::fs::write(
+            specs_dir.join("SPEC-1776").join("metadata.json"),
+            r#"{"id":"1776","title":"Spec detail","status":"open","phase":"planning"}"#,
+        )
+        .unwrap();
+
+        let mut cache = IssueExactCache::default();
+        cache.upsert(IssueExactCacheEntry {
+            number: 42,
+            title: "GitHub issue".to_string(),
+            url: "https://example.com/issues/42".to_string(),
+            state: "OPEN".to_string(),
+            labels: vec!["bug".to_string()],
+            updated_at: "2026-04-02T00:00:00Z".to_string(),
+            fetched_at: 0,
+        });
+        cache.save(temp.path()).unwrap();
+
+        let mut model = Model::new(temp.path().to_path_buf());
+        model.load_all_data();
+
+        assert_eq!(model.specs_state.specs.len(), 1);
+        assert_eq!(model.issues_state.issues.len(), 1);
+        assert_eq!(model.issues_state.issues[0].number, 42);
+        assert_eq!(model.issues_state.issues[0].title, "GitHub issue");
     }
 }
