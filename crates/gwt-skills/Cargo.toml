@@ -1,0 +1,18 @@
+[package]
+name = "gwt-skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Skill registry and hooks management for gwt"
+publish = false
+
+[dependencies]
+gwt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

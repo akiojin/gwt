@@ -2375,6 +2375,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-clipboard"
+version = "8.17.2"
+dependencies = [
+ "gwt-core",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gwt-core"
 version = "8.17.2"
 dependencies = [
@@ -2416,6 +2425,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-skills"
+version = "8.17.2"
+dependencies = [
+ "gwt-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gwt-tauri"
 version = "8.17.2"
 dependencies = [
@@ -2448,6 +2468,15 @@ dependencies = [
  "uuid",
  "which",
  "whisper-rs",
+]
+
+[[package]]
+name = "gwt-voice"
+version = "8.17.2"
+dependencies = [
+ "gwt-core",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

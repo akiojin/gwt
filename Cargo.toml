@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/gwt-core",
     "crates/gwt-tauri",
+    "crates/gwt-voice",
+    "crates/gwt-clipboard",
+    "crates/gwt-skills",
 ]
 default-members = [
     "crates/gwt-tauri",
