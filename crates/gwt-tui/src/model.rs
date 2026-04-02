@@ -94,6 +94,13 @@ pub enum SessionStatus {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionLayoutMode {
+    #[default]
+    Grid,
+    Maximized,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectionPoint {
     pub row: u16,
@@ -186,6 +193,7 @@ pub struct Model {
     // Session tabs (Agent + Shell) -- Main layer
     pub session_tabs: Vec<SessionTab>,
     pub active_session: usize,
+    pub session_layout_mode: SessionLayoutMode,
 
     // Management tabs -- Management layer
     pub management_tab: ManagementTab,
@@ -249,6 +257,7 @@ impl Model {
             active_layer,
             session_tabs: Vec::new(),
             active_session: 0,
+            session_layout_mode: SessionLayoutMode::Grid,
             management_tab: ManagementTab::Branches,
             branches_state: BranchListState::new(),
             issues_state: IssuePanelState::new(),
@@ -290,6 +299,7 @@ impl Model {
         self.repo_root = new_repo_root;
         self.session_tabs.clear();
         self.active_session = 0;
+        self.session_layout_mode = SessionLayoutMode::Grid;
         self.active_layer = ActiveLayer::Management;
         self.management_tab = ManagementTab::Specs;
         self.overlay_mode = OverlayMode::None;
@@ -317,6 +327,7 @@ impl Model {
         self.clear_active_history_view();
         self.session_tabs.push(tab);
         self.active_session = self.session_tabs.len() - 1;
+        self.session_layout_mode = SessionLayoutMode::Grid;
         self.active_layer = ActiveLayer::Main;
         self.sync_branch_session_counts();
     }
@@ -411,6 +422,16 @@ impl Model {
             self.clear_active_history_view();
             self.active_session = index;
         }
+    }
+
+    pub fn toggle_session_layout_mode(&mut self) {
+        if self.session_tabs.is_empty() {
+            return;
+        }
+        self.session_layout_mode = match self.session_layout_mode {
+            SessionLayoutMode::Grid => SessionLayoutMode::Maximized,
+            SessionLayoutMode::Maximized => SessionLayoutMode::Grid,
+        };
     }
 
     // ---- Layer helpers -------------------------------------------------------

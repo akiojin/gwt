@@ -46,7 +46,7 @@ pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
             " Enter on Branches: Agent | Ctrl+G,c: Shell | Ctrl+G,Ctrl+G: Manage "
         }
         ActiveLayer::Main => {
-            " Wheel: Scroll | PgUp/PgDn: History | Drag: Copy | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close "
+            " Wheel: Scroll | PgUp/PgDn: History | Drag: Copy | Ctrl+G,z: Maximize | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close "
         }
         ActiveLayer::Management => " Tab: Switch | Ctrl+G,Ctrl+G: Terminal | Ctrl+C×2: Quit ",
     };

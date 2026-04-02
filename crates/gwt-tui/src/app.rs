@@ -21,7 +21,7 @@ use crate::input::keybind::{self, KeyAction, PrefixState};
 use crate::message::Message;
 use crate::model::{
     ActiveLayer, ErrorEntry, ErrorSeverity, ManagementTab, Model, OverlayMode, SelectionPoint,
-    TerminalViewportState,
+    SessionLayoutMode, TerminalViewportState,
 };
 use crate::screens::{self, LogsMessage, SettingsMessage};
 use crate::widgets;
@@ -235,6 +235,78 @@ fn build_history_view_parser(model: &mut Model, pane_id: &str) -> Option<(vt100:
         .max(usize::from(rows));
     let max_scrollback = content_rows.saturating_sub(usize::from(rows));
     Some((parser, max_scrollback))
+}
+
+fn equal_grid_layout(area: Rect, count: usize) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![area];
+    }
+
+    let columns = (count as f64).sqrt().ceil() as usize;
+    let rows = count.div_ceil(columns);
+    let row_constraints = vec![Constraint::Ratio(1, rows as u32); rows];
+    let col_constraints = vec![Constraint::Ratio(1, columns as u32); columns];
+
+    let mut rects = Vec::with_capacity(count);
+    for row in Layout::vertical(row_constraints)
+        .split(area)
+        .iter()
+        .copied()
+    {
+        for cell in Layout::horizontal(col_constraints.clone())
+            .split(row)
+            .iter()
+            .copied()
+        {
+            rects.push(cell);
+            if rects.len() == count {
+                return rects;
+            }
+        }
+    }
+    rects
+}
+
+fn render_session_grid(model: &Model, buf: &mut Buffer, area: Rect) {
+    let rects = equal_grid_layout(area, model.session_tabs.len());
+    for (index, (tab, rect)) in model.session_tabs.iter().zip(rects.into_iter()).enumerate() {
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(if index == model.active_session {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            })
+            .title(format!(" {} ", tab.name));
+        let inner = block.inner(rect);
+        ratatui::widgets::Widget::render(block, rect, buf);
+
+        if inner.width == 0 || inner.height == 0 {
+            continue;
+        }
+
+        let parser = active_terminal_parser(model, &tab.pane_id);
+        let view = model.terminal_viewport(&tab.pane_id);
+        let selection = view.and_then(|view| view.selection_anchor.zip(view.selection_focus));
+        if model.active_history_pane_id.as_deref() == Some(tab.pane_id.as_str())
+            && model.active_history_parser.is_some()
+        {
+            if let Some(parser) = parser {
+                let _ = crate::screens::agent_pane::render_history(
+                    buf,
+                    inner,
+                    parser,
+                    view.map(terminal_view_origin).unwrap_or_default(),
+                    selection,
+                );
+            }
+        } else {
+            let _ = crate::screens::agent_pane::render(buf, inner, parser, selection);
+        }
+    }
 }
 
 fn selection_active(view: &TerminalViewportState) -> bool {
@@ -714,6 +786,9 @@ pub fn update(model: &mut Model, msg: Message) {
             if idx < model.session_tabs.len() {
                 model.active_layer = ActiveLayer::Main;
             }
+        }
+        Message::ToggleSessionLayout => {
+            model.toggle_session_layout_mode();
         }
         Message::CloseSession => {
             model.close_active_session();
@@ -1298,27 +1373,36 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     let text_area = centered_rect(60, 3, layout[2]);
                     ratatui::widgets::Widget::render(center, text_area, buf);
                 } else {
-                    let pane_id = &model.session_tabs[model.active_session].pane_id;
-                    let parser = active_terminal_parser(model, pane_id);
-                    let view = model.terminal_viewport(pane_id);
-                    let selection =
-                        view.and_then(|view| view.selection_anchor.zip(view.selection_focus));
-                    cursor_pos = if model.active_history_pane_id.as_deref()
-                        == Some(pane_id.as_str())
-                        && model.active_history_parser.is_some()
-                    {
-                        parser.and_then(|parser| {
-                            crate::screens::agent_pane::render_history(
-                                buf,
-                                layout[2],
-                                parser,
-                                view.map(terminal_view_origin).unwrap_or_default(),
-                                selection,
-                            )
-                        })
-                    } else {
-                        crate::screens::agent_pane::render(buf, layout[2], parser, selection)
-                    };
+                    match model.session_layout_mode {
+                        SessionLayoutMode::Grid => {
+                            render_session_grid(model, buf, layout[2]);
+                        }
+                        SessionLayoutMode::Maximized => {
+                            let pane_id = &model.session_tabs[model.active_session].pane_id;
+                            let parser = active_terminal_parser(model, pane_id);
+                            let view = model.terminal_viewport(pane_id);
+                            let selection = view
+                                .and_then(|view| view.selection_anchor.zip(view.selection_focus));
+                            cursor_pos = if model.active_history_pane_id.as_deref()
+                                == Some(pane_id.as_str())
+                                && model.active_history_parser.is_some()
+                            {
+                                parser.and_then(|parser| {
+                                    crate::screens::agent_pane::render_history(
+                                        buf,
+                                        layout[2],
+                                        parser,
+                                        view.map(terminal_view_origin).unwrap_or_default(),
+                                        selection,
+                                    )
+                                })
+                            } else {
+                                crate::screens::agent_pane::render(
+                                    buf, layout[2], parser, selection,
+                                )
+                            };
+                        }
+                    }
                 }
             }
             ActiveLayer::Management => match model.management_tab {
@@ -2261,6 +2345,7 @@ fn action_to_message(action: KeyAction, key: crossterm::event::KeyEvent) -> Opti
         KeyAction::NextSession => Some(Message::NextSession),
         KeyAction::PrevSession => Some(Message::PrevSession),
         KeyAction::SwitchSession(n) => Some(Message::SwitchSession(n)),
+        KeyAction::ToggleSessionLayout => Some(Message::ToggleSessionLayout),
         KeyAction::CloseSession => Some(Message::CloseSession),
         KeyAction::NewShell => Some(Message::NewShell),
         KeyAction::TogglePtyCopyMode => Some(Message::TogglePtyCopyMode),
@@ -2756,6 +2841,54 @@ mod tests {
 
         update(&mut m, Message::PrevSession);
         assert_eq!(m.active_session, 0);
+    }
+
+    #[test]
+    fn update_toggle_session_layout_switches_between_grid_and_maximized() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        assert_eq!(m.session_layout_mode, SessionLayoutMode::Grid);
+
+        update(&mut m, Message::ToggleSessionLayout);
+        assert_eq!(m.session_layout_mode, SessionLayoutMode::Maximized);
+
+        update(&mut m, Message::ToggleSessionLayout);
+        assert_eq!(m.session_layout_mode, SessionLayoutMode::Grid);
+    }
+
+    #[test]
+    fn maximize_mode_keeps_tab_switch_behavior() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        m.add_session(test_session("s2"));
+        m.switch_session(0);
+        update(&mut m, Message::ToggleSessionLayout);
+        assert_eq!(m.session_layout_mode, SessionLayoutMode::Maximized);
+
+        update(&mut m, Message::NextSession);
+        assert_eq!(m.active_session, 1);
+        assert_eq!(m.session_layout_mode, SessionLayoutMode::Maximized);
+    }
+
+    #[test]
+    fn toggling_management_preserves_session_layout_mode() {
+        let mut m = test_model();
+        m.add_session(test_session("s1"));
+        update(&mut m, Message::ToggleSessionLayout);
+        assert_eq!(m.session_layout_mode, SessionLayoutMode::Maximized);
+
+        update(&mut m, Message::ToggleLayer);
+        assert_eq!(m.active_layer, ActiveLayer::Management);
+        update(&mut m, Message::ToggleLayer);
+        assert_eq!(m.active_layer, ActiveLayer::Main);
+        assert_eq!(m.session_layout_mode, SessionLayoutMode::Maximized);
+    }
+
+    #[test]
+    fn equal_grid_layout_returns_one_rect_per_session() {
+        let rects = equal_grid_layout(Rect::new(0, 0, 100, 40), 4);
+        assert_eq!(rects.len(), 4);
+        assert!(rects.iter().all(|rect| rect.width > 0 && rect.height > 0));
     }
 
     #[test]
@@ -3457,6 +3590,20 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| view(&model, f)).unwrap();
+    }
+
+    #[test]
+    fn view_main_layer_grid_renders_all_session_titles() {
+        let mut model = test_model();
+        model.add_session(test_session("s1"));
+        model.add_session(test_session("s2"));
+        model.session_layout_mode = SessionLayoutMode::Grid;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| view(&model, f)).unwrap();
+        let rendered = buffer_text(Rect::new(0, 0, 80, 24), terminal.backend().buffer());
+        assert!(rendered.contains("s1"), "expected s1 title in grid");
+        assert!(rendered.contains("s2"), "expected s2 title in grid");
     }
 
     #[test]

@@ -47,6 +47,27 @@
 
 - Implement the session workspace itself: `equal grid`, maximize toggle, and maximize-time tab switching
 
+## 2026-04-02: Equal-grid and maximize session workspace
+
+### Progress
+
+- Added `SessionLayoutMode` and made the session workspace switch between `Grid` and `Maximized`
+- Implemented an equal-grid renderer for the main session workspace using all open sessions
+- Added `Ctrl+G,z` to toggle maximize mode
+- Kept maximize mode compatible with the existing session tab switch shortcuts
+- Verified that toggling the management layer does not discard the current session layout mode
+
+### Done
+
+- Main layer now renders all open sessions in equal-grid mode by default
+- Focused session can be maximized and restored
+- Maximize mode continues to use tab switching for other sessions
+- Management open/close preserves the last chosen session layout mode
+
+### Next
+
+- Remove remaining assumptions that the shell is fundamentally tab-first and finish the explicit `hidden pane` cleanup task
+
 ## 2026-04-02: Normal-mode virtual terminal viewport
 
 ### Progress

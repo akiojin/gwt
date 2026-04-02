@@ -24,6 +24,8 @@ pub enum Message {
     PrevSession,
     /// Switch to session by 1-based index (Ctrl+G, 1-9)
     SwitchSession(usize),
+    /// Toggle between equal-grid and maximized session workspace
+    ToggleSessionLayout,
     /// Close current session (Ctrl+G, &)
     CloseSession,
     /// Open a new shell tab (Ctrl+G, c)
@@ -103,6 +105,7 @@ mod tests {
             Message::NextSession,
             Message::PrevSession,
             Message::SwitchSession(0),
+            Message::ToggleSessionLayout,
             Message::CloseSession,
             Message::NewShell,
             Message::TogglePtyCopyMode,

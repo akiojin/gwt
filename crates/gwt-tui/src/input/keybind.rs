@@ -35,6 +35,8 @@ pub enum KeyAction {
     PrevSession,
     /// Switch to session by 1-based number (1-9)
     SwitchSession(usize),
+    /// Toggle between equal-grid and maximized workspace
+    ToggleSessionLayout,
     /// Close current session
     CloseSession,
     /// New shell
@@ -85,6 +87,8 @@ pub fn process_key(state: &mut PrefixState, key: KeyEvent) -> KeyAction {
                 }
                 // Ctrl+G, x → close session
                 KeyCode::Char('x') => KeyAction::CloseSession,
+                // Ctrl+G, z → toggle equal-grid / maximized session workspace
+                KeyCode::Char('z') => KeyAction::ToggleSessionLayout,
                 // Ctrl+G, c → new shell
                 KeyCode::Char('c') => KeyAction::NewShell,
                 // Ctrl+G, m → legacy live-tail shortcut
@@ -189,6 +193,16 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_g_z_toggles_session_layout() {
+        let mut state = PrefixState::Normal;
+        process_key(&mut state, ctrl_g());
+        assert_eq!(
+            process_key(&mut state, plain('z')),
+            KeyAction::ToggleSessionLayout
+        );
+    }
+
+    #[test]
     fn ctrl_g_m_triggers_legacy_live_tail_shortcut() {
         let mut state = PrefixState::Normal;
         process_key(&mut state, ctrl_g());
@@ -250,6 +264,7 @@ mod tests {
             KeyAction::NextSession,
             KeyAction::PrevSession,
             KeyAction::SwitchSession(1),
+            KeyAction::ToggleSessionLayout,
             KeyAction::CloseSession,
             KeyAction::NewShell,
             KeyAction::TogglePtyCopyMode,

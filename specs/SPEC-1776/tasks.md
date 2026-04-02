@@ -18,11 +18,11 @@
 
 ## Phase 2: Permanent Multi-Mode Session Workspace
 
-- [ ] T200: [TDD] `equal grid` layout model の tests を追加する
-- [ ] T201: `4件以上` を前提にした session grid を実装する
-- [ ] T202: focus session の maximize toggle を実装する
-- [ ] T203: maximize 時の tab switch を実装する
-- [ ] T204: 管理画面開閉後の layout restore を実装する
+- [x] T200: [TDD] `equal grid` layout model の tests を追加する
+- [x] T201: `4件以上` を前提にした session grid を実装する
+- [x] T202: focus session の maximize toggle を実装する
+- [x] T203: maximize 時の tab switch を実装する
+- [x] T204: 管理画面開閉後の layout restore を実装する
 - [ ] T205: `hidden pane` 依存を削除する
 
 ## Phase 3: Management Workspace Core
