@@ -33,7 +33,7 @@
 - [ ] T014 Write RED test: startup spawns async cache refresh when cache is expired.
 - [ ] T015 Write RED test: startup does not block on cache refresh (UI is interactive immediately).
 - [ ] T016 Implement async startup task: check TTL, if expired spawn tokio task to fetch and update cache.
-- [ ] T017 Wire cached versions into wizard model selection step.
+- [x] T017 Wire cached versions into wizard model selection step.
 - [ ] T018 Verify startup integration tests pass GREEN.
 
 ## Phase 4: Session Conversion UI

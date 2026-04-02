@@ -261,6 +261,8 @@ pub fn update(model: &mut Model, msg: Message) {
 /// Populates branches, specs, and version tags.  Each section is
 /// best-effort: failures are silently ignored so the TUI still starts.
 pub fn load_initial_data(model: &mut Model) {
+    schedule_startup_version_cache_refresh();
+
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
         let items: Vec<screens::branches::BranchItem> = branches
@@ -812,6 +814,27 @@ fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecCont
 
     model.wizard = Some(wizard);
     schedule_wizard_version_cache_refresh(cache_path, refresh_targets);
+}
+
+fn schedule_startup_version_cache_refresh() {
+    schedule_startup_version_cache_refresh_with(
+        wizard_version_cache_path(),
+        AgentDetector::detect_all,
+        schedule_wizard_version_cache_refresh,
+    );
+}
+
+fn schedule_startup_version_cache_refresh_with<Detect, Schedule>(
+    cache_path: PathBuf,
+    detect_agents: Detect,
+    schedule_refresh: Schedule,
+) where
+    Detect: FnOnce() -> Vec<DetectedAgent>,
+    Schedule: FnOnce(PathBuf, Vec<AgentId>),
+{
+    let cache = VersionCache::load(&cache_path);
+    let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
+    schedule_refresh(cache_path, refresh_targets);
 }
 
 fn prepare_wizard_startup(
@@ -1452,6 +1475,64 @@ mod tests {
         assert_eq!(wizard.detected_agents[0].versions, vec!["1.0.55"]);
         assert!(wizard.detected_agents[0].cache_outdated);
         assert_eq!(refresh_targets, vec![AgentId::ClaudeCode]);
+    }
+
+    #[test]
+    fn schedule_startup_version_cache_refresh_with_schedules_stale_refreshable_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("agent-versions.json");
+        let mut cache = VersionCache::new();
+        cache.entries.insert(
+            "claude-code".into(),
+            version_entry(&["1.0.54", "1.0.53"], 90_000),
+        );
+        cache
+            .entries
+            .insert("codex".into(), version_entry(&["0.5.0"], 60));
+        cache.save(&cache_path).unwrap();
+
+        let scheduled = std::cell::RefCell::new(None);
+        schedule_startup_version_cache_refresh_with(
+            cache_path.clone(),
+            || {
+                vec![
+                    detected_agent(AgentId::ClaudeCode, Some("1.0.55")),
+                    detected_agent(AgentId::Codex, Some("0.5.1")),
+                    detected_agent(AgentId::OpenCode, Some("0.2.0")),
+                ]
+            },
+            |path, targets| {
+                *scheduled.borrow_mut() = Some((path, targets));
+            },
+        );
+
+        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        assert_eq!(scheduled_path, cache_path);
+        assert_eq!(targets, vec![AgentId::ClaudeCode]);
+    }
+
+    #[test]
+    fn schedule_startup_version_cache_refresh_with_schedules_missing_cache_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("agent-versions.json");
+        let scheduled = std::cell::RefCell::new(None);
+
+        schedule_startup_version_cache_refresh_with(
+            cache_path.clone(),
+            || {
+                vec![
+                    detected_agent(AgentId::Gemini, Some("0.2.0")),
+                    detected_agent(AgentId::OpenCode, Some("0.4.0")),
+                ]
+            },
+            |path, targets| {
+                *scheduled.borrow_mut() = Some((path, targets));
+            },
+        );
+
+        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        assert_eq!(scheduled_path, cache_path);
+        assert_eq!(targets, vec![AgentId::Gemini]);
     }
 
     #[test]
