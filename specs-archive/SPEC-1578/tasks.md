@@ -1,0 +1,23 @@
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+
+- [ ] T001 [S] Rust 側の `skill_registration.rs` を完全分析（全関数・テストケースの棚卸し）
+- [ ] T002 [S] Unity C# でのアセット埋め込み方式を決定（C# const/static 埋め込みを採用）
+- [ ] T003 [F] `ISkillRegistrationService` インターフェース設計
+- [ ] T004 [F] [US-2] `EnsureProjectLocalExcludeRules` メソッド実装（exclude ブロック差し替え）
+- [ ] T005 [F] [US-3] ユーザー独自ルール保持ロジック実装
+- [ ] T006 [F] [US-7] 不正マーカー検出 + エラーハンドリング実装
+- [ ] T007 [F] [US-5] worktree commondir 解決（`git rev-parse --git-common-dir`）実装
+- [ ] T008 [F] [US-6] レガシーパターン自動移行ロジック実装
+- [ ] T009 [U] [US-1] スキル/コマンド/フックファイル自動配置実装
+- [ ] T010 [U] [US-4] バージョンアップ時の上書き更新実装
+- [ ] T011 [U] [US-1] プレースホルダ置換（`${CLAUDE_PLUGIN_ROOT}` → プロジェクトルート名）実装
+- [ ] T012 [U] [US-8] `.claude/settings.local.json` フック定義自動登録実装
+- [ ] T012a [U] [US-10] Claude hook 定義を CWD 非依存の repo ルート解決形式に更新
+- [ ] T012b [U] [US-10] Docker / DevContainer でも同じ hook 定義が成立する前提と確認手順を SPEC に反映
+- [ ] T013 [U] [US-1] UNIX スクリプト実行権限付与実装
+- [ ] T014 [FIN] VContainer DI 登録
+- [ ] T015 [FIN] プロジェクトオープンイベントでの自動トリガー統合
+- [ ] T016 [FIN] ユニットテスト（全 SC カバー）
+- [ ] T017 [FIN] 統合テスト（`git init` → 登録 → `git status` 確認）
+
+---
