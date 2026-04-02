@@ -305,14 +305,14 @@ impl Model {
 
     /// Reset the model for a new repository root.
     /// Clears session state, reloads all management screen data,
-    /// and transitions to Management layer with SPECs tab active.
+    /// and transitions to the branch-first management entry.
     pub fn reset(&mut self, new_repo_root: std::path::PathBuf) {
         self.repo_root = new_repo_root;
         self.session_tabs.clear();
         self.active_session = 0;
         self.session_layout_mode = SessionLayoutMode::Grid;
         self.active_layer = ActiveLayer::Management;
-        self.management_tab = ManagementTab::Specs;
+        self.management_tab = ManagementTab::Branches;
         self.overlay_mode = OverlayMode::None;
         self.branch_session_selector = None;
         self.clone_wizard = None;
@@ -980,6 +980,22 @@ mod tests {
         assert_eq!(model.issues_state.issues.len(), 1);
         assert_eq!(model.issues_state.issues[0].number, 42);
         assert_eq!(model.issues_state.issues[0].title, "GitHub issue");
+    }
+
+    #[test]
+    fn reset_returns_to_branch_first_management_entry() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Issues;
+        model.add_session(test_session("s1", SessionTabType::Shell));
+
+        let repo = tempfile::tempdir().unwrap();
+
+        model.reset(repo.path().to_path_buf());
+
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.management_tab, ManagementTab::Branches);
+        assert!(model.session_tabs.is_empty());
+        assert_eq!(model.session_layout_mode, SessionLayoutMode::Grid);
     }
 
     #[test]
