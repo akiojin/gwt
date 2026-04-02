@@ -101,16 +101,12 @@ impl ErrorState {
 
     /// Create from GwtError
     pub fn from_gwt_error(err: &gwt_core::error::GwtError) -> Self {
-        let code = err.code();
-        let category = err.category();
-        let suggestions = err.suggestions();
-
         Self {
-            title: format!("{} Error", category),
+            title: "Error".to_string(),
             message: err.to_string(),
-            code: Some(code.to_string()),
+            code: None,
             details: Vec::new(),
-            suggestions,
+            suggestions: Vec::new(),
             severity: ErrorSeverity::Error,
             scroll_offset: 0,
         }

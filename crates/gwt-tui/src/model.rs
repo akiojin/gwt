@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
-use gwt_core::terminal::manager::PaneManager;
-use gwt_core::terminal::AgentColor;
+use crate::compat::terminal::manager::PaneManager;
+use crate::compat::terminal::AgentColor;
 
 use crate::screens::branch_session_selector::BranchSessionSelectorState;
 use crate::screens::branches::BranchListState;
@@ -17,6 +17,7 @@ use crate::screens::issues::IssuePanelState;
 use crate::screens::speckit_wizard::SpecKitState;
 use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
+use crate::screens::profiles::ProfilesState;
 use crate::screens::{LogsState, SettingsState};
 use crate::widgets::progress_modal::ProgressState;
 
@@ -244,6 +245,7 @@ pub struct Model {
     pub branches_state: BranchListState,
     pub issues_state: IssuePanelState,
     pub specs_state: SpecsState,
+    pub profiles_state: ProfilesState,
     pub settings_state: SettingsState,
     pub logs_state: LogsState,
     pub versions_state: VersionsState,
@@ -288,7 +290,7 @@ impl Model {
     /// Detects repo type and starts in Initialization layer if no repo is found,
     /// otherwise starts in Management layer with Branches tab active.
     pub fn new(repo_root: PathBuf) -> Self {
-        use gwt_core::git::{detect_repo_type, RepoType};
+        use crate::compat::git::{detect_repo_type, RepoType};
 
         let repo_type = detect_repo_type(&repo_root);
         let active_layer = match repo_type {
@@ -305,6 +307,7 @@ impl Model {
             branches_state: BranchListState::new(),
             issues_state: IssuePanelState::new(),
             specs_state: SpecsState::new(),
+            profiles_state: ProfilesState::new(),
             settings_state: SettingsState::new(),
             logs_state: LogsState::new(),
             versions_state: VersionsState::new(),
@@ -527,7 +530,7 @@ impl Model {
     // ---- Background update polling -------------------------------------------
 
     pub fn apply_background_updates(&mut self) {
-        use gwt_core::terminal::pane::PaneStatus;
+        use crate::compat::terminal::pane::PaneStatus;
 
         self.tick_count += 1;
         // Poll branch list updates
@@ -556,7 +559,7 @@ impl Model {
         }
 
         let mut session_status_updates = Vec::new();
-        for pane in self.pane_manager.panes_mut() {
+        for mut pane in self.pane_manager.panes_mut() {
             let status = match pane.check_status() {
                 Ok(status) => status.clone(),
                 Err(err) => {
@@ -640,11 +643,11 @@ fn normalize_branch_name(name: &str) -> &str {
     name
 }
 
-fn map_pane_status(status: &gwt_core::terminal::pane::PaneStatus) -> SessionStatus {
+fn map_pane_status(status: &crate::compat::terminal::pane::PaneStatus) -> SessionStatus {
     match status {
-        gwt_core::terminal::pane::PaneStatus::Running => SessionStatus::Running,
-        gwt_core::terminal::pane::PaneStatus::Completed(code) => SessionStatus::Completed(*code),
-        gwt_core::terminal::pane::PaneStatus::Error(message) => {
+        crate::compat::terminal::pane::PaneStatus::Running => SessionStatus::Running,
+        crate::compat::terminal::pane::PaneStatus::Completed(code) => SessionStatus::Completed(*code),
+        crate::compat::terminal::pane::PaneStatus::Error(message) => {
             SessionStatus::Error(message.clone())
         }
     }
@@ -655,8 +658,8 @@ mod tests {
     use super::*;
     use std::{collections::HashMap, path::PathBuf, thread, time::Duration};
 
-    use gwt_core::git::issue_cache::{IssueExactCache, IssueExactCacheEntry};
-    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
+    use crate::compat::git::issue_cache::{IssueExactCache, IssueExactCacheEntry};
+    use crate::compat::terminal::pane::{PaneConfig, TerminalPane};
 
     fn test_model() -> Model {
         let mut m = Model::new(PathBuf::from("/tmp/test-repo"));

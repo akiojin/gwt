@@ -4,7 +4,7 @@ use crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::model::{ErrorEntry, ManagementTab};
 use crate::screens::versions::VersionsMessage;
-use crate::screens::{BranchesMessage, IssuesMessage, LogsMessage, SettingsMessage};
+use crate::screens::{BranchesMessage, IssuesMessage, LogsMessage, ProfilesMessage, SettingsMessage};
 
 /// All messages that can flow through the Elm Architecture update loop.
 #[derive(Debug)]
@@ -85,6 +85,7 @@ pub enum Message {
     // -- Screen-specific messages (delegated) ---------------------------------
     BranchesMsg(BranchesMessage),
     IssuesMsg(IssuesMessage),
+    ProfilesMsg(ProfilesMessage),
     SettingsMsg(SettingsMessage),
     LogsMsg(LogsMessage),
     VersionsMsg(VersionsMessage),
@@ -137,6 +138,7 @@ mod tests {
             Message::ProgressError("err".into()),
             Message::BranchesMsg(BranchesMessage::Refresh),
             Message::IssuesMsg(IssuesMessage::Refresh),
+            Message::ProfilesMsg(ProfilesMessage::Refresh),
             Message::SettingsMsg(SettingsMessage::Refresh),
             Message::LogsMsg(LogsMessage::Refresh),
             Message::VersionsMsg(VersionsMessage::SelectNext),

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::git::LocalSpecDetail;
+use crate::compat::git::LocalSpecDetail;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear};
 
@@ -561,31 +561,36 @@ fn load_spec_detail_result(
     spec_dir_name: &str,
 ) -> Result<Vec<SpecDetailSection>, String> {
     let spec_id = spec_dir_name.strip_prefix("SPEC-").unwrap_or(spec_dir_name);
-    let detail = gwt_core::git::get_local_spec_detail(repo_root, spec_id)?;
+    let detail = crate::compat::git::get_local_spec_detail(repo_root, spec_id)?;
     Ok(build_detail_sections(&detail))
 }
 
 fn build_detail_sections(detail: &LocalSpecDetail) -> Vec<SpecDetailSection> {
-    [
-        ("spec", &detail.sections.spec),
-        ("plan", &detail.sections.plan),
-        ("tasks", &detail.sections.tasks),
-        ("research", &detail.sections.research),
-        ("data-model", &detail.sections.data_model),
-        ("quickstart", &detail.sections.quickstart),
-        ("checklists", &detail.sections.checklists),
-        ("contracts", &detail.sections.contracts),
-    ]
-    .into_iter()
-    .map(|(label, content)| SpecDetailSection {
-        label,
-        content: if content.trim().is_empty() {
-            format!("_No `{label}` artifact yet._")
-        } else {
-            content.to_string()
-        },
-    })
-    .collect()
+    let find = |name: &str| -> String {
+        detail.sections
+            .iter()
+            .find(|s| s.label.eq_ignore_ascii_case(name))
+            .map(|s| s.content.clone())
+            .unwrap_or_default()
+    };
+
+    [("spec", "spec"), ("plan", "plan"), ("tasks", "tasks"),
+     ("research", "research"), ("data-model", "data-model"),
+     ("quickstart", "quickstart"), ("checklists", "checklists"),
+     ("contracts", "contracts")]
+        .into_iter()
+        .map(|(label, search): (&'static str, &str)| {
+            let content = find(search);
+            SpecDetailSection {
+                label,
+                content: if content.trim().is_empty() {
+                    format!("_No `{label}` artifact yet._")
+                } else {
+                    content
+                },
+            }
+        })
+        .collect()
 }
 
 /// Load SPEC items from specs/ directory

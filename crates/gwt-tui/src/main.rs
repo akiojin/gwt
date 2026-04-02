@@ -5,8 +5,8 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    let log_config = gwt_core::logging::LogConfig::default();
-    let _profiling_guard = gwt_core::logging::init_logger(&log_config).ok();
+    let log_config = gwt_tui::compat::logging::LogConfig::default();
+    let _profiling_guard = gwt_tui::compat::logging::init_logger(&log_config).ok();
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let repo_root = resolve_repo_root(&cwd);
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// - If `cwd` is already a git repo (Normal / Worktree), return it as-is.
 /// - Falls back to `cwd` when no repository can be detected (NonRepo / Empty).
 fn resolve_repo_root(cwd: &std::path::Path) -> std::path::PathBuf {
-    use gwt_core::git::{detect_repo_type, RepoType};
+    use gwt_tui::compat::git::{detect_repo_type, RepoType};
 
     match detect_repo_type(cwd) {
         RepoType::Normal | RepoType::Worktree => cwd.to_path_buf(),

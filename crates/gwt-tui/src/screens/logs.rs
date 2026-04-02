@@ -4,7 +4,6 @@
 
 use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::logging::LogReader;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::BTreeMap;
@@ -32,36 +31,31 @@ pub struct LogEntry {
 
 impl LogEntry {
     pub fn from_core_entry(
-        entry: gwt_core::logging::LogEntry,
+        entry: crate::compat::logging::LogEntry,
         workspace_hint: Option<&str>,
     ) -> Self {
-        let message = entry.message().to_string();
-        let category = entry.category().map(ToString::to_string);
-        let event = entry.event().map(ToString::to_string);
-        let result = entry.result().map(ToString::to_string);
-        let workspace = entry
-            .workspace()
-            .map(ToString::to_string)
+        let fields = entry.fields.as_ref();
+        let get_str = |key: &str| -> Option<String> {
+            fields
+                .and_then(|f| f.get(key))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+        };
+        let message = get_str("message").unwrap_or_default();
+        let category = get_str("category");
+        let event = get_str("event");
+        let result = get_str("result");
+        let workspace = get_str("workspace")
             .or_else(|| workspace_hint.map(ToString::to_string));
-        let error_code = entry.error_code().map(ToString::to_string);
-        let error_detail = entry.error_detail().map(ToString::to_string);
-        let extra = entry
-            .fields
-            .extra
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    serde_json::to_string(value).unwrap_or_default(),
-                )
-            })
-            .collect();
+        let error_code = get_str("error_code");
+        let error_detail = get_str("error_detail");
+        let extra = BTreeMap::new();
 
         Self {
-            timestamp: entry.timestamp,
-            level: entry.level,
+            timestamp: entry.timestamp.unwrap_or_default(),
+            level: entry.level.unwrap_or_default(),
             message,
-            target: entry.target,
+            target: entry.target.unwrap_or_default(),
             category,
             event,
             result,
@@ -750,22 +744,25 @@ fn load_entries_from_dir(log_dir: &Path, workspace_hint: Option<&str>) -> Vec<Lo
         return Vec::new();
     }
 
-    let reader = LogReader::new(log_dir);
-    let files = match reader.list_files() {
-        Ok(files) => files,
-        Err(_) => return Vec::new(),
-    };
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(log_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl" || ext == "log"))
+        .collect();
+    files.sort();
+    files.reverse();
 
     let mut entries = Vec::new();
     for file in files.into_iter().take(MAX_LOG_FILES) {
-        let Ok((file_entries, _)) = LogReader::read_entries(&file, 0, MAX_LOG_FILE_LINES) else {
-            continue;
-        };
-        entries.extend(
-            file_entries
-                .into_iter()
-                .map(|entry| LogEntry::from_core_entry(entry, workspace_hint)),
-        );
+        let Ok(content) = std::fs::read_to_string(&file) else { continue };
+        for line in content.lines().take(MAX_LOG_FILE_LINES) {
+            if let Ok(entry) = serde_json::from_str::<crate::compat::logging::LogEntry>(line) {
+                entries.push(LogEntry::from_core_entry(entry, workspace_hint));
+            }
+        }
     }
     entries
 }
@@ -826,7 +823,7 @@ mod tests {
     }
 
     fn parse_core_log(line: &str, workspace_hint: Option<&str>) -> LogEntry {
-        let entry: gwt_core::logging::LogEntry = serde_json::from_str(line).unwrap();
+        let entry: crate::compat::logging::LogEntry = serde_json::from_str(line).unwrap();
         LogEntry::from_core_entry(entry, workspace_hint)
     }
 

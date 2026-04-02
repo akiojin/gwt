@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::git::{
+use crate::compat::git::{
     fetch_issues_with_options,
     issue_cache::{IssueExactCache, IssueExactCacheEntry},
 };
@@ -468,20 +468,20 @@ fn render_detail(state: &IssuePanelState, buf: &mut Buffer, area: Rect) {
 
 pub fn load_issues(repo_root: &Path) -> Vec<IssueItem> {
     let cache = IssueExactCache::load(repo_root);
-    let mut items = cache
+    let mut items: Vec<IssueItem> = cache
         .all_entries()
-        .values()
+        .into_iter()
         .map(issue_item_from_cache_entry)
-        .collect::<Vec<_>>();
+        .collect();
     items.sort_by(|a, b| b.number.cmp(&a.number));
     items
 }
 
 pub fn refresh_issues(repo_root: &Path) -> Result<Vec<IssueItem>, String> {
-    let result = fetch_issues_with_options(repo_root, 1, 100, "open", false, "issues")?;
+    let issues = fetch_issues_with_options(repo_root, "open", 100);
     let mut cache = IssueExactCache::default();
-    for issue in result.issues {
-        cache.upsert(IssueExactCache::entry_from_github_issue(&issue));
+    for issue in &issues {
+        cache.upsert(IssueExactCache::entry_from_github_issue(issue));
     }
     cache.save(repo_root)?;
     Ok(load_issues(repo_root))

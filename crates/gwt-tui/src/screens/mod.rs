@@ -8,6 +8,7 @@ pub mod confirm;
 pub mod error;
 pub mod issues;
 pub mod logs;
+pub mod profiles;
 pub mod settings;
 pub mod speckit_wizard;
 pub mod specs;
@@ -19,4 +20,5 @@ pub use branches::{
 };
 pub use issues::{IssueItem, IssuePanelState, IssuesMessage};
 pub use logs::{LogsMessage, LogsState};
+pub use profiles::{ProfilesMessage, ProfilesState};
 pub use settings::{SettingsMessage, SettingsState};

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::config::{
+use crate::compat::config::{
     AgentType, CustomCodingAgent, Profile, ProfilesConfig, Settings, ToolsConfig,
 };
 use ratatui::prelude::*;
@@ -980,7 +980,11 @@ impl SettingsState {
         if let Some(name) = self.selected_profile_name() {
             let is_active = self.is_profile_active(&name);
             if let Some(ref mut config) = self.profiles_config {
-                config.set_active(if is_active { None } else { Some(name) });
+                if is_active {
+                    config.active = None;
+                } else {
+                    let _ = config.set_active(&name);
+                }
             }
         }
     }
@@ -1034,7 +1038,7 @@ impl SettingsState {
                     config.profiles.insert(name, profile);
                 } else {
                     let mut config = ProfilesConfig {
-                        version: 1,
+                        version: Some(1),
                         active: None,
                         profiles: HashMap::new(),
                     };
@@ -1744,7 +1748,7 @@ fn render_ai_settings(state: &SettingsState, buf: &mut Buffer, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("API Key:  ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(if ai.api_key.is_empty() {
+                Span::raw(if ai.api_key.as_deref().unwrap_or("").is_empty() {
                     "Not set"
                 } else {
                     "********"
@@ -1752,7 +1756,7 @@ fn render_ai_settings(state: &SettingsState, buf: &mut Buffer, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("Language: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(&ai.language),
+                Span::raw("en"),
             ]),
             Line::from(vec![
                 Span::styled("Summary:  ", Style::default().add_modifier(Modifier::BOLD)),
@@ -2057,7 +2061,7 @@ mod tests {
     fn profile_crud_operations() {
         let mut state = SettingsState::new();
         state.profiles_config = Some(ProfilesConfig {
-            version: 1,
+            version: Some(1),
             active: None,
             profiles: HashMap::new(),
         });
@@ -2225,7 +2229,7 @@ mod tests {
         let mut state = SettingsState::new();
         state.category = SettingsCategory::Environment;
         state.profiles_config = Some(ProfilesConfig {
-            version: 1,
+            version: Some(1),
             active: None,
             profiles: HashMap::new(),
         });

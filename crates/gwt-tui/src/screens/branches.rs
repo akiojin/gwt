@@ -8,10 +8,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use gwt_core::git::issue_cache::IssueExactCache;
-use gwt_core::git::issue_linkage::WorktreeIssueLinkStore;
-use gwt_core::git::{Branch, PrCache};
-use gwt_core::worktree::{Worktree, WorktreeManager, WorktreeStatus as CoreWorktreeStatus};
+use crate::compat::git::issue_cache::IssueExactCache;
+use crate::compat::git::issue_linkage::WorktreeIssueLinkStore;
+use crate::compat::git::{Branch, PrCache};
+use crate::compat::worktree::{Worktree, WorktreeManager, WorktreeStatus as CoreWorktreeStatus};
 
 // ---------------------------------------------------------------------------
 // Safety status
@@ -573,11 +573,11 @@ pub fn update(state: &mut BranchListState, msg: BranchesMessage) {
 
 /// Load branches from the repository at `repo_root`.
 pub fn load_branches(repo_root: &Path) -> Vec<BranchItem> {
-    let local = Branch::list(repo_root).unwrap_or_default();
-    let remote = Branch::list_remote(repo_root).unwrap_or_default();
+    let local = Branch::list(repo_root);
+    let remote = Branch::list_remote(repo_root);
 
     // Get tool usage map for agent info.
-    let tool_map = gwt_core::config::get_last_tool_usage_map(repo_root);
+    let tool_map = crate::compat::config::get_last_tool_usage_map(repo_root);
 
     let mut items: Vec<BranchItem> = Vec::with_capacity(local.len() + remote.len());
 
@@ -1570,10 +1570,10 @@ mod tests {
         store.set_link(
             "feature/issue-42-demo",
             42,
-            gwt_core::git::issue_linkage::LinkSource::BranchParse,
+            crate::compat::git::issue_linkage::LinkSource::BranchParse,
         );
         let mut cache = IssueExactCache::default();
-        cache.upsert(gwt_core::git::issue_cache::IssueExactCacheEntry {
+        cache.upsert(crate::compat::git::issue_cache::IssueExactCacheEntry {
             number: 42,
             title: "Issue 42".to_string(),
             url: "https://example.com/issues/42".to_string(),
