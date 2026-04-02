@@ -43,6 +43,42 @@
 | `SPEC-1782` | `1ブランチ = Nセッション` 前提へ Quick Start 導線を同期 |
 | `SPEC-1542`, `SPEC-1656` | `Profiles = Env profiles` wording を必要なら明示 |
 
+## Coverage Audit Status
+
+| SPEC | Coverage Status | Why |
+|---|---|---|
+| `SPEC-1541` | reference only | terminal basis は維持し、parent UX では上書きしない |
+| `SPEC-1579` | audit required | `gwt-spec-ops` / `gwt-spec-implement` など workflow skill 契約の正本 |
+| `SPEC-1636` | reference only | Assistant interrupt semantics は今回の主変更対象ではない |
+| `SPEC-1643` | audit required | Issues search/discovery contract が management tabs と噛み合う必要がある |
+| `SPEC-1644` | reference only | local git/worktree owner。branch-first でも正本は維持 |
+| `SPEC-1646` | reference only | agent catalog / launch contract owner |
+| `SPEC-1648` | reference only | multi-session persistence の owner |
+| `SPEC-1654` | sync required | shell/session model が parent UX と明確にずれている |
+| `SPEC-1714` | audit required | Branches / Issues の linkage source として必須 |
+| `SPEC-1770` | sync required | shortcut / grid / maximize 操作が親方針で変わる |
+| `SPEC-1777` | sync required | SPECs tab の navigation / launch entry を parent 方針に合わせる |
+| `SPEC-1779` | reference only | custom agent UI は後続だが owner として inventory に含める |
+| `SPEC-1782` | sync required | `1ブランチ = Nセッション` により Branches flow が変わる |
+| `SPEC-1786` | audit required | hooks confirm が新しい branch enter selector にぶつかる |
+| `SPEC-1787` | audit required | SPEC-first workflow / initialization と branch-first UX の整合確認が必要 |
+| `SPEC-1354` | audit required | Issues detail contract の canonical owner |
+| `SPEC-1542`, `SPEC-1656` | audit required | Profiles persistence wording を `Profiles = Env profiles` に揃える必要がある |
+
+## Embedded Workflow Skill Coverage
+
+- `gwt-spec-ops`
+- `gwt-spec-implement`
+- `gwt-spec-plan`
+- `gwt-spec-tasks`
+- `gwt-spec-analyze`
+- `gwt-spec-register`
+- `gwt-spec-search`
+- `gwt-issue-register`
+- `gwt-issue-resolve`
+
+These are considered covered through `SPEC-1579` and `SPEC-1787`. `SPEC-1776` does not redefine their workflow contract; it only constrains how `Branches`, `SPECs`, and `Issues` surfaces hand users into those flows.
+
 ## Accepted Product Decisions
 
 - 旧TUIの使いやすさは `branch list` と操作意味にある

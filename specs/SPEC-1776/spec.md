@@ -1,4 +1,4 @@
-> **Canonical Boundary**: `SPEC-1776` は TUI 再設計の親 SPEC である。`branch list` 中心の UX 方針、常設マルチモード、管理画面の情報設計、各 child SPEC の統合優先順位だけを定義する。terminal emulation は `SPEC-1541`、interaction policy は `SPEC-1770`、workspace shell は `SPEC-1654`、SPEC workflow は `SPEC-1579`、workspace initialization は `SPEC-1787`、Quick Start は `SPEC-1782`、Issue linkage/cache は `SPEC-1714`、Codex hooks merge は `SPEC-1786`、Profiles persistence は `SPEC-1542` / `SPEC-1656` を正本とする。
+> **Canonical Boundary**: `SPEC-1776` は TUI 再設計の親 SPEC である。`branch list` 中心の UX 方針、常設マルチモード、管理画面の情報設計、各関連 SPEC の統合優先順位だけを定義する。terminal emulation は `SPEC-1541`、interaction policy は `SPEC-1770`、workspace shell は `SPEC-1654`、SPEC workflow は `SPEC-1579`、workspace initialization は `SPEC-1787`、Quick Start は `SPEC-1782`、Issue detail は `SPEC-1354`、Issue search/discovery は `SPEC-1643`、Issue linkage/cache は `SPEC-1714`、local git/worktree は `SPEC-1644`、agent catalog/launch contract は `SPEC-1646`、session persistence は `SPEC-1648`、Codex hooks merge は `SPEC-1786`、Profiles persistence は `SPEC-1542` / `SPEC-1656`、Assistant interrupt semantics は `SPEC-1636`、custom agent UI は `SPEC-1779` を正本とする。
 
 # 旧TUI UX を基準にした ratatui TUI 再設計
 
@@ -21,13 +21,26 @@ gwt の現行 `gwt-tui` は `native PTY`、hooks、SPEC/Issue integration、sess
 | Terminal emulation | `SPEC-1541` | `native PTY + vt100` を前提に採用し、詳細契約は委譲する |
 | Mouse / keyboard interaction | `SPEC-1770` | 新しい layout / Enter flow に合わせて interaction policy の親条件を渡す |
 | Workspace shell / session lifecycle | `SPEC-1654` | `branch list` 中心 + 常設マルチモードへ再編する親方針を渡す |
+| Local git / worktree domain | `SPEC-1644` | Branch-first UX でも ref/worktree 正本は変えない |
+| Agent catalog / launch contract | `SPEC-1646` | Wizard と launch flow が参照する agent contract を維持する |
+| Session persistence | `SPEC-1648` | `1ブランチ = Nセッション` でも persistence owner は維持する |
 | SPECs tab | `SPEC-1777` | parent navigation と launch entry を合わせる |
 | Quick Start | `SPEC-1782` | Branches 起点の Quick Start を維持し、新しい Enter flow に接続する |
 | Hooks merge | `SPEC-1786` | Codex hooks confirm / embed flow を parent launch flow に組み込む |
 | SPEC workflow / storage | `SPEC-1579` | local SPEC artifact を正本として扱う前提を維持する |
 | Workspace initialization | `SPEC-1787` | 初期導線や SPEC-first workflow の責務を再確認する |
+| Issue detail | `SPEC-1354` | Issues tab の detail contract は child 正本に従う |
+| Issue discovery / search | `SPEC-1643` | Issues list/search の source of truth を維持する |
 | Issue linkage / cache | `SPEC-1714` | Branches / Issues で同じ linkage source を使う |
 | Profiles persistence | `SPEC-1542`, `SPEC-1656` | `Profiles = Env profiles` の保存契約を再利用する |
+| Assistant behavior | `SPEC-1636` | Shell/Assistant の interrupt/queue semantics は上書きしない |
+| Custom agent UI | `SPEC-1779` | 初回完成条件では後続だが canonical owner は維持する |
+
+## Embedded Workflow Coverage
+
+- `gwt-spec-ops`、`gwt-spec-implement`、`gwt-spec-plan`、`gwt-spec-tasks`、`gwt-spec-analyze` などの埋め込み workflow skill 群は `SPEC-1579` が正本である
+- `SPEC-1776` はそれらを再定義しない。制約するのは `SPECs` / `Issues` / `Branches` からの launch entry、viewer navigation、branch-first UX だけである
+- `SPEC-first workflow` の起点や workspace initialization は `SPEC-1787` が正本であり、`SPEC-1776` はその entry surface が新しい管理画面タブと矛盾しないことだけを担保する
 
 ## Product Direction
 
@@ -90,6 +103,7 @@ As a developer, I want the rebuilt TUI to keep native PTY, hooks, SPEC integrati
 - FR-001: `SPEC-1776` は parent UX spec として振る舞い、detail contract は child SPEC に委譲する
 - FR-002: 実装前に `旧TUI / 現行 gwt-tui / 現行 gwt-core / 新目標` の比較マトリクスを持つ
 - FR-003: child SPEC の正本境界を壊す変更は、該当 child SPEC の同期タスクとして扱う
+- FR-004: `gwt-spec-ops` などの embedded workflow skill contract は `SPEC-1579` / `SPEC-1787` を正本とし、`SPEC-1776` では launch/view/navigation への影響だけを定義する
 
 ### Branches and Session Workspace
 

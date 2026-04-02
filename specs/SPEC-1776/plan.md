@@ -12,13 +12,20 @@
 | Terminal emulation | `SPEC-1541` | `native PTY + vt100` を維持し、scrollback / selection / resize 契約を流用 |
 | Interaction policy | `SPEC-1770` | `Enter`、管理画面トグル、grid/maximize 操作へ再配線 |
 | Workspace shell | `SPEC-1654` | `tab-first` 記述を `branch-first + permanent multi-mode` に同期する follow-up を切る |
+| Local git / worktree | `SPEC-1644` | branch-first UX でも local git/worktree owner はそのまま参照する |
+| Agent catalog / launch contract | `SPEC-1646` | Wizard / launch selector は child contract を参照する |
+| Session persistence | `SPEC-1648` | `1ブランチ = Nセッション` でも persistence owner は変えない |
 | SPECs tab | `SPEC-1777` | tab form 維持。一覧・詳細・launch entry の親遷移だけ合わせる |
 | Quick Start | `SPEC-1782` | Branches 起点の再開導線を維持し、multi-session selector に接続する |
 | Hooks merge | `SPEC-1786` | launch flow の child 契約として接続 |
 | SPEC workflow / storage | `SPEC-1579` | local artifact 正本を維持 |
 | Workspace initialization | `SPEC-1787` | Branches / SPEC-first 導線との整合を確認 |
+| Issue detail | `SPEC-1354` | Issues detail rendering は child 正本を維持する |
+| Issue search / discovery | `SPEC-1643` | Issues list/search の parent dependency として監査する |
 | Issue linkage / cache | `SPEC-1714` | Branch row / Issues detail の source of truth として再利用 |
 | Profiles persistence | `SPEC-1542`, `SPEC-1656` | env profile 保存形を再利用 |
+| Assistant semantics | `SPEC-1636` | Shell/Assistant interrupt semantics を上書きしない |
+| Custom agents | `SPEC-1779` | 初回は後続だが owner として inventory に含める |
 
 ## Design Decisions
 
@@ -55,6 +62,7 @@
 - `SPEC-1776` の spec / plan / tasks / research / data-model / quickstart を新前提へ更新
 - `旧TUI / 現行 gwt-tui / 現行 gwt-core / 新目標` の比較マトリクスを作る
 - child SPEC へ波及する更新箇所を inventory 化する
+- workflow / persistence / integration 系を含め、関連 SPEC を `sync required / reference only / deferred` に分類する
 
 ### Phase 1: Branch-First Shell Model
 
@@ -90,7 +98,11 @@
 - `SPEC-1770` を新 shortcut / layout policy に合わせる
 - `SPEC-1777` を management tabs と launch entry に同期する
 - `SPEC-1782` を `1ブランチ = Nセッション` 前提へ同期する
+- `SPEC-1579` / `SPEC-1787` の workflow entry contract が branch-first UX と矛盾しないか監査する
+- `SPEC-1714` / `SPEC-1354` / `SPEC-1643` の Issue list/detail/linkage contract を監査する
+- `SPEC-1786` の hooks confirm が新しい branch enter selector と矛盾しないか監査する
 - 必要に応じて `SPEC-1542` / `SPEC-1656` の profile wording を見直す
+- `SPEC-1636` / `SPEC-1779` / `SPEC-1648` / `SPEC-1646` / `SPEC-1644` は reference-only 監査対象として整合確認する
 
 ### Deferred Phase
 
