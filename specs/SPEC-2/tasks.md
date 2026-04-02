@@ -1,5 +1,11 @@
 # Workspace Shell -- Tasks
 
+## Phase 0: Implementation Details Documentation
+
+- [x] T-W01 Document complete keybinding map (18 bindings) in spec.md
+- [x] T-W02 Document Ctrl+G prefix state machine in spec.md
+- [x] T-W03 Document session persistence TOML schema in spec.md
+
 ## Phase 1: Help Overlay Auto-Collection
 
 - [ ] T001 [P] Write RED test: help overlay output contains all registered keybindings (Ctrl+G,c / Ctrl+G,x / Ctrl+G,z / etc.).

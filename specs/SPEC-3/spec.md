@@ -148,10 +148,23 @@ As a developer, I want to convert an existing session to a different agent type 
 
 | Flag | Description |
 |------|-------------|
-| `--print` | Non-interactive mode |
-| `--dangerously-skip-permissions` | Skip permission prompts (if configured) |
-| `--model <model>` | Model selection |
-| `--allowedTools <tools>` | Allowed tool list |
+| `--print` | Non-interactive mode (SDK mode) |
+| `--permission-mode auto` | Auto mode — execute without prompts (recommended over --dangerously-skip-permissions) |
+| `--permission-mode bypassPermissions` | Bypass all permission checks (legacy: `--dangerously-skip-permissions`) |
+| `--enable-auto-mode` | Unlock auto mode in Shift+Tab cycle |
+| `--model <model>` | Model selection (alias: `sonnet`, `opus`, or full name) |
+| `--allowedTools <tools>` | Tools that execute without prompting (pattern matching supported) |
+| `--disallowedTools <tools>` | Tools removed from context entirely |
+| `--effort <level>` | Effort level: low/medium/high/max (Opus 4.6 only) |
+| `--continue`, `-c` | Continue most recent conversation |
+| `--resume <id>`, `-r` | Resume specific session by ID or name |
+| `--name <name>`, `-n` | Set session display name |
+| `--append-system-prompt <text>` | Append to system prompt |
+| `--max-turns <n>` | Limit agentic turns (print mode) |
+| `--max-budget-usd <amount>` | Limit API spend (print mode) |
+| `--worktree <name>`, `-w` | Run in isolated git worktree |
+| `--bare` | Minimal mode (skip auto-discovery) |
+| `--verbose` | Verbose logging |
 
 #### Codex
 

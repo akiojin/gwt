@@ -1,5 +1,14 @@
 # Agent Management -- Tasks
 
+## Phase 0: Agent Launch Environment and Permission Mode
+
+- [x] T-A01 Add Claude Code telemetry disable env vars to AgentLaunchBuilder (DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING, DISABLE_FEEDBACK_COMMAND, CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)
+- [x] T-A02 Add CLAUDE_CODE_NO_FLICKER=1 env var to AgentLaunchBuilder
+- [x] T-A03 Add PermissionMode enum (Default/AcceptEdits/Plan/Auto/DontAsk/BypassPermissions) with --permission-mode CLI flag
+- [x] T-A04 Write test: Claude Code build includes all telemetry disable env vars
+- [x] T-A05 Write test: Claude Code build with PermissionMode::Auto emits --permission-mode auto
+- [x] T-A06 Update SPEC-3 spec.md with complete env var table and CLI flags
+
 ## Phase 1: Version Cache -- Core
 
 - [ ] T001 [P] Write RED test: cache file round-trip (write versions, read back, verify content matches).

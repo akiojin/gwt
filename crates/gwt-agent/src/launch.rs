@@ -16,6 +16,17 @@ pub struct LaunchConfig {
     pub color: AgentColor,
 }
 
+/// Permission mode for agent launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionMode {
+    Default,
+    AcceptEdits,
+    Plan,
+    Auto,
+    DontAsk,
+    BypassPermissions,
+}
+
 /// Builder for constructing agent launch configurations.
 #[derive(Debug, Clone)]
 pub struct AgentLaunchBuilder {
@@ -27,6 +38,7 @@ pub struct AgentLaunchBuilder {
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
+    permission_mode: Option<PermissionMode>,
     env_overrides: HashMap<String, String>,
     extra_args: Vec<String>,
 }
@@ -42,6 +54,7 @@ impl AgentLaunchBuilder {
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            permission_mode: None,
             env_overrides: HashMap::new(),
             extra_args: Vec::new(),
         }
@@ -84,6 +97,11 @@ impl AgentLaunchBuilder {
 
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_overrides.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_mode = Some(mode);
         self
     }
 
@@ -142,11 +160,31 @@ impl AgentLaunchBuilder {
     }
 
     fn build_claude_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
-        env_vars.insert(
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
-            "1".to_string(),
-        );
+        // Claude Code specific env vars
+        env_vars.insert("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".into(), "1".into());
+        env_vars.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
 
+        // Telemetry/analytics disable
+        env_vars.insert("DISABLE_TELEMETRY".into(), "1".into());
+        env_vars.insert("DISABLE_ERROR_REPORTING".into(), "1".into());
+        env_vars.insert("DISABLE_FEEDBACK_COMMAND".into(), "1".into());
+        env_vars.insert("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".into(), "1".into());
+        env_vars.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into());
+
+        // Permission mode
+        if let Some(ref mode) = self.permission_mode {
+            args.push("--permission-mode".to_string());
+            args.push(match mode {
+                PermissionMode::Default => "default",
+                PermissionMode::AcceptEdits => "acceptEdits",
+                PermissionMode::Plan => "plan",
+                PermissionMode::Auto => "auto",
+                PermissionMode::DontAsk => "dontAsk",
+                PermissionMode::BypassPermissions => "bypassPermissions",
+            }.to_string());
+        }
+
+        // Session mode
         match self.session_mode {
             SessionMode::Continue => args.push("--continue".to_string()),
             SessionMode::Resume => {
@@ -306,6 +344,34 @@ mod tests {
 
         assert!(config.args.contains(&"--verbose".to_string()));
         assert!(config.args.contains(&"--debug".to_string()));
+    }
+
+    #[test]
+    fn build_claude_has_telemetry_disable_vars() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+
+        assert_eq!(config.env_vars.get("CLAUDE_CODE_NO_FLICKER"), Some(&"1".to_string()));
+        assert_eq!(config.env_vars.get("DISABLE_TELEMETRY"), Some(&"1".to_string()));
+        assert_eq!(config.env_vars.get("DISABLE_ERROR_REPORTING"), Some(&"1".to_string()));
+        assert_eq!(config.env_vars.get("DISABLE_FEEDBACK_COMMAND"), Some(&"1".to_string()));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+            Some(&"1".to_string())
+        );
+    }
+
+    #[test]
+    fn build_claude_auto_permission_mode() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .permission_mode(PermissionMode::Auto)
+            .build();
+
+        assert!(config.args.contains(&"--permission-mode".to_string()));
+        assert!(config.args.contains(&"auto".to_string()));
     }
 
     #[test]
