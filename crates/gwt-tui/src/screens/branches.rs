@@ -688,6 +688,30 @@ fn apply_safety_status(item: &mut BranchItem) {
     };
 }
 
+fn branch_runtime_summary(branch: &BranchItem) -> Option<String> {
+    let mut parts = Vec::new();
+    if branch.running_session_count > 0 {
+        parts.push(format!("●{}", branch.running_session_count));
+    }
+    if branch.stopped_session_count > 0 {
+        parts.push(format!("○{}", branch.stopped_session_count));
+    }
+    if let Some(tool) = branch.last_tool_usage.as_deref() {
+        if !tool.is_empty() {
+            parts.push(tool.to_string());
+        }
+    }
+    if branch.quick_start_available {
+        parts.push("↺".to_string());
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -852,26 +876,6 @@ fn render_branch_row(
         Style::default().fg(name_color),
     ));
 
-    // Agent label
-    let agent = branch.agent_label();
-    if !agent.is_empty() {
-        let max_agent = 10;
-        let display_agent = if agent.len() > max_agent {
-            &agent[..max_agent]
-        } else {
-            agent
-        };
-        spans.push(Span::styled(
-            format!(" {display_agent:<max_agent$}"),
-            Style::default().fg(branch.agent_color()),
-        ));
-    } else {
-        spans.push(Span::styled(
-            format!(" {:<10}", ""),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
     spans.push(Span::styled(
         format!(" {}", branch.worktree_indicator),
         Style::default().fg(match branch.worktree_indicator {
@@ -907,23 +911,6 @@ fn render_branch_row(
             Color::DarkGray
         }),
     ));
-
-    if branch.running_session_count > 0 {
-        spans.push(Span::styled(
-            format!(" ●{}", branch.running_session_count),
-            Style::default().fg(Color::Green),
-        ));
-    }
-    if branch.stopped_session_count > 0 {
-        spans.push(Span::styled(
-            format!(" ○{}", branch.stopped_session_count),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    if branch.quick_start_available {
-        spans.push(Span::styled(" ↺", Style::default().fg(Color::Yellow)));
-    }
 
     if let Some(number) = branch.linked_issue_number {
         let issue_color = match branch.linked_issue_state.as_deref() {
@@ -972,6 +959,26 @@ fn render_branch_row(
                     Style::default().fg(Color::DarkGray),
                 ));
             }
+        }
+    }
+
+    let right_summary = branch_runtime_summary(branch);
+    if let Some(summary) = right_summary.as_deref() {
+        let used = spans.iter().map(|s| s.content.len()).sum::<usize>();
+        let summary_width = summary.len() + 1;
+        let available_gap = width as usize;
+        if available_gap > used + summary_width {
+            let gap = available_gap - used - summary_width;
+            spans.push(Span::styled(" ".repeat(gap), Style::default()));
+            spans.push(Span::styled(
+                format!(" {summary}"),
+                Style::default().fg(Color::Gray),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!(" {summary}"),
+                Style::default().fg(Color::Gray),
+            ));
         }
     }
 
@@ -1476,6 +1483,7 @@ mod tests {
         branch.running_session_count = 1;
         branch.stopped_session_count = 1;
         branch.worktree_indicator = 'w';
+        branch.last_tool_usage = Some("Codex@1.2.3".to_string());
         branch.quick_start_available = true;
         branch.linked_issue_number = Some(42);
         branch.linked_issue_state = Some("open".to_string());
@@ -1506,8 +1514,24 @@ mod tests {
         assert!(row_text.contains("●1"), "expected running summary in row");
         assert!(row_text.contains("○1"), "expected stopped summary in row");
         assert!(row_text.contains(" w"), "expected worktree indicator in row");
+        assert!(row_text.contains("Codex@1.2.3"), "expected tool summary in row");
         assert!(row_text.contains("↺"), "expected quick-start marker in row");
         assert!(row_text.contains("#42 open"), "expected linked issue in row");
+    }
+
+    #[test]
+    fn branch_runtime_summary_formats_runtime_state() {
+        let mut branch = make_branch("feature/demo", false);
+        branch.running_session_count = 2;
+        branch.stopped_session_count = 1;
+        branch.last_tool_usage = Some("Claude@1.0.0".to_string());
+        branch.quick_start_available = true;
+
+        let summary = branch_runtime_summary(&branch).expect("summary");
+        assert!(summary.contains("●2"));
+        assert!(summary.contains("○1"));
+        assert!(summary.contains("Claude@1.0.0"));
+        assert!(summary.contains("↺"));
     }
 
     #[test]
