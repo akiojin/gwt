@@ -72,7 +72,7 @@ As a project maintainer, I want develop to be protected from accidental direct c
 
 ## Functional Requirements
 
-- **FR-001**: Detect repo type on startup: `Normal`, `Bare`, `NonRepo`
+- **FR-001**: Detect repo type on startup: `Normal`, `Bare`, `NonRepo`. Detection scans the given path, its child directories (for `*.git` bare repos and worktree markers), and parent directories.
 - **FR-002**: `ActiveLayer::Initialization` added to model — fullscreen modal, blocks Ctrl+G
 - **FR-003**: Initialization screen: URL input field, clone progress, error display
 - **FR-004**: Clone uses `git clone --depth=1 <url>`, attempts `-b develop` first
@@ -96,11 +96,16 @@ pub enum ActiveLayer {
 ### Repo Detection Flow
 
 ```
-startup
-  ├─ git repo found → ActiveLayer::Management (current behavior)
-  ├─ bare repo found → error screen with migration instructions
-  └─ no repo → ActiveLayer::Initialization (clone wizard)
+startup(path)
+  ├─ path/.git exists → Normal → ActiveLayer::Management
+  ├─ path/HEAD+objects+refs → Bare → migration screen
+  ├─ child dir has *.git bare repo or .git worktree marker → Bare → migration screen
+  ├─ child dir has .git/ directory → Normal → ActiveLayer::Management
+  ├─ parent dir has .git → Normal → ActiveLayer::Management
+  └─ none found → NonRepo → ActiveLayer::Initialization (clone wizard)
 ```
+
+This means launching gwt in a bare repo workspace directory (e.g., `/path/gwt/` containing `gwt.git/` + `develop/` + `feature/`) correctly detects the Bare layout.
 
 ### Clone Command
 

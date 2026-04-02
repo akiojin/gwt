@@ -23,13 +23,42 @@ pub enum RepoType {
 /// Checks the path itself and walks parent directories to find a git repo.
 /// Distinguishes between normal repos, bare repos, and non-repo directories.
 pub fn detect_repo_type(path: &Path) -> RepoType {
-    // Check if path itself has .git (normal repo)
-    if path.join(".git").exists() {
+    // Check if path itself has .git (normal repo or worktree)
+    let git_path = path.join(".git");
+    if git_path.exists() {
         return RepoType::Normal;
     }
     // Check if path itself is a bare repo (has HEAD + objects + refs)
     if path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists() {
         return RepoType::Bare;
+    }
+    // Check child directories for:
+    // 1. A *.git bare repo directory (e.g., gwt.git/)
+    // 2. A worktree directory (has .git file pointing to bare repo)
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if !child.is_dir() {
+                continue;
+            }
+            // Check for bare repo in child (e.g., repo.git/)
+            if child.join("HEAD").exists()
+                && child.join("objects").exists()
+                && child.join("refs").exists()
+            {
+                return RepoType::Bare;
+            }
+            // Check for worktree in child (e.g., develop/.git file)
+            let child_git = child.join(".git");
+            if child_git.is_file() {
+                // .git file = worktree marker → parent has a bare repo
+                return RepoType::Bare;
+            }
+            // Check for normal repo in child
+            if child_git.is_dir() {
+                return RepoType::Normal;
+            }
+        }
     }
     // Walk parent directories
     let mut current = path.to_path_buf();
@@ -324,6 +353,31 @@ mod tests {
         let subdir = tmp.path().join("a").join("b");
         std::fs::create_dir_all(&subdir).unwrap();
         assert_eq!(detect_repo_type(&subdir), RepoType::Normal);
+    }
+
+    #[test]
+    fn detect_repo_type_finds_bare_in_child_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare_dir = tmp.path().join("repo.git");
+        Command::new("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        // Parent directory (tmp) should detect Bare via child scan
+        assert_eq!(detect_repo_type(tmp.path()), RepoType::Bare);
+    }
+
+    #[test]
+    fn detect_repo_type_finds_normal_in_child_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path().join("my-project");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        Command::new("git")
+            .args(["init", repo_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        // Parent directory should detect Normal via child scan
+        assert_eq!(detect_repo_type(tmp.path()), RepoType::Normal);
     }
 
     // ---- clone_repo tests ----
