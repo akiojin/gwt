@@ -39,19 +39,18 @@ pub enum ManagementTab {
     Branches,
     Specs,
     Issues,
+    Profiles,
     Versions,
     Settings,
     Logs,
 }
 
 impl ManagementTab {
-    pub const ALL: [ManagementTab; 6] = [
+    pub const ALL: [ManagementTab; 4] = [
         ManagementTab::Branches,
         ManagementTab::Specs,
         ManagementTab::Issues,
-        ManagementTab::Versions,
-        ManagementTab::Settings,
-        ManagementTab::Logs,
+        ManagementTab::Profiles,
     ];
 
     pub fn index(self) -> usize {
@@ -59,9 +58,10 @@ impl ManagementTab {
             ManagementTab::Branches => 0,
             ManagementTab::Specs => 1,
             ManagementTab::Issues => 2,
-            ManagementTab::Versions => 3,
-            ManagementTab::Settings => 4,
-            ManagementTab::Logs => 5,
+            ManagementTab::Profiles => 3,
+            ManagementTab::Versions => 4,
+            ManagementTab::Settings => 5,
+            ManagementTab::Logs => 6,
         }
     }
 
@@ -70,6 +70,7 @@ impl ManagementTab {
             ManagementTab::Branches => "Branches",
             ManagementTab::Specs => "SPECs",
             ManagementTab::Issues => "Issues",
+            ManagementTab::Profiles => "Profiles",
             ManagementTab::Versions => "Versions",
             ManagementTab::Settings => "Settings",
             ManagementTab::Logs => "Logs",
@@ -894,13 +895,14 @@ mod tests {
         assert_eq!(ManagementTab::Branches.index(), 0);
         assert_eq!(ManagementTab::Specs.index(), 1);
         assert_eq!(ManagementTab::Issues.index(), 2);
-        assert_eq!(ManagementTab::Versions.index(), 3);
-        assert_eq!(ManagementTab::Settings.index(), 4);
-        assert_eq!(ManagementTab::Logs.index(), 5);
+        assert_eq!(ManagementTab::Profiles.index(), 3);
+        assert_eq!(ManagementTab::Versions.index(), 4);
+        assert_eq!(ManagementTab::Settings.index(), 5);
+        assert_eq!(ManagementTab::Logs.index(), 6);
         assert_eq!(ManagementTab::ALL[1].label(), "SPECs");
         assert_eq!(ManagementTab::ALL[2].label(), "Issues");
-        assert_eq!(ManagementTab::ALL[3].label(), "Versions");
-        assert_eq!(ManagementTab::ALL.len(), 6);
+        assert_eq!(ManagementTab::ALL[3].label(), "Profiles");
+        assert_eq!(ManagementTab::ALL.len(), 4);
     }
 
     #[test]

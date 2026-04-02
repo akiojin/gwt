@@ -694,6 +694,13 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
+fn activate_management_tab(model: &mut Model, tab: ManagementTab) {
+    model.management_tab = tab;
+    if matches!(tab, ManagementTab::Profiles) {
+        model.settings_state.category = crate::screens::settings::SettingsCategory::Environment;
+    }
+}
+
 fn write_bytes_to_active_pane(model: &mut Model, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
@@ -756,7 +763,7 @@ pub fn update(model: &mut Model, msg: Message) {
             );
         }
         Message::SwitchManagementTab(tab) => {
-            model.management_tab = tab;
+            activate_management_tab(model, tab);
             model.active_layer = ActiveLayer::Management;
             tracing::info!(
                 message = "flow_success",
@@ -957,18 +964,22 @@ pub fn update(model: &mut Model, msg: Message) {
                 && key.code == crossterm::event::KeyCode::Tab
             {
                 let screen_wants_tab = match model.management_tab {
-                    ManagementTab::Settings => model.settings_state.is_form_mode(),
+                    ManagementTab::Profiles | ManagementTab::Settings => {
+                        model.settings_state.is_form_mode()
+                    }
                     _ => false,
                 };
                 if !screen_wants_tab {
-                    model.management_tab = match model.management_tab {
+                    let next_tab = match model.management_tab {
                         ManagementTab::Branches => ManagementTab::Specs,
                         ManagementTab::Specs => ManagementTab::Issues,
-                        ManagementTab::Issues => ManagementTab::Versions,
-                        ManagementTab::Versions => ManagementTab::Settings,
-                        ManagementTab::Settings => ManagementTab::Logs,
-                        ManagementTab::Logs => ManagementTab::Branches,
+                        ManagementTab::Issues => ManagementTab::Profiles,
+                        ManagementTab::Profiles => ManagementTab::Branches,
+                        ManagementTab::Versions | ManagementTab::Settings | ManagementTab::Logs => {
+                            ManagementTab::Branches
+                        }
                     };
+                    activate_management_tab(model, next_tab);
                     sync_active_terminal_history(model);
                     return;
                 }
@@ -1030,6 +1041,10 @@ pub fn update(model: &mut Model, msg: Message) {
                             })
                         }
                         ManagementTab::Settings => {
+                            crate::screens::settings::handle_key(&model.settings_state, &key)
+                                .map(Message::SettingsMsg)
+                        }
+                        ManagementTab::Profiles => {
                             crate::screens::settings::handle_key(&model.settings_state, &key)
                                 .map(Message::SettingsMsg)
                         }
@@ -1417,6 +1432,13 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 }
                 ManagementTab::Settings => {
                     crate::screens::settings::render(&model.settings_state, buf, layout[2]);
+                }
+                ManagementTab::Profiles => {
+                    crate::screens::settings::render_profiles_tab(
+                        &model.settings_state,
+                        buf,
+                        layout[2],
+                    );
                 }
                 ManagementTab::Logs => {
                     crate::screens::logs::render(&model.logs_state, buf, layout[2]);
@@ -2821,9 +2843,13 @@ mod tests {
     #[test]
     fn update_switch_management_tab() {
         let mut m = test_model();
-        update(&mut m, Message::SwitchManagementTab(ManagementTab::Logs));
-        assert_eq!(m.management_tab, ManagementTab::Logs);
+        update(&mut m, Message::SwitchManagementTab(ManagementTab::Profiles));
+        assert_eq!(m.management_tab, ManagementTab::Profiles);
         assert_eq!(m.active_layer, ActiveLayer::Management);
+        assert_eq!(
+            m.settings_state.category,
+            crate::screens::settings::SettingsCategory::Environment
+        );
     }
 
     #[test]
@@ -3467,19 +3493,7 @@ mod tests {
             &mut m,
             Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
         );
-        assert_eq!(m.management_tab, ManagementTab::Versions);
-
-        update(
-            &mut m,
-            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
-        );
-        assert_eq!(m.management_tab, ManagementTab::Settings);
-
-        update(
-            &mut m,
-            Message::KeyInput(make_key(KeyCode::Tab, KeyModifiers::NONE)),
-        );
-        assert_eq!(m.management_tab, ManagementTab::Logs);
+        assert_eq!(m.management_tab, ManagementTab::Profiles);
 
         update(
             &mut m,

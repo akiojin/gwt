@@ -1255,6 +1255,10 @@ fn render_profiles(state: &SettingsState, buf: &mut Buffer, area: Rect) {
     }
 }
 
+pub fn render_profiles_tab(state: &SettingsState, buf: &mut Buffer, area: Rect) {
+    render_profiles(state, buf, area);
+}
+
 fn render_profile_list(state: &SettingsState, buf: &mut Buffer, area: Rect) {
     let names = state.profile_names();
 

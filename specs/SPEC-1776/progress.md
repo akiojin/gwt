@@ -68,6 +68,24 @@
 
 - Remove remaining assumptions that the shell is fundamentally tab-first and finish the explicit `hidden pane` cleanup task
 
+## 2026-04-02: Profiles tab extraction
+
+### Progress
+
+- Added `Profiles` as a first-class management tab and removed `Versions / Settings / Logs` from the visible management tab cycle
+- Reused the existing profile/env editor so the dedicated Profiles tab already supports profile CRUD and env editing
+- Kept the deeper `Settings` surface hidden from the first-class management flow
+
+### Done
+
+- Management tab cycle now follows `Branches / SPECs / Issues / Profiles`
+- Switching to `Profiles` forces the environment-profile view rather than the old settings category tabs
+- Existing profile CRUD tests and render smoke tests still pass under the new exposure model
+
+### Next
+
+- Implement OS environment variable reference/replacement in Profiles
+
 ## 2026-04-02: Normal-mode virtual terminal viewport
 
 ### Progress
