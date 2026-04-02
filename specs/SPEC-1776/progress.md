@@ -1,5 +1,23 @@
 # Progress: SPEC-1776
 
+## 2026-04-02: Completion gate
+
+### Progress
+
+- Reconciled the rebuilt shell implementation against `spec.md`, `tasks.md`, `quickstart.md`, and `data-model.md`
+- Closed the parent-spec active scope now that `Branches / SPECs / Issues / Profiles / Settings / Versions / Logs` are aligned with the current UI
+- Left only the explicitly deferred follow-ups (`AI summary`, custom-agent UI redesign) outside the closed parent scope
+
+### Done
+
+- `SPEC-1776` artifacts now consistently describe the implemented branch-first rebuilt shell
+- Parent UX ownership is closed and can now serve as a stable reference for child specs and follow-up work
+- Deferred items remain documented without blocking closure of the rebuilt shell scope
+
+### Next
+
+- Open follow-up work only for `AI summary` or custom-agent UI redesign when product priority justifies it
+
 ## 2026-04-02: Settings re-exposure
 
 ### Progress

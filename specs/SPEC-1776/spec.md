@@ -1,4 +1,5 @@
 > **Canonical Boundary**: `SPEC-1776` は TUI 再設計の親 SPEC である。`branch list` 中心の UX 方針、常設マルチモード、管理画面の情報設計、各関連 SPEC の統合優先順位だけを定義する。terminal emulation は `SPEC-1541`、interaction policy は `SPEC-1770`、workspace shell は `SPEC-1654`、SPEC workflow は `SPEC-1579`、workspace initialization は `SPEC-1787`、Quick Start は `SPEC-1782`、Issue detail は `SPEC-1354`、Issue search/discovery は `SPEC-1643`、Issue linkage/cache は `SPEC-1714`、local git/worktree は `SPEC-1644`、agent catalog/launch contract は `SPEC-1646`、session persistence は `SPEC-1648`、Codex hooks merge は `SPEC-1786`、Profiles persistence は `SPEC-1542` / `SPEC-1656`、Assistant interrupt semantics は `SPEC-1636`、custom agent UI は `SPEC-1779` を正本とする。
+> **Status Note**: この SPEC は branch-first rebuilt TUI の親UX仕様として実装完了により closed。`AI summary` と custom-agent UI 再設計は明示的な deferred scope として別 follow-up で扱う。
 
 # 旧TUI UX を基準にした ratatui TUI 再設計
 
