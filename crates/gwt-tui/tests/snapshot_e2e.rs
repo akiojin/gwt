@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifi
 use gwt_tui::app;
 use gwt_tui::input::keybind::KeybindRegistry;
 use gwt_tui::message::Message;
-use gwt_tui::model::{ActiveLayer, ManagementTab, Model, SessionLayout};
+use gwt_tui::model::{ActiveLayer, FocusPane, ManagementTab, Model, SessionLayout};
 use gwt_tui::screens::branches::{BranchCategory, BranchItem, BranchesMessage};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -542,7 +542,7 @@ fn snapshot_branches_with_detail_split() {
 }
 
 #[test]
-fn e2e_branch_detail_tab_cycles_sections() {
+fn e2e_branch_detail_arrows_cycle_sections() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     app::update(
@@ -550,28 +550,23 @@ fn e2e_branch_detail_tab_cycles_sections() {
         Message::Branches(BranchesMessage::SetBranches(sample_branches())),
     );
 
+    // Focus on BranchDetail pane (Tab twice from default TabContent)
+    send_key(&mut model, &mut kb, press(KeyCode::Tab));
+    assert_eq!(model.active_focus, FocusPane::BranchDetail);
+
     // Default section is 0 (Overview)
     assert_eq!(model.branches_detail_section(), 0);
 
-    // Tab -> section 1
-    send_key(&mut model, &mut kb, press(KeyCode::Tab));
+    // Right -> section 1
+    send_key(&mut model, &mut kb, press(KeyCode::Right));
     assert_eq!(model.branches_detail_section(), 1);
 
-    // Tab -> section 2
-    send_key(&mut model, &mut kb, press(KeyCode::Tab));
+    // Right -> section 2
+    send_key(&mut model, &mut kb, press(KeyCode::Right));
     assert_eq!(model.branches_detail_section(), 2);
 
-    // Shift+Tab -> section 1
-    send_key(
-        &mut model,
-        &mut kb,
-        KeyEvent {
-            code: KeyCode::BackTab,
-            modifiers: KeyModifiers::SHIFT,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::empty(),
-        },
-    );
+    // Left -> section 1
+    send_key(&mut model, &mut kb, press(KeyCode::Left));
     assert_eq!(model.branches_detail_section(), 1);
 }
 

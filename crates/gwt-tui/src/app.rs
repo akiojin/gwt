@@ -453,6 +453,21 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     false
 }
 
+fn branch_detail_action_message(
+    model: &Model,
+) -> Option<screens::branches::BranchesMessage> {
+    use screens::branches::BranchesMessage;
+    if model.branches.detail_section == 4 {
+        Some(match model.branches.detail_action_selected {
+            0 => BranchesMessage::LaunchAgent,
+            1 => BranchesMessage::OpenShell,
+            _ => BranchesMessage::DeleteWorktree,
+        })
+    } else {
+        None
+    }
+}
+
 /// Route a key event to the tab header pane (Left/Right switches tabs, Enter focuses content).
 fn route_key_to_tab_header(model: &mut Model, key: crossterm::event::KeyEvent) {
     let tab_count = ManagementTab::ALL.len();
@@ -485,17 +500,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
         KeyCode::Up => Some(BranchesMessage::DetailActionUp),
         KeyCode::Down => Some(BranchesMessage::DetailActionDown),
-        KeyCode::Enter => {
-            if model.branches.detail_section == 4 {
-                Some(match model.branches.detail_action_selected {
-                    0 => BranchesMessage::LaunchAgent,
-                    1 => BranchesMessage::OpenShell,
-                    _ => BranchesMessage::DeleteWorktree,
-                })
-            } else {
-                None
-            }
-        }
+        KeyCode::Enter => branch_detail_action_message(model),
         _ => None,
     };
     if let Some(m) = msg {
@@ -532,15 +537,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
                 KeyCode::Enter => {
-                    if model.branches.detail_section == 4 {
-                        Some(match model.branches.detail_action_selected {
-                            0 => BranchesMessage::LaunchAgent,
-                            1 => BranchesMessage::OpenShell,
-                            _ => BranchesMessage::DeleteWorktree,
-                        })
-                    } else {
-                        Some(BranchesMessage::Select)
-                    }
+                    branch_detail_action_message(model)
+                        .or(Some(BranchesMessage::Select))
                 }
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
                 KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
@@ -1282,7 +1280,6 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 }
 
-/// Return a border style based on whether the pane is focused.
 fn focused_border_style(is_focused: bool) -> Style {
     if is_focused {
         Style::default().fg(Color::Cyan)
