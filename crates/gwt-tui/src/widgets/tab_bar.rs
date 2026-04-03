@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::model::{Model, SessionTabType};
+use crate::model::Model;
 
 /// Render the session tab bar.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
@@ -17,10 +17,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let icon = match &s.tab_type {
-                SessionTabType::Shell => "\u{25B6}",
-                SessionTabType::Agent { .. } => "\u{2B50}",
-            };
+            let icon = s.tab_type.icon();
             let style = if i == model.active_session {
                 Style::default()
                     .fg(Color::Yellow)
@@ -46,7 +43,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AgentColor, SessionTab, VtState};
+    use crate::model::{AgentColor, SessionTab, SessionTabType, VtState};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;

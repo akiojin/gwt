@@ -9,7 +9,14 @@
 - Role: Enumerates non-terminal panels shown inside the management area.
 - Invariant: The documented tab set must match the routed tab set in code.
 
+### FocusPane
+
+- Role: Identifies which pane currently owns keyboard focus.
+- Variants: `TabContent`, `BranchDetail`, `Terminal` (3 panes).
+- Invariant: Only one pane can own focus at a time. Tab/Shift+Tab cycles through all 3 in order.
+
 ### PrefixKeyState
+
 - Role: Tracks multi-stroke shortcuts such as `Ctrl+G` sequences.
 - Invariant: Prefix handling must be reversible and timeout-safe.
 

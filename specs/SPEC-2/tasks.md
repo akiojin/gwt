@@ -83,36 +83,36 @@
 
 ### 5.1: Focus State
 
-- [ ] T053 Add FocusPane enum to model.rs: TabHeader, TabContent, BranchDetail, Terminal
-- [ ] T054 Add active_focus: FocusPane field to Model
-- [ ] T055 Write RED test: Tab cycles through 4 focus panes in order
-- [ ] T056 Write RED test: Shift+Tab cycles in reverse
-- [ ] T057 Implement Tab/Shift+Tab focus cycling in app.rs update()
-- [ ] T058 Implement focus-aware border colors: Cyan (focused) / Gray (unfocused)
-- [ ] T059 Write render test: focused pane has Cyan border
+- [x] T053 Add FocusPane enum to model.rs: TabContent, BranchDetail, Terminal (3 panes, no TabHeader)
+- [x] T054 Add active_focus: FocusPane field to Model
+- [x] T055 Write RED test: Tab cycles through 3 focus panes in order
+- [x] T056 Write RED test: Shift+Tab cycles in reverse
+- [x] T057 Implement Tab/Shift+Tab focus cycling in app.rs update()
+- [x] T058 Implement focus-aware border colors: Cyan (focused) / Gray (unfocused)
+- [x] T059 Write render test: focused pane has Cyan border
 
 ### 5.2: Replace j/k with Arrow Keys
 
-- [ ] T060 Replace KeyCode::Char('j') with KeyCode::Down in all screens
-- [ ] T061 Replace KeyCode::Char('k') with KeyCode::Up in all screens
-- [ ] T062 Update route_key_to_management to use arrow keys only
-- [ ] T063 Update all screen tests to use arrow keys
-- [ ] T064 Update E2E tests to use arrow keys
+- [x] T060 Replace KeyCode::Char('j') with KeyCode::Down in all screens
+- [x] T061 Replace KeyCode::Char('k') with KeyCode::Up in all screens
+- [x] T062 Update route_key_to_management to use arrow keys only
+- [x] T063 Update all screen tests to use arrow keys
+- [x] T064 Update E2E tests to use arrow keys
 
 ### 5.3: Focus-Aware Key Routing
 
-- [ ] T065 In app.rs: route keys based on active_focus instead of active_layer
-- [ ] T066 TabHeader focus: Left/Right switch tabs, Enter moves focus to TabContent
-- [ ] T067 TabContent focus: ↑↓ navigate list, Enter select, / search, r refresh
-- [ ] T068 BranchDetail focus: ←→ switch sections, ↑↓ navigate actions, Enter execute
-- [ ] T069 Terminal focus: forward all keys to PTY (except Tab and Ctrl+G prefix)
-- [ ] T070 Write 10+ tests for focus-aware key routing
+- [x] T065 In app.rs: route keys based on active_focus instead of active_layer
+- [x] T066 TabHeader focus: Left/Right switch tabs, Enter moves focus to TabContent
+- [x] T067 TabContent focus: ↑↓ navigate list, Enter select, / search, r refresh
+- [x] T068 BranchDetail focus: ←→ switch sections, ↑↓ navigate actions, Enter execute
+- [x] T069 Terminal focus: forward all keys to PTY (except Tab and Ctrl+G prefix)
+- [x] T070 Write 10+ tests for focus-aware key routing
 
 ### 5.4: Update Overlay Key Routing
 
-- [ ] T071 Wizard: ↑↓ navigate, Enter select, Esc back, char input
-- [ ] T072 Confirm: ←→ toggle, Enter accept, Esc cancel
-- [ ] T073 Error: Enter/Esc dismiss
+- [x] T071 Wizard: ↑↓ navigate, Enter select, Esc back, char input
+- [x] T072 Confirm: ←→ toggle, Enter accept, Esc cancel
+- [x] T073 Error: Enter/Esc dismiss
 
 ## Phase 6: Regression and Polish
 

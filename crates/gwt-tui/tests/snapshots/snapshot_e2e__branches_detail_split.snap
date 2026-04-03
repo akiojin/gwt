@@ -1,13 +1,9 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 541
 expression: output
 ---
-┌Management────────────────────────────┐  ▶ Shell
-│ Branches │ Issues │ PRs │ Profiles │ │┌Shell─────────────────────────────────┐
-└──────────────────────────────────────┘│Session: Shell (80x24)                │
-┌──────────────────────────────────────┐│                                      │
-│┌Branches────────────────────────────┐││                                      │
+┌ Branches │ Issues │ PRs │ Profiles │ ┐┌ ▶ Shell ─────────────────────────────┐
+│┌Branches────────────────────────────┐││Session: Shell (80x24)                │
 ││ View: All | Sort: Default          │││                                      │
 │└────────────────────────────────────┘││                                      │
 │┌────────────────────────────────────┐││                                      │
@@ -16,6 +12,7 @@ expression: output
 ││── Feature ──                       │││                                      │
 ││  [L] feature/api                   │││                                      │
 ││  [L] feature/app-shell             │││                                      │
+││── Other ──                         │││                                      │
 │└────────────────────────────────────┘││                                      │
 │┌Detail──────────────────────────────┐││                                      │
 ││ Overview │ SPECs │ Git │ Sessions ││││                                      │
@@ -24,6 +21,8 @@ expression: output
 ││ Branch: main (HEAD)                │││                                      │
 ││ Category: Main                     │││                                      │
 ││ Type: Local                        │││                                      │
+││                                    │││                                      │
+││                                    │││                                      │
 ││                                    │││                                      │
 │└────────────────────────────────────┘│└──────────────────────────────────────┘
 └──────────────────────────────────────┘ ▣ Shell  [Mgmt]  /tmp/test-repo  Ctrl+G

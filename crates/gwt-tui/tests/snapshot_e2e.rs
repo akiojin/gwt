@@ -7,11 +7,13 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use gwt_notification::{Notification, Severity};
 use gwt_tui::app;
 use gwt_tui::input::keybind::KeybindRegistry;
 use gwt_tui::message::Message;
 use gwt_tui::model::{ActiveLayer, FocusPane, ManagementTab, Model, SessionLayout};
 use gwt_tui::screens::branches::{BranchCategory, BranchItem, BranchesMessage};
+use gwt_tui::screens::logs::{LogEntry, LogsMessage};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -123,6 +125,16 @@ fn sample_branches() -> Vec<BranchItem> {
     ]
 }
 
+fn sample_log_entries() -> Vec<LogEntry> {
+    vec![
+        Notification::new(Severity::Error, "core", "Failed to connect")
+            .with_detail("connection timed out"),
+        Notification::new(Severity::Warn, "tui", "Slow render"),
+        Notification::new(Severity::Info, "core", "Started session"),
+        Notification::new(Severity::Debug, "pty", "Buffer flush"),
+    ]
+}
+
 // ============================================================
 // Screen Snapshots
 // ============================================================
@@ -186,6 +198,21 @@ fn snapshot_logs_tab() {
     model.management_tab = ManagementTab::Logs;
     let output = render_to_string(&model, 80, 24);
     insta::assert_snapshot!("logs_tab", output);
+}
+
+#[test]
+fn snapshot_logs_tab_filter_active() {
+    let mut model = test_model();
+    model.active_layer = ActiveLayer::Management;
+    model.management_tab = ManagementTab::Logs;
+    app::update(
+        &mut model,
+        Message::Logs(LogsMessage::SetEntries(sample_log_entries())),
+    );
+    app::update(&mut model, Message::KeyInput(press(KeyCode::Char('f'))));
+    app::update(&mut model, Message::KeyInput(press(KeyCode::Char('d'))));
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("logs_tab_filter_active", output);
 }
 
 #[test]

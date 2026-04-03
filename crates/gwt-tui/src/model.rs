@@ -35,9 +35,7 @@ pub enum ActiveLayer {
 /// Which pane currently owns keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPane {
-    /// Management tab header (Left/Right switches tabs).
-    TabHeader,
-    /// Tab content area (↑↓ navigates list).
+    /// Tab content area (↑↓ navigates list, Left/Right switches tabs).
     #[default]
     TabContent,
     /// Branch detail panel (←→ sections, ↑↓ actions).
@@ -47,8 +45,7 @@ pub enum FocusPane {
 }
 
 impl FocusPane {
-    const ALL: [FocusPane; 4] = [
-        FocusPane::TabHeader,
+    const ALL: [FocusPane; 3] = [
         FocusPane::TabContent,
         FocusPane::BranchDetail,
         FocusPane::Terminal,
@@ -117,6 +114,18 @@ impl ManagementTab {
             Self::Logs => "Logs",
         }
     }
+
+    /// Next tab (wraps around).
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    /// Previous tab (wraps around).
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[if idx == 0 { Self::ALL.len() - 1 } else { idx - 1 }]
+    }
 }
 
 /// Type of a session tab.
@@ -124,6 +133,16 @@ impl ManagementTab {
 pub enum SessionTabType {
     Shell,
     Agent { agent_id: String, color: AgentColor },
+}
+
+impl SessionTabType {
+    /// Unicode icon for this session type.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Shell => "\u{25B6}",
+            Self::Agent { .. } => "\u{2B50}",
+        }
+    }
 }
 
 /// Agent color for TUI display.
