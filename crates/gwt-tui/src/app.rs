@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use gwt_agent::{AgentDetector, AgentId, DetectedAgent, VersionCache};
+use gwt_agent::{AgentDetector, AgentId, AgentLaunchBuilder, DetectedAgent, LaunchConfig, VersionCache};
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings};
 use gwt_core::paths::gwt_cache_dir;
@@ -232,10 +232,16 @@ pub fn update(model: &mut Model, msg: Message) {
                 screens::wizard::update(wizard, msg);
                 maybe_start_wizard_branch_suggestions(wizard);
                 let completed = wizard.completed;
+                let launch_config = if completed {
+                    Some(build_launch_config_from_wizard(wizard))
+                } else {
+                    None
+                };
                 if wizard.completed || wizard.cancelled {
                     model.wizard = None;
                 }
-                if completed {
+                if let Some(config) = launch_config {
+                    model.pending_launch_config = Some(config);
                     model.active_focus = FocusPane::Terminal;
                 }
             }
@@ -1243,6 +1249,38 @@ fn ai_client_from_settings(settings: &AISettings) -> Result<AIClient, String> {
         &settings.model,
     )
     .map_err(|err| err.to_string())
+}
+
+/// Build a LaunchConfig from the wizard's accumulated selections.
+fn build_launch_config_from_wizard(wizard: &screens::wizard::WizardState) -> LaunchConfig {
+    let agent_id = match wizard.agent_id.as_str() {
+        "claude" => AgentId::ClaudeCode,
+        "codex" => AgentId::Codex,
+        "gemini" => AgentId::Gemini,
+        "opencode" => AgentId::OpenCode,
+        "gh" => AgentId::Copilot,
+        other => AgentId::Custom(other.to_string()),
+    };
+
+    let mut builder = AgentLaunchBuilder::new(agent_id);
+
+    if !wizard.model.is_empty() {
+        builder = builder.model(&wizard.model);
+    }
+
+    if !wizard.version.is_empty() {
+        builder = builder.version(&wizard.version);
+    }
+
+    if !wizard.reasoning.is_empty() && wizard.reasoning != "medium" {
+        builder = builder.reasoning_level(&wizard.reasoning);
+    }
+
+    if wizard.skip_perms {
+        builder = builder.permission_mode(gwt_agent::launch::PermissionMode::Auto);
+    }
+
+    builder.build()
 }
 
 fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecContext>) {

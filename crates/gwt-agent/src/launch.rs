@@ -5,6 +5,77 @@ use std::path::PathBuf;
 
 use crate::types::{AgentColor, AgentId, SessionMode};
 
+/// Resolved runner command for agent execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRunner {
+    /// Executable to invoke (e.g., "claude", "bunx", "npx").
+    pub executable: String,
+    /// Base args inserted before agent-specific args (e.g., ["@anthropic-ai/claude-code@1.2.3"]).
+    pub base_args: Vec<String>,
+}
+
+/// Resolve the runner command based on version selection.
+///
+/// - `"installed"` → use the agent's direct command (must be in PATH).
+/// - `"latest"` or a semver string → use bunx/npx with `@package@version`.
+pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
+    if version == "installed" || version.is_empty() {
+        return ResolvedRunner {
+            executable: agent_id.command().to_string(),
+            base_args: Vec::new(),
+        };
+    }
+
+    let Some(package) = agent_id.package_name() else {
+        // No npm package — fall back to direct command
+        return ResolvedRunner {
+            executable: agent_id.command().to_string(),
+            base_args: Vec::new(),
+        };
+    };
+
+    let version_spec = if version == "latest" {
+        format!("{}@latest", package)
+    } else {
+        format!("{}@{}", package, version)
+    };
+
+    let (executable, needs_yes) = find_bunx_or_npx();
+    let mut base_args = Vec::new();
+    if needs_yes {
+        base_args.push("--yes".to_string());
+    }
+    base_args.push(version_spec);
+
+    ResolvedRunner {
+        executable,
+        base_args,
+    }
+}
+
+/// Find bunx or npx executable, preferring global bunx over local node_modules.
+///
+/// Returns `(executable_name, needs_yes_flag)`.
+/// - bunx: no `--yes` needed
+/// - npx: `--yes` needed to suppress interactive prompt
+fn find_bunx_or_npx() -> (String, bool) {
+    // Try bunx first, but skip if it's a local node_modules/.bin/bunx
+    if let Ok(path) = which::which("bunx") {
+        let path_str = path.to_string_lossy();
+        if !path_str.contains("node_modules") {
+            return (path.to_string_lossy().into_owned(), false);
+        }
+    }
+
+    // Fall back to npx (needs --yes)
+    if let Ok(path) = which::which("npx") {
+        return (path.to_string_lossy().into_owned(), true);
+    }
+
+    // Last resort: assume bunx is available
+    ("bunx".to_string(), false)
+}
+
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
@@ -34,6 +105,7 @@ pub struct AgentLaunchBuilder {
     working_dir: Option<PathBuf>,
     branch: Option<String>,
     model: Option<String>,
+    version: Option<String>,
     fast_mode: bool,
     reasoning_level: Option<String>,
     session_mode: SessionMode,
@@ -50,6 +122,7 @@ impl AgentLaunchBuilder {
             working_dir: None,
             branch: None,
             model: None,
+            version: None,
             fast_mode: false,
             reasoning_level: None,
             session_mode: SessionMode::Normal,
@@ -72,6 +145,12 @@ impl AgentLaunchBuilder {
 
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    /// Set the version selection ("installed", "latest", or a semver string).
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
         self
     }
 
@@ -112,7 +191,6 @@ impl AgentLaunchBuilder {
 
     /// Build the final `LaunchConfig`.
     pub fn build(self) -> LaunchConfig {
-        let mut args = Vec::new();
         let mut env_vars = HashMap::new();
 
         // Common env vars
@@ -120,6 +198,14 @@ impl AgentLaunchBuilder {
         if let Some(ref dir) = self.working_dir {
             env_vars.insert("GWT_PROJECT_ROOT".to_string(), dir.display().to_string());
         }
+
+        // Resolve runner (installed binary vs bunx/npx)
+        let runner = resolve_runner(
+            &self.agent_id,
+            self.version.as_deref().unwrap_or("installed"),
+        );
+
+        let mut args = runner.base_args;
 
         // Agent-specific configuration
         match &self.agent_id {
@@ -150,7 +236,7 @@ impl AgentLaunchBuilder {
         env_vars.extend(self.env_overrides);
 
         LaunchConfig {
-            command: self.agent_id.command().to_string(),
+            command: runner.executable,
             args,
             env_vars,
             working_dir: self.working_dir,
@@ -215,13 +301,47 @@ impl AgentLaunchBuilder {
         );
 
         if let Some(ref model) = self.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
+            args.push(format!("--model={}", model));
+        }
+
+        // Reasoning level (Codex-specific)
+        if let Some(ref level) = self.reasoning_level {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort={}", level));
+            args.push("-c".to_string());
+            args.push("model_reasoning_summaries=detailed".to_string());
         }
 
         if self.fast_mode {
             args.push("--full-auto".to_string());
         }
+
+        // Version-dependent flags
+        let version_str = self.version.as_deref().unwrap_or("");
+        let parsed_version = semver::Version::parse(version_str).ok();
+
+        // Web search args
+        if let Some(ref ver) = parsed_version {
+            if *ver >= semver::Version::new(0, 90, 0) {
+                args.push("--enable".to_string());
+                args.push("web_search".to_string());
+            } else {
+                args.push("--enable".to_string());
+                args.push("web_search_request".to_string());
+            }
+        }
+
+        // Sandbox & shell env policies
+        args.push("--sandbox".to_string());
+        args.push("workspace-write".to_string());
+        args.push("-c".to_string());
+        args.push("sandbox_workspace_write.network_access=true".to_string());
+        args.push("-c".to_string());
+        args.push("shell_environment_policy.inherit=all".to_string());
+        args.push("-c".to_string());
+        args.push("shell_environment_policy.ignore_default_excludes=true".to_string());
+        args.push("-c".to_string());
+        args.push("shell_environment_policy.experimental_use_profile=true".to_string());
     }
 
     fn build_gemini_args(&self, args: &mut Vec<String>) {
@@ -320,6 +440,54 @@ mod tests {
     }
 
     #[test]
+    fn build_codex_with_reasoning_level() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .model("gpt-5.3-codex")
+            .reasoning_level("high")
+            .build();
+
+        assert!(config.args.contains(&"--model=gpt-5.3-codex".to_string()));
+        assert!(config.args.contains(&"-c".to_string()));
+        assert!(config
+            .args
+            .contains(&"model_reasoning_effort=high".to_string()));
+        assert!(config
+            .args
+            .contains(&"model_reasoning_summaries=detailed".to_string()));
+    }
+
+    #[test]
+    fn build_codex_version_specific_web_search_new() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("0.91.0")
+            .build();
+
+        assert!(config.args.contains(&"web_search".to_string()));
+    }
+
+    #[test]
+    fn build_codex_version_specific_web_search_old() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("0.80.0")
+            .build();
+
+        assert!(config.args.contains(&"web_search_request".to_string()));
+    }
+
+    #[test]
+    fn build_codex_sandbox_and_shell_policies() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert!(config.args.contains(&"workspace-write".to_string()));
+        assert!(config
+            .args
+            .contains(&"sandbox_workspace_write.network_access=true".to_string()));
+        assert!(config
+            .args
+            .contains(&"shell_environment_policy.inherit=all".to_string()));
+    }
+
+    #[test]
     fn build_copilot_prepends_subcommand() {
         let config = AgentLaunchBuilder::new(AgentId::Copilot).build();
         assert_eq!(config.command, "gh");
@@ -397,6 +565,77 @@ mod tests {
 
         assert!(config.args.contains(&"--permission-mode".to_string()));
         assert!(config.args.contains(&"auto".to_string()));
+    }
+
+    #[test]
+    fn resolve_runner_installed_returns_direct_command() {
+        let runner = resolve_runner(&AgentId::ClaudeCode, "installed");
+        assert_eq!(runner.executable, "claude");
+        assert!(runner.base_args.is_empty());
+    }
+
+    #[test]
+    fn resolve_runner_empty_version_returns_direct_command() {
+        let runner = resolve_runner(&AgentId::Codex, "");
+        assert_eq!(runner.executable, "codex");
+        assert!(runner.base_args.is_empty());
+    }
+
+    #[test]
+    fn resolve_runner_latest_uses_bunx_or_npx() {
+        let runner = resolve_runner(&AgentId::ClaudeCode, "latest");
+        assert!(!runner.executable.is_empty());
+        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
+        assert!(spec_arg.is_some(), "should have @package@latest arg");
+        assert!(
+            spec_arg
+                .unwrap()
+                .contains("@anthropic-ai/claude-code@latest")
+        );
+    }
+
+    #[test]
+    fn resolve_runner_specific_version_uses_bunx_or_npx() {
+        let runner = resolve_runner(&AgentId::Codex, "1.5.0");
+        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
+        assert!(spec_arg.is_some());
+        assert!(spec_arg.unwrap().contains("@openai/codex@1.5.0"));
+    }
+
+    #[test]
+    fn resolve_runner_no_npm_package_falls_back_to_direct() {
+        let runner = resolve_runner(&AgentId::OpenCode, "latest");
+        assert_eq!(runner.executable, "opencode");
+        assert!(runner.base_args.is_empty());
+    }
+
+    #[test]
+    fn build_with_version_latest() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .version("latest")
+            .build();
+        assert!(
+            config.command.contains("bunx") || config.command.contains("npx"),
+            "expected bunx/npx but got: {}",
+            config.command
+        );
+        let has_package_spec = config
+            .args
+            .iter()
+            .any(|a| a.contains("@anthropic-ai/claude-code@latest"));
+        assert!(
+            has_package_spec,
+            "args should contain package@latest: {:?}",
+            config.args
+        );
+    }
+
+    #[test]
+    fn build_with_version_installed() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .version("installed")
+            .build();
+        assert_eq!(config.command, "claude");
     }
 
     #[test]

@@ -15,6 +15,57 @@ use crate::types::AgentId;
 /// Time-to-live for cached version entries (24 hours).
 const TTL_SECS: i64 = 86400;
 
+/// A single version option presented to the user in the wizard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionOption {
+    /// Display label (e.g., "Installed (v1.2.3)", "1.2.3", "latest").
+    pub label: String,
+    /// Value used for launch resolution ("installed", "latest", "1.2.3").
+    pub value: String,
+}
+
+/// Build the list of version options for the wizard VersionSelect step.
+///
+/// - If `is_installed` is true and `installed_version` is provided, prepends "Installed (vX.Y.Z)".
+/// - If `is_installed` is true but version is unknown, prepends "Installed".
+/// - Appends "latest" if the agent has an npm package.
+/// - Appends each cached version from `cached_versions`.
+pub fn build_version_options(
+    is_installed: bool,
+    installed_version: Option<&str>,
+    has_npm_package: bool,
+    cached_versions: &[String],
+) -> Vec<VersionOption> {
+    let mut options = Vec::new();
+
+    if is_installed {
+        let label = match installed_version {
+            Some(v) => format!("Installed (v{})", v),
+            None => "Installed".to_string(),
+        };
+        options.push(VersionOption {
+            label,
+            value: "installed".to_string(),
+        });
+    }
+
+    if has_npm_package {
+        options.push(VersionOption {
+            label: "latest".to_string(),
+            value: "latest".to_string(),
+        });
+
+        for version in cached_versions {
+            options.push(VersionOption {
+                label: version.clone(),
+                value: version.clone(),
+            });
+        }
+    }
+
+    options
+}
+
 /// Maximum number of version strings retained per agent.
 const MAX_VERSIONS_PER_AGENT: usize = 10;
 
@@ -373,6 +424,58 @@ mod tests {
 
         let cache: VersionCache = serde_json::from_str(&json).unwrap();
         assert_eq!(cache.get(&AgentId::Codex).unwrap(), &["1.2.3"]);
+    }
+
+    #[test]
+    fn build_version_options_installed_with_version_and_npm() {
+        let opts = build_version_options(
+            true,
+            Some("1.2.3"),
+            true,
+            &["2.0.0".to_string(), "1.9.0".to_string()],
+        );
+        assert_eq!(opts.len(), 4); // Installed + latest + 2 cached
+        assert_eq!(opts[0].label, "Installed (v1.2.3)");
+        assert_eq!(opts[0].value, "installed");
+        assert_eq!(opts[1].label, "latest");
+        assert_eq!(opts[1].value, "latest");
+        assert_eq!(opts[2].label, "2.0.0");
+        assert_eq!(opts[2].value, "2.0.0");
+        assert_eq!(opts[3].label, "1.9.0");
+        assert_eq!(opts[3].value, "1.9.0");
+    }
+
+    #[test]
+    fn build_version_options_not_installed_with_npm() {
+        let opts = build_version_options(false, None, true, &["3.0.0".to_string()]);
+        assert_eq!(opts.len(), 2); // latest + 1 cached
+        assert_eq!(opts[0].label, "latest");
+        assert_eq!(opts[0].value, "latest");
+        assert_eq!(opts[1].label, "3.0.0");
+        assert_eq!(opts[1].value, "3.0.0");
+    }
+
+    #[test]
+    fn build_version_options_installed_without_npm() {
+        // OpenCode/Copilot: installed but no npm package
+        let opts = build_version_options(true, Some("0.1.0"), false, &[]);
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].label, "Installed (v0.1.0)");
+        assert_eq!(opts[0].value, "installed");
+    }
+
+    #[test]
+    fn build_version_options_installed_no_version_string() {
+        let opts = build_version_options(true, None, true, &[]);
+        assert_eq!(opts.len(), 2); // "Installed" + "latest"
+        assert_eq!(opts[0].label, "Installed");
+        assert_eq!(opts[0].value, "installed");
+    }
+
+    #[test]
+    fn build_version_options_nothing_available() {
+        let opts = build_version_options(false, None, false, &[]);
+        assert!(opts.is_empty());
     }
 
     #[test]

@@ -327,6 +327,8 @@ pub struct Model {
     pub(crate) confirm: ConfirmState,
     /// Pending session conversion awaiting confirmation.
     pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
+    /// Launch config built from completed wizard, ready for PTY spawn.
+    pub(crate) pending_launch_config: Option<gwt_agent::LaunchConfig>,
     /// Voice input state.
     pub(crate) voice: VoiceInputState,
     /// Buffered PTY input generated from forwarded key events.
@@ -381,6 +383,7 @@ impl Model {
             port_select: None,
             confirm: ConfirmState::default(),
             pending_session_conversion: None,
+            pending_launch_config: None,
             voice: VoiceInputState::default(),
             pending_pty_inputs: VecDeque::new(),
             initialization: None,

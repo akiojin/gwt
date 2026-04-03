@@ -13,7 +13,7 @@ pub mod version_cache;
 
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
-pub use launch::{AgentLaunchBuilder, LaunchConfig};
+pub use launch::{resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner};
 pub use session::Session;
 pub use types::{AgentColor, AgentId, AgentInfo, AgentStatus, SessionMode};
-pub use version_cache::VersionCache;
+pub use version_cache::{build_version_options, VersionCache, VersionOption};

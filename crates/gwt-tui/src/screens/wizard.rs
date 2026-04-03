@@ -16,6 +16,7 @@ pub enum WizardStep {
     AgentSelect,
     ModelSelect,
     ReasoningLevel,
+    VersionSelect,
     ExecutionMode,
     BranchTypeSelect,
     BranchNameInput,
@@ -26,47 +27,6 @@ pub enum WizardStep {
 }
 
 impl WizardStep {
-    /// All steps in order.
-    const ALL: [WizardStep; 11] = [
-        WizardStep::QuickStart,
-        WizardStep::AgentSelect,
-        WizardStep::ModelSelect,
-        WizardStep::ReasoningLevel,
-        WizardStep::ExecutionMode,
-        WizardStep::BranchTypeSelect,
-        WizardStep::BranchNameInput,
-        WizardStep::AIBranchSuggest,
-        WizardStep::IssueSelect,
-        WizardStep::SkipPermissions,
-        WizardStep::Confirm,
-    ];
-
-    /// Index of this step (0-based).
-    pub fn index(self) -> usize {
-        Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
-    }
-
-    /// Total number of steps.
-    pub fn total() -> usize {
-        Self::ALL.len()
-    }
-
-    /// Advance to the next step, if any.
-    pub fn next(self) -> Option<WizardStep> {
-        let idx = self.index();
-        Self::ALL.get(idx + 1).copied()
-    }
-
-    /// Go back to the previous step, if any.
-    pub fn prev(self) -> Option<WizardStep> {
-        let idx = self.index();
-        if idx == 0 {
-            None
-        } else {
-            Some(Self::ALL[idx - 1])
-        }
-    }
-
     /// Human-readable title for this step.
     pub fn title(self) -> &'static str {
         match self {
@@ -74,6 +34,7 @@ impl WizardStep {
             Self::AgentSelect => "Select Agent",
             Self::ModelSelect => "Select Model",
             Self::ReasoningLevel => "Reasoning Level",
+            Self::VersionSelect => "Select Version",
             Self::ExecutionMode => "Execution Mode",
             Self::BranchTypeSelect => "Branch Type",
             Self::BranchNameInput => "Branch Name",
@@ -82,6 +43,89 @@ impl WizardStep {
             Self::SkipPermissions => "Skip Permissions",
             Self::Confirm => "Confirm & Launch",
         }
+    }
+}
+
+/// Determine the next step based on current step and wizard context.
+///
+/// Uses agent-specific logic from the old TUI:
+/// - AgentSelect → has_models? ModelSelect : has_npm? VersionSelect : ExecutionMode
+/// - ModelSelect → is_codex? ReasoningLevel : has_npm? VersionSelect : ExecutionMode
+/// - ReasoningLevel → has_npm? VersionSelect : ExecutionMode
+/// - VersionSelect → ExecutionMode
+/// - OpenCode/Copilot skip ModelSelect, ReasoningLevel, VersionSelect
+fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
+    match current {
+        WizardStep::QuickStart => Some(WizardStep::AgentSelect),
+        WizardStep::AgentSelect => {
+            if state.agent_has_models() {
+                Some(WizardStep::ModelSelect)
+            } else if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
+            } else {
+                Some(WizardStep::ExecutionMode)
+            }
+        }
+        WizardStep::ModelSelect => {
+            if state.agent_is_codex() {
+                Some(WizardStep::ReasoningLevel)
+            } else if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
+            } else {
+                Some(WizardStep::ExecutionMode)
+            }
+        }
+        WizardStep::ReasoningLevel => {
+            if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
+            } else {
+                Some(WizardStep::ExecutionMode)
+            }
+        }
+        WizardStep::VersionSelect => Some(WizardStep::ExecutionMode),
+        WizardStep::ExecutionMode => Some(WizardStep::BranchTypeSelect),
+        WizardStep::BranchTypeSelect => Some(WizardStep::BranchNameInput),
+        WizardStep::BranchNameInput => Some(WizardStep::AIBranchSuggest),
+        WizardStep::AIBranchSuggest => Some(WizardStep::IssueSelect),
+        WizardStep::IssueSelect => Some(WizardStep::SkipPermissions),
+        WizardStep::SkipPermissions => Some(WizardStep::Confirm),
+        WizardStep::Confirm => None,
+    }
+}
+
+/// Determine the previous step based on current step and wizard context.
+fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
+    match current {
+        WizardStep::QuickStart => None,
+        WizardStep::AgentSelect => Some(WizardStep::QuickStart),
+        WizardStep::ModelSelect => Some(WizardStep::AgentSelect),
+        WizardStep::ReasoningLevel => Some(WizardStep::ModelSelect),
+        WizardStep::VersionSelect => {
+            if state.agent_is_codex() {
+                Some(WizardStep::ReasoningLevel)
+            } else if state.agent_has_models() {
+                Some(WizardStep::ModelSelect)
+            } else {
+                Some(WizardStep::AgentSelect)
+            }
+        }
+        WizardStep::ExecutionMode => {
+            if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
+            } else if state.agent_is_codex() {
+                Some(WizardStep::ReasoningLevel)
+            } else if state.agent_has_models() {
+                Some(WizardStep::ModelSelect)
+            } else {
+                Some(WizardStep::AgentSelect)
+            }
+        }
+        WizardStep::BranchTypeSelect => Some(WizardStep::ExecutionMode),
+        WizardStep::BranchNameInput => Some(WizardStep::BranchTypeSelect),
+        WizardStep::AIBranchSuggest => Some(WizardStep::BranchNameInput),
+        WizardStep::IssueSelect => Some(WizardStep::AIBranchSuggest),
+        WizardStep::SkipPermissions => Some(WizardStep::IssueSelect),
+        WizardStep::Confirm => Some(WizardStep::SkipPermissions),
     }
 }
 
@@ -160,6 +204,9 @@ pub struct SpecContext {
     pub title: String,
 }
 
+/// A version option for the VersionSelect step.
+pub use gwt_agent::version_cache::VersionOption;
+
 /// State for the wizard overlay.
 #[derive(Debug, Clone)]
 pub struct WizardState {
@@ -170,6 +217,8 @@ pub struct WizardState {
     pub agent_id: String,
     pub model: String,
     pub reasoning: String,
+    pub version: String,
+    pub version_options: Vec<VersionOption>,
     pub mode: String,
     pub branch_name: String,
     pub issue_id: String,
@@ -193,6 +242,8 @@ impl Default for WizardState {
             agent_id: String::new(),
             model: String::new(),
             reasoning: "medium".to_string(),
+            version: String::new(),
+            version_options: Vec::new(),
             mode: "autonomous".to_string(),
             branch_name: String::new(),
             issue_id: String::new(),
@@ -206,6 +257,53 @@ impl Default for WizardState {
 }
 
 impl WizardState {
+    /// Whether the selected agent has model options.
+    fn agent_has_models(&self) -> bool {
+        // All agents except OpenCode have model selection
+        matches!(
+            self.agent_id.as_str(),
+            "claude" | "codex" | "gemini" | ""
+        ) || self.agent_id.is_empty()
+    }
+
+    /// Whether the selected agent is Codex (needs ReasoningLevel step).
+    fn agent_is_codex(&self) -> bool {
+        self.agent_id == "codex"
+    }
+
+    /// Whether the selected agent is distributed via npm.
+    fn agent_has_npm_package(&self) -> bool {
+        matches!(
+            self.agent_id.as_str(),
+            "claude" | "codex" | "gemini"
+        )
+    }
+
+    /// Total steps visible for the current agent configuration.
+    pub fn visible_step_count(&self) -> usize {
+        let mut count = 0;
+        let mut step = Some(WizardStep::QuickStart);
+        while let Some(s) = step {
+            count += 1;
+            step = next_step(s, self);
+        }
+        count
+    }
+
+    /// 1-based index of the current step among visible steps.
+    pub fn visible_step_index(&self) -> usize {
+        let mut idx = 0;
+        let mut step = Some(WizardStep::QuickStart);
+        while let Some(s) = step {
+            idx += 1;
+            if s == self.step {
+                return idx;
+            }
+            step = next_step(s, self);
+        }
+        idx
+    }
+
     fn selected_agent(&self) -> Option<&AgentOption> {
         if !self.agent_id.is_empty() {
             self.detected_agents
@@ -236,6 +334,7 @@ impl WizardState {
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
             WizardStep::ReasoningLevel => 3,   // low, medium, high
+            WizardStep::VersionSelect => self.version_options.len().max(1),
             WizardStep::ExecutionMode => 2,    // autonomous, interactive
             WizardStep::BranchTypeSelect => 3, // feature, fix, custom
             WizardStep::BranchNameInput => 0,  // text input, no list
@@ -281,6 +380,16 @@ impl WizardState {
                 }
             }
             WizardStep::ModelSelect => self.current_model_options(),
+            WizardStep::VersionSelect => {
+                if self.version_options.is_empty() {
+                    vec!["(no versions available)".to_string()]
+                } else {
+                    self.version_options
+                        .iter()
+                        .map(|v| v.label.clone())
+                        .collect()
+                }
+            }
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     vec![]
@@ -380,7 +489,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
             } else {
                 // Store selection for current step, then advance
                 apply_selection(state);
-                if let Some(next) = state.step.next() {
+                if let Some(next) = next_step(state.step, state) {
                     state.step = next;
                     state.selected = 0;
                     // When entering AIBranchSuggest, start loading
@@ -401,7 +510,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
             }
         }
         WizardMessage::Back => {
-            if let Some(prev) = state.step.prev() {
+            if let Some(prev) = prev_step(state.step, state) {
                 state.step = prev;
                 state.selected = 0;
             } else {
@@ -506,6 +615,11 @@ fn apply_selection(state: &mut WizardState) {
                 state.reasoning = opt.to_lowercase();
             }
         }
+        WizardStep::VersionSelect => {
+            if let Some(opt) = state.version_options.get(state.selected) {
+                state.version = opt.value.clone();
+            }
+        }
         WizardStep::ExecutionMode => {
             if let Some(opt) = options.get(state.selected) {
                 state.mode = opt.to_lowercase();
@@ -587,7 +701,7 @@ fn advance_from_ai_branch_step(state: &mut WizardState) {
     }
 
     apply_selected_ai_suggestion(state);
-    if let Some(next) = state.step.next() {
+    if let Some(next) = next_step(state.step, state) {
         state.step = next;
         state.selected = 0;
     }
@@ -614,8 +728,8 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         .split(overlay);
 
     // Progress bar
-    let step_idx = state.step.index() + 1;
-    let total = WizardStep::total();
+    let step_idx = state.visible_step_index();
+    let total = state.visible_step_count();
     let progress_text = format!(" Step {}/{}", step_idx, total);
     let progress = Paragraph::new(progress_text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(progress, chunks[0]);
@@ -845,21 +959,129 @@ mod tests {
 
     #[test]
     fn step_navigation_next() {
-        assert_eq!(WizardStep::QuickStart.next(), Some(WizardStep::AgentSelect));
-        assert_eq!(WizardStep::Confirm.next(), None);
+        let state = WizardState::default();
+        assert_eq!(
+            next_step(WizardStep::QuickStart, &state),
+            Some(WizardStep::AgentSelect)
+        );
+        assert_eq!(next_step(WizardStep::Confirm, &state), None);
     }
 
     #[test]
     fn step_navigation_prev() {
-        assert_eq!(WizardStep::QuickStart.prev(), None);
-        assert_eq!(WizardStep::AgentSelect.prev(), Some(WizardStep::QuickStart));
+        let state = WizardState::default();
+        assert_eq!(prev_step(WizardStep::QuickStart, &state), None);
+        assert_eq!(
+            prev_step(WizardStep::AgentSelect, &state),
+            Some(WizardStep::QuickStart)
+        );
     }
 
     #[test]
-    fn step_index_and_total() {
-        assert_eq!(WizardStep::QuickStart.index(), 0);
-        assert_eq!(WizardStep::Confirm.index(), 10);
-        assert_eq!(WizardStep::total(), 11);
+    fn step_transitions_skip_for_opencode() {
+        let mut state = WizardState::default();
+        state.agent_id = "opencode".to_string();
+        // OpenCode has no models, no npm → AgentSelect → ExecutionMode
+        assert_eq!(
+            next_step(WizardStep::AgentSelect, &state),
+            Some(WizardStep::ExecutionMode)
+        );
+    }
+
+    #[test]
+    fn step_transitions_codex_includes_reasoning_and_version() {
+        let mut state = WizardState::default();
+        state.agent_id = "codex".to_string();
+        // Codex: AgentSelect → ModelSelect → ReasoningLevel → VersionSelect → ExecutionMode
+        assert_eq!(
+            next_step(WizardStep::AgentSelect, &state),
+            Some(WizardStep::ModelSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::ModelSelect, &state),
+            Some(WizardStep::ReasoningLevel)
+        );
+        assert_eq!(
+            next_step(WizardStep::ReasoningLevel, &state),
+            Some(WizardStep::VersionSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::VersionSelect, &state),
+            Some(WizardStep::ExecutionMode)
+        );
+    }
+
+    #[test]
+    fn step_transitions_claude_skips_reasoning() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        // Claude: AgentSelect → ModelSelect → VersionSelect → ExecutionMode
+        assert_eq!(
+            next_step(WizardStep::AgentSelect, &state),
+            Some(WizardStep::ModelSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::ModelSelect, &state),
+            Some(WizardStep::VersionSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::VersionSelect, &state),
+            Some(WizardStep::ExecutionMode)
+        );
+    }
+
+    #[test]
+    fn visible_step_count_varies_by_agent() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        let claude_count = state.visible_step_count();
+
+        state.agent_id = "opencode".to_string();
+        let opencode_count = state.visible_step_count();
+
+        // OpenCode skips ModelSelect, ReasoningLevel, VersionSelect → fewer steps
+        assert!(opencode_count < claude_count);
+    }
+
+    #[test]
+    fn version_select_options() {
+        let mut state = WizardState::default();
+        state.version_options = vec![
+            VersionOption {
+                label: "Installed (v1.0.0)".to_string(),
+                value: "installed".to_string(),
+            },
+            VersionOption {
+                label: "latest".to_string(),
+                value: "latest".to_string(),
+            },
+        ];
+        state.step = WizardStep::VersionSelect;
+        assert_eq!(state.option_count(), 2);
+        let opts = state.current_options();
+        assert_eq!(opts[0], "Installed (v1.0.0)");
+        assert_eq!(opts[1], "latest");
+    }
+
+    #[test]
+    fn version_select_applies_selection() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.step = WizardStep::VersionSelect;
+        state.version_options = vec![
+            VersionOption {
+                label: "Installed (v1.0.0)".to_string(),
+                value: "installed".to_string(),
+            },
+            VersionOption {
+                label: "latest".to_string(),
+                value: "latest".to_string(),
+            },
+        ];
+        state.selected = 1;
+        update(&mut state, WizardMessage::Select);
+        assert_eq!(state.version, "latest");
+        assert_eq!(state.step, WizardStep::ExecutionMode);
     }
 
     #[test]
@@ -1137,7 +1359,21 @@ mod tests {
 
     #[test]
     fn step_titles_non_empty() {
-        for step in WizardStep::ALL {
+        let all_steps = [
+            WizardStep::QuickStart,
+            WizardStep::AgentSelect,
+            WizardStep::ModelSelect,
+            WizardStep::ReasoningLevel,
+            WizardStep::VersionSelect,
+            WizardStep::ExecutionMode,
+            WizardStep::BranchTypeSelect,
+            WizardStep::BranchNameInput,
+            WizardStep::AIBranchSuggest,
+            WizardStep::IssueSelect,
+            WizardStep::SkipPermissions,
+            WizardStep::Confirm,
+        ];
+        for step in all_steps {
             assert!(!step.title().is_empty(), "{:?} has empty title", step);
         }
     }
