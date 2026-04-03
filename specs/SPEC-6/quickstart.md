@@ -8,6 +8,7 @@
 
 ## Repeatable Evidence
 - `cargo test -p gwt-tui e2e_notifications_land_in_structured_log_for_all_severities -- --nocapture`
+- `cargo test -p gwt-tui e2e_error_modal_queue_preserved_after_dismiss -- --nocapture`
 - `cargo test -p gwt-tui notification -- --nocapture`
 - `cargo test -p gwt-tui error -- --nocapture`
 - `cargo test -p gwt-tui logs -- --nocapture`
@@ -20,5 +21,6 @@
 - The Logs tab can show an active filter state and react to `f`/`d` controls from the app layer.
 - The Logs tab presents structured entries in stable columns that are easier to scan by eye.
 - A focused E2E test now proves every notification severity lands in the structured log rendering path.
-- Any missing behavior is logged against the remaining `16` unchecked tasks.
+- A focused regression test now proves the error modal queue keeps the next error visible after dismiss.
+- Any missing behavior is logged against the remaining `15` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

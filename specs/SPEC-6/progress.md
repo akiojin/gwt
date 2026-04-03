@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `28/44` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T03:00:59Z`
+- Task progress: `29/44` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T04:24:46Z`
 
 ## Done
 - Severity routing is now wired through structured notifications: debug logs only, info/warn feed the status bar, and errors keep their detail in the modal queue.
@@ -14,8 +14,9 @@
 - The Logs tab now exposes `f` to cycle severity filters and `d` to toggle the debug filter state.
 - Snapshot coverage now includes a Logs tab render with an active filter state.
 - The Logs list now renders stable timestamp / severity / source / message columns instead of a loose inline row.
+- A focused regression test now proves the error modal queue preserves order across dismiss transitions.
 
 ## Next
-- Add the remaining richer log affordances and the still-open end-to-end cases.
+- Add the remaining richer log affordances and the still-open status-bar E2E case.
 - Close the remaining performance verification tasks.
 - Keep the SPEC artifacts aligned as the remaining unchecked tasks are implemented.

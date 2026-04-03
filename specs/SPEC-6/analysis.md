@@ -10,12 +10,13 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `28/44` completed items.
+- Task traceability snapshot: `tasks.md` currently records `29/44` completed items.
 - Notes: Notification-bus artifacts are complete enough for continued implementation.
 - Notes: Severity routing is now live for debug/info/warn/error, and warn notifications dismiss on unclaimed `Esc`.
 - Notes: The Logs tab now has app-layer filter controls and snapshot coverage for an active filter state.
 - Notes: The Logs list now presents stable columns for timestamp, severity, source, and message.
-- Notes: The remaining gap is the other end-to-end cases and performance verification, not missing core routing plumbing.
+- Notes: The error modal queue now has explicit regression coverage for preserving order after dismiss.
+- Notes: The remaining gap is the status-bar end-to-end case plus performance verification, not missing core routing plumbing.
 
 ## Next
 - `gwt-spec-implement`

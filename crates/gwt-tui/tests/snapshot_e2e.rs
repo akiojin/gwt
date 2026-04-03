@@ -395,6 +395,28 @@ fn snapshot_error_overlay() {
 }
 
 #[test]
+fn e2e_error_modal_queue_preserved_after_dismiss() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+
+    app::update(&mut model, Message::PushError("First failure".to_string()));
+    app::update(&mut model, Message::PushError("Second failure".to_string()));
+
+    let output = render_to_string(&model, 80, 24);
+    assert!(output.contains("Error (1 of 2)"));
+    assert!(output.contains("First failure"));
+    assert!(output.contains("Press Enter or Esc to dismiss"));
+
+    let status = send_key(&mut model, &mut kb, press(KeyCode::Enter));
+    assert!(matches!(status, DispatchStatus::Forwarded));
+
+    let output = render_to_string(&model, 80, 24);
+    assert!(output.contains("Second failure"));
+    assert!(!output.contains("First failure"));
+    assert!(!output.contains("1 of 2"));
+}
+
+#[test]
 fn snapshot_management_tab_switch() {
     let mut model = test_model();
     app::update(
