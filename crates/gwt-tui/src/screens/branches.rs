@@ -159,7 +159,6 @@ pub struct BranchesState {
     pub(crate) view_mode: ViewMode,
     pub(crate) search_query: String,
     pub(crate) search_active: bool,
-    pub(crate) detail_view: bool,
     /// Active detail section: 0=Overview, 1=SPECs, 2=Git, 3=Sessions.
     pub(crate) detail_section: usize,
     /// Whether the action modal overlay is visible.
@@ -294,8 +293,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         }
         BranchesMessage::Select => {
             if !state.filtered_branches().is_empty() {
-                state.action_modal_visible = true;
-                state.action_modal_selected = 0;
+                state.pending_launch_agent = true;
             }
         }
         BranchesMessage::ToggleSort => {
@@ -941,10 +939,7 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static DOCKER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn sample_branches() -> Vec<BranchItem> {
         vec![
@@ -1024,7 +1019,9 @@ mod tests {
     }
 
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
-        let _guard = DOCKER_TEST_LOCK.lock().expect("lock docker tests");
+        let _guard = crate::DOCKER_ENV_TEST_LOCK
+            .lock()
+            .expect("lock docker tests");
         let (_dir, script_path) = write_fake_docker(script_body);
         let previous = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", &script_path);

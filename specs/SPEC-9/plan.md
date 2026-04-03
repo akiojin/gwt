@@ -12,7 +12,7 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 1. **gwt-tui**: Add `DockerProgress` screen with 5-state FSM (DetectingFiles, BuildingImage, StartingContainer, WaitingForServices, Ready).
    - Each state renders a progress indicator and status message.
-   - Transitions driven by async events from gwt-core `DockerManager`.
+   - Transitions driven by an app-side producer that bridges `gwt-docker` operations into progress messages.
 
 2. **gwt-tui**: Add `ServiceSelect` screen.
    - Parse docker-compose.yml via gwt-core to list services.
@@ -22,14 +22,14 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
    - Display conflicting ports with current and proposed mappings.
    - Allow user to edit port mappings inline.
 
-4. **gwt-core**: Ensure `DockerManager` exposes async event stream for progress states.
-   - File detection, image build, container start, service readiness checks.
+4. **gwt-docker + gwt-tui**: Add a background producer for progress states.
+   - File detection, image build, container start, and service readiness checks should emit `DockerProgressMessage` updates without inventing a fake `DockerManager`.
 
 5. **gwt-tui**: Add container lifecycle controls (start/stop/restart) accessible from the Docker status area.
 
 ### Dependencies
 
-- Existing `DockerManager` in gwt-core.
+- `gwt-docker` synchronous detection and lifecycle APIs.
 - docker CLI available on the system.
 
 ## Phase 2: Embedded Skills

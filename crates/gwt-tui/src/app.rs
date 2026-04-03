@@ -528,7 +528,9 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
         KeyCode::Enter => Some(BranchesMessage::OpenActionModal),
-        KeyCode::Up if model.branches.detail_section == 0 => Some(BranchesMessage::DockerContainerUp),
+        KeyCode::Up if model.branches.detail_section == 0 => {
+            Some(BranchesMessage::DockerContainerUp)
+        }
         KeyCode::Down if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerDown)
         }
@@ -863,11 +865,9 @@ fn handle_pending_branch_docker_action(
         .unwrap_or_else(|| action.container_id.clone());
 
     let (verb_past, verb_base, result) = match action.action {
-        DockerLifecycleAction::Start => (
-            "Started",
-            "start",
-            gwt_docker::start(&action.container_id),
-        ),
+        DockerLifecycleAction::Start => {
+            ("Started", "start", gwt_docker::start(&action.container_id))
+        }
         DockerLifecycleAction::Stop => ("Stopped", "stop", gwt_docker::stop(&action.container_id)),
         DockerLifecycleAction::Restart => (
             "Restarted",
@@ -1725,10 +1725,7 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static DOCKER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_model() -> Model {
         Model::new(PathBuf::from("/tmp/test"))
@@ -1807,7 +1804,9 @@ mod tests {
     }
 
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
-        let _guard = DOCKER_TEST_LOCK.lock().expect("lock docker tests");
+        let _guard = crate::DOCKER_ENV_TEST_LOCK
+            .lock()
+            .expect("lock docker tests");
         let (_dir, script_path) = write_fake_docker(script_body);
         let previous = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", &script_path);
@@ -2752,8 +2751,11 @@ mod tests {
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(tmp.path().to_path_buf()),
             }];
-            model.branches.docker_containers =
-                vec![docker_container("abc123", "web", gwt_docker::ContainerStatus::Running)];
+            model.branches.docker_containers = vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )];
 
             update(
                 &mut model,
@@ -2766,7 +2768,10 @@ mod tests {
                 model.branches.docker_containers[0].status,
                 gwt_docker::ContainerStatus::Exited
             );
-            let notification = model.current_notification.as_ref().expect("status notification");
+            let notification = model
+                .current_notification
+                .as_ref()
+                .expect("status notification");
             assert_eq!(notification.source, "docker");
             assert_eq!(notification.message, "Stopped container web");
             assert!(model.error_queue.is_empty());
@@ -2779,8 +2784,11 @@ mod tests {
 
         with_fake_docker(script, || {
             let mut model = test_model();
-            model.branches.docker_containers =
-                vec![docker_container("abc123", "web", gwt_docker::ContainerStatus::Running)];
+            model.branches.docker_containers = vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )];
 
             update(
                 &mut model,
@@ -2792,13 +2800,11 @@ mod tests {
             let notification = model.error_queue.front().unwrap();
             assert_eq!(notification.source, "docker");
             assert_eq!(notification.message, "Failed to restart container web");
-            assert!(
-                notification
-                    .detail
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("permission denied")
-            );
+            assert!(notification
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("permission denied"));
         });
     }
 

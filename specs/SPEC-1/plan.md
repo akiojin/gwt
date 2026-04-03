@@ -2,15 +2,14 @@
 
 ## Summary
 
-Extend the existing terminal emulation layer with URL detection/opening and verify alt-screen buffer correctness. The core rendering pipeline (vt100 parsing, color mapping, scrollback, selection) is already implemented and tested.
+Complete the terminal emulation layer by first adding a real vt100-backed session surface in `gwt-tui`, then layering URL opening and alt-screen verification on top of it. Low-level renderer tests exist, but the interactive session pane is still missing the state needed for click routing and wrapped URL handling.
 
 ## Technical Context
 
 - **Renderer**: `crates/gwt-tui/src/renderer.rs` -- converts vt100 screen to ratatui Buffer
 - **vt100 crate**: Handles ANSI parsing, screen buffer, alt-screen (DECSET 1049)
-- **Scrollback**: Managed in the pane model, 10,000-line default
-- **Selection**: Mouse drag tracking in keybind/input handler, reversed-video in renderer
-- **Existing tests**: 17+ keybind tests, viewport scroll tests, color mapping tests
+- **Current blocker**: `app.rs` still discards `PtyOutput`, `SessionTab` only stores terminal dimensions, and the session pane renders a placeholder instead of a vt100 surface
+- **Existing tests**: renderer URL tests, alt-screen tests, and broader `gwt-tui` keybind coverage already exist
 
 ## Constitution Check
 
@@ -25,6 +24,12 @@ Extend the existing terminal emulation layer with URL detection/opening and veri
 - Mitigation: URL detection runs only on visible lines, not full scrollback
 
 ## Phased Implementation
+
+### Phase 0: Session Surface Foundation
+
+1. Store real vt100-backed session state in the model instead of only terminal dimensions.
+2. Feed `PtyOutput` into the per-session parser/screen state.
+3. Render the session pane through `renderer::render_vt_screen` and preserve URL regions / geometry for hit testing.
 
 ### Phase 1: URL Detection and Opening
 

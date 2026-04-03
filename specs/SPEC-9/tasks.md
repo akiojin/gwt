@@ -32,7 +32,7 @@
 - [x] **T-017**: Write test for container start command execution.
 - [x] **T-018**: Write test for container stop command execution.
 - [x] **T-019**: Write test for container restart command execution.
-- [ ] **T-020**: Implement container lifecycle controls in Docker status area.
+- [x] **T-020**: Implement container lifecycle controls in Docker status area.
 - [x] **T-021**: Verify T-017 through T-019 pass (GREEN).
 
 ## Phase 2: Embedded Skills

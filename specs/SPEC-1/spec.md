@@ -2,11 +2,11 @@
 
 ## Background
 
-gwt-tui renders agent and shell PTY output via the vt100 crate combined with ratatui. Core rendering capabilities including ANSI 256-color support, scrollback buffer, text selection, mouse wheel scroll, and live-follow mode are already implemented. This SPEC covers the complete terminal emulation domain including implemented features and remaining gaps such as URL detection/opening and alt-screen buffer verification.
+`renderer.rs` and related tests cover low-level vt100 cell rendering, URL underline detection, and alt-screen verification, but the current `gwt-tui` session pane still lacks an end-to-end vt100-backed surface. This SPEC therefore covers both the renderer-level work already in place and the still-missing session-surface foundation needed for URL opening, scrollback interaction, and selection.
 
 ## User Stories
 
-### US-1: View Agent Output with Full ANSI Color and Attribute Support (P0) -- IMPLEMENTED
+### US-1: View Agent Output with Full ANSI Color and Attribute Support (P0) -- PARTIALLY IMPLEMENTED
 
 As a developer, I want agent output to render with full ANSI color and text attributes so that I can read formatted output naturally.
 
@@ -16,7 +16,7 @@ As a developer, I want agent output to render with full ANSI color and text attr
 2. Given PTY output containing bold, italic, underline, and strikethrough attributes, when rendered, then each attribute is visually distinct.
 3. Given rapid PTY output (1000+ lines/sec), when rendering, then no frames are dropped and all content is eventually visible.
 
-### US-2: Scroll Through Terminal History (P0) -- IMPLEMENTED
+### US-2: Scroll Through Terminal History (P0) -- NOT IMPLEMENTED
 
 As a developer, I want to scroll through terminal history so that I can review past output.
 
@@ -26,7 +26,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 2. Given a scrollback buffer at maximum capacity (10,000 lines), when new output arrives, then the oldest lines are evicted first.
 3. Given I have scrolled up, when new output arrives, then the viewport stays at my scroll position (no auto-jump).
 
-### US-3: Select and Copy Text from Terminal Output (P1) -- IMPLEMENTED
+### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
 As a developer, I want to select text with mouse drag and copy it so that I can paste terminal output elsewhere.
 
@@ -47,7 +47,7 @@ As a developer, I want to click URLs in terminal output so that I can quickly op
 3. Given terminal output contains multiple URLs on the same line, when rendered, then each URL is independently clickable.
 4. Given a URL wraps across two terminal lines, when detected, then the full URL is recognized and clickable.
 
-### US-5: Run TUI Apps That Use Alt-Screen Buffer (P2) -- NEEDS VERIFICATION
+### US-5: Run TUI Apps That Use Alt-Screen Buffer (P2) -- VERIFIED AT RENDERER LAYER ONLY
 
 As a developer, I want TUI applications (vi, top, htop) running inside gwt sessions to display correctly using the alternate screen buffer.
 

@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `67/82` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T14:00:00Z`
+- Task progress: `78/82` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T10:15:00Z`
 
 ## Done
 - Supporting artifacts now cover the full infrastructure umbrella instead of only the core four files.
@@ -18,9 +18,9 @@
 - PortSelect now has focused coverage for conflict detection, explicit acceptance flows, and auto-closing when all conflicts are resolved.
 - Container lifecycle command execution is now testable without a real Docker daemon via a fake-binary seam in `gwt-docker`.
 - Settings now expose a `Skills` category, render builtin embedded skills, and sync toggle state back into `SkillRegistry`.
+- Branch detail `Overview` now exposes a Docker status area with container selection and synchronous start/stop/restart controls wired through `app.rs` with success/error feedback.
 
 ## Next
-- Connect the new DockerProgress message contract to a real Docker event producer, then finish the remaining status-area lifecycle gaps in the Docker UI flow.
-- Finish any embedded-skills work beyond builtin toggle UI, if product scope still needs runtime discovery or non-builtin state.
-- Close release workflow validation and remaining hooks hardening items.
-- Re-run infrastructure verification before updating task completion further.
+- Replace the stale `DockerManager async event stream` assumption with a real producer task that bridges `gwt-docker` sync APIs into background progress messages for `DockerProgress`.
+- Reconcile the remaining completion-gate items and reviewer evidence now that only the producer-side Docker work is still open in this SPEC task list.
+- Re-run infrastructure verification before any `Done` transition.

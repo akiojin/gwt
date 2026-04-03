@@ -1,8 +1,8 @@
 {
   "id": "9",
   "title": "gwt-spec: Infrastructure — build distribution, Docker UI, embedded skills, hooks merge",
-  "status": "done",
-  "phase": "Done",
+  "status": "in-progress",
+  "phase": "Implementation",
   "created_at": "2026-04-02T09:38:44.299823+00:00",
-  "updated_at": "2026-04-02T00:00:00Z"
+  "updated_at": "2026-04-03T10:15:00Z"
 }
