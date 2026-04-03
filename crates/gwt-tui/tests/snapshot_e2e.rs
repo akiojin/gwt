@@ -436,6 +436,28 @@ fn e2e_error_modal_queue_preserved_after_dismiss() {
 }
 
 #[test]
+fn e2e_error_modal_survives_burst_of_100_errors() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+
+    for i in 0..100 {
+        app::update(&mut model, Message::PushError(format!("Burst failure {i}")));
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("Burst failure 0"));
+    }
+
+    let output = render_to_string(&model, 80, 24);
+    assert!(output.contains("Burst failure 0"));
+
+    let status = send_key(&mut model, &mut kb, press(KeyCode::Enter));
+    assert!(matches!(status, DispatchStatus::Forwarded));
+
+    let output = render_to_string(&model, 80, 24);
+    assert!(output.contains("Burst failure 1"));
+    assert!(!output.contains("Burst failure 0"));
+}
+
+#[test]
 fn snapshot_management_tab_switch() {
     let mut model = test_model();
     app::update(
