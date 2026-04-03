@@ -37,6 +37,7 @@ pub fn build_version_options(
     cached_versions: &[String],
 ) -> Vec<VersionOption> {
     let mut options = Vec::new();
+    let installed_version = installed_version.map(str::trim);
 
     if is_installed {
         let label = match installed_version {
@@ -56,6 +57,9 @@ pub fn build_version_options(
         });
 
         for version in cached_versions {
+            if installed_version == Some(version.as_str()) {
+                continue;
+            }
             options.push(VersionOption {
                 label: version.clone(),
                 value: version.clone(),
@@ -476,6 +480,20 @@ mod tests {
     fn build_version_options_nothing_available() {
         let opts = build_version_options(false, None, false, &[]);
         assert!(opts.is_empty());
+    }
+
+    #[test]
+    fn build_version_options_skips_duplicate_installed_version() {
+        let opts = build_version_options(
+            true,
+            Some("1.2.3"),
+            true,
+            &["1.2.3".to_string(), "1.2.2".to_string()],
+        );
+        assert_eq!(opts.len(), 3);
+        assert_eq!(opts[0].label, "Installed (v1.2.3)");
+        assert_eq!(opts[1].label, "latest");
+        assert_eq!(opts[2].label, "1.2.2");
     }
 
     #[test]

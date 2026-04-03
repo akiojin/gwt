@@ -79,12 +79,16 @@ fn find_bunx_or_npx() -> (String, bool) {
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
+    pub agent_id: AgentId,
     pub command: String,
     pub args: Vec<String>,
     pub env_vars: HashMap<String, String>,
     pub working_dir: Option<PathBuf>,
+    pub branch: Option<String>,
     pub display_name: String,
     pub color: AgentColor,
+    pub model: Option<String>,
+    pub tool_version: Option<String>,
 }
 
 /// Permission mode for agent launch.
@@ -235,13 +239,21 @@ impl AgentLaunchBuilder {
         // Apply env overrides last (user wins)
         env_vars.extend(self.env_overrides);
 
+        let agent_id = self.agent_id.clone();
+        let display_name = self.agent_id.display_name().to_string();
+        let color = self.agent_id.default_color();
+
         LaunchConfig {
+            agent_id,
             command: runner.executable,
             args,
             env_vars,
             working_dir: self.working_dir,
-            display_name: self.agent_id.display_name().to_string(),
-            color: self.agent_id.default_color(),
+            branch: self.branch,
+            display_name,
+            color,
+            model: self.model,
+            tool_version: self.version.filter(|version| version != "installed"),
         }
     }
 

@@ -8,10 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use gwt_agent::{AgentDetector, AgentId, AgentLaunchBuilder, DetectedAgent, LaunchConfig, VersionCache};
+use gwt_agent::{
+    AgentDetector, AgentId, AgentLaunchBuilder, DetectedAgent, LaunchConfig,
+    Session as AgentSession, VersionCache,
+};
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings};
-use gwt_core::paths::gwt_cache_dir;
+use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -228,7 +231,7 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::versions::update(&mut model.versions, msg);
         }
         Message::Wizard(msg) => {
-            if let Some(ref mut wizard) = model.wizard {
+            let launch_config = if let Some(ref mut wizard) = model.wizard {
                 screens::wizard::update(wizard, msg);
                 maybe_start_wizard_branch_suggestions(wizard);
                 let completed = wizard.completed;
@@ -240,10 +243,14 @@ pub fn update(model: &mut Model, msg: Message) {
                 if wizard.completed || wizard.cancelled {
                     model.wizard = None;
                 }
-                if let Some(config) = launch_config {
-                    model.pending_launch_config = Some(config);
-                    model.active_focus = FocusPane::Terminal;
-                }
+                launch_config
+            } else {
+                None
+            };
+            if let Some(config) = launch_config {
+                model.pending_launch_config = Some(config);
+                materialize_pending_launch(model);
+                model.active_focus = FocusPane::Terminal;
             }
         }
         Message::DockerProgress(msg) => {
@@ -852,10 +859,11 @@ fn check_branch_pending_actions(model: &mut Model) {
     if model.branches.pending_launch_agent {
         model.branches.pending_launch_agent = false;
         if let Some(branch) = model.branches.selected_branch() {
-            model.wizard = Some(screens::wizard::WizardState {
-                branch_name: branch.name.clone(),
-                ..Default::default()
-            });
+            let branch_name = branch.name.clone();
+            open_wizard(model, None);
+            if let Some(ref mut wizard) = model.wizard {
+                wizard.branch_name = branch_name;
+            }
         }
     }
     if model.branches.pending_open_shell {
@@ -1264,7 +1272,11 @@ fn build_launch_config_from_wizard(wizard: &screens::wizard::WizardState) -> Lau
 
     let mut builder = AgentLaunchBuilder::new(agent_id);
 
-    if !wizard.model.is_empty() {
+    if !wizard.branch_name.is_empty() {
+        builder = builder.branch(&wizard.branch_name);
+    }
+
+    if is_explicit_model_selection(&wizard.model) {
         builder = builder.model(&wizard.model);
     }
 
@@ -1281,6 +1293,60 @@ fn build_launch_config_from_wizard(wizard: &screens::wizard::WizardState) -> Lau
     }
 
     builder.build()
+}
+
+fn is_explicit_model_selection(model: &str) -> bool {
+    !model.is_empty() && !model.starts_with("Default")
+}
+
+fn materialize_pending_launch(model: &mut Model) {
+    if let Err(err) = materialize_pending_launch_with(model, &gwt_sessions_dir()) {
+        apply_notification(
+            model,
+            Notification::new(Severity::Warn, "session", "Launch metadata was not persisted")
+                .with_detail(err),
+        );
+    }
+}
+
+fn materialize_pending_launch_with(model: &mut Model, sessions_dir: &std::path::Path) -> Result<(), String> {
+    let Some(config) = model.pending_launch_config.take() else {
+        return Ok(());
+    };
+
+    let mut session = AgentSession::new(
+        model.repo_path.clone(),
+        config.branch.clone().unwrap_or_default(),
+        config.agent_id.clone(),
+    );
+    session.model = config.model.clone().filter(|model| is_explicit_model_selection(model));
+    session.tool_version = config.tool_version.clone();
+    session.display_name = config.display_name.clone();
+    session.save(sessions_dir).map_err(|err| err.to_string())?;
+
+    let tab = crate::model::SessionTab {
+        id: session.id.clone(),
+        name: config.display_name.clone(),
+        tab_type: SessionTabType::Agent {
+            agent_id: config.agent_id.command().to_string(),
+            color: tui_agent_color(config.color),
+        },
+        vt: crate::model::VtState::new(24, 80),
+    };
+    model.sessions.push(tab);
+    model.active_session = model.sessions.len().saturating_sub(1);
+    model.active_layer = ActiveLayer::Main;
+
+    apply_notification(
+        model,
+        Notification::new(
+            Severity::Info,
+            "session",
+            format!("Created session for {}", config.display_name),
+        ),
+    );
+
+    Ok(())
 }
 
 fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecContext>) {
@@ -1428,17 +1494,12 @@ fn build_wizard_agent_options(
                 refresh_targets.push(detected.agent_id.clone());
             }
 
-            let versions = if cached_versions.is_empty() {
-                detected.version.into_iter().collect()
-            } else {
-                cached_versions
-            };
-
             screens::wizard::AgentOption {
                 id: detected.agent_id.command().to_string(),
                 name: detected.agent_id.display_name().to_string(),
                 available: true,
-                versions,
+                installed_version: detected.version,
+                versions: cached_versions,
                 cache_outdated,
             }
         })
@@ -2675,11 +2736,32 @@ mod tests {
         assert_eq!(ctx.spec_id, "SPEC-42");
         assert_eq!(ctx.title, "My Feature");
         assert_eq!(wizard.detected_agents.len(), 3);
+        assert_eq!(
+            wizard.detected_agents[0].installed_version.as_deref(),
+            Some("1.0.55")
+        );
         assert_eq!(wizard.detected_agents[0].versions, vec!["1.0.54", "1.0.53"]);
+        assert_eq!(
+            wizard.detected_agents[1].installed_version.as_deref(),
+            Some("0.5.1")
+        );
         assert_eq!(wizard.detected_agents[1].versions, vec!["0.5.0"]);
         assert!(wizard.detected_agents[1].cache_outdated);
-        assert_eq!(wizard.detected_agents[2].versions, vec!["0.2.0"]);
+        assert_eq!(
+            wizard.detected_agents[2].installed_version.as_deref(),
+            Some("0.2.0")
+        );
+        assert!(wizard.detected_agents[2].versions.is_empty());
         assert!(wizard.detected_agents[2].cache_outdated);
+        assert_eq!(wizard.model, "Default (Opus 4.6)");
+        assert_eq!(
+            wizard
+                .version_options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Installed (v1.0.55)", "latest", "1.0.54", "1.0.53"]
+        );
         assert_eq!(refresh_targets, vec![AgentId::Codex, AgentId::Gemini]);
     }
 
@@ -2693,9 +2775,98 @@ mod tests {
         assert!(wizard.spec_context.is_none());
         assert!(wizard.branch_name.is_empty());
         assert_eq!(wizard.detected_agents.len(), 1);
-        assert_eq!(wizard.detected_agents[0].versions, vec!["1.0.55"]);
+        assert_eq!(
+            wizard.detected_agents[0].installed_version.as_deref(),
+            Some("1.0.55")
+        );
+        assert!(wizard.detected_agents[0].versions.is_empty());
+        assert_eq!(
+            wizard
+                .version_options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Installed (v1.0.55)", "latest"]
+        );
         assert!(wizard.detected_agents[0].cache_outdated);
         assert_eq!(refresh_targets, vec![AgentId::ClaudeCode]);
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_omits_default_model_selection() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "Default (Opus 4.6)".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.agent_id, AgentId::ClaudeCode);
+        assert_eq!(config.branch.as_deref(), Some("feature/spec-42"));
+        assert!(config.model.is_none());
+        assert!(!config.args.iter().any(|arg| arg.contains("--model")));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_keeps_selected_version() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            version: "latest".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.agent_id, AgentId::ClaudeCode);
+        assert_eq!(config.branch.as_deref(), Some("feature/spec-42"));
+        assert_eq!(config.model.as_deref(), Some("sonnet"));
+        assert_eq!(config.tool_version.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_creates_agent_session_and_persists_metadata() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut model = test_model();
+        model.pending_launch_config = Some(
+            AgentLaunchBuilder::new(AgentId::ClaudeCode)
+                .branch("feature/spec-42")
+                .model("sonnet")
+                .version("latest")
+                .build(),
+        );
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        assert!(model.pending_launch_config.is_none());
+        assert_eq!(model.sessions.len(), 2);
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        let session_tab = model.active_session_tab().expect("active launched session");
+        assert_eq!(session_tab.name, "Claude Code");
+        assert_eq!(
+            session_tab.tab_type,
+            SessionTabType::Agent {
+                agent_id: "claude".to_string(),
+                color: crate::model::AgentColor::Green,
+            }
+        );
+
+        let mut entries = fs::read_dir(dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries.len(), 1);
+
+        let persisted = AgentSession::load(&entries[0]).expect("load persisted session");
+        assert_eq!(persisted.agent_id, AgentId::ClaudeCode);
+        assert_eq!(persisted.branch, "feature/spec-42");
+        assert_eq!(persisted.model.as_deref(), Some("sonnet"));
+        assert_eq!(persisted.tool_version.as_deref(), Some("latest"));
+        assert_eq!(persisted.display_name, "Claude Code");
     }
 
     #[test]

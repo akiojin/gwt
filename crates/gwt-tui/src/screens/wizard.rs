@@ -161,6 +161,8 @@ pub struct AgentOption {
     pub id: String,
     pub name: String,
     pub available: bool,
+    /// Detected installed binary version, if known.
+    pub installed_version: Option<String>,
     /// Cached version history loaded at wizard startup.
     pub versions: Vec<String>,
     /// Whether the cached version list is stale and scheduled for refresh.
@@ -186,7 +188,7 @@ impl AgentOption {
 
     fn cached_version_summary(&self) -> Option<String> {
         match self.versions.as_slice() {
-            [] => None,
+            [] => self.installed_version.clone(),
             [single] => Some(single.clone()),
             versions => Some(format!(
                 "{} (+{} older)",
@@ -257,26 +259,25 @@ impl Default for WizardState {
 }
 
 impl WizardState {
+    fn effective_agent_id(&self) -> &str {
+        self.selected_agent()
+            .map(|agent| agent.id.as_str())
+            .unwrap_or(self.agent_id.as_str())
+    }
+
     /// Whether the selected agent has model options.
     fn agent_has_models(&self) -> bool {
-        // All agents except OpenCode have model selection
-        matches!(
-            self.agent_id.as_str(),
-            "claude" | "codex" | "gemini" | ""
-        ) || self.agent_id.is_empty()
+        matches!(self.effective_agent_id(), "claude" | "codex" | "gemini")
     }
 
     /// Whether the selected agent is Codex (needs ReasoningLevel step).
     fn agent_is_codex(&self) -> bool {
-        self.agent_id == "codex"
+        self.effective_agent_id() == "codex"
     }
 
     /// Whether the selected agent is distributed via npm.
     fn agent_has_npm_package(&self) -> bool {
-        matches!(
-            self.agent_id.as_str(),
-            "claude" | "codex" | "gemini"
-        )
+        matches!(self.effective_agent_id(), "claude" | "codex" | "gemini")
     }
 
     /// Total steps visible for the current agent configuration.
@@ -305,6 +306,9 @@ impl WizardState {
     }
 
     fn selected_agent(&self) -> Option<&AgentOption> {
+        if self.step == WizardStep::AgentSelect {
+            return self.detected_agents.get(self.selected);
+        }
         if !self.agent_id.is_empty() {
             self.detected_agents
                 .iter()
@@ -315,15 +319,44 @@ impl WizardState {
     }
 
     fn current_model_options(&self) -> Vec<String> {
-        let versions = self
-            .selected_agent()
-            .map(|agent| agent.versions.clone())
-            .unwrap_or_default();
+        default_model_options(self.effective_agent_id())
+    }
 
-        if versions.is_empty() {
-            vec!["latest".to_string()]
+    fn sync_selected_agent_options(&mut self) {
+        let Some(agent) = self.selected_agent().cloned() else {
+            self.model.clear();
+            self.version.clear();
+            self.version_options.clear();
+            return;
+        };
+
+        let model_options = self.current_model_options();
+        if let Some(first_model) = model_options.first() {
+            if self.model.is_empty() || !model_options.iter().any(|option| option == &self.model) {
+                self.model = first_model.clone();
+            }
         } else {
-            versions
+            self.model.clear();
+        }
+
+        self.version_options = gwt_agent::build_version_options(
+            agent.available,
+            agent.installed_version.as_deref(),
+            self.agent_has_npm_package(),
+            &agent.versions,
+        );
+
+        if let Some(first_version) = self.version_options.first() {
+            if self.version.is_empty()
+                || !self
+                    .version_options
+                    .iter()
+                    .any(|option| option.value == self.version)
+            {
+                self.version = first_version.value.clone();
+            }
+        } else {
+            self.version.clear();
         }
     }
 
@@ -478,10 +511,16 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
         WizardMessage::MoveUp => {
             let count = state.option_count();
             super::move_up(&mut state.selected, count);
+            if state.step == WizardStep::AgentSelect {
+                state.sync_selected_agent_options();
+            }
         }
         WizardMessage::MoveDown => {
             let count = state.option_count();
             super::move_down(&mut state.selected, count);
+            if state.step == WizardStep::AgentSelect {
+                state.sync_selected_agent_options();
+            }
         }
         WizardMessage::Select => {
             if state.step == WizardStep::AIBranchSuggest {
@@ -492,6 +531,9 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 if let Some(next) = next_step(state.step, state) {
                     state.step = next;
                     state.selected = 0;
+                    if matches!(next, WizardStep::ModelSelect | WizardStep::VersionSelect) {
+                        state.sync_selected_agent_options();
+                    }
                     // When entering AIBranchSuggest, start loading
                     if next == WizardStep::AIBranchSuggest {
                         state.ai_suggest = AISuggestState {
@@ -544,6 +586,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
             if state.step == WizardStep::AgentSelect {
                 state.selected = 0;
             }
+            state.sync_selected_agent_options();
         }
         WizardMessage::SetBranchSuggestions(suggestions) => {
             state.ai_suggest.loading = false;
@@ -604,11 +647,13 @@ fn apply_selection(state: &mut WizardState) {
             if let Some(agent) = state.detected_agents.get(state.selected) {
                 state.agent_id = agent.id.clone();
             }
+            state.sync_selected_agent_options();
         }
         WizardStep::ModelSelect => {
             if let Some(opt) = options.get(state.selected) {
                 state.model = opt.clone();
             }
+            state.sync_selected_agent_options();
         }
         WizardStep::ReasoningLevel => {
             if let Some(opt) = options.get(state.selected) {
@@ -704,6 +749,34 @@ fn advance_from_ai_branch_step(state: &mut WizardState) {
     if let Some(next) = next_step(state.step, state) {
         state.step = next;
         state.selected = 0;
+    }
+}
+
+fn default_model_options(agent_id: &str) -> Vec<String> {
+    match agent_id {
+        "claude" => vec![
+            "Default (Opus 4.6)".to_string(),
+            "opus".to_string(),
+            "sonnet".to_string(),
+            "haiku".to_string(),
+        ],
+        "codex" => vec![
+            "Default (Auto)".to_string(),
+            "gpt-5.3-codex".to_string(),
+            "gpt-5.2-codex".to_string(),
+            "gpt-5.1-codex-max".to_string(),
+            "gpt-5.2".to_string(),
+            "gpt-5.1-codex-mini".to_string(),
+        ],
+        "gemini" => vec![
+            "Default (Auto)".to_string(),
+            "gemini-3-pro-preview".to_string(),
+            "gemini-3-flash-preview".to_string(),
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-flash-lite".to_string(),
+        ],
+        _ => Vec::new(),
     }
 }
 
@@ -873,9 +946,10 @@ fn render_confirm_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     // Summary
     let summary = format!(
-        " Agent:       {}\n Model:       {}\n Reasoning:   {}\n Mode:        {}\n Branch:      {}\n Issue:       {}\n Skip Perms:  {}",
+        " Agent:       {}\n Model:       {}\n Version:     {}\n Reasoning:   {}\n Mode:        {}\n Branch:      {}\n Issue:       {}\n Skip Perms:  {}",
         if state.agent_id.is_empty() { "-" } else { &state.agent_id },
         if state.model.is_empty() { "-" } else { &state.model },
+        if state.version.is_empty() { "-" } else { &state.version },
         state.reasoning,
         state.mode,
         if state.branch_name.is_empty() { "-" } else { &state.branch_name },
@@ -916,6 +990,7 @@ mod tests {
                 id: "claude".to_string(),
                 name: "Claude Code".to_string(),
                 available: true,
+                installed_version: Some("1.0.54".to_string()),
                 versions: vec!["1.0.54".to_string(), "1.0.53".to_string()],
                 cache_outdated: false,
             },
@@ -923,6 +998,7 @@ mod tests {
                 id: "codex".to_string(),
                 name: "Codex CLI".to_string(),
                 available: true,
+                installed_version: Some("0.5.0".to_string()),
                 versions: vec!["0.5.0".to_string()],
                 cache_outdated: true,
             },
@@ -930,6 +1006,7 @@ mod tests {
                 id: "aider".to_string(),
                 name: "Aider".to_string(),
                 available: false,
+                installed_version: None,
                 versions: Vec::new(),
                 cache_outdated: false,
             },
@@ -1204,6 +1281,7 @@ mod tests {
             id: "codex".to_string(),
             name: "Codex CLI".to_string(),
             available: true,
+            installed_version: Some("1.3.0".to_string()),
             versions: vec!["1.3.0".to_string(), "1.2.0".to_string()],
             cache_outdated: true,
         };
@@ -1222,6 +1300,7 @@ mod tests {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             available: true,
+            installed_version: Some("1.0.54".to_string()),
             versions: vec!["1.0.54".to_string()],
             cache_outdated: false,
         }];
@@ -1233,18 +1312,18 @@ mod tests {
     }
 
     #[test]
-    fn select_on_model_step_stores_model() {
+    fn select_on_model_step_stores_model_catalog_entry() {
         let mut state = WizardState::default();
         state.agent_id = "claude".to_string();
         state.detected_agents = sample_agents();
         state.step = WizardStep::ModelSelect;
         state.selected = 1;
         update(&mut state, WizardMessage::Select);
-        assert_eq!(state.model, "1.0.53");
+        assert_eq!(state.model, "opus");
     }
 
     #[test]
-    fn model_select_uses_cached_versions_for_selected_agent() {
+    fn model_select_uses_agent_model_catalog() {
         let mut state = WizardState::default();
         state.agent_id = "claude".to_string();
         state.detected_agents = sample_agents();
@@ -1252,20 +1331,34 @@ mod tests {
 
         assert_eq!(
             state.current_options(),
-            vec!["1.0.54".to_string(), "1.0.53".to_string()]
+            vec![
+                "Default (Opus 4.6)".to_string(),
+                "opus".to_string(),
+                "sonnet".to_string(),
+                "haiku".to_string()
+            ]
         );
-        assert_eq!(state.option_count(), 2);
+        assert_eq!(state.option_count(), 4);
     }
 
     #[test]
-    fn model_select_falls_back_to_latest_without_cached_versions() {
+    fn select_on_model_step_populates_version_select_options() {
         let mut state = WizardState::default();
-        state.agent_id = "aider".to_string();
+        state.agent_id = "claude".to_string();
         state.detected_agents = sample_agents();
         state.step = WizardStep::ModelSelect;
 
-        assert_eq!(state.current_options(), vec!["latest".to_string()]);
-        assert_eq!(state.option_count(), 1);
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::VersionSelect);
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Installed (v1.0.54)".to_string(),
+                "latest".to_string(),
+                "1.0.53".to_string()
+            ]
+        );
     }
 
     #[test]
