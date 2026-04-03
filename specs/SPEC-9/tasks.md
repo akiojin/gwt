@@ -48,10 +48,10 @@
 
 ### 2.2 Skill Management UI
 
-- [ ] **T-028**: Write test for skill management panel rendering with registered skills.
-- [ ] **T-029**: Write test for skill enable/disable toggle.
-- [ ] **T-030**: Implement skill management panel in gwt-tui.
-- [ ] **T-031**: Verify T-028, T-029 pass (GREEN).
+- [x] **T-028**: Write test for skill management panel rendering with registered skills.
+- [x] **T-029**: Write test for skill enable/disable toggle.
+- [x] **T-030**: Implement skill management panel in gwt-tui.
+- [x] **T-031**: Verify T-028, T-029 pass (GREEN).
 
 ### 2.3 gwt-pr-check Extended Report
 

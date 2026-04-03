@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `63/82` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T13:05:00Z`
+- Task progress: `67/82` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T14:00:00Z`
 
 ## Done
 - Supporting artifacts now cover the full infrastructure umbrella instead of only the core four files.
@@ -17,9 +17,10 @@
 - ServiceSelect now has focused coverage for multi-service listing, empty-state errors, and single-service auto-selection.
 - PortSelect now has focused coverage for conflict detection, explicit acceptance flows, and auto-closing when all conflicts are resolved.
 - Container lifecycle command execution is now testable without a real Docker daemon via a fake-binary seam in `gwt-docker`.
+- Settings now expose a `Skills` category, render builtin embedded skills, and sync toggle state back into `SkillRegistry`.
 
 ## Next
 - Connect the new DockerProgress message contract to a real Docker event producer, then finish the remaining status-area lifecycle gaps in the Docker UI flow.
-- Finish any remaining embedded-skills execution surfaces beyond startup registration.
+- Finish any embedded-skills work beyond builtin toggle UI, if product scope still needs runtime discovery or non-builtin state.
 - Close release workflow validation and remaining hooks hardening items.
 - Re-run infrastructure verification before updating task completion further.
