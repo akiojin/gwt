@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt infrastructure covers four domains: build/distribution (GitHub Release + bunx/npx), Docker integration UI (detection, container lifecycle, port mapping), embedded skill management, and Codex hooks.json merge. Docker UI screens existed in the old TUI (v6.30.3) and need restoration to the current ratatui-based TUI. The hooks.json merge feature was 65% complete (20/31 tasks done) in the archived SPEC-1786 before it was consolidated into this SPEC. Embedded skill management also owns keeping the bundled `.claude/skills/gwt-*` assets aligned with the current local SPEC artifact model, including persisted `analysis.md`.
+gwt infrastructure covers four domains: build/distribution (GitHub Release + bunx/npx), Docker integration UI (detection, container lifecycle, port mapping), embedded skill management, and Codex hooks.json merge. Docker UI screens existed in the old TUI (v6.30.3) and need restoration to the current ratatui-based TUI. The hooks.json merge feature was 65% complete (20/31 tasks done) in the archived SPEC-1786 before it was consolidated into this SPEC. Embedded skill management also owns keeping the bundled `.claude/skills/gwt-*` assets aligned with the current local SPEC artifact model, including persisted `analysis.md`, and now covers the pre-SPEC intake entrypoint that interviews rough requests before any `spec.md` is drafted.
 
 ## User Stories
 
@@ -29,16 +29,17 @@ As a developer, I want gwt to detect Docker environments and launch agents insid
 5. Given a running container, when I use the container management UI, then I can start, stop, or restart the container.
 6. Given a .devcontainer/devcontainer.json exists, when gwt starts, then DevContainer detection is offered as an alternative.
 
-### US-3: Manage Embedded Skills Registration (P1) -- NOT IMPLEMENTED
+### US-3: Manage Embedded Skills Registration and Pre-SPEC Intake (P1) -- NOT IMPLEMENTED
 
-As a developer, I want gwt to register its embedded skills on startup so that AI agents can use them without manual configuration.
+As a developer, I want gwt to register its embedded skills on startup and expose a pre-SPEC brainstorming entrypoint so that AI agents can handle rough requests without manual configuration or premature SPEC creation.
 
 **Acceptance Scenarios**
 
-1. Given gwt starts, when initialization completes, then all embedded skills (gwt-pr, gwt-pr-check, gwt-pr-fix, etc.) are registered.
+1. Given gwt starts, when initialization completes, then all embedded skills (gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-brainstorm, etc.) are registered.
 2. Given I open the skill management panel, when I view registered skills, then each skill shows its name, description, and status.
 3. Given gwt-pr-check is invoked, when it runs, then it reports CI status, merge readiness, and review state in a structured format.
 4. Given the local SPEC workflow changes its persisted artifact model, when embedded gwt-spec skills are refreshed, then the bundled skill docs stay aligned with that model (including `analysis.md`).
+5. Given a user starts with a rough idea or asks whether an existing SPEC should be updated, when `gwt-spec-brainstorm` is invoked, then it performs one-question-at-a-time intake, searches existing owners first, and routes existing-Issue matches into `gwt-issue-resolve` and existing-SPEC updates into `gwt-spec-ops` instead of creating duplicate artifacts prematurely.
 
 ### US-4: Merge hooks.json Preserving User Hooks (P1) -- PARTIALLY IMPLEMENTED
 
@@ -81,17 +82,18 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 
 ### Embedded Skills
 
-- **FR-009**: Skill registration on startup: register gwt-pr, gwt-pr-check, gwt-pr-fix, and other embedded skills, and keep embedded gwt-spec workflow docs aligned with the local SPEC artifact model.
-- **FR-010**: Skill management UI: display registered skills with name, description, and status in a settings panel or dedicated screen.
-- **FR-011**: gwt-pr-check extended status report: CI check status, merge readiness, review thread states, combined in a structured output.
+- **FR-009**: Skill registration on startup: register gwt-pr, gwt-pr-check, gwt-pr-fix, `gwt-spec-brainstorm`, and other embedded skills, and keep embedded gwt-spec workflow docs aligned with the local SPEC artifact model.
+- **FR-010**: `gwt-spec-brainstorm` must provide a cross-agent pre-SPEC intake workflow that performs duplicate search first, interviews the user one question at a time, and routes to `EXISTING-ISSUE` via `gwt-issue-resolve`, `EXISTING-SPEC` via `gwt-spec-ops`, `NEW-SPEC`, or `ISSUE` before any new `spec.md` is drafted.
+- **FR-011**: Skill management UI: display registered skills with name, description, and status in a settings panel or dedicated screen.
+- **FR-012**: gwt-pr-check extended status report: CI check status, merge readiness, review thread states, combined in a structured output.
 
 ### Hooks Merge (carried over from archived SPEC-1786)
 
-- **FR-012**: `write_managed_codex_hooks()` uses merge mode: read existing hooks.json, update only gwt-managed entries, write back.
-- **FR-013**: Preserve user-defined hooks during gwt-managed hook updates; never delete or modify entries without the gwt marker.
-- **FR-014**: gwt-managed hooks identified by a `"_gwt_managed": true` field on each managed hook entry.
-- **FR-015**: Confirmation dialog displayed for Codex agent sessions only before writing hooks.
-- **FR-016**: JSON corruption recovery: on parse failure, create timestamped backup, attempt recovery from last known good state, and fall back to writing gwt-only hooks if recovery fails.
+- **FR-013**: `write_managed_codex_hooks()` uses merge mode: read existing hooks.json, update only gwt-managed entries, write back.
+- **FR-014**: Preserve user-defined hooks during gwt-managed hook updates; never delete or modify entries without the gwt marker.
+- **FR-015**: gwt-managed hooks identified by a `"_gwt_managed": true` field on each managed hook entry.
+- **FR-016**: Confirmation dialog displayed for Codex agent sessions only before writing hooks.
+- **FR-017**: JSON corruption recovery: on parse failure, create timestamped backup, attempt recovery from last known good state, and fall back to writing gwt-only hooks if recovery fails.
 
 ## Non-Functional Requirements
 
@@ -165,7 +167,7 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - **SC-004**: Service Select screen lists services from a test docker-compose.yml.
 - **SC-005**: Port Select screen detects and resolves a simulated port conflict.
 - **SC-006**: Container start/stop/restart commands execute and report status.
-- **SC-007**: All embedded skills are registered and queryable after startup.
+- **SC-007**: All embedded skills, including `gwt-spec-brainstorm`, are registered and queryable after startup.
 - **SC-008**: hooks.json merge preserves user hooks across 10 consecutive gwt-managed updates.
 - **SC-009**: hooks.json corruption recovery creates backup and restores functionality.
 - **SC-010**: All carried-over hooks merge tests from SPEC-1786 continue to pass.

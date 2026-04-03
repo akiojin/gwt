@@ -34,20 +34,25 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 ## Phase 2: Embedded Skills
 
-**Goal**: Implement skill registration on startup and a skill management UI.
+**Goal**: Implement skill registration on startup, add a pre-SPEC brainstorming entrypoint, and expose embedded skill state in the UI.
 
 ### Key Changes
 
 1. **gwt-core**: Define `EmbeddedSkill` struct with name, description, entry point, and status.
    - Registry: `Vec<EmbeddedSkill>` populated at startup.
-   - Skills: gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-ops, etc.
+   - Skills: gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-brainstorm, gwt-spec-ops, etc.
    - Bundled gwt-spec skills stay aligned with the local SPEC artifact model, including persisted `analysis.md`.
 
-2. **gwt-tui**: Add skill management panel (accessible from Settings or a dedicated screen).
+2. **embedded skills**: Add `gwt-spec-brainstorm` as the cross-agent pre-SPEC intake skill and expose `/gwt:gwt-spec-brainstorm` as the Claude command entrypoint.
+   - One-question-at-a-time interview flow.
+   - Duplicate search across Issues and SPECs before new registration.
+   - Auto-handoff to `gwt-spec-ops`, `gwt-spec-register`, or `gwt-issue-register`.
+
+3. **gwt-tui**: Add skill management panel (accessible from Settings or a dedicated screen).
    - List registered skills with status indicators.
    - Allow enable/disable per skill.
 
-3. **gwt-core**: Extend `gwt-pr-check` to produce structured status report.
+4. **gwt-core**: Extend `gwt-pr-check` to produce structured status report.
    - CI check status (pass/fail/pending per check).
    - Merge readiness (conflicts, approvals, required checks).
    - Review thread states (resolved/unresolved counts).

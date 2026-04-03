@@ -84,6 +84,7 @@ pub enum BuiltinSkill {
     GwtPr,
     GwtPrCheck,
     GwtPrFix,
+    GwtSpecBrainstorm,
     GwtSpecOps,
     GwtSpecRegister,
     GwtSpecImplement,
@@ -98,6 +99,7 @@ impl BuiltinSkill {
             Self::GwtPr => "gwt-pr",
             Self::GwtPrCheck => "gwt-pr-check",
             Self::GwtPrFix => "gwt-pr-fix",
+            Self::GwtSpecBrainstorm => "gwt-spec-brainstorm",
             Self::GwtSpecOps => "gwt-spec-ops",
             Self::GwtSpecRegister => "gwt-spec-register",
             Self::GwtSpecImplement => "gwt-spec-implement",
@@ -112,6 +114,9 @@ impl BuiltinSkill {
             Self::GwtPr => "Create or update GitHub Pull Requests",
             Self::GwtPrCheck => "Check GitHub PR status (CI, merge, review)",
             Self::GwtPrFix => "Fix CI failures, merge conflicts, and review comments",
+            Self::GwtSpecBrainstorm => {
+                "Interview rough ideas and route them to the right SPEC or Issue path"
+            }
             Self::GwtSpecOps => "Orchestrate SPEC lifecycle end-to-end",
             Self::GwtSpecRegister => "Create a new local SPEC directory",
             Self::GwtSpecImplement => "Implement SPEC tasks with test-first workflow",
@@ -126,6 +131,7 @@ impl BuiltinSkill {
             Self::GwtPr,
             Self::GwtPrCheck,
             Self::GwtPrFix,
+            Self::GwtSpecBrainstorm,
             Self::GwtSpecOps,
             Self::GwtSpecRegister,
             Self::GwtSpecImplement,

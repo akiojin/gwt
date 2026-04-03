@@ -441,9 +441,40 @@ mod tests {
     }
 
     #[test]
-    fn builtin_all_returns_expected_count() {
-        // We defined 8 builtins
-        assert_eq!(BuiltinSkill::all().len(), 8);
+    fn gwt_spec_brainstorm_is_registered_and_assets_exist() {
+        let has_builtin = BuiltinSkill::all()
+            .iter()
+            .any(|builtin| builtin.name() == "gwt-spec-brainstorm");
+        assert!(has_builtin);
+
+        let skill_md = include_str!("../../../.claude/skills/gwt-spec-brainstorm/SKILL.md");
+        let command_md = include_str!("../../../.claude/commands/gwt-spec-brainstorm.md");
+        assert!(!skill_md.trim().is_empty());
+        assert!(!command_md.trim().is_empty());
+    }
+
+    #[test]
+    fn builtin_all_returns_expected_names() {
+        let mut actual: Vec<&str> = BuiltinSkill::all()
+            .iter()
+            .map(|builtin| builtin.name())
+            .collect();
+        actual.sort_unstable();
+
+        let mut expected = vec![
+            "gwt-issue-register",
+            "gwt-issue-resolve",
+            "gwt-pr",
+            "gwt-pr-check",
+            "gwt-pr-fix",
+            "gwt-spec-brainstorm",
+            "gwt-spec-implement",
+            "gwt-spec-ops",
+            "gwt-spec-register",
+        ];
+        expected.sort_unstable();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
