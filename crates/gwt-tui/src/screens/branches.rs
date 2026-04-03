@@ -120,6 +120,21 @@ pub struct DetailSpecItem {
     pub status: String,
 }
 
+/// Lifecycle action requested for a Docker container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockerLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// Pending Docker action selected in the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDockerAction {
+    pub container_id: String,
+    pub action: DockerLifecycleAction,
+}
+
 /// Number of detail sections in the branch detail view.
 const DETAIL_SECTION_COUNT: usize = 4;
 
@@ -163,6 +178,12 @@ pub struct BranchesState {
     pub(crate) detail_files: Vec<String>,
     /// Recent commits for the selected branch worktree.
     pub(crate) detail_commits: Vec<String>,
+    /// Docker containers available for the selected branch context.
+    pub(crate) docker_containers: Vec<gwt_docker::ContainerInfo>,
+    /// Selected Docker container index in the overview area.
+    pub(crate) docker_selected: usize,
+    /// Pending Docker action intent to be handled by the caller.
+    pub(crate) pending_docker_action: Option<PendingDockerAction>,
 }
 
 impl BranchesState {
@@ -201,6 +222,17 @@ impl BranchesState {
         let len = self.filtered_branches().len();
         super::clamp_index(&mut self.selected, len);
     }
+
+    /// Clamp selected Docker container index to available containers.
+    fn clamp_docker_selected(&mut self) {
+        let len = self.docker_containers.len();
+        super::clamp_index(&mut self.docker_selected, len);
+    }
+
+    /// Return the currently selected Docker container, if any.
+    fn selected_docker_container(&self) -> Option<&gwt_docker::ContainerInfo> {
+        self.docker_containers.get(self.docker_selected)
+    }
 }
 
 /// Messages specific to the branches screen.
@@ -237,6 +269,16 @@ pub enum BranchesMessage {
     OpenShell,
     /// Delete worktree action.
     DeleteWorktree,
+    /// Move to the next Docker container in the overview area.
+    DockerContainerDown,
+    /// Move to the previous Docker container in the overview area.
+    DockerContainerUp,
+    /// Request a start lifecycle action for the selected Docker container.
+    DockerContainerStart,
+    /// Request a stop lifecycle action for the selected Docker container.
+    DockerContainerStop,
+    /// Request a restart lifecycle action for the selected Docker container.
+    DockerContainerRestart,
 }
 
 /// Update branches state in response to a message.
@@ -332,6 +374,40 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::DeleteWorktree => {
             state.pending_delete_worktree = true;
         }
+        BranchesMessage::DockerContainerDown => {
+            if !state.docker_containers.is_empty() {
+                super::move_down(&mut state.docker_selected, state.docker_containers.len());
+            }
+        }
+        BranchesMessage::DockerContainerUp => {
+            if !state.docker_containers.is_empty() {
+                super::move_up(&mut state.docker_selected, state.docker_containers.len());
+            }
+        }
+        BranchesMessage::DockerContainerStart => {
+            if let Some(container) = state.selected_docker_container() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    container_id: container.id.clone(),
+                    action: DockerLifecycleAction::Start,
+                });
+            }
+        }
+        BranchesMessage::DockerContainerStop => {
+            if let Some(container) = state.selected_docker_container() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    container_id: container.id.clone(),
+                    action: DockerLifecycleAction::Stop,
+                });
+            }
+        }
+        BranchesMessage::DockerContainerRestart => {
+            if let Some(container) = state.selected_docker_container() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    container_id: container.id.clone(),
+                    action: DockerLifecycleAction::Restart,
+                });
+            }
+        }
     }
 }
 
@@ -342,6 +418,14 @@ pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Pat
     state.detail_specs.clear();
     state.detail_files.clear();
     state.detail_commits.clear();
+    state.docker_containers.clear();
+    state.docker_selected = 0;
+    state.pending_docker_action = None;
+
+    if let Ok(containers) = gwt_docker::list_containers() {
+        state.docker_containers = containers;
+        state.clamp_docker_selected();
+    }
 
     let worktree_path = state
         .selected_branch()
@@ -600,32 +684,72 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
 
 /// Overview section: branch name, HEAD indicator, category, worktree path.
 fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) {
-    let content = match state.selected_branch() {
+    let mut lines = Vec::new();
+
+    match state.selected_branch() {
         Some(branch) => {
             let head = if branch.is_head { " (HEAD)" } else { "" };
             let locality = if branch.is_local { "Local" } else { "Remote" };
-            let wt = branch
-                .worktree_path
-                .as_ref()
-                .map(|p| format!("\n Worktree: {}", p.display()))
-                .unwrap_or_default();
-            format!(
-                " Branch: {}{}\n Category: {}\n Type: {}{}",
-                branch.name,
-                head,
-                branch.category.label(),
-                locality,
-                wt,
-            )
+            lines.push(format!(" Branch: {}{}", branch.name, head));
+            lines.push(format!(" Category: {}", branch.category.label()));
+            lines.push(format!(" Type: {}", locality));
+            if let Some(worktree) = branch.worktree_path.as_ref() {
+                lines.push(format!(" Worktree: {}", worktree.display()));
+            }
         }
-        None => " No branch selected".to_string(),
-    };
+        None => lines.push(" No branch selected".to_string()),
+    }
+
+    lines.push(String::new());
+    lines.push(" Docker status".to_string());
+    if state.docker_containers.is_empty() {
+        lines.push(" No containers found".to_string());
+    } else if let Some(container) = state.selected_docker_container() {
+        lines.push(format!(" Selected: {}", container.name));
+        lines.push(format!(
+            " Status: {}",
+            docker_status_label(container.status)
+        ));
+        lines.push(format!(" Ports: {}", docker_ports_label(&container.ports)));
+        lines.push(format!(
+            " Controls: {}",
+            docker_controls_hint(container.status)
+        ));
+    }
 
     let block = Block::default().title("Overview");
-    let paragraph = Paragraph::new(content)
+    let paragraph = Paragraph::new(lines.join("\n"))
         .block(block)
         .style(Style::default().fg(Color::White));
     frame.render_widget(paragraph, area);
+}
+
+fn docker_status_label(status: gwt_docker::ContainerStatus) -> &'static str {
+    match status {
+        gwt_docker::ContainerStatus::Created => "Created",
+        gwt_docker::ContainerStatus::Running => "Running",
+        gwt_docker::ContainerStatus::Paused => "Paused",
+        gwt_docker::ContainerStatus::Stopped => "Stopped",
+        gwt_docker::ContainerStatus::Exited => "Exited",
+    }
+}
+
+fn docker_ports_label(ports: &str) -> &str {
+    if ports.is_empty() {
+        "No published ports"
+    } else {
+        ports
+    }
+}
+
+fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
+    match status {
+        gwt_docker::ContainerStatus::Running => "Up/Down select  T stop  R restart",
+        gwt_docker::ContainerStatus::Paused => "Up/Down select  S start  T stop  R restart",
+        gwt_docker::ContainerStatus::Created
+        | gwt_docker::ContainerStatus::Stopped
+        | gwt_docker::ContainerStatus::Exited => "Up/Down select  S start  R restart",
+    }
 }
 
 /// SPECs section: list loaded from the worktree.
@@ -813,6 +937,13 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static DOCKER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn sample_branches() -> Vec<BranchItem> {
         vec![
@@ -852,6 +983,69 @@ mod tests {
                 worktree_path: None,
             },
         ]
+    }
+
+    fn sample_containers() -> Vec<gwt_docker::ContainerInfo> {
+        vec![
+            gwt_docker::ContainerInfo {
+                id: "abc123".to_string(),
+                name: "web".to_string(),
+                status: gwt_docker::ContainerStatus::Running,
+                image: "nginx:latest".to_string(),
+                ports: "0.0.0.0:8080->80/tcp".to_string(),
+            },
+            gwt_docker::ContainerInfo {
+                id: "def456".to_string(),
+                name: "db".to_string(),
+                status: gwt_docker::ContainerStatus::Stopped,
+                image: "postgres:16".to_string(),
+                ports: String::new(),
+            },
+        ]
+    }
+
+    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let script_path = dir.path().join("docker");
+        let mut file = fs::File::create(&script_path).expect("create fake docker");
+        file.write_all(script_body.as_bytes())
+            .expect("write fake docker");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata().expect("stat fake docker").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
+        }
+
+        (dir, script_path)
+    }
+
+    fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
+        let _guard = DOCKER_TEST_LOCK.lock().expect("lock docker tests");
+        let (_dir, script_path) = write_fake_docker(script_body);
+        let previous = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", &script_path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        result
+    }
+
+    fn buffer_to_lines(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]
@@ -1349,6 +1543,149 @@ mod tests {
             }
         }
         assert!(found_overview, "Detail panel should contain 'Overview'");
+    }
+
+    #[test]
+    fn render_detail_overview_shows_docker_status_area() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 0; // Overview
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let mut found_docker_status = false;
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains("Docker status") {
+                found_docker_status = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_docker_status,
+            "Detail panel should contain a Docker status area"
+        );
+    }
+
+    #[test]
+    fn render_detail_overview_shows_no_containers_message() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 0;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("No containers found")),
+            "Detail panel should explain when there are no Docker containers"
+        );
+    }
+
+    #[test]
+    fn load_branch_detail_populates_docker_containers() {
+        with_fake_docker(
+            "#!/bin/sh\nprintf 'abc123\\tweb\\trunning\\tnginx:latest\\t0.0.0.0:8080->80/tcp\\n'\n",
+            || {
+                let tmp = tempfile::tempdir().expect("create temp worktree");
+                let mut state = BranchesState::default();
+                state.branches = vec![BranchItem {
+                    name: "feature/docker".to_string(),
+                    is_head: true,
+                    is_local: true,
+                    category: BranchCategory::Feature,
+                    worktree_path: Some(tmp.path().to_path_buf()),
+                }];
+
+                load_branch_detail(&mut state, tmp.path());
+
+                assert_eq!(state.docker_containers.len(), 1);
+                let container = &state.docker_containers[0];
+                assert_eq!(container.id, "abc123");
+                assert_eq!(container.name, "web");
+                assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
+                assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
+            },
+        );
+    }
+
+    #[test]
+    fn docker_selection_and_lifecycle_intent_update_state() {
+        let mut state = BranchesState::default();
+        state.docker_containers = sample_containers();
+
+        update(&mut state, BranchesMessage::DockerContainerDown);
+        assert_eq!(state.docker_selected, 1);
+
+        update(&mut state, BranchesMessage::DockerContainerUp);
+        assert_eq!(state.docker_selected, 0);
+
+        update(&mut state, BranchesMessage::DockerContainerRestart);
+        assert_eq!(
+            state.pending_docker_action,
+            Some(PendingDockerAction {
+                container_id: "abc123".to_string(),
+                action: DockerLifecycleAction::Restart,
+            })
+        );
+    }
+
+    #[test]
+    fn render_detail_overview_shows_selected_docker_container_details() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.docker_containers = sample_containers();
+        state.docker_selected = 1;
+        state.detail_section = 0;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("Selected: db")),
+            "Detail panel should show the selected Docker container"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Status: Stopped")),
+            "Detail panel should show Docker status"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Ports: No published ports")),
+            "Detail panel should show Docker ports"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Controls: Up/Down select  S start  R restart")),
+            "Detail panel should show Docker control hints"
+        );
     }
 
     #[test]

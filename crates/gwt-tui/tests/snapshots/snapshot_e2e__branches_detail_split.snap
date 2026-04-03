@@ -20,8 +20,8 @@ expression: output
 │ Category: Main                       ││                                      │
 │ Type: Local                          ││                                      │
 │                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│ Docker status                        ││                                      │
+│ No containers found                  ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
