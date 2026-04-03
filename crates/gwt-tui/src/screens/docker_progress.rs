@@ -67,6 +67,44 @@ pub struct DockerProgressState {
     pub visible: bool,
 }
 
+impl DockerProgressState {
+    /// Make the overlay visible.
+    pub fn show(&mut self) {
+        self.visible = true;
+    }
+
+    /// Hide the overlay.
+    pub fn hide(&mut self) {
+        self.visible = false;
+    }
+
+    /// Update the descriptive message shown above the stage list.
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+    }
+
+    /// Advance to the next stage in the normal flow.
+    pub fn advance(&mut self) {
+        let idx = self.stage.index();
+        if let Some(&next) = DockerStage::PROGRESS.get(idx + 1) {
+            self.stage = next;
+            self.error = None;
+        }
+    }
+
+    /// Transition to a failed state and surface the error.
+    pub fn fail(&mut self, error: impl Into<String>) {
+        self.stage = DockerStage::Failed;
+        self.error = Some(error.into());
+        self.visible = true;
+    }
+
+    /// Restore the initial hidden state.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Messages for the Docker progress overlay.
 #[derive(Debug, Clone)]
 pub enum DockerProgressMessage {
@@ -81,22 +119,9 @@ pub enum DockerProgressMessage {
 /// Update Docker progress state.
 pub fn update(state: &mut DockerProgressState, msg: DockerProgressMessage) {
     match msg {
-        DockerProgressMessage::Advance => {
-            let idx = state.stage.index();
-            if let Some(&next) = DockerStage::PROGRESS.get(idx + 1) {
-                state.stage = next;
-                state.error = None;
-            }
-        }
-        DockerProgressMessage::SetError(err) => {
-            state.stage = DockerStage::Failed;
-            state.error = Some(err);
-        }
-        DockerProgressMessage::Reset => {
-            state.stage = DockerStage::DetectingFiles;
-            state.message = String::new();
-            state.error = None;
-        }
+        DockerProgressMessage::Advance => state.advance(),
+        DockerProgressMessage::SetError(err) => state.fail(err),
+        DockerProgressMessage::Reset => state.reset(),
     }
 }
 
@@ -257,6 +282,51 @@ mod tests {
             update(&mut state, DockerProgressMessage::Advance);
         }
         assert_eq!(state.stage, DockerStage::Ready);
+    }
+
+    #[test]
+    fn show_and_hide_toggle_overlay_visibility() {
+        let mut state = DockerProgressState::default();
+
+        state.show();
+        assert!(state.visible);
+
+        state.hide();
+        assert!(!state.visible);
+    }
+
+    #[test]
+    fn control_surface_advances_and_records_messages() {
+        let mut state = DockerProgressState::default();
+
+        state.show();
+        state.set_message("Detecting compose files");
+        state.advance();
+
+        assert!(state.visible);
+        assert_eq!(state.stage, DockerStage::BuildingImage);
+        assert_eq!(state.message, "Detecting compose files");
+
+        state.fail("docker daemon unavailable");
+        assert_eq!(state.stage, DockerStage::Failed);
+        assert_eq!(state.error.as_deref(), Some("docker daemon unavailable"));
+        assert!(state.visible);
+    }
+
+    #[test]
+    fn reset_restores_initial_hidden_state() {
+        let mut state = DockerProgressState::default();
+
+        state.show();
+        state.set_message("Launching");
+        state.advance();
+        state.fail("boom");
+        state.reset();
+
+        assert_eq!(state.stage, DockerStage::DetectingFiles);
+        assert!(state.message.is_empty());
+        assert!(state.error.is_none());
+        assert!(!state.visible);
     }
 
     #[test]
