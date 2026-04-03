@@ -2,7 +2,11 @@
 
 ## Summary
 
-Implement the version cache feature and complete the session conversion UI. Agent detection, launch wizard, Quick Start, and custom agent CRUD are already implemented and tested.
+Implement the version cache feature and complete the session conversion UI.
+Agent detection, launch wizard, Quick Start, and custom agent CRUD are
+already implemented and tested. The remaining wizard work separates model
+selection from version selection and materializes launch state into a
+persisted agent session before activation.
 
 ## Technical Context
 
@@ -33,8 +37,13 @@ Implement the version cache feature and complete the session conversion UI. Agen
 2. Implement npm registry client to fetch latest 10 versions for a given package name.
 3. Implement cache read/write with atomic file operations and TTL check.
 4. Spawn async cache refresh task on gwt startup (non-blocking).
-5. Wire cached versions into the wizard's model selection step.
-6. Add tests: cache read/write, TTL expiry, network failure fallback, corrupted file handling.
+5. Wire cached versions into a dedicated VersionSelect step rather than mixing
+   them into model selection.
+6. Add tests: cache read/write, TTL expiry, network failure fallback,
+   corrupted file handling, installed-version de-duplication, and wizard
+   option refresh.
+7. Resolve launch runner choice from the selected version:
+   `installed`/empty -> direct binary, `latest`/semver -> `bunx` or `npx`.
 
 ### Phase 2: Session Conversion UI
 
@@ -43,6 +52,16 @@ Implement the version cache feature and complete the session conversion UI. Agen
 3. On confirmation, update the active session metadata to the selected agent while preserving repository context.
 4. Handle conversion failure: keep the original session intact and display an error notification.
 5. Add tests: conversion success path, conversion failure path, working directory preservation.
+
+### Phase 3: Wizard Launch Materialization
+
+1. Keep explicit model selection separate from default UI labels so launch
+   flags only include real model identifiers.
+2. Build a pending launch config from the wizard without holding a mutable
+   borrow across app-level side effects.
+3. Materialize the pending launch into a persisted `~/.gwt/sessions/*.toml`
+   entry and activate the new agent tab.
+4. Add focused tests for launch-config normalization and session persistence.
 
 ## Dependencies
 

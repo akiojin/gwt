@@ -33,7 +33,7 @@
 - [x] T014 Write RED test: startup spawns async cache refresh when cache is expired.
 - [x] T015 Write RED test: startup does not block on cache refresh (UI is interactive immediately).
 - [x] T016 Implement async startup task: check TTL, if expired spawn tokio task to fetch and update cache.
-- [x] T017 Wire cached versions into wizard model selection step.
+- [x] T017 Wire cached versions into the wizard flow.
 - [x] T018 Verify startup integration tests pass GREEN.
 
 ## Phase 4: Session Conversion UI
@@ -50,3 +50,17 @@
 - [x] T025 Run full existing test suite and verify no regressions.
 - [x] T026 Run `cargo clippy` and `cargo fmt` on all changed files.
 - [x] T027 Update SPEC-3 progress artifacts with verification results.
+
+## Phase 6: Version Selection and Launch Materialization
+
+- [x] T028 Write RED test: VersionSelect options include installed, `latest`,
+  and cached semver entries without duplicating the installed version.
+- [x] T029 Write RED test: wizard keeps model selection separate from version
+  selection and shows the chosen version in the confirm summary.
+- [x] T030 Implement dedicated VersionSelect option refresh when the selected
+  agent changes or the wizard is prefilled from Quick Start.
+- [x] T031 Write RED test: launch config omits default model labels, preserves
+  the selected version, and resolves pending launch state into a persisted
+  agent session.
+- [x] T032 Implement pending launch materialization and update SPEC-3
+  artifacts with focused verification evidence.

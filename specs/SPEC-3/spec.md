@@ -2,7 +2,14 @@
 
 ## Background
 
-gwt detects and launches coding agents (Claude Code, Codex, Gemini, OpenCode, Copilot) with an 11-step wizard. Agents are detected via PATH lookup combined with `--version` invocation. Custom agents are configurable via the Settings management tab. The launch wizard provides Quick Start from branch history, agent selection, model configuration, and session setup. This SPEC covers the complete agent management domain including detection, wizard flow, custom agents, and the planned version cache feature.
+gwt detects and launches coding agents (Claude Code, Codex, Gemini,
+OpenCode, Copilot) with a dynamic wizard whose longest path is 12 steps.
+Agents are detected via PATH lookup combined with `--version` invocation.
+Custom agents are configurable via the Settings management tab. The launch
+wizard provides Quick Start from branch history, agent selection, model
+configuration, dedicated version selection, and session setup. This SPEC
+covers the complete agent management domain including detection, wizard
+flow, custom agents, version cache, and launch resolution.
 
 ## User Stories
 
@@ -13,8 +20,11 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
 **Acceptance Scenarios**
 
 1. Given I initiate agent launch, when the wizard starts, then I see the Quick Start step with branch history options.
-2. Given I proceed through the wizard, when I reach the Confirm step, then all configured options (agent, model, reasoning level, mode, branch, issue) are summarized.
-3. Given I confirm the wizard, when the agent launches, then a new session is created with the configured parameters.
+2. Given I proceed through the wizard, when I reach the Confirm step, then
+   all configured options (agent, model, version, reasoning level, mode,
+   branch, issue) are summarized.
+3. Given I confirm the wizard, when the agent launches, then a new persisted
+   session is created with the configured parameters.
 4. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
 
 ### US-2: Detect Installed Agents (P0) -- IMPLEMENTED
@@ -55,9 +65,13 @@ As a developer, I want gwt to cache available agent versions at startup so that 
 **Acceptance Scenarios**
 
 1. Given gwt starts, when the version cache is empty or expired (TTL 24 hours), then gwt fetches the last 10 versions per agent from the npm registry asynchronously.
-2. Given the version cache is fresh, when I open the agent wizard, then version options load instantly from cache.
+2. Given the version cache is fresh, when I open the agent wizard, then
+   version options load instantly from cache in a dedicated VersionSelect
+   step.
 3. Given the network is unavailable during cache refresh, when I open the wizard, then stale cached versions are shown with a "cache outdated" indicator.
-4. Given a new agent version is published, when the cache refreshes after TTL expiry, then the new version appears in the list.
+4. Given a new agent version is published, when the cache refreshes after TTL
+   expiry, then the new version appears in the list alongside the installed
+   and `latest` options.
 
 ### US-6: Convert Sessions Between Agent Types (P2) -- IMPLEMENTED
 
@@ -81,12 +95,19 @@ As a developer, I want to convert an existing session to a different agent type 
 - Agent detection runs concurrently with user opening the wizard.
 - Session conversion attempted while the session has active PTY I/O.
 - Session conversion updates agent identity without reopening the current transcript buffer.
+- Installed version also appears in the cached version list and must not be
+  duplicated in the UI.
+- User keeps the default model label selected; launch should omit an explicit
+  `--model` override instead of passing the human-readable placeholder text.
 
 ## Functional Requirements
 
 - **FR-001**: `AgentTrait::detect()` checks PATH for agent binary and invokes `--version` to confirm availability.
 - **FR-002**: `AgentLaunchBuilder` constructs launch configuration including model, fast_mode, reasoning_level, and environment variables.
-- **FR-003**: Wizard flow proceeds through steps: QuickStart, Agent, Model, Reasoning, Mode, Branch, Issue, Confirm.
+- **FR-003**: Wizard flow proceeds through dynamic steps chosen by agent
+  capabilities: QuickStart, Agent, Model, Reasoning, Version, Execution Mode,
+  Branch Type, Branch Name, AI Branch Suggestion, Issue, Skip Permissions,
+  Confirm.
 - **FR-004**: Custom agent CRUD operations available in Settings > Custom Agents tab.
 - **FR-005**: `CustomCodingAgent` structure: id, display_name, agent_type (Command/Path/Bunx), command string.
 - **FR-006**: Version list cache fetches last 10 versions per agent from npm registry on startup.
@@ -96,6 +117,15 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-010**: Codex hooks confirmation flow integrated into the wizard when Codex agent is selected.
 - **FR-011**: Agent detection timeout: individual agent detection must complete within 5 seconds.
 - **FR-012**: Version cache fetch is async and non-blocking; does not delay startup or wizard display.
+- **FR-013**: VersionSelect options include an installed runner when detected,
+  a `latest` npm runner when supported, and cached semver versions without
+  duplicating the installed version.
+- **FR-014**: Wizard confirmation materializes a persisted agent session in
+  `~/.gwt/sessions/` before activating the new tab.
+- **FR-015**: Launch resolution uses the direct installed binary for
+  `installed` or empty version selection and `bunx`/`npx` package runners for
+  `latest` or a specific cached semver version when the agent supports npm
+  distribution.
 
 ## Non-Functional Requirements
 
@@ -250,3 +280,5 @@ default = { id = "default", label = "Default", arg = "" }
 - **SC-005**: Version cache gracefully degrades when network is unavailable.
 - **SC-006**: Quick Start history correctly records and retrieves per-branch configurations.
 - **SC-007**: Session conversion preserves repository context, updates agent identity safely, and handles errors gracefully.
+- **SC-008**: Version selection remains separated from model selection and the
+  launch summary shows the effective version that will be used.
