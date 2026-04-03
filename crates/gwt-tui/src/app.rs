@@ -212,8 +212,27 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::DockerProgress(msg) => {
+            let should_create = matches!(
+                msg,
+                screens::docker_progress::DockerProgressMessage::SetStage { .. }
+                    | screens::docker_progress::DockerProgressMessage::Advance
+                    | screens::docker_progress::DockerProgressMessage::SetError(_)
+            );
+            if model.docker_progress.is_none() && should_create {
+                let mut state = screens::docker_progress::DockerProgressState::default();
+                state.show();
+                model.docker_progress = Some(state);
+            }
             if let Some(ref mut state) = model.docker_progress {
+                let hide_after = matches!(
+                    msg,
+                    screens::docker_progress::DockerProgressMessage::Hide
+                        | screens::docker_progress::DockerProgressMessage::Reset
+                );
                 screens::docker_progress::update(state, msg);
+                if hide_after || !state.visible {
+                    model.docker_progress = None;
+                }
             }
         }
         Message::ServiceSelect(msg) => {
@@ -2559,6 +2578,46 @@ mod tests {
         );
 
         assert_eq!(model.service_select.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn update_docker_progress_set_stage_creates_overlay_when_missing() {
+        let mut model = test_model();
+        assert!(model.docker_progress.is_none());
+
+        update(
+            &mut model,
+            Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetStage {
+                stage: screens::docker_progress::DockerStage::BuildingImage,
+                message: "Building image".into(),
+            }),
+        );
+
+        let state = model.docker_progress.as_ref().expect("docker progress");
+        assert!(state.visible);
+        assert_eq!(
+            state.stage,
+            screens::docker_progress::DockerStage::BuildingImage
+        );
+        assert_eq!(state.message, "Building image");
+    }
+
+    #[test]
+    fn update_docker_progress_hide_drops_overlay() {
+        let mut model = test_model();
+        model.docker_progress = Some(screens::docker_progress::DockerProgressState {
+            visible: true,
+            stage: screens::docker_progress::DockerStage::WaitingForServices,
+            message: "Waiting".into(),
+            error: None,
+        });
+
+        update(
+            &mut model,
+            Message::DockerProgress(screens::docker_progress::DockerProgressMessage::Hide),
+        );
+
+        assert!(model.docker_progress.is_none());
     }
 
     #[test]

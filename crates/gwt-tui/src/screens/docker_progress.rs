@@ -108,6 +108,10 @@ impl DockerProgressState {
 /// Messages for the Docker progress overlay.
 #[derive(Debug, Clone)]
 pub enum DockerProgressMessage {
+    /// Set the current stage and descriptive message from an external event source.
+    SetStage { stage: DockerStage, message: String },
+    /// Hide the overlay without resetting progress state.
+    Hide,
     /// Advance to the next stage.
     Advance,
     /// Set an error and move to Failed stage.
@@ -119,6 +123,13 @@ pub enum DockerProgressMessage {
 /// Update Docker progress state.
 pub fn update(state: &mut DockerProgressState, msg: DockerProgressMessage) {
     match msg {
+        DockerProgressMessage::SetStage { stage, message } => {
+            state.stage = stage;
+            state.message = message;
+            state.error = None;
+            state.show();
+        }
+        DockerProgressMessage::Hide => state.hide(),
         DockerProgressMessage::Advance => state.advance(),
         DockerProgressMessage::SetError(err) => state.fail(err),
         DockerProgressMessage::Reset => state.reset(),
@@ -340,6 +351,40 @@ mod tests {
         );
         assert_eq!(state.stage, DockerStage::Failed);
         assert_eq!(state.error.as_deref(), Some("build failed"));
+    }
+
+    #[test]
+    fn set_stage_updates_message_and_makes_overlay_visible() {
+        let mut state = DockerProgressState::default();
+
+        update(
+            &mut state,
+            DockerProgressMessage::SetStage {
+                stage: DockerStage::StartingContainer,
+                message: "Starting api".into(),
+            },
+        );
+
+        assert!(state.visible);
+        assert_eq!(state.stage, DockerStage::StartingContainer);
+        assert_eq!(state.message, "Starting api");
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn hide_hides_overlay_without_resetting_progress() {
+        let mut state = DockerProgressState {
+            visible: true,
+            stage: DockerStage::WaitingForServices,
+            message: "Waiting".into(),
+            error: None,
+        };
+
+        update(&mut state, DockerProgressMessage::Hide);
+
+        assert!(!state.visible);
+        assert_eq!(state.stage, DockerStage::WaitingForServices);
+        assert_eq!(state.message, "Waiting");
     }
 
     #[test]
