@@ -417,9 +417,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     // Visual index = data index + number of headers inserted before it
     let visual_selected = state.selected + headers_before_selected;
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
+    let block = super::bordered_block();
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -433,10 +431,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
 /// Render the branch detail panel (bottom half).
 fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let title = super::build_tab_title(&DETAIL_SECTION_LABELS, state.detail_section);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray))
-        .title(title);
+    let block = super::bordered_block().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -96,6 +96,13 @@ pub fn build_tab_title(labels: &[&str], active: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Create a bordered block with gray border (primary content pane style).
+pub fn bordered_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray))
+}
+
 /// Render an empty list placeholder.
 pub fn render_empty_list(frame: &mut Frame, area: Rect, has_data: bool, noun: &str) {
     let msg = if has_data {

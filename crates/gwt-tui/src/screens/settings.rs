@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -517,10 +517,7 @@ pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let labels: Vec<&str> = SettingsCategory::ALL.iter().map(|c| c.label()).collect();
     let tab_title = super::build_tab_title(&labels, active_idx);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray))
-        .title(tab_title);
+    let block = super::bordered_block().title(tab_title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     render_fields(state, frame, inner);

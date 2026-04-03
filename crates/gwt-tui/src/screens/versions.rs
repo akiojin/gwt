@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -80,10 +80,7 @@ pub fn render(state: &VersionsState, frame: &mut Frame, area: Rect) {
 /// Render the tag list.
 fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
     if state.tags.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Gray))
-            .title("Versions");
+        let block = super::bordered_block().title("Versions");
         let paragraph = Paragraph::new("No version tags found")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -119,10 +116,7 @@ fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray))
-        .title("Versions");
+    let block = super::bordered_block().title("Versions");
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
