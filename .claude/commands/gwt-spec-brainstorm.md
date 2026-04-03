@@ -1,12 +1,12 @@
 ---
-description: Brainstorm a rough request before SPEC registration and route it to the correct owner workflow
+description: Brainstorm a rough request before SPEC registration, or decide whether an existing SPEC should be updated, and route it to the correct owner workflow
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # GWT SPEC Brainstorm Command
 
-Use this command when the user starts from a rough idea and needs interview-driven intake before any SPEC or Issue owner is chosen.
+Use this command when the user starts from a rough idea and needs interview-driven intake before any SPEC or Issue owner is chosen, or when the user wants to know whether an existing SPEC should be updated.
 
 ## Usage
 

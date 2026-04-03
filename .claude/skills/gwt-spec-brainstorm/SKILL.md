@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-brainstorm
-description: "Use when a user starts with a rough idea, title-level request, or pre-SPEC brainstorming request and the workflow must decide whether the work belongs in an existing SPEC, a new SPEC, or a plain Issue before drafting artifacts."
+description: "Use when a user starts with a rough idea, title-level request, pre-SPEC brainstorming request, or asks whether an existing SPEC should be updated to cover the change."
 ---
 
 # gwt SPEC Brainstorm
@@ -12,6 +12,7 @@ Use this skill as the pre-SPEC intake entrypoint for rough requests.
 - Do not create `spec.md` at the start.
 - Do not jump directly to `gwt-spec-register` or `gwt-issue-register` before search and interview.
 - If the user already has a SPEC ID, use `gwt-spec-ops` instead.
+- If the interview shows that an existing SPEC should be updated, hand off to `gwt-spec-ops`.
 - If the user already has an Issue number or URL, use `gwt-issue-resolve` instead.
 
 ## Goals
@@ -101,7 +102,7 @@ After enough signal is gathered, produce this summary:
 
 Once the path is clear, continue automatically:
 
-- `EXISTING-SPEC` -> `gwt-spec-ops`
+- `EXISTING-SPEC` -> `gwt-spec-ops` to update the owning SPEC instead of creating a new one
 - `NEW-SPEC` -> `gwt-spec-register`, then `gwt-spec-ops`
 - `ISSUE` -> `gwt-issue-register`
 - `TOO-BROAD-SPLIT-FIRST` -> ask the user to choose the first slice, then continue with this skill
@@ -124,5 +125,6 @@ Do not hand off until all of the following are true:
 - "SPEC にする前に壁打ちしたい"
 - "表題だけ決まっていて中身を詰めたい"
 - "既存 SPEC に統合すべきか見て"
+- "既存 SPEC の更新が必要か見て"
 - "これって Issue で十分?"
 - "新機能の方向性を整理したい"
