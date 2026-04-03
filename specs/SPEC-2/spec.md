@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt-tui's workspace shell manages terminal sessions (shell and agent) with two display modes: tab view (one session visible at a time) and split window (equal grid showing multiple sessions simultaneously). A management panel containing Branches, SPECs, Issues, Profiles, Git View, Versions, Settings, and Logs tabs can be toggled on/off. All navigation uses a Ctrl+G prefix key system with a 2-second timeout. Session state is persisted for restore on restart. The application follows an Elm Architecture pattern (Model/Message/Update/View).
+gwt-tui's workspace shell manages terminal sessions (shell and agent) with two display modes: tab view (one session visible at a time) and split window (equal grid showing multiple sessions simultaneously). A management panel containing Branches, Issues, PRs, Profiles, Git View, Versions, Settings, and Logs tabs can be toggled on/off. All navigation uses a Ctrl+G prefix key system with a 2-second timeout. Session state is persisted for restore on restart. The application follows an Elm Architecture pattern (Model/Message/Update/View).
 
 ## User Stories
 
@@ -44,7 +44,7 @@ As a developer, I want to navigate between management tabs so that I can access 
 
 **Acceptance Scenarios**
 
-1. Given the management panel is visible, when I use tab navigation keys, then I can cycle through all 7 tabs: Branches, Issues, Profiles, Git View, Versions, Settings, Logs.
+1. Given the management panel is visible, when I use tab navigation keys, then I can cycle through all 8 tabs: Branches, Issues, PRs, Profiles, Git View, Versions, Settings, Logs.
 2. Given I am on the Branches tab, when I navigate to Settings, then the Settings content loads and displays.
 3. Given I switch management tabs, when I return to a previous tab, then its scroll position and selection state are preserved.
 
@@ -95,7 +95,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
-- **FR-006**: 7 management tabs: Branches, Issues, Profiles, Git View, Versions, Settings, Logs. (SPECs tab removed — SPECs are shown in Branch Detail view.)
+- **FR-006**: 8 management tabs: Branches, Issues, PRs, Profiles, Git View, Versions, Settings, Logs. (SPECs tab removed — SPECs are shown in Branch Detail view.)
 - **FR-006a**: Branch Detail view: Branches tab is split vertically — top 50% branch list, bottom 50% detail of selected branch (always visible). Cursor movement in the list updates the detail. Sections:
   - **Overview**: Branch name, head status, worktree path, linked Issues, PR status
   - **SPECs**: SPEC list from the branch's worktree `specs/` directory (worktree-only)

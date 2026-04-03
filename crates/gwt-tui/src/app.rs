@@ -426,6 +426,49 @@ pub fn load_initial_data(model: &mut Model) {
     // Load detail for initially selected branch
     let repo_path = model.repo_path.clone();
     screens::branches::load_branch_detail(&mut model.branches, &repo_path);
+
+    // -- Git View --
+    if let Ok(entries) = gwt_git::diff::get_status(&model.repo_path) {
+        let files = entries
+            .into_iter()
+            .map(|entry| {
+                let diff_preview = entry.diff_content(&model.repo_path).unwrap_or_default();
+                screens::git_view::GitFileItem {
+                    path: entry.path.display().to_string(),
+                    status: match entry.status {
+                        gwt_git::diff::FileStatus::Staged => screens::git_view::FileStatus::Staged,
+                        gwt_git::diff::FileStatus::Unstaged => {
+                            screens::git_view::FileStatus::Unstaged
+                        }
+                        gwt_git::diff::FileStatus::Untracked => {
+                            screens::git_view::FileStatus::Untracked
+                        }
+                    },
+                    diff_preview,
+                }
+            })
+            .collect();
+        screens::git_view::update(
+            &mut model.git_view,
+            screens::git_view::GitViewMessage::SetFiles(files),
+        );
+    }
+
+    if let Ok(entries) = gwt_git::commit::recent_commits(&model.repo_path, 10) {
+        let commits = entries
+            .into_iter()
+            .map(|entry| screens::git_view::GitCommitItem {
+                hash: entry.hash,
+                subject: entry.subject,
+                author: entry.author,
+                date: entry.timestamp.chars().take(10).collect(),
+            })
+            .collect();
+        screens::git_view::update(
+            &mut model.git_view,
+            screens::git_view::GitViewMessage::SetCommits(commits),
+        );
+    }
 }
 
 /// Route a key event to the initialization screen.
@@ -730,7 +773,10 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => Some(GitViewMessage::MoveDown),
                 KeyCode::Up => Some(GitViewMessage::MoveUp),
                 KeyCode::Enter => Some(GitViewMessage::ToggleExpand),
-                KeyCode::Char('r') => Some(GitViewMessage::Refresh),
+                KeyCode::Char('r') => {
+                    load_initial_data(model);
+                    return;
+                }
                 _ => None,
             };
             if let Some(m) = msg {
@@ -1821,6 +1867,42 @@ mod tests {
         result
     }
 
+    fn init_git_repo(path: &std::path::Path) {
+        let path_str = path.to_string_lossy().to_string();
+        let init = std::process::Command::new("git")
+            .args(["init", &path_str])
+            .output()
+            .expect("init git repo");
+        assert!(init.status.success(), "git init failed: {:?}", init);
+
+        let email = std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .output()
+            .expect("set git email");
+        assert!(email.status.success(), "git config user.email failed");
+
+        let name = std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .output()
+            .expect("set git name");
+        assert!(name.status.success(), "git config user.name failed");
+    }
+
+    fn git_commit_allow_empty(path: &std::path::Path, message: &str) {
+        let output = std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", message])
+            .current_dir(path)
+            .output()
+            .expect("create git commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn update_quit_sets_flag() {
         let mut model = test_model();
@@ -1936,6 +2018,72 @@ mod tests {
         let mut model = test_model();
         update(&mut model, Message::Resize(120, 40));
         assert_eq!(model.terminal_size, (120, 40));
+    }
+
+    #[test]
+    fn load_initial_data_populates_git_view_from_repository_state() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let tracked = dir.path().join("tracked.txt");
+        fs::write(&tracked, "before\n").expect("write tracked file");
+        let add = std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add tracked file");
+        assert!(add.status.success(), "git add failed");
+        git_commit_allow_empty(dir.path(), "add tracked file");
+
+        fs::write(&tracked, "before\nafter\n").expect("modify tracked file");
+        fs::write(dir.path().join("new.txt"), "new file\n").expect("write untracked file");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        assert!(
+            model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == "tracked.txt"),
+            "tracked modified file should appear in Git View"
+        );
+        assert!(
+            model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == "new.txt"),
+            "untracked file should appear in Git View"
+        );
+        assert!(
+            model
+                .git_view
+                .commits
+                .iter()
+                .any(|commit| commit.subject == "add tracked file"),
+            "recent commits should populate Git View"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_handles_empty_repo_git_view_gracefully() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        assert!(
+            model.git_view.files.is_empty(),
+            "empty repo should not produce file entries"
+        );
+        assert!(
+            model.git_view.commits.is_empty(),
+            "empty repo should not produce commit entries"
+        );
     }
 
     #[test]
@@ -2648,6 +2796,33 @@ mod tests {
         route_key_to_management(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert_eq!(model.issues.search_query, "b");
+    }
+
+    #[test]
+    fn route_key_to_management_git_view_refresh_reloads_repository_data() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+        fs::write(dir.path().join("tracked.txt"), "one\n").expect("write tracked file");
+        let add = std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add tracked file");
+        assert!(add.status.success(), "git add failed");
+        git_commit_allow_empty(dir.path(), "add tracked file");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.management_tab = ManagementTab::GitView;
+        load_initial_data(&mut model);
+        assert!(model.git_view.files.is_empty());
+
+        fs::write(dir.path().join("tracked.txt"), "one\ntwo\n").expect("modify tracked file");
+
+        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+
+        assert_eq!(model.git_view.files.len(), 1);
+        assert_eq!(model.git_view.files[0].path, "tracked.txt");
     }
 
     #[test]

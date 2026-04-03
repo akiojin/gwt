@@ -30,11 +30,11 @@
 
 ## Phase 3: Git View Tab
 
-- [ ] T014 [P] Write RED test: Git View tab renders recent commit list from git log.
-- [ ] T015 [P] Write RED test: Git View tab handles empty repository gracefully.
-- [ ] T016 Implement Git View management tab component.
-- [ ] T017 Wire Git View into management panel tab navigation.
-- [ ] T018 Verify Git View tests pass GREEN.
+- [x] T014 [P] Write RED test: Git View tab renders recent commit list from git log.
+- [x] T015 [P] Write RED test: Git View tab handles empty repository gracefully.
+- [x] T016 Implement Git View management tab component.
+- [x] T017 Wire Git View into management panel tab navigation.
+- [x] T018 Verify Git View tests pass GREEN.
 
 ## Phase 4: Branch Detail View (SPECs Tab Removal)
 
