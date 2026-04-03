@@ -41,6 +41,7 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 1. **gwt-core**: Define `EmbeddedSkill` struct with name, description, entry point, and status.
    - Registry: `Vec<EmbeddedSkill>` populated at startup.
    - Skills: gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-ops, etc.
+   - Bundled gwt-spec skills stay aligned with the local SPEC artifact model, including persisted `analysis.md`.
 
 2. **gwt-tui**: Add skill management panel (accessible from Settings or a dedicated screen).
    - List registered skills with status indicators.

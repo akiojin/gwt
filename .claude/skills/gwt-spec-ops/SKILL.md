@@ -67,6 +67,7 @@ specs/SPEC-{id}/
   research.md
   data-model.md
   quickstart.md
+  analysis.md
   contracts/
   checklists/
 ```
@@ -177,7 +178,7 @@ Execution-oriented spec maintenance procedure:
 4. Mark unresolved blockers with `[NEEDS CLARIFICATION: ...]` only when they truly block execution.
 5. Explicitly document edge cases and error handling that affect implementation or testing.
 6. When integrating new work into an existing SPEC, explain the integration choice and reference the related Issue numbers when they exist.
-7. Treat `plan.md`, `tasks.md`, `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`, and `progress.md` as the local artifact set that downstream viewers and completion gates consume.
+7. Treat `plan.md`, `tasks.md`, `research.md`, `data-model.md`, `quickstart.md`, `analysis.md`, `contracts/*`, `checklists/*`, and `progress.md` as the local artifact set that downstream viewers and completion gates consume.
 
 ### 2. Clarify blocking ambiguity
 
@@ -230,6 +231,7 @@ Run `gwt-spec-analyze` before implementation starts.
 
 Analysis handling rules:
 
+- Persist the analysis report to `analysis.md`
 - `CLEAR`: continue directly into `gwt-spec-implement`
 - `AUTO-FIXABLE`: repair the artifact set through clarify/plan/tasks as needed, then rerun analysis
 - `NEEDS-DECISION`: stop and ask the user only for the missing decision
@@ -239,9 +241,9 @@ Analysis handling rules:
 When the artifact set is ready:
 
 1. Run `gwt-spec-implement`.
-2. Keep local progress files current (e.g., `specs/SPEC-{id}/progress.md`).
+2. Keep local progress files current (e.g., `specs/SPEC-{id}/progress.md`) and refresh `analysis.md` whenever artifact repair changes the readiness judgment.
 3. Use `gwt-pr` and `gwt-pr-fix` to keep PR work moving without waiting for extra permission on routine branch-sync or CI fixes.
-4. After implementation, require a completion-gate reconciliation across `spec.md`, `tasks.md`, `checklists/acceptance.md`, `checklists/tdd.md`, progress files, and verification evidence before treating the SPEC as complete.
+4. After implementation, require a completion-gate reconciliation across `spec.md`, `tasks.md`, `analysis.md`, `checklists/acceptance.md`, `checklists/tdd.md`, progress files, and verification evidence before treating the SPEC as complete.
 5. Return to artifact maintenance whenever execution uncovers a real spec bug, false completion markers, malformed checklist artifacts, or newly required clarification.
 
 ### 8. Quality checklists

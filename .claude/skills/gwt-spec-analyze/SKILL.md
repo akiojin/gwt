@@ -49,6 +49,8 @@ Optional but validated when present:
 
 ## Required output
 
+Persist the analysis result to `specs/SPEC-{id}/analysis.md` and use this shape:
+
 ```text
 ## Analysis Report: SPEC-<id>
 
@@ -77,6 +79,7 @@ Next:
 - Completion requires a post-implementation reconciliation pass in `gwt-spec-implement` against:
   - `spec.md`
   - `tasks.md`
+  - `analysis.md`
   - `checklists/acceptance.md`
   - `checklists/tdd.md`
   - latest progress files
@@ -89,4 +92,11 @@ python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --list
+
+python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
+  --repo "." \
+  --spec "<id>" \
+  --upsert \
+  --artifact "doc:analysis.md" \
+  --body-file /tmp/analysis.md
 ```

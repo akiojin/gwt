@@ -59,6 +59,7 @@ Each task must include:
 
 6. **Write `tasks.md` and continue into analysis.**
    - Return the artifact to `gwt-spec-ops`, or proceed directly to `gwt-spec-analyze` when the flow is already active.
+   - The analysis step persists its report to `analysis.md`.
 
 ## Exit criteria
 

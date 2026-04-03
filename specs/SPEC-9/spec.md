@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt infrastructure covers four domains: build/distribution (GitHub Release + bunx/npx), Docker integration UI (detection, container lifecycle, port mapping), embedded skill management, and Codex hooks.json merge. Docker UI screens existed in the old TUI (v6.30.3) and need restoration to the current ratatui-based TUI. The hooks.json merge feature was 65% complete (20/31 tasks done) in the archived SPEC-1786 before it was consolidated into this SPEC.
+gwt infrastructure covers four domains: build/distribution (GitHub Release + bunx/npx), Docker integration UI (detection, container lifecycle, port mapping), embedded skill management, and Codex hooks.json merge. Docker UI screens existed in the old TUI (v6.30.3) and need restoration to the current ratatui-based TUI. The hooks.json merge feature was 65% complete (20/31 tasks done) in the archived SPEC-1786 before it was consolidated into this SPEC. Embedded skill management also owns keeping the bundled `.claude/skills/gwt-*` assets aligned with the current local SPEC artifact model, including persisted `analysis.md`.
 
 ## User Stories
 
@@ -38,6 +38,7 @@ As a developer, I want gwt to register its embedded skills on startup so that AI
 1. Given gwt starts, when initialization completes, then all embedded skills (gwt-pr, gwt-pr-check, gwt-pr-fix, etc.) are registered.
 2. Given I open the skill management panel, when I view registered skills, then each skill shows its name, description, and status.
 3. Given gwt-pr-check is invoked, when it runs, then it reports CI status, merge readiness, and review state in a structured format.
+4. Given the local SPEC workflow changes its persisted artifact model, when embedded gwt-spec skills are refreshed, then the bundled skill docs stay aligned with that model (including `analysis.md`).
 
 ### US-4: Merge hooks.json Preserving User Hooks (P1) -- PARTIALLY IMPLEMENTED
 
@@ -80,7 +81,7 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 
 ### Embedded Skills
 
-- **FR-009**: Skill registration on startup: register gwt-pr, gwt-pr-check, gwt-pr-fix, and other embedded skills.
+- **FR-009**: Skill registration on startup: register gwt-pr, gwt-pr-check, gwt-pr-fix, and other embedded skills, and keep embedded gwt-spec workflow docs aligned with the local SPEC artifact model.
 - **FR-010**: Skill management UI: display registered skills with name, description, and status in a settings panel or dedicated screen.
 - **FR-011**: gwt-pr-check extended status report: CI check status, merge readiness, review thread states, combined in a structured output.
 

@@ -6,7 +6,7 @@ description: "Implement an existing SPEC end-to-end from tasks.md. Execute test-
 # gwt SPEC Implement
 
 Use this skill after a SPEC has a stable `spec.md`, `plan.md`, `tasks.md`, and a `CLEAR`
-analysis result.
+analysis report persisted in `analysis.md`.
 
 - Primary caller: `gwt-spec-ops`
 - If the user only wants spec maintenance, stay in `gwt-spec-ops`
@@ -30,14 +30,14 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
 - `spec.md`
 - `plan.md`
 - `tasks.md`
-- latest analysis result of `CLEAR`
+- `analysis.md` with the latest `CLEAR` result
 - `progress.md` when present
 - supporting artifacts: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`
 
 ## Workflow
 
 1. **Read the execution context.**
-   - Load the SPEC directory, the three core artifacts, `progress.md` when present, and any supporting contracts/checklists.
+   - Load the SPEC directory, the three core artifacts, `analysis.md`, `progress.md` when present, and any supporting contracts/checklists.
    - Identify the next incomplete task slice in phase order.
 
 2. **Execute tasks in dependency order.**
@@ -73,7 +73,7 @@ Routine CI failures, update-branch merges, and test-first edits should be handle
    - Continue task-by-task until the SPEC is complete or a true decision blocker remains.
 
 9. **Run the post-implementation completion gate.**
-   - Reconcile the implemented behavior against `spec.md`, `tasks.md`, `checklists/acceptance.md`, `checklists/tdd.md`, latest progress files, and executed verification.
+   - Reconcile the implemented behavior against `spec.md`, `tasks.md`, `analysis.md`, `checklists/acceptance.md`, `checklists/tdd.md`, latest progress files, and executed verification.
    - If these artifacts disagree, return to `gwt-spec-ops` and repair the artifact set or rollback false completion markers.
    - Only after reconciliation passes may the workflow declare the SPEC complete.
    - Do not treat GitHub Issue bodies or Issue comments as completion authority; they are contextual references only.
@@ -91,6 +91,7 @@ Stop only when:
 Before declaring completion:
 
 - every claimed completed task in `tasks.md` must match the implementation
+- `analysis.md` must match the current artifact readiness and not claim a stale `CLEAR`
 - `checklists/acceptance.md` must reflect actual accepted behavior
 - `checklists/tdd.md` must reflect actual verification evidence
 - progress entries in `progress.md` must not claim completion that the artifacts or code do not support

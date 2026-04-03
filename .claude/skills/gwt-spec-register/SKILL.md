@@ -83,6 +83,7 @@ specs/SPEC-{id}/
   research.md        (created later)
   data-model.md      (created later)
   quickstart.md      (created later)
+  analysis.md        (created later)
   contracts/
   checklists/
 ```

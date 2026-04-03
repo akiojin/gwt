@@ -5,10 +5,10 @@
 ### 1.1 ChromaDB Indexing [P]
 
 - [ ] TEST: Unit test for `action_index_specs` — indexes 3 SPECs, verifies collection count
-- [ ] TEST: Unit test for text extraction from SPEC artifacts (spec.md, plan.md, tasks.md)
+- [ ] TEST: Unit test for text extraction from SPEC artifacts (`spec.md`, `plan.md`, `tasks.md`, `analysis.md`)
 - [ ] IMPL: Add `action_index_specs()` function in gwt-core
   - File: `crates/gwt-core/src/spec/search.rs`
-- [ ] IMPL: Text extraction utility for SPEC artifact files
+- [ ] IMPL: Text extraction utility for SPEC artifact files, including `analysis.md`
 
 ### 1.2 ChromaDB Search [P]
 

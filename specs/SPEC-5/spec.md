@@ -2,11 +2,11 @@
 
 ## Background
 
-gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) with a dedicated SPECs tab in the management panel. List view, detail view with markdown rendering, and the SpecKit Wizard are implemented. Semantic search via ChromaDB, SPEC editing from the TUI, and agent launch from the SPECs screen are not yet implemented.
+gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. A dedicated SPEC-management screen still exists in code, but the current management shell no longer exposes a live Specs tab. List/detail rendering logic and the SpecKit Wizard paths exist in code; semantic search via ChromaDB, live shell reintegration, and full SPEC editing from the TUI remain incomplete.
 
 ## User Stories
 
-### US-1 (P0): Browse Local SPECs List — IMPLEMENTED
+### US-1 (P0): Browse Local SPECs List — PARTIALLY IMPLEMENTED
 
 As a developer, I want to browse all local SPECs in a list so that I can see the status of all specifications at a glance.
 
@@ -16,13 +16,13 @@ As a developer, I want to browse all local SPECs in a list so that I can see the
 - AC-1.2: List is sorted by SPEC id (ascending)
 - AC-1.3: List loads under 500ms for 100 SPECs
 
-### US-2 (P0): View SPEC Detail — IMPLEMENTED
+### US-2 (P0): View SPEC Detail — PARTIALLY IMPLEMENTED
 
-As a developer, I want to view SPEC detail (spec.md, plan.md, tasks.md, etc.) with markdown rendering so that I can read specifications inline.
+As a developer, I want to view SPEC detail (`spec.md`, `plan.md`, `tasks.md`, `analysis.md`, etc.) with markdown rendering so that I can read specifications inline.
 
 **Acceptance Scenarios:**
 
-- AC-2.1: Detail view renders markdown for all artifact types (spec.md, plan.md, tasks.md, research.md)
+- AC-2.1: Detail view renders markdown for all artifact types (`spec.md`, `plan.md`, `tasks.md`, `analysis.md`, `research.md`)
 - AC-2.2: Tab or keybinding switches between artifact files within a SPEC
 - AC-2.3: Pressing Esc returns to the SPEC list
 
@@ -73,8 +73,8 @@ As a developer, I want to generate a new SPEC through a guided wizard so that I 
 
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
-| FR-001 | SPEC list shows id, title, status, phase from metadata.json | P0 | Implemented |
-| FR-002 | Detail view renders markdown for all artifact types | P0 | Implemented |
+| FR-001 | SPEC list shows id, title, status, phase from metadata.json | P0 | Partially Implemented |
+| FR-002 | Detail view renders markdown for all artifact types, including `analysis.md` | P0 | Partially Implemented |
 | FR-003 | Semantic search via ChromaDB index (action_index_specs, action_search_specs) | P1 | Not Implemented |
 | FR-004 | Search results ranked by relevance score | P1 | Not Implemented |
 | FR-005 | Shift+Enter on SPEC opens agent launch wizard with SPEC context | P1 | Not Implemented |
@@ -95,6 +95,7 @@ As a developer, I want to generate a new SPEC through a guided wizard so that I 
 - Semantic search uses ChromaDB for vector embeddings; indexing is triggered by `action_index_specs` and searching by `action_search_specs`
 - Agent launch from SPEC detail follows the same wizard pattern as Issue-based agent launch (reference archived SPEC-1785 for details)
 - SPEC editing writes directly to the filesystem; no intermediate database
+- `analysis.md` is a persisted local artifact and must stay aligned with the current readiness judgment
 
 ## Success Criteria
 

@@ -2,17 +2,17 @@
 
 ## Phase 1: Semantic Search
 
-**Goal:** Enable semantic search over local SPEC files using ChromaDB.
+**Goal:** Enable semantic search over local SPEC files, including persisted readiness artifacts, using ChromaDB.
 
 ### Approach
 
-- Implement `action_index_specs` to read all SPEC artifacts and index them in ChromaDB
+- Implement `action_index_specs` to read all SPEC artifacts, including `analysis.md`, and index them in ChromaDB
 - Implement `action_search_specs` to query ChromaDB with free-text and return ranked results
-- Add search UI to the SPECs tab (search input + results list)
+- Add search UI to the SPEC-management entry point (search input + results list)
 
 ### Components
 
-1. **Indexing** — Scan `specs/SPEC-{id}/` directories, extract text from spec.md/plan.md/tasks.md, upsert into ChromaDB collection
+1. **Indexing** — Scan `specs/SPEC-{id}/` directories, extract text from `spec.md`, `plan.md`, `tasks.md`, and `analysis.md`, upsert into ChromaDB collection
 2. **Search query** — Accept free-text, query ChromaDB, return top-N results with relevance score
 3. **Search UI** — Input field at top of SPECs tab, results replace list temporarily
 
@@ -23,7 +23,7 @@
 
 ## Phase 2: Agent Launch from SPEC Detail
 
-**Goal:** Allow launching an agent session directly from SPEC detail view.
+**Goal:** Allow launching an agent session directly from SPEC detail view when the screen is reachable from the live shell.
 
 ### Approach
 
@@ -40,7 +40,7 @@
 
 ## Phase 3: SPEC Editing
 
-**Goal:** Enable editing SPEC artifacts (status, phase, content) from within the TUI.
+**Goal:** Enable editing SPEC artifacts (status, phase, content) from within the TUI, including persisted readiness artifacts when appropriate.
 
 ### Approach
 

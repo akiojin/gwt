@@ -92,6 +92,7 @@ specs/SPEC-{N}/
   research.md
   data-model.md
   quickstart.md
+  analysis.md
   contracts/
   checklists/
 ```
