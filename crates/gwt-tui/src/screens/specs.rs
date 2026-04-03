@@ -602,10 +602,8 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
 
-    // Section content with tabs in block title
     let section_name = DETAIL_SECTIONS[state.detail_section];
-    let section_labels: Vec<&str> = DETAIL_SECTIONS.to_vec();
-    let tab_title = super::build_tab_title(&section_labels, state.detail_section);
+    let tab_title = super::build_tab_title(&DETAIL_SECTIONS, state.detail_section);
 
     let content_text = if state.detail_editing {
         format!(

@@ -1334,27 +1334,17 @@ fn focused_border_style(is_focused: bool) -> Style {
 
 /// Render the management panel (left side).
 fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
-    // Build tab title line with active tab highlighted
-    let mut title_line: Vec<Span> = Vec::new();
-    for (i, t) in ManagementTab::ALL.iter().enumerate() {
-        if i > 0 {
-            title_line.push(Span::raw("│"));
-        }
-        let label = format!(" {} ", t.label());
-        let style = if *t == model.management_tab {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        title_line.push(Span::styled(label, style));
-    }
+    let labels: Vec<&str> = ManagementTab::ALL.iter().map(|t| t.label()).collect();
+    let active_idx = ManagementTab::ALL
+        .iter()
+        .position(|t| *t == model.management_tab)
+        .unwrap_or(0);
+    let title = screens::build_tab_title(&labels, active_idx);
 
     let content_focused = model.active_focus == FocusPane::TabContent;
     let content_block = Block::default()
         .borders(Borders::ALL)
-        .title(Line::from(title_line))
+        .title(title)
         .border_style(focused_border_style(content_focused));
     let inner = content_block.inner(area);
     frame.render_widget(content_block, area);
