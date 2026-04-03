@@ -136,6 +136,25 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
 
     // Stage list with spinner/check marks
     let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("Status: {}", state.stage.label()),
+        Style::default()
+            .fg(border_color)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if let Some(ref err) = state.error {
+        lines.push(Line::from(Span::styled(
+            format!("Error: {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    } else if !state.message.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("Message: {}", state.message),
+            Style::default().fg(Color::White),
+        )));
+    }
+    lines.push(Line::from(""));
+
     for &stage in &DockerStage::PROGRESS {
         let (icon, style) = if stage == state.stage && stage != DockerStage::Ready {
             (
@@ -152,15 +171,6 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(Span::styled(
             format!("{icon}{}", stage.label()),
             style,
-        )));
-    }
-
-    // Error line
-    if let Some(ref err) = state.error {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!("Error: {err}"),
-            Style::default().fg(Color::Red),
         )));
     }
 
@@ -192,6 +202,26 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    fn render_text(state: &DockerProgressState) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn default_state() {
@@ -263,6 +293,24 @@ mod tests {
     }
 
     #[test]
+    fn render_shows_explicit_status_label_for_each_stage() {
+        for &stage in &DockerStage::PROGRESS {
+            let state = DockerProgressState {
+                visible: true,
+                stage,
+                ..DockerProgressState::default()
+            };
+            let text = render_text(&state);
+            assert!(
+                text.contains(&format!("Status: {}", stage.label())),
+                "missing status line for {:?}\n{}",
+                stage,
+                text
+            );
+        }
+    }
+
+    #[test]
     fn stage_ratio_increases() {
         let ratios: Vec<f64> = DockerStage::PROGRESS.iter().map(|s| s.ratio()).collect();
         for i in 1..ratios.len() {
@@ -277,38 +325,33 @@ mod tests {
             visible: true,
             ..DockerProgressState::default()
         };
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f, area);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let full_text: String = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_string())
-            .collect();
+        let full_text = render_text(&state);
         assert!(full_text.contains("Docker"));
     }
 
     #[test]
     fn render_invisible_is_noop() {
         let state = DockerProgressState::default();
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f, area);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let full_text: String = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_string())
-            .collect();
+        let full_text = render_text(&state);
         assert!(!full_text.contains("Docker"));
+    }
+
+    #[test]
+    fn render_failed_state_is_explicit_about_error() {
+        let state = DockerProgressState {
+            visible: true,
+            stage: DockerStage::Failed,
+            error: Some("Docker daemon not running".into()),
+            ..DockerProgressState::default()
+        };
+
+        let text = render_text(&state);
+        assert!(text.contains("Status: Failed"), "{}", text);
+        assert!(
+            text.contains("Error: Docker daemon not running"),
+            "{}",
+            text
+        );
+        assert!(text.contains("Failed"));
     }
 }
