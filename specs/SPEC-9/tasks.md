@@ -13,27 +13,27 @@
 
 ### 1.2 Service Select Screen
 
-- [ ] **T-007**: Write test for ServiceSelect screen listing services from docker-compose.yml.
-- [ ] **T-008**: Write test for ServiceSelect with single service auto-selecting.
-- [ ] **T-009**: Write test for ServiceSelect with no services showing error message.
-- [ ] **T-010**: Implement `ServiceSelect` screen in `crates/gwt-tui/src/screens/service_select.rs`.
-- [ ] **T-011**: Verify T-007 through T-009 pass (GREEN).
+- [x] **T-007**: Write test for ServiceSelect screen listing services from docker-compose.yml.
+- [x] **T-008**: Write test for ServiceSelect with single service auto-selecting.
+- [x] **T-009**: Write test for ServiceSelect with no services showing error message.
+- [x] **T-010**: Implement `ServiceSelect` screen in `crates/gwt-tui/src/screens/service_select.rs`.
+- [x] **T-011**: Verify T-007 through T-009 pass (GREEN).
 
 ### 1.3 Port Select Screen
 
-- [ ] **T-012**: Write test for PortSelect screen detecting port conflicts.
-- [ ] **T-013**: Write test for PortSelect allowing port remap.
-- [ ] **T-014**: Write test for PortSelect with no conflicts proceeding automatically.
-- [ ] **T-015**: Implement `PortSelect` screen in `crates/gwt-tui/src/screens/port_select.rs`.
-- [ ] **T-016**: Verify T-012 through T-014 pass (GREEN).
+- [x] **T-012**: Write test for PortSelect screen detecting port conflicts.
+- [x] **T-013**: Write test for PortSelect allowing port remap.
+- [x] **T-014**: Write test for PortSelect with no conflicts proceeding automatically.
+- [x] **T-015**: Implement `PortSelect` screen in `crates/gwt-tui/src/screens/port_select.rs`.
+- [x] **T-016**: Verify T-012 through T-014 pass (GREEN).
 
 ### 1.4 Container Lifecycle Controls
 
-- [ ] **T-017**: Write test for container start command execution.
-- [ ] **T-018**: Write test for container stop command execution.
-- [ ] **T-019**: Write test for container restart command execution.
+- [x] **T-017**: Write test for container start command execution.
+- [x] **T-018**: Write test for container stop command execution.
+- [x] **T-019**: Write test for container restart command execution.
 - [ ] **T-020**: Implement container lifecycle controls in Docker status area.
-- [ ] **T-021**: Verify T-017 through T-019 pass (GREEN).
+- [x] **T-021**: Verify T-017 through T-019 pass (GREEN).
 
 ## Phase 2: Embedded Skills
 
