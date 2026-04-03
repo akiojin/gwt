@@ -3,10 +3,12 @@
 pub mod backend;
 pub mod config;
 pub mod noop;
+pub mod qwen3;
 
 pub use backend::{VoiceBackend, VoiceError};
 pub use config::VoiceState;
 pub use noop::NoOpVoiceBackend;
+pub use qwen3::Qwen3AsrRecorder;
 pub use session::VoiceSession;
 pub mod session;
 
@@ -80,6 +82,150 @@ mod tests {
     fn noop_default_trait() {
         let backend: NoOpVoiceBackend = Default::default();
         assert!(!backend.is_available());
+    }
+
+    // --- T-007: Recording timeout tests ---
+
+    #[test]
+    fn voice_backend_default_max_recording_is_30_seconds() {
+        let backend = NoOpVoiceBackend::new();
+        assert_eq!(backend.max_recording_seconds(), Some(30));
+    }
+
+    #[test]
+    fn recording_timeout_error_carries_duration() {
+        let err = VoiceError::RecordingTimeout(30);
+        assert!(err.to_string().contains("30"));
+        assert!(matches!(err, VoiceError::RecordingTimeout(30)));
+    }
+
+    #[test]
+    fn fake_backend_can_enforce_recording_timeout() {
+        struct TimedBackend {
+            elapsed: u32,
+        }
+        impl VoiceBackend for TimedBackend {
+            fn start_recording(&mut self) -> Result<(), VoiceError> {
+                Ok(())
+            }
+            fn stop_recording(&mut self) -> Result<Vec<u8>, VoiceError> {
+                if self.elapsed >= self.max_recording_seconds().unwrap_or(u32::MAX) {
+                    return Err(VoiceError::RecordingTimeout(
+                        self.max_recording_seconds().unwrap(),
+                    ));
+                }
+                Ok(vec![1, 2, 3])
+            }
+            fn transcribe(&self, _audio: &[u8]) -> Result<String, VoiceError> {
+                Ok("text".to_string())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn max_recording_seconds(&self) -> Option<u32> {
+                Some(30)
+            }
+        }
+
+        let mut backend = TimedBackend { elapsed: 31 };
+        backend.start_recording().unwrap();
+        let err = backend.stop_recording().unwrap_err();
+        assert!(matches!(err, VoiceError::RecordingTimeout(30)));
+    }
+
+    // --- T-008: Silence detection tests ---
+
+    #[test]
+    fn voice_backend_default_silence_timeout_is_3_seconds() {
+        let backend = NoOpVoiceBackend::new();
+        assert_eq!(backend.silence_timeout_seconds(), Some(3));
+    }
+
+    #[test]
+    fn silence_detected_error_carries_duration() {
+        let err = VoiceError::SilenceDetected(3);
+        assert!(err.to_string().contains("3"));
+        assert!(matches!(err, VoiceError::SilenceDetected(3)));
+    }
+
+    #[test]
+    fn fake_backend_can_stop_on_silence() {
+        struct SilenceBackend {
+            silence_seconds: u32,
+        }
+        impl VoiceBackend for SilenceBackend {
+            fn start_recording(&mut self) -> Result<(), VoiceError> {
+                Ok(())
+            }
+            fn stop_recording(&mut self) -> Result<Vec<u8>, VoiceError> {
+                if let Some(threshold) = self.silence_timeout_seconds() {
+                    if self.silence_seconds >= threshold {
+                        return Err(VoiceError::SilenceDetected(threshold));
+                    }
+                }
+                Ok(vec![1, 2, 3])
+            }
+            fn transcribe(&self, _audio: &[u8]) -> Result<String, VoiceError> {
+                Ok("text".to_string())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn silence_timeout_seconds(&self) -> Option<u32> {
+                Some(3)
+            }
+        }
+
+        let mut backend = SilenceBackend { silence_seconds: 4 };
+        backend.start_recording().unwrap();
+        let err = backend.stop_recording().unwrap_err();
+        assert!(matches!(err, VoiceError::SilenceDetected(3)));
+    }
+
+    // --- T-011: Qwen3AsrRecorder tests ---
+
+    #[test]
+    fn qwen3_backend_is_not_available() {
+        let backend = Qwen3AsrRecorder::new();
+        assert!(!backend.is_available());
+    }
+
+    #[test]
+    fn qwen3_start_recording_returns_model_not_loaded() {
+        let mut backend = Qwen3AsrRecorder::new();
+        let err = backend.start_recording().unwrap_err();
+        assert!(matches!(err, VoiceError::ModelNotLoaded(_)));
+        assert!(err.to_string().contains("Qwen3 ASR model not loaded"));
+    }
+
+    #[test]
+    fn qwen3_stop_recording_returns_not_recording() {
+        let mut backend = Qwen3AsrRecorder::new();
+        let err = backend.stop_recording().unwrap_err();
+        assert!(matches!(err, VoiceError::NotRecording));
+    }
+
+    #[test]
+    fn qwen3_transcribe_returns_model_not_loaded() {
+        let backend = Qwen3AsrRecorder::new();
+        let err = backend.transcribe(&[0u8; 10]).unwrap_err();
+        assert!(matches!(err, VoiceError::ModelNotLoaded(_)));
+    }
+
+    #[test]
+    fn qwen3_default_trait() {
+        let backend: Qwen3AsrRecorder = Default::default();
+        assert!(!backend.is_available());
+    }
+
+    #[test]
+    fn qwen3_session_start_surfaces_error() {
+        let backend = Qwen3AsrRecorder::new();
+        let mut session = VoiceSession::new(backend);
+
+        let err = session.start_recording().unwrap_err();
+        assert!(matches!(err, VoiceError::ModelNotLoaded(_)));
+        assert!(session.state().is_error());
     }
 
     #[test]

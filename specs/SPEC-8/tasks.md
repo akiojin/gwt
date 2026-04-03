@@ -13,12 +13,12 @@
 
 - [x] **T-005**: Write test for `VoiceRecorder` trait interface (start, stop, transcribe). (implemented as `VoiceBackend` trait in gwt-voice)
 - [x] **T-006**: Write test for mock recorder returning hardcoded transcription. (implemented as `NoOpVoiceBackend` + FakeBackend in gwt-voice tests)
-- [ ] **T-007**: Write test for recording timeout at 30 seconds.
-- [ ] **T-008**: Write test for silence detection stopping recording after 3 seconds.
+- [x] **T-007**: Write test for recording timeout at 30 seconds. (implemented as `max_recording_seconds()` default method + `RecordingTimeout` error variant in gwt-voice)
+- [x] **T-008**: Write test for silence detection stopping recording after 3 seconds. (implemented as `silence_timeout_seconds()` default method + `SilenceDetected` error variant in gwt-voice)
 - [x] **T-009**: Define `VoiceRecorder` trait in `crates/gwt-core/src/voice.rs`. (implemented as `VoiceBackend` in `crates/gwt-voice/src/backend.rs`)
 - [x] **T-010**: Implement `MockVoiceRecorder` for testing. (implemented as `NoOpVoiceBackend` in gwt-voice)
-- [ ] **T-011**: Implement `Qwen3AsrRecorder` with model loading and audio capture.
-- [ ] **T-012**: Verify T-005 through T-008 pass (GREEN).
+- [x] **T-011**: Implement `Qwen3AsrRecorder` with model loading and audio capture. (implemented as stub in `crates/gwt-voice/src/qwen3.rs`; returns `ModelNotLoaded` errors)
+- [x] **T-012**: Verify T-005 through T-008 pass (GREEN). (all 26 gwt-voice tests pass)
 
 ### 1.3 Status Bar Recording Indicator
 

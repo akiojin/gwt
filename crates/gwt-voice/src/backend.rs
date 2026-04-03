@@ -13,6 +13,18 @@ pub trait VoiceBackend {
 
     /// Check whether this backend is available on the current system.
     fn is_available(&self) -> bool;
+
+    /// Maximum recording duration in seconds before auto-stop.
+    /// Returns `None` if there is no limit.
+    fn max_recording_seconds(&self) -> Option<u32> {
+        Some(30)
+    }
+
+    /// Silence duration in seconds before auto-stop.
+    /// Returns `None` if silence detection is disabled.
+    fn silence_timeout_seconds(&self) -> Option<u32> {
+        Some(3)
+    }
 }
 
 /// Errors produced by voice operations.
@@ -27,8 +39,17 @@ pub enum VoiceError {
     #[error("Already recording")]
     AlreadyRecording,
 
+    #[error("Recording timed out after {0} seconds")]
+    RecordingTimeout(u32),
+
+    #[error("Silence detected for {0} seconds, recording stopped")]
+    SilenceDetected(u32),
+
     #[error("Transcription failed: {0}")]
     TranscriptionFailed(String),
+
+    #[error("Model not loaded: {0}")]
+    ModelNotLoaded(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
