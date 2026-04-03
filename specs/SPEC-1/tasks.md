@@ -2,16 +2,16 @@
 
 ## Phase 1: URL Detection and Opening
 
-- [ ] T001 [P] Write RED tests for URL regex matching: single URL, multiple URLs per line, URLs with query params/fragments/parentheses, non-URL text.
+- [x] T001 [P] Write RED tests for URL regex matching: single URL, multiple URLs per line, URLs with query params/fragments/parentheses, non-URL text.
 - [ ] T002 [P] Write RED tests for URL region tracking: verify screen coordinates map to correct URL strings.
-- [ ] T003 Implement URL regex matching utility that returns match ranges for a given string.
+- [x] T003 Implement URL regex matching utility that returns match ranges for a given string.
 - [ ] T004 Integrate URL detection into renderer: scan visible lines, apply underline style to URL regions.
 - [ ] T005 Implement URL region coordinate tracking for click detection.
 - [ ] T006 Write RED test for Ctrl+click on URL: verify platform opener is invoked with correct URL.
 - [ ] T007 Implement Ctrl+click handler: detect click within URL region, invoke `open`/`xdg-open` with URL.
 - [ ] T008 Write RED test for wrapped URLs spanning two terminal lines.
 - [ ] T009 Implement wrapped URL detection across adjacent lines.
-- [ ] T010 Verify all URL detection tests pass GREEN.
+- [x] T010 Verify all URL detection tests pass GREEN.
 
 ## Phase 2: Alt-Screen Buffer Verification
 
