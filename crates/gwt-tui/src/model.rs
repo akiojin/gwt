@@ -32,6 +32,39 @@ pub enum ActiveLayer {
     Management,
 }
 
+/// Which pane currently owns keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusPane {
+    /// Management tab header (Left/Right switches tabs).
+    TabHeader,
+    /// Tab content area (↑↓ navigates list).
+    #[default]
+    TabContent,
+    /// Branch detail panel (←→ sections, ↑↓ actions).
+    BranchDetail,
+    /// Terminal PTY (all keys forwarded).
+    Terminal,
+}
+
+impl FocusPane {
+    const ALL: [FocusPane; 4] = [
+        FocusPane::TabHeader,
+        FocusPane::TabContent,
+        FocusPane::BranchDetail,
+        FocusPane::Terminal,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&p| p == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&p| p == self).unwrap_or(0);
+        Self::ALL[if idx == 0 { Self::ALL.len() - 1 } else { idx - 1 }]
+    }
+}
+
 /// Session layout mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLayout {
@@ -160,6 +193,8 @@ pub struct Model {
     pub(crate) notification_receiver: NotificationReceiver,
     /// Which layer has focus.
     pub active_layer: ActiveLayer,
+    /// Which pane has keyboard focus.
+    pub active_focus: FocusPane,
     /// All open session tabs.
     pub(crate) sessions: Vec<SessionTab>,
     /// Index of the active session.
@@ -230,6 +265,7 @@ impl Model {
             _notification_bus: notification_bus,
             notification_receiver,
             active_layer: ActiveLayer::Management,
+            active_focus: FocusPane::TabContent,
             sessions: vec![default_session],
             active_session: 0,
             session_layout: SessionLayout::Tab,
