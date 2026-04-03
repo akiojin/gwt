@@ -135,6 +135,16 @@ pub enum SessionTabType {
     Agent { agent_id: String, color: AgentColor },
 }
 
+impl SessionTabType {
+    /// Unicode icon for this session type.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Shell => "\u{25B6}",
+            Self::Agent { .. } => "\u{2B50}",
+        }
+    }
+}
+
 /// Agent color for TUI display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentColor {

@@ -1382,11 +1382,7 @@ fn build_session_title(model: &Model) -> Line<'static> {
         if i > 0 {
             spans.push(Span::raw("│"));
         }
-        let icon = match &s.tab_type {
-            SessionTabType::Shell => "\u{25B6}",
-            SessionTabType::Agent { .. } => "\u{2B50}",
-        };
-        let label = format!(" {icon} {} ", s.name);
+        let label = format!(" {} {} ", s.tab_type.icon(), s.name);
         if i == model.active_session {
             spans.push(Span::styled(
                 label,
