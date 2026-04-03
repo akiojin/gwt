@@ -54,16 +54,16 @@
 
 ### 4.3: Detail Sections
 
-- [x] T030 [P] Write RED test: detail section cycles through Overview/SPECs/GitStatus/Sessions/Actions with Tab
+- [x] T030 [P] Write RED test: detail section cycles through Overview/SPECs/GitStatus/Sessions with Tab
 - [x] T031 Implement Overview section: branch name, head, worktree path, category
 - [x] T032 Implement SPECs section: placeholder with branch name
 - [x] T033 Implement Git Status section: placeholder with branch name
 - [x] T034 Implement Sessions section: placeholder "No active sessions"
-- [x] T035 Implement Actions section: Launch Agent, Open Shell, Delete Worktree
+- [x] T035 ~~Actions section removed~~ — replaced by action modal overlay (Enter in detail pane)
 
-### 4.4: Actions Implementation
+### 4.4: Actions Implementation (via Action Modal)
 
-- [x] T036 [P] Write RED test: Agent launch from Actions sets pending flag
+- [x] T036 [P] Write RED test: Agent launch from action modal sets pending flag
 - [x] T037 [P] Write RED test: Shell launch sets pending flag
 - [x] T038 [P] Write RED test: Worktree delete sets pending flag
 - [x] T039 Implement agent launch action: set pending_launch_agent flag
@@ -72,10 +72,10 @@
 
 ### 4.5: Integration
 
-- [x] T042 Add detail_section, detail_action_selected, pending flags to BranchesState
-- [x] T043 Add BranchDetailMessage variants to BranchesMessage
-- [x] T044 Route Tab/Shift+Tab to detail section cycling in route_key_to_management
-- [x] T045 Route Enter in Actions section to appropriate action handlers
+- [x] T042 Add detail_section, action_modal_visible/selected, pending flags to BranchesState
+- [x] T043 Add ActionModal message variants to BranchesMessage
+- [x] T044 Route Left/Right to detail section cycling in route_key_to_branch_detail
+- [x] T045 Route Enter in detail pane to open action modal; modal keys routed via route_overlay_key
 - [x] T046 Write 15 tests for branch detail state transitions and rendering
 - [x] T047 Update all E2E snapshot tests
 

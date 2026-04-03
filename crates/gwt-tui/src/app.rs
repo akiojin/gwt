@@ -434,6 +434,21 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
         }
     }
 
+    // Branch action modal overlay
+    if model.branches.action_modal_visible {
+        let msg = match key.code {
+            KeyCode::Down => Some(screens::branches::BranchesMessage::ActionModalDown),
+            KeyCode::Up => Some(screens::branches::BranchesMessage::ActionModalUp),
+            KeyCode::Enter => Some(screens::branches::BranchesMessage::ActionModalSelect),
+            KeyCode::Esc => Some(screens::branches::BranchesMessage::CloseActionModal),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            screens::branches::update(&mut model.branches, msg);
+        }
+        return true;
+    }
+
     if model.confirm.visible {
         let msg = match key.code {
             KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
@@ -452,29 +467,14 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     false
 }
 
-fn branch_detail_action_message(model: &Model) -> Option<screens::branches::BranchesMessage> {
-    use screens::branches::BranchesMessage;
-    if model.branches.detail_section == 4 {
-        Some(match model.branches.detail_action_selected {
-            0 => BranchesMessage::LaunchAgent,
-            1 => BranchesMessage::OpenShell,
-            _ => BranchesMessage::DeleteWorktree,
-        })
-    } else {
-        None
-    }
-}
-
-/// Route a key event to the branch detail pane (sections, actions, Enter dispatches).
+/// Route a key event to the branch detail pane (sections, Enter opens action modal).
 fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
 
     let msg = match key.code {
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
-        KeyCode::Up => Some(BranchesMessage::DetailActionUp),
-        KeyCode::Down => Some(BranchesMessage::DetailActionDown),
-        KeyCode::Enter => branch_detail_action_message(model),
+        KeyCode::Enter => Some(BranchesMessage::OpenActionModal),
         _ => None,
     };
     if let Some(m) = msg {
@@ -528,9 +528,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             let msg = match key.code {
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
-                KeyCode::Enter => {
-                    branch_detail_action_message(model).or(Some(BranchesMessage::Select))
-                }
+                KeyCode::Enter => Some(BranchesMessage::Select),
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
                 KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
                 KeyCode::Char('/') => Some(BranchesMessage::SearchStart),

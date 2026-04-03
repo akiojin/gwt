@@ -661,7 +661,7 @@ fn e2e_branch_detail_arrows_cycle_sections() {
 }
 
 #[test]
-fn snapshot_branches_detail_actions_section() {
+fn snapshot_branches_action_modal() {
     let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
     model.management_tab = ManagementTab::Branches;
@@ -669,35 +669,29 @@ fn snapshot_branches_detail_actions_section() {
         &mut model,
         Message::Branches(BranchesMessage::SetBranches(sample_branches())),
     );
-    // Switch to Actions section (Tab x4 to get to section 4)
-    for _ in 0..4 {
-        app::update(
-            &mut model,
-            Message::Branches(BranchesMessage::NextDetailSection),
-        );
-    }
-    assert_eq!(model.branches_detail_section(), 4);
+    // Open action modal
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::OpenActionModal),
+    );
     let output = render_to_string(&model, 80, 24);
-    insta::assert_snapshot!("branches_detail_actions", output);
+    insta::assert_snapshot!("branches_action_modal", output);
 }
 
 #[test]
-fn e2e_enter_in_actions_section_triggers_launch_agent() {
+fn e2e_action_modal_select_triggers_launch_agent() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     app::update(
         &mut model,
         Message::Branches(BranchesMessage::SetBranches(sample_branches())),
     );
-    // Switch to Actions section (Tab x4)
-    for _ in 0..4 {
-        app::update(
-            &mut model,
-            Message::Branches(BranchesMessage::NextDetailSection),
-        );
-    }
-    assert_eq!(model.branches_detail_section(), 4);
-
+    // Open action modal
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::OpenActionModal),
+    );
+    // Select first action (Launch Agent) via Enter
     send_key(&mut model, &mut kb, press(KeyCode::Enter));
     assert!(model.branches_pending_launch_agent());
 }
