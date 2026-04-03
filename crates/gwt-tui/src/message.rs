@@ -95,6 +95,8 @@ pub enum Message {
     Initialization(InitializationMessage),
     /// Open active agent session conversion flow.
     OpenSessionConversion,
+    /// Toggle the keybinding help overlay.
+    ToggleHelp,
     /// Paste file paths from clipboard.
     PasteFiles,
     /// Open the wizard overlay.
@@ -132,6 +134,7 @@ mod tests {
             "test",
             "message",
         ));
+        let _ = Message::ToggleHelp;
         let _ = Message::ShowNotification(Notification::new(
             gwt_notification::Severity::Warn,
             "test",

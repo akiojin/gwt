@@ -231,6 +231,8 @@ pub struct Model {
     pub session_layout: SessionLayout,
     /// Active management tab.
     pub management_tab: ManagementTab,
+    /// Whether the help overlay is visible.
+    pub(crate) help_visible: bool,
     /// Error queue (shown as overlays).
     pub(crate) error_queue: VecDeque<Notification>,
     /// Whether the app should quit.
@@ -302,6 +304,7 @@ impl Model {
             active_session: 0,
             session_layout: SessionLayout::Tab,
             management_tab: ManagementTab::Branches,
+            help_visible: false,
             error_queue: VecDeque::new(),
             quit: false,
             repo_path,
@@ -486,6 +489,7 @@ mod tests {
         assert_eq!(model.active_session, 0);
         assert_eq!(model.session_layout, SessionLayout::Tab);
         assert_eq!(model.management_tab, ManagementTab::Branches);
+        assert!(!model.help_visible);
         assert!(model.error_queue.is_empty());
         assert!(!model.quit);
         assert!(model.drain_notifications().is_empty());

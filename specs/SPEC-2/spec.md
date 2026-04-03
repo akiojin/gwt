@@ -48,7 +48,7 @@ As a developer, I want to navigate between management tabs so that I can access 
 2. Given I am on the Branches tab, when I navigate to Settings, then the Settings content loads and displays.
 3. Given I switch management tabs, when I return to a previous tab, then its scroll position and selection state are preserved.
 
-### US-5: View Help Overlay Showing All Keybindings (P1) -- PARTIALLY IMPLEMENTED
+### US-5: View Help Overlay Showing All Keybindings (P1) -- IMPLEMENTED
 
 As a developer, I want to see a help overlay with all available keybindings so that I can discover and remember shortcuts.
 

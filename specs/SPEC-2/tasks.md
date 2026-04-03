@@ -11,12 +11,12 @@
 
 ## Phase 1: Help Overlay Auto-Collection
 
-- [ ] T001 [P] Write RED test: help overlay output contains all registered keybindings.
-- [ ] T002 [P] Write RED test: help overlay does not contain unregistered key sequences.
+- [x] T001 [P] Write RED test: help overlay output contains all registered keybindings.
+- [x] T002 [P] Write RED test: help overlay does not contain unregistered key sequences.
 - [ ] T003 Define keybinding registry data structure (key sequence, description, category).
 - [ ] T004 Populate registry from existing keybind.rs match arms.
-- [ ] T005 Render help overlay (Ctrl+G,?) using registry data, grouped by category.
-- [ ] T006 Verify help overlay tests pass GREEN.
+- [x] T005 Render help overlay (Ctrl+G,?) using registry data, grouped by category.
+- [x] T006 Verify help overlay tests pass GREEN.
 
 ## Phase 2: Session Persistence Improvement
 

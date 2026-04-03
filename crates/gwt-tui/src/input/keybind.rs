@@ -31,6 +31,26 @@ impl PrefixState {
     }
 }
 
+/// Logical grouping for a registered keybinding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeybindingCategory {
+    Global,
+    Sessions,
+    Management,
+    Input,
+}
+
+impl KeybindingCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Global => "Global",
+            Self::Sessions => "Sessions",
+            Self::Management => "Management",
+            Self::Input => "Input",
+        }
+    }
+}
+
 /// A registered keybinding.
 #[derive(Debug, Clone)]
 pub struct Keybinding {
@@ -38,6 +58,8 @@ pub struct Keybinding {
     pub keys: String,
     /// Description of what this binding does.
     pub description: String,
+    /// Logical grouping for the help overlay.
+    pub category: KeybindingCategory,
 }
 
 /// Registry of all keybindings, also drives the prefix state machine.
@@ -64,50 +86,87 @@ impl KeybindRegistry {
             Keybinding {
                 keys: "Ctrl+G, g".into(),
                 description: "Toggle management panel".into(),
+                category: KeybindingCategory::Global,
             },
             Keybinding {
                 keys: "Ctrl+G, ]".into(),
                 description: "Next session".into(),
+                category: KeybindingCategory::Sessions,
             },
             Keybinding {
                 keys: "Ctrl+G, [".into(),
                 description: "Previous session".into(),
+                category: KeybindingCategory::Sessions,
             },
             Keybinding {
                 keys: "Ctrl+G, 1-9".into(),
                 description: "Switch to session N".into(),
+                category: KeybindingCategory::Sessions,
             },
             Keybinding {
                 keys: "Ctrl+G, z".into(),
                 description: "Toggle Tab/Grid layout".into(),
+                category: KeybindingCategory::Sessions,
             },
             Keybinding {
                 keys: "Ctrl+G, c".into(),
                 description: "New shell session".into(),
+                category: KeybindingCategory::Sessions,
             },
             Keybinding {
                 keys: "Ctrl+G, x".into(),
                 description: "Close active session".into(),
+                category: KeybindingCategory::Sessions,
             },
             Keybinding {
                 keys: "Ctrl+G, q".into(),
                 description: "Quit".into(),
+                category: KeybindingCategory::Global,
             },
             Keybinding {
                 keys: "Ctrl+G, v".into(),
                 description: "Start voice input".into(),
+                category: KeybindingCategory::Input,
             },
             Keybinding {
                 keys: "Ctrl+G, a".into(),
                 description: "Convert active agent session".into(),
+                category: KeybindingCategory::Sessions,
             },
             Keybinding {
                 keys: "Ctrl+G, p".into(),
                 description: "Paste file paths".into(),
+                category: KeybindingCategory::Input,
             },
             Keybinding {
                 keys: "Ctrl+G, ?".into(),
                 description: "Show help".into(),
+                category: KeybindingCategory::Global,
+            },
+            Keybinding {
+                keys: "Ctrl+G, n".into(),
+                description: "Open agent launch wizard".into(),
+                category: KeybindingCategory::Global,
+            },
+            Keybinding {
+                keys: "Ctrl+G, b".into(),
+                description: "Switch to Branches tab".into(),
+                category: KeybindingCategory::Management,
+            },
+            Keybinding {
+                keys: "Ctrl+G, s".into(),
+                description: "Switch to Settings tab".into(),
+                category: KeybindingCategory::Management,
+            },
+            Keybinding {
+                keys: "Ctrl+G, i".into(),
+                description: "Switch to Issues tab".into(),
+                category: KeybindingCategory::Management,
+            },
+            Keybinding {
+                keys: "Ctrl+C, Ctrl+C".into(),
+                description: "Quit".into(),
+                category: KeybindingCategory::Global,
             },
         ];
 
@@ -181,9 +240,9 @@ impl KeybindRegistry {
                     KeyCode::Char('i') => Some(Message::SwitchManagementTab(ManagementTab::Issues)),
                     KeyCode::Char('p') => Some(Message::PasteFiles),
                     KeyCode::Char('n') => Some(Message::OpenWizard),
-                    KeyCode::Char('?') => Some(Message::Tick), // TODO: ShowHelp
-                    KeyCode::Esc => Some(Message::Tick),       // Cancel prefix
-                    _ => None,                                 // Unknown, discard
+                    KeyCode::Char('?') => Some(Message::ToggleHelp),
+                    KeyCode::Esc => Some(Message::Tick), // Cancel prefix
+                    _ => None,                           // Unknown, discard
                 }
             }
         }
@@ -269,6 +328,14 @@ mod tests {
     }
 
     #[test]
+    fn prefix_question_toggles_help() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::ToggleHelp)));
+    }
+
+    #[test]
     fn prefix_esc_cancels() {
         let mut reg = KeybindRegistry::new();
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
@@ -288,6 +355,10 @@ mod tests {
     fn all_bindings_not_empty() {
         let reg = KeybindRegistry::new();
         assert!(!reg.all_bindings().is_empty());
+        assert!(reg
+            .all_bindings()
+            .iter()
+            .any(|binding| binding.category == KeybindingCategory::Management));
     }
 
     #[test]
@@ -333,5 +404,40 @@ mod tests {
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(matches!(result, Some(Message::OpenSessionConversion)));
+    }
+
+    #[test]
+    fn all_bindings_include_registered_shortcuts() {
+        let reg = KeybindRegistry::new();
+        let registered: Vec<&str> = reg
+            .all_bindings()
+            .iter()
+            .map(|binding| binding.keys.as_str())
+            .collect();
+
+        for expected in [
+            "Ctrl+G, g",
+            "Ctrl+G, c",
+            "Ctrl+G, n",
+            "Ctrl+G, ?",
+            "Ctrl+G, 1-9",
+            "Ctrl+C, Ctrl+C",
+        ] {
+            assert!(
+                registered.contains(&expected),
+                "expected binding registry to contain {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_bindings_exclude_unregistered_shortcuts() {
+        let reg = KeybindRegistry::new();
+        let registered: Vec<&str> = reg
+            .all_bindings()
+            .iter()
+            .map(|binding| binding.keys.as_str())
+            .collect();
+        assert!(!registered.contains(&"Ctrl+G, y"));
     }
 }

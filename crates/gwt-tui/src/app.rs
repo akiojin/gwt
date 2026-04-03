@@ -113,6 +113,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Notify(notification) => {
             apply_notification(model, notification);
         }
+        Message::ToggleHelp => {
+            model.help_visible = !model.help_visible;
+        }
         Message::ShowNotification(notification) => match notification.severity {
             Severity::Info => {
                 model.current_notification = Some(notification);
@@ -491,6 +494,13 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
 }
 
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
+    if model.help_visible {
+        if key.code == KeyCode::Esc {
+            update(model, Message::ToggleHelp);
+        }
+        return true;
+    }
+
     // Wizard overlay takes priority (fullscreen modal)
     if model.wizard.is_some() {
         let msg = match key.code {
@@ -512,6 +522,13 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     if !model.error_queue.is_empty() {
         if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
             update(model, Message::DismissError);
+        }
+        return true;
+    }
+
+    if model.help_visible {
+        if key.code == KeyCode::Esc {
+            update(model, Message::ToggleHelp);
         }
         return true;
     }
@@ -1704,6 +1721,11 @@ fn render_overlays(model: &Model, frame: &mut Frame, size: Rect) {
         screens::wizard::render(wizard, frame, size);
     }
 
+    if model.help_visible {
+        let bindings = crate::input::keybind::KeybindRegistry::new();
+        screens::help::render(bindings.all_bindings(), frame, size);
+    }
+
     // Error overlay on top of everything
     if !model.error_queue.is_empty() {
         screens::error::render(&model.error_queue, frame, size);
@@ -1768,6 +1790,8 @@ mod tests {
     use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
     use gwt_agent::{version_cache::VersionEntry, AgentId, DetectedAgent, VersionCache};
     use gwt_notification::{Notification, Severity};
+    use ratatui::backend::TestBackend;
+    use ratatui::{buffer::Buffer, Terminal};
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -1784,6 +1808,18 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         }
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            let line = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>();
+            text.push_str(line.trim_end());
+            text.push('\n');
+        }
+        text
     }
 
     fn detected_agent(agent_id: AgentId, version: Option<&str>) -> DetectedAgent {
@@ -2823,6 +2859,60 @@ mod tests {
 
         assert_eq!(model.git_view.files.len(), 1);
         assert_eq!(model.git_view.files[0].path, "tracked.txt");
+    }
+
+    #[test]
+    fn update_toggle_help_flips_overlay_visibility() {
+        let mut model = test_model();
+        assert!(!model.help_visible);
+
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help_visible);
+
+        update(&mut model, Message::ToggleHelp);
+        assert!(!model.help_visible);
+    }
+
+    #[test]
+    fn route_overlay_key_escape_closes_help_overlay() {
+        let mut model = test_model();
+        model.help_visible = true;
+
+        assert!(route_overlay_key(
+            &mut model,
+            key(KeyCode::Esc, KeyModifiers::NONE)
+        ));
+        assert!(!model.help_visible);
+    }
+
+    #[test]
+    fn render_help_overlay_lists_all_registered_keybindings_only() {
+        let mut model = test_model();
+        model.help_visible = true;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        terminal
+            .draw(|frame| view(&model, frame))
+            .expect("render help overlay");
+
+        let text = buffer_text(terminal.backend().buffer());
+        let registry = crate::input::keybind::KeybindRegistry::new();
+
+        for binding in registry.all_bindings() {
+            assert!(
+                text.contains(&binding.keys),
+                "expected help overlay to contain binding {}",
+                binding.keys
+            );
+            assert!(
+                text.contains(&binding.description),
+                "expected help overlay to contain description {}",
+                binding.description
+            );
+        }
+
+        assert!(!text.contains("Ctrl+G, y"));
     }
 
     #[test]

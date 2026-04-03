@@ -5,6 +5,7 @@ pub mod confirm;
 pub mod docker_progress;
 pub mod error;
 pub mod git_view;
+pub mod help;
 pub mod initialization;
 pub mod issues;
 pub mod logs;
