@@ -180,6 +180,9 @@ pub fn update(model: &mut Model, msg: Message) {
                     FocusPane::BranchDetail => route_key_to_branch_detail(model, key),
                     FocusPane::Terminal => forward_key_to_active_session(model, key),
                 }
+
+                // Check pending actions after key dispatch
+                check_branch_pending_actions(model);
             } else {
                 forward_key_to_active_session(model, key);
             }
@@ -189,6 +192,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Branches(msg) => {
             screens::branches::update(&mut model.branches, msg);
+            check_branch_pending_actions(model);
             if let Some(action) = model.branches.pending_docker_action.take() {
                 handle_pending_branch_docker_action(model, action);
             }
@@ -829,6 +833,36 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::profiles::update(&mut model.profiles, m);
+            }
+        }
+    }
+}
+
+/// Check and consume pending branch actions (Wizard launch, shell open).
+fn check_branch_pending_actions(model: &mut Model) {
+    if model.branches.pending_launch_agent {
+        model.branches.pending_launch_agent = false;
+        if let Some(branch) = model.branches.selected_branch() {
+            model.wizard = Some(screens::wizard::WizardState {
+                branch_name: branch.name.clone(),
+                ..Default::default()
+            });
+        }
+    }
+    if model.branches.pending_open_shell {
+        model.branches.pending_open_shell = false;
+        if let Some(branch) = model.branches.selected_branch() {
+            if branch.worktree_path.is_some() {
+                let idx = model.sessions.len();
+                let session = crate::model::SessionTab {
+                    id: format!("shell-{idx}"),
+                    name: format!("Shell: {}", branch.name),
+                    tab_type: crate::model::SessionTabType::Shell,
+                    vt: crate::model::VtState::new(24, 80),
+                };
+                model.sessions.push(session);
+                model.active_session = idx;
+                model.active_focus = FocusPane::Terminal;
             }
         }
     }

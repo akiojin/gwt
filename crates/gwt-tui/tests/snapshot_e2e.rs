@@ -717,13 +717,26 @@ fn e2e_branch_detail_arrows_cycle_sections() {
 }
 
 #[test]
-fn e2e_enter_on_branch_triggers_launch_agent() {
+fn e2e_enter_on_branch_opens_wizard() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     app::update(
         &mut model,
         Message::Branches(BranchesMessage::SetBranches(sample_branches())),
     );
+    // Wizard should NOT be open before Enter
+    assert!(!model.has_wizard());
+
+    // Press Enter on selected branch
     send_key(&mut model, &mut kb, press(KeyCode::Enter));
-    assert!(model.branches_pending_launch_agent());
+
+    // Wizard MUST be open now (not just a flag set)
+    assert!(model.has_wizard(), "Enter on branch must open Wizard");
+
+    // Verify the wizard has the branch name pre-filled
+    let output = render_to_string(&model, 80, 24);
+    assert!(
+        output.contains("Wizard") || output.contains("Agent") || output.contains("Quick"),
+        "Wizard overlay should be visible after Enter"
+    );
 }
