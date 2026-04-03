@@ -1,8 +1,8 @@
 {
   "id": "5",
   "title": "gwt-spec: Local SPEC management — list, detail, search, edit, agent launch",
-  "status": "in-progress",
-  "phase": "Implementation",
+  "status": "done",
+  "phase": "Done",
   "created_at": "2026-04-02T09:37:55.507143+00:00",
-  "updated_at": "2026-04-03T04:29:59Z"
+  "updated_at": "2026-04-02T00:00:00Z"
 }

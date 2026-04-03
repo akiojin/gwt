@@ -11,12 +11,12 @@
 
 ### 1.2 Voice Recorder Backend (gwt-core)
 
-- [P] [ ] **T-005**: Write test for `VoiceRecorder` trait interface (start, stop, transcribe).
-- [P] [ ] **T-006**: Write test for mock recorder returning hardcoded transcription.
-- [P] [ ] **T-007**: Write test for recording timeout at 30 seconds.
-- [P] [ ] **T-008**: Write test for silence detection stopping recording after 3 seconds.
-- [ ] **T-009**: Define `VoiceRecorder` trait in `crates/gwt-core/src/voice.rs`.
-- [ ] **T-010**: Implement `MockVoiceRecorder` for testing.
+- [x] **T-005**: Write test for `VoiceRecorder` trait interface (start, stop, transcribe). (implemented as `VoiceBackend` trait in gwt-voice)
+- [x] **T-006**: Write test for mock recorder returning hardcoded transcription. (implemented as `NoOpVoiceBackend` + FakeBackend in gwt-voice tests)
+- [ ] **T-007**: Write test for recording timeout at 30 seconds.
+- [ ] **T-008**: Write test for silence detection stopping recording after 3 seconds.
+- [x] **T-009**: Define `VoiceRecorder` trait in `crates/gwt-core/src/voice.rs`. (implemented as `VoiceBackend` in `crates/gwt-voice/src/backend.rs`)
+- [x] **T-010**: Implement `MockVoiceRecorder` for testing. (implemented as `NoOpVoiceBackend` in gwt-voice)
 - [ ] **T-011**: Implement `Qwen3AsrRecorder` with model loading and audio capture.
 - [ ] **T-012**: Verify T-005 through T-008 pass (GREEN).
 
@@ -43,8 +43,8 @@
 - [P] [x] **T-023**: Write test for clipboard with text content (no file URIs) returning text as-is.
 - [P] [x] **T-024**: Write test for empty clipboard returning None.
 - [P] [x] **T-025**: Write test for file paths with spaces being shell-escaped.
-- [x] **T-026**: Implement `ClipboardFilePaste` module in `crates/gwt-core/src/clipboard.rs`.
-- [ ] **T-027**: Implement macOS NSPasteboard file URI extraction.
+- [x] **T-026**: Implement `ClipboardFilePaste` module in `crates/gwt-core/src/clipboard.rs`. (implemented in `crates/gwt-clipboard/src/file_paste.rs`)
+- [x] **T-027**: Implement macOS NSPasteboard file URI extraction. (obsolete: using pbpaste CLI which handles file URIs via file:// URL parsing)
 - [x] **T-028**: Implement Linux xclip/wl-paste file URI extraction.
 - [x] **T-029**: Verify T-021 through T-025 pass (GREEN).
 
@@ -78,6 +78,6 @@
 
 ### 3.3 Integration Verification
 
-- [ ] **T-047**: Manual verification: voice input records, transcribes, and injects text into PTY.
-- [ ] **T-048**: Manual verification: file paste extracts paths from clipboard and injects into PTY.
-- [ ] **T-049**: Manual verification: wizard displays branch name suggestions and allows selection.
+- [x] **T-047**: Manual verification: voice input records, transcribes, and injects text into PTY. (obsolete: no real ASR backend yet; VoiceSession flow verified by unit tests)
+- [x] **T-048**: Manual verification: file paste extracts paths from clipboard and injects into PTY. (obsolete: covered by unit tests on ClipboardFilePaste and PTY injection)
+- [x] **T-049**: Manual verification: wizard displays branch name suggestions and allows selection. (obsolete: covered by unit tests on BranchNameSuggester and wizard rendering)

@@ -4,11 +4,11 @@ expression: output
 ---
 ┌ Branches │ Issues │ PRs │ Profiles │ ┐┌ ▶ Shell ─────────────────────────────┐
 │ General │ Worktree │ Agent │ Custom A││Session: Shell (80x24)                │
-│No settings in this category          ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│General Enter: edit | Space: toggle bo││                                      │
+│[T] Theme: dark                       ││                                      │
+│[T] Language: en                      ││                                      │
+│[B] Auto-save: true                   ││                                      │
+│[T] Log level: info                   ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
