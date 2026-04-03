@@ -497,19 +497,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
 
     // Left/Right switches tabs when not in text input mode
     if !is_in_text_input_mode(model) {
-        let tab_count = ManagementTab::ALL.len();
-        let idx = ManagementTab::ALL
-            .iter()
-            .position(|t| *t == model.management_tab)
-            .unwrap_or(0);
         match key.code {
             KeyCode::Right => {
-                model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
+                model.management_tab = model.management_tab.next();
                 return;
             }
             KeyCode::Left => {
-                model.management_tab =
-                    ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
+                model.management_tab = model.management_tab.prev();
                 return;
             }
             _ => {}
@@ -1320,19 +1314,15 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
         if i > 0 {
             title_line.push(Span::raw("│"));
         }
-        if *t == model.management_tab {
-            title_line.push(Span::styled(
-                format!(" {} ", t.label()),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
+        let label = format!(" {} ", t.label());
+        let style = if *t == model.management_tab {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
-            title_line.push(Span::styled(
-                format!(" {} ", t.label()),
-                Style::default().fg(Color::Gray),
-            ));
-        }
+            Style::default().fg(Color::Gray)
+        };
+        title_line.push(Span::styled(label, style));
     }
 
     let content_focused = model.active_focus == FocusPane::TabContent;

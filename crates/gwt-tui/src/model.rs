@@ -114,6 +114,18 @@ impl ManagementTab {
             Self::Logs => "Logs",
         }
     }
+
+    /// Next tab (wraps around).
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    /// Previous tab (wraps around).
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[if idx == 0 { Self::ALL.len() - 1 } else { idx - 1 }]
+    }
 }
 
 /// Type of a session tab.
