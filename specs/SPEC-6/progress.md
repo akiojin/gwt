@@ -3,15 +3,16 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `14/44` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T00:23:11Z`
+- Task progress: `24/44` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T02:25:41Z`
 
 ## Done
-- The support artifacts now reflect that bus primitives exist while status-bar routing is still incomplete.
-- Completion tracking distinguishes backend notification infrastructure from finished TUI behavior.
-- Review checklists are now present for acceptance and test evidence.
+- Severity routing is now wired through structured notifications: debug logs only, info/warn feed the status bar, and errors keep their detail in the modal queue.
+- The error overlay now renders `Notification` objects directly, including `source` and `detail`.
+- Focused verification now exists for notification routing, error rendering, bus draining, and logs filtering.
+- Warn notifications can now be dismissed with `Esc` when no overlay, search field, or settings edit session has already claimed that key.
 
 ## Next
-- Complete severity routing for info and warning notifications in the TUI.
-- Reconcile error-queue behavior with modal and log expectations.
-- Add focused verification that proves the final routing policy.
+- Add the remaining richer log affordances and end-to-end coverage.
+- Close the remaining end-to-end and performance verification tasks.
+- Keep the SPEC artifacts aligned as the remaining unchecked tasks are implemented.

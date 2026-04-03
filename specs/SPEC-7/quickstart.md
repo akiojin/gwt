@@ -6,7 +6,13 @@
 3. Compare the visible voice fields against the intended configuration schema.
 4. Track missing fields or validation mismatches as remaining SPEC-7 execution work.
 
+## Repeatable Evidence
+- `cargo test -p gwt-tui settings -- --nocapture`
+- `cargo test -p gwt-core -p gwt-tui`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
 ## Expected Result
 - The reviewer sees the current implemented scope for settings and profiles.
-- Any missing behavior is logged against the remaining `16` unchecked tasks.
+- The reviewer can confirm the Voice category defaults, ordering, and validation behavior through focused automated evidence.
+- Any missing behavior is logged against the remaining `2` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

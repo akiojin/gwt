@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 
+use gwt_notification::Notification;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -20,9 +21,9 @@ pub enum ErrorMessage {
 ///
 /// Takes the error_queue from the model directly.
 /// Shows the first (oldest) error with a dismiss hint.
-pub fn render(error_queue: &VecDeque<String>, frame: &mut Frame, area: Rect) {
-    let err = match error_queue.front() {
-        Some(e) => e,
+pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rect) {
+    let notification = match error_queue.front() {
+        Some(notification) => notification,
         None => return, // Nothing to show
     };
 
@@ -45,17 +46,31 @@ pub fn render(error_queue: &VecDeque<String>, frame: &mut Frame, area: Rect) {
         .title(title)
         .border_style(Style::default().fg(Color::Red));
 
-    let text = vec![
-        Line::from(Span::styled(
-            err.as_str(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press Enter or Esc to dismiss",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    let summary = if notification.source == "app" && notification.detail.is_none() {
+        notification.message.clone()
+    } else {
+        format!("{}: {}", notification.source, notification.message)
+    };
+
+    let mut text = vec![Line::from(Span::styled(
+        summary,
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    ))];
+    if let Some(detail) = notification
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.is_empty())
+    {
+        text.push(Line::from(Span::styled(
+            detail.to_string(),
+            Style::default().fg(Color::White),
+        )));
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "Press Enter or Esc to dismiss",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let paragraph = Paragraph::new(text)
         .block(block)
@@ -66,12 +81,18 @@ pub fn render(error_queue: &VecDeque<String>, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
     #[test]
     fn render_with_error_does_not_panic() {
-        let errors: VecDeque<String> = vec!["Something went wrong".to_string()].into();
+        let errors: VecDeque<Notification> = vec![Notification::new(
+            Severity::Error,
+            "pty",
+            "Something went wrong",
+        )]
+        .into();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -90,7 +111,7 @@ mod tests {
 
     #[test]
     fn render_empty_queue_is_noop() {
-        let errors: VecDeque<String> = VecDeque::new();
+        let errors: VecDeque<Notification> = VecDeque::new();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -110,10 +131,10 @@ mod tests {
 
     #[test]
     fn render_multiple_errors_shows_count() {
-        let errors: VecDeque<String> = vec![
-            "Error 1".to_string(),
-            "Error 2".to_string(),
-            "Error 3".to_string(),
+        let errors: VecDeque<Notification> = vec![
+            Notification::new(Severity::Error, "core", "Error 1"),
+            Notification::new(Severity::Error, "core", "Error 2"),
+            Notification::new(Severity::Error, "core", "Error 3"),
         ]
         .into();
         let backend = TestBackend::new(80, 24);
@@ -134,7 +155,8 @@ mod tests {
 
     #[test]
     fn render_single_error_no_count() {
-        let errors: VecDeque<String> = vec!["Only one".to_string()].into();
+        let errors: VecDeque<Notification> =
+            vec![Notification::new(Severity::Error, "core", "Only one")].into();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -160,5 +182,28 @@ mod tests {
         match msg {
             ErrorMessage::Dismiss => {}
         }
+    }
+
+    #[test]
+    fn render_structured_error_includes_source_and_detail() {
+        let errors: VecDeque<Notification> =
+            vec![Notification::new(Severity::Error, "pty", "Crash")
+                .with_detail("stack trace line 1")]
+            .into();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&errors, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let full_text: String = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(full_text.contains("pty: Crash"));
+        assert!(full_text.contains("stack trace line 1"));
     }
 }

@@ -15,17 +15,15 @@ pub fn route(notification: &Notification) -> Option<Message> {
         }
         Severity::Info => {
             tracing::info!("{}", notification.message);
-            // Phase 2: status bar notification with 5s timeout
-            None
+            Some(Message::ShowNotification(notification.clone()))
         }
         Severity::Warn => {
             tracing::warn!("{}", notification.message);
-            // Phase 2: persistent status bar notification
-            None
+            Some(Message::ShowNotification(notification.clone()))
         }
         Severity::Error => {
             tracing::error!("{}", notification.message);
-            Some(Message::PushError(notification.message.clone()))
+            Some(Message::PushErrorNotification(notification.clone()))
         }
     }
 }
@@ -41,21 +39,39 @@ mod tests {
     }
 
     #[test]
-    fn info_returns_none() {
+    fn info_returns_status_notification() {
         let n = Notification::new(Severity::Info, "router", "info msg");
-        assert!(route(&n).is_none());
+        let msg = route(&n);
+        assert!(
+            matches!(msg, Some(Message::ShowNotification(ref notification))
+            if notification.severity == Severity::Info
+            && notification.source == "router"
+            && notification.message == "info msg")
+        );
     }
 
     #[test]
     fn error_returns_push_error() {
-        let n = Notification::new(Severity::Error, "router", "boom");
+        let n = Notification::new(Severity::Error, "router", "boom").with_detail("stack trace");
         let msg = route(&n);
-        assert!(matches!(msg, Some(Message::PushError(ref s)) if s == "boom"));
+        assert!(
+            matches!(msg, Some(Message::PushErrorNotification(ref notification))
+            if notification.severity == Severity::Error
+            && notification.source == "router"
+            && notification.message == "boom"
+            && notification.detail.as_deref() == Some("stack trace"))
+        );
     }
 
     #[test]
-    fn warn_returns_none() {
+    fn warn_returns_status_notification() {
         let n = Notification::new(Severity::Warn, "router", "warn msg");
-        assert!(route(&n).is_none());
+        let msg = route(&n);
+        assert!(
+            matches!(msg, Some(Message::ShowNotification(ref notification))
+            if notification.severity == Severity::Warn
+            && notification.source == "router"
+            && notification.message == "warn msg")
+        );
     }
 }

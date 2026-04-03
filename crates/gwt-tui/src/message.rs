@@ -51,10 +51,16 @@ pub enum Message {
     PtyOutput(String, Vec<u8>),
     /// Periodic tick (100ms).
     Tick,
-    /// Push an error message onto the queue.
+    /// Push a plain error message onto the queue.
     PushError(String),
+    /// Push a structured error notification onto the queue.
+    PushErrorNotification(Notification),
     /// Push a structured notification through the UI routing path.
     Notify(Notification),
+    /// Show a structured notification in the status bar.
+    ShowNotification(Notification),
+    /// Dismiss the current status-bar notification.
+    DismissNotification,
     /// Dismiss the top error.
     DismissError,
     /// Branches screen message.
@@ -116,11 +122,22 @@ mod tests {
         let _ = Message::CloseSession;
         let _ = Message::Tick;
         let _ = Message::PushError("err".into());
+        let _ = Message::PushErrorNotification(Notification::new(
+            gwt_notification::Severity::Error,
+            "test",
+            "err",
+        ));
         let _ = Message::Notify(Notification::new(
             gwt_notification::Severity::Info,
             "test",
             "message",
         ));
+        let _ = Message::ShowNotification(Notification::new(
+            gwt_notification::Severity::Warn,
+            "test",
+            "warning",
+        ));
+        let _ = Message::DismissNotification;
         let _ = Message::DismissError;
         let _ = Message::Resize(80, 24);
         let _ = Message::PtyOutput("id".into(), vec![0x41]);

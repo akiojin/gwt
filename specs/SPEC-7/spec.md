@@ -37,7 +37,7 @@ As a developer, I want to configure AI provider settings so that gwt connects to
 2. Given I change the AI provider, when I start a new agent session, then the new provider is used without requiring a restart.
 3. Given an invalid API key is provided, when I test the connection, then a clear error message indicates the authentication failure.
 
-### US-4: Configure Voice Input Settings (P1) -- NOT IMPLEMENTED
+### US-4: Configure Voice Input Settings (P1) -- PARTIALLY IMPLEMENTED
 
 As a developer, I want to configure voice input settings so that I can customize speech recognition behavior including model path, activation hotkey, and input device.
 

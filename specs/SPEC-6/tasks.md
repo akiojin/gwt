@@ -28,7 +28,7 @@
   - File: `crates/gwt-tui/src/widgets/status_bar.rs`
 - [x] IMPL: Auto-dismiss timer for Info notifications
 - [x] IMPL: Warn notification rendering with amber/yellow color
-- [ ] IMPL: Dismiss keybinding for Warn notifications
+- [x] IMPL: Dismiss keybinding for Warn notifications
 
 ## Phase 2: Severity Routing
 
@@ -43,12 +43,12 @@
 
 ### 2.2 Error Modal Upgrade
 
-- [ ] TEST: Unit test for error modal accepting `Notification` objects
-- [ ] TEST: Unit test for error queue stacking (dismiss one, next appears)
-- [ ] IMPL: Refactor existing error queue overlay to use `Notification` struct
+- [x] TEST: Unit test for error modal accepting `Notification` objects
+- [x] TEST: Unit test for error queue stacking (dismiss one, next appears)
+- [x] IMPL: Refactor existing error queue overlay to use `Notification` struct
   - File: `crates/gwt-tui/src/widgets/error_modal.rs`
-- [ ] IMPL: Modal displays message, details, and dismiss instruction
-- [ ] IMPL: Queue management: dismiss with Enter/Esc, show next in queue
+- [x] IMPL: Modal displays message, details, and dismiss instruction
+- [x] IMPL: Queue management: dismiss with Enter/Esc, show next in queue
 
 ## Phase 3: Structured Log Integration
 
@@ -72,10 +72,10 @@
 
 ### 3.3 Bus-to-Log Integration
 
-- [ ] TEST: Integration test: notification sent via bus -> appears in structured log
-- [ ] TEST: Integration test: notification sent via bus -> routed to correct surface
-- [ ] IMPL: Connect NotificationBus consumer to StructuredLog store
-- [ ] IMPL: Connect NotificationBus consumer to NotificationRouter
+- [x] TEST: Integration test: notification sent via bus -> appears in structured log
+- [x] TEST: Integration test: notification sent via bus -> routed to correct surface
+- [x] IMPL: Connect NotificationBus consumer to StructuredLog store
+- [x] IMPL: Connect NotificationBus consumer to NotificationRouter
 
 ## Phase 4: Integration Testing
 

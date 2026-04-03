@@ -24,7 +24,8 @@ use crate::{
     input::voice::VoiceInputMessage,
     message::Message,
     model::{
-        ActiveLayer, ManagementTab, Model, PendingSessionConversion, SessionLayout, SessionTabType,
+        ActiveLayer, FocusPane, ManagementTab, Model, PendingSessionConversion, SessionLayout,
+        SessionTabType,
     },
     screens,
 };
@@ -99,10 +100,30 @@ pub fn update(model: &mut Model, msg: Message) {
             // Phase 2: feed data into vt100 parser for the matching pane
         }
         Message::PushError(err) => {
-            model.error_queue.push_back(err);
+            model
+                .error_queue
+                .push_back(Notification::new(Severity::Error, "app", err));
+        }
+        Message::PushErrorNotification(notification) => {
+            model.error_queue.push_back(notification);
         }
         Message::Notify(notification) => {
             apply_notification(model, notification);
+        }
+        Message::ShowNotification(notification) => match notification.severity {
+            Severity::Info => {
+                model.current_notification = Some(notification);
+                model.current_notification_ttl = Some(Duration::from_secs(5));
+            }
+            Severity::Warn => {
+                model.current_notification = Some(notification);
+                model.current_notification_ttl = None;
+            }
+            Severity::Debug | Severity::Error => {}
+        },
+        Message::DismissNotification => {
+            model.current_notification = None;
+            model.current_notification_ttl = None;
         }
         Message::DismissError => {
             model.error_queue.pop_front();
@@ -129,7 +150,28 @@ pub fn update(model: &mut Model, msg: Message) {
             if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
-                route_key_to_management(model, key);
+                // Focus cycling with Tab/BackTab (before pane-specific dispatch)
+                if !is_in_text_input_mode(model) {
+                    match key.code {
+                        KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            model.active_focus = model.active_focus.next();
+                            return;
+                        }
+                        KeyCode::BackTab => {
+                            model.active_focus = model.active_focus.prev();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Dispatch based on focused pane
+                match model.active_focus {
+                    FocusPane::TabHeader => route_key_to_tab_header(model, key),
+                    FocusPane::TabContent => route_key_to_management(model, key),
+                    FocusPane::BranchDetail => route_key_to_branch_detail(model, key),
+                    FocusPane::Terminal => forward_key_to_active_session(model, key),
+                }
             } else {
                 forward_key_to_active_session(model, key);
             }
@@ -357,10 +399,8 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     // Wizard overlay takes priority (fullscreen modal)
     if model.wizard.is_some() {
         let msg = match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                Some(screens::wizard::WizardMessage::MoveDown)
-            }
-            KeyCode::Char('k') | KeyCode::Up => Some(screens::wizard::WizardMessage::MoveUp),
+            KeyCode::Down => Some(screens::wizard::WizardMessage::MoveDown),
+            KeyCode::Up => Some(screens::wizard::WizardMessage::MoveUp),
             KeyCode::Enter => Some(screens::wizard::WizardMessage::Select),
             KeyCode::Esc => Some(screens::wizard::WizardMessage::Back),
             KeyCode::Backspace => Some(screens::wizard::WizardMessage::Backspace),
@@ -383,12 +423,8 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
 
     if model.service_select.is_some() {
         let msg = match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                Some(screens::service_select::ServiceSelectMessage::MoveDown)
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                Some(screens::service_select::ServiceSelectMessage::MoveUp)
-            }
+            KeyCode::Down => Some(screens::service_select::ServiceSelectMessage::MoveDown),
+            KeyCode::Up => Some(screens::service_select::ServiceSelectMessage::MoveUp),
             KeyCode::Enter => Some(screens::service_select::ServiceSelectMessage::Select),
             KeyCode::Esc => Some(screens::service_select::ServiceSelectMessage::Cancel),
             _ => None,
@@ -417,6 +453,64 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     false
 }
 
+fn branch_detail_action_message(model: &Model) -> Option<screens::branches::BranchesMessage> {
+    use screens::branches::BranchesMessage;
+    if model.branches.detail_section == 4 {
+        Some(match model.branches.detail_action_selected {
+            0 => BranchesMessage::LaunchAgent,
+            1 => BranchesMessage::OpenShell,
+            _ => BranchesMessage::DeleteWorktree,
+        })
+    } else {
+        None
+    }
+}
+
+/// Route a key event to the tab header pane (Left/Right switches tabs, Enter focuses content).
+fn route_key_to_tab_header(model: &mut Model, key: crossterm::event::KeyEvent) {
+    let tab_count = ManagementTab::ALL.len();
+    let idx = ManagementTab::ALL
+        .iter()
+        .position(|t| *t == model.management_tab)
+        .unwrap_or(0);
+
+    match key.code {
+        KeyCode::Right => {
+            model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
+        }
+        KeyCode::Left => {
+            model.management_tab =
+                ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
+        }
+        KeyCode::Enter => {
+            model.active_focus = FocusPane::TabContent;
+        }
+        KeyCode::Esc => {
+            dismiss_warn_notification(model);
+        }
+        _ => {}
+    }
+}
+
+/// Route a key event to the branch detail pane (sections, actions, Enter dispatches).
+fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent) {
+    use screens::branches::BranchesMessage;
+
+    let msg = match key.code {
+        KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
+        KeyCode::Right => Some(BranchesMessage::NextDetailSection),
+        KeyCode::Up => Some(BranchesMessage::DetailActionUp),
+        KeyCode::Down => Some(BranchesMessage::DetailActionDown),
+        KeyCode::Enter => branch_detail_action_message(model),
+        _ => None,
+    };
+    if let Some(m) = msg {
+        screens::branches::update(&mut model.branches, m);
+    } else if key.code == KeyCode::Esc {
+        dismiss_warn_notification(model);
+    }
+}
+
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
@@ -428,34 +522,12 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
 
-    // Global management keys: tab switching with Left/Right arrows
-    // (only when not in text input mode like search or edit)
-    if !is_in_text_input_mode(model) {
-        let tab_count = ManagementTab::ALL.len();
-        let idx = ManagementTab::ALL
-            .iter()
-            .position(|t| *t == model.management_tab)
-            .unwrap_or(0);
-
-        match key.code {
-            KeyCode::Right => {
-                model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
-                return;
-            }
-            KeyCode::Left => {
-                model.management_tab =
-                    ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
-                return;
-            }
-            _ => {}
-        }
-    }
-
     // Tab-specific key routing
     match model.management_tab {
         ManagementTab::Branches => {
             if model.branches.search_active {
                 let msg = match key.code {
+                    KeyCode::Esc => Some(BranchesMessage::SearchClear),
                     KeyCode::Backspace => Some(BranchesMessage::SearchBackspace),
                     _ => search_input_char(&key).map(BranchesMessage::SearchInput),
                 };
@@ -466,19 +538,10 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
 
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(BranchesMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(BranchesMessage::MoveUp),
+                KeyCode::Down => Some(BranchesMessage::MoveDown),
+                KeyCode::Up => Some(BranchesMessage::MoveUp),
                 KeyCode::Enter => {
-                    // In Actions section, dispatch the selected action
-                    if model.branches.detail_section == 4 {
-                        Some(match model.branches.detail_action_selected {
-                            0 => BranchesMessage::LaunchAgent,
-                            1 => BranchesMessage::OpenShell,
-                            _ => BranchesMessage::DeleteWorktree,
-                        })
-                    } else {
-                        Some(BranchesMessage::Select)
-                    }
+                    branch_detail_action_message(model).or(Some(BranchesMessage::Select))
                 }
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
                 KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
@@ -487,18 +550,18 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     load_initial_data(model);
                     return;
                 }
-                KeyCode::Tab => Some(BranchesMessage::NextDetailSection),
-                KeyCode::BackTab => Some(BranchesMessage::PrevDetailSection),
-                KeyCode::Esc => Some(BranchesMessage::SearchClear),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::branches::update(&mut model.branches, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Issues => {
             if model.issues.search_active {
                 let msg = match key.code {
+                    KeyCode::Esc => Some(IssuesMessage::SearchClear),
                     KeyCode::Backspace => Some(IssuesMessage::SearchBackspace),
                     _ => search_input_char(&key).map(IssuesMessage::SearchInput),
                 };
@@ -509,16 +572,17 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
 
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(IssuesMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(IssuesMessage::MoveUp),
+                KeyCode::Down => Some(IssuesMessage::MoveDown),
+                KeyCode::Up => Some(IssuesMessage::MoveUp),
                 KeyCode::Enter => Some(IssuesMessage::ToggleDetail),
                 KeyCode::Char('/') => Some(IssuesMessage::SearchStart),
                 KeyCode::Char('r') => Some(IssuesMessage::Refresh),
-                KeyCode::Esc => Some(IssuesMessage::SearchClear),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::issues::update(&mut model.issues, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Settings => {
@@ -532,15 +596,15 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 };
                 if let Some(m) = msg {
                     screens::settings::update(&mut model.settings, m);
+                } else if key.code == KeyCode::Esc {
+                    dismiss_warn_notification(model);
                 }
             } else {
                 let msg = match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => Some(SettingsMessage::MoveDown),
-                    KeyCode::Char('k') | KeyCode::Up => Some(SettingsMessage::MoveUp),
+                    KeyCode::Down => Some(SettingsMessage::MoveDown),
+                    KeyCode::Up => Some(SettingsMessage::MoveUp),
                     KeyCode::Enter => Some(SettingsMessage::StartEdit),
                     KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
-                    KeyCode::Tab => Some(SettingsMessage::NextCategory),
-                    KeyCode::BackTab => Some(SettingsMessage::PrevCategory),
                     KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         Some(SettingsMessage::Save)
                     }
@@ -548,25 +612,29 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 };
                 if let Some(m) = msg {
                     screens::settings::update(&mut model.settings, m);
+                } else if key.code == KeyCode::Esc {
+                    dismiss_warn_notification(model);
                 }
             }
         }
         ManagementTab::Logs => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(LogsMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(LogsMessage::MoveUp),
+                KeyCode::Down => Some(LogsMessage::MoveDown),
+                KeyCode::Up => Some(LogsMessage::MoveUp),
                 KeyCode::Enter => Some(LogsMessage::ToggleDetail),
                 KeyCode::Char('r') => Some(LogsMessage::Refresh),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::logs::update(&mut model.logs, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Versions => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(VersionsMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(VersionsMessage::MoveUp),
+                KeyCode::Down => Some(VersionsMessage::MoveDown),
+                KeyCode::Up => Some(VersionsMessage::MoveUp),
                 KeyCode::Char('r') => {
                     load_initial_data(model);
                     return;
@@ -575,36 +643,42 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::versions::update(&mut model.versions, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::GitView => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(GitViewMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(GitViewMessage::MoveUp),
+                KeyCode::Down => Some(GitViewMessage::MoveDown),
+                KeyCode::Up => Some(GitViewMessage::MoveUp),
                 KeyCode::Enter => Some(GitViewMessage::ToggleExpand),
                 KeyCode::Char('r') => Some(GitViewMessage::Refresh),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::git_view::update(&mut model.git_view, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::PrDashboard => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(PrDashboardMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(PrDashboardMessage::MoveUp),
+                KeyCode::Down => Some(PrDashboardMessage::MoveDown),
+                KeyCode::Up => Some(PrDashboardMessage::MoveUp),
                 KeyCode::Enter => Some(PrDashboardMessage::ToggleDetail),
                 KeyCode::Char('r') => Some(PrDashboardMessage::Refresh),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::pr_dashboard::update(&mut model.pr_dashboard, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Profiles => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(ProfilesMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(ProfilesMessage::MoveUp),
+                KeyCode::Down => Some(ProfilesMessage::MoveDown),
+                KeyCode::Up => Some(ProfilesMessage::MoveUp),
                 KeyCode::Enter => Some(ProfilesMessage::ToggleActive),
                 KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
                 KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
@@ -648,18 +722,6 @@ fn apply_notification(model: &mut Model, notification: Notification) {
     if let Some(msg) = crate::notification_router::route(&notification) {
         update(model, msg);
     }
-
-    match notification.severity {
-        Severity::Info => {
-            model.current_notification = Some(notification);
-            model.current_notification_ttl = Some(Duration::from_secs(5));
-        }
-        Severity::Warn => {
-            model.current_notification = Some(notification);
-            model.current_notification_ttl = None;
-        }
-        Severity::Debug | Severity::Error => {}
-    }
 }
 
 fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
@@ -682,6 +744,18 @@ fn tick_notification(model: &mut Model) {
         model.current_notification_ttl = None;
     } else {
         model.current_notification_ttl = Some(ttl - step);
+    }
+}
+
+fn dismiss_warn_notification(model: &mut Model) {
+    if matches!(
+        model
+            .current_notification
+            .as_ref()
+            .map(|notification| notification.severity),
+        Some(Severity::Warn)
+    ) {
+        update(model, Message::DismissNotification);
     }
 }
 
@@ -1236,6 +1310,14 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 }
 
+fn focused_border_style(is_focused: bool) -> Style {
+    if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
 /// Render the management panel (left side).
 fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
@@ -1254,8 +1336,14 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
         .position(|t| *t == model.management_tab)
         .unwrap_or(0);
 
+    let tab_header_focused = model.active_focus == FocusPane::TabHeader;
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title("Management"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(focused_border_style(tab_header_focused))
+                .title("Management"),
+        )
         .select(active_idx)
         .highlight_style(
             Style::default()
@@ -1264,14 +1352,27 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
         );
     frame.render_widget(tabs, chunks[0]);
 
-    // Tab content
-    render_management_tab_content(model, frame, chunks[1]);
+    // Tab content — wrap with focus-aware border
+    let content_focused = model.active_focus == FocusPane::TabContent;
+    let content_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(content_focused));
+    let inner = content_block.inner(chunks[1]);
+    frame.render_widget(content_block, chunks[1]);
+    render_management_tab_content(model, frame, inner);
 }
 
 /// Render the content of the active management tab.
 fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
     match model.management_tab {
-        ManagementTab::Branches => screens::branches::render(&model.branches, frame, area),
+        ManagementTab::Branches => {
+            let focus = match model.active_focus {
+                FocusPane::TabContent => screens::branches::BranchesFocus::List,
+                FocusPane::BranchDetail => screens::branches::BranchesFocus::Detail,
+                _ => screens::branches::BranchesFocus::None,
+            };
+            screens::branches::render(&model.branches, frame, area, focus);
+        }
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -1307,10 +1408,11 @@ fn render_sessions_area(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Render session content (Tab mode = single, Grid mode = tiled).
 fn render_session_content(model: &Model, frame: &mut Frame, area: Rect) {
+    let terminal_focused = model.active_focus == FocusPane::Terminal;
     match model.session_layout {
         SessionLayout::Tab => {
             if let Some(session) = model.active_session_tab() {
-                render_single_session(session, frame, area);
+                render_single_session(session, terminal_focused, frame, area);
             }
         }
         SessionLayout::Grid => {
@@ -1320,9 +1422,15 @@ fn render_session_content(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 /// Render a single session pane.
-fn render_single_session(session: &crate::model::SessionTab, frame: &mut Frame, area: Rect) {
+fn render_single_session(
+    session: &crate::model::SessionTab,
+    terminal_focused: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(focused_border_style(terminal_focused))
         .title(session.name.as_str());
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1563,12 +1671,15 @@ mod tests {
     fn update_error_queue() {
         let mut model = test_model();
         update(&mut model, Message::PushError("e1".into()));
-        update(&mut model, Message::PushError("e2".into()));
+        update(
+            &mut model,
+            Message::PushErrorNotification(Notification::new(Severity::Error, "core", "e2")),
+        );
         assert_eq!(model.error_queue.len(), 2);
 
         update(&mut model, Message::DismissError);
         assert_eq!(model.error_queue.len(), 1);
-        assert_eq!(model.error_queue.front().unwrap(), "e2");
+        assert_eq!(model.error_queue.front().unwrap().message, "e2");
     }
 
     #[test]
@@ -2091,6 +2202,84 @@ mod tests {
     }
 
     #[test]
+    fn update_key_input_esc_dismisses_warn_notification_when_unclaimed() {
+        let mut model = test_model();
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn update_key_input_esc_preserves_warn_notification_during_branch_search() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.search_active = true;
+        model.branches.search_query = "detached".into();
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_some());
+        assert!(!model.branches.search_active);
+        assert!(model.branches.search_query.is_empty());
+    }
+
+    #[test]
+    fn update_key_input_esc_preserves_warn_notification_during_settings_edit() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Settings;
+        model.settings.editing = true;
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_some());
+        assert!(!model.settings.editing);
+    }
+
+    #[test]
+    fn update_key_input_esc_preserves_warn_notification_during_issue_search() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Issues;
+        model.issues.search_active = true;
+        model.issues.search_query = "warn".into();
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_some());
+        assert!(!model.issues.search_active);
+        assert!(model.issues.search_query.is_empty());
+    }
+
+    #[test]
     fn update_notify_info_auto_dismisses_after_timeout() {
         let mut model = test_model();
         let notification = Notification::new(Severity::Info, "core", "Started");
@@ -2106,15 +2295,33 @@ mod tests {
     #[test]
     fn update_notify_error_routes_to_error_queue_and_log() {
         let mut model = test_model();
-        let notification = Notification::new(Severity::Error, "pty", "Crashed");
+        let notification =
+            Notification::new(Severity::Error, "pty", "Crashed").with_detail("stack trace");
 
         update(&mut model, Message::Notify(notification));
 
         assert_eq!(model.error_queue.len(), 1);
-        assert_eq!(model.error_queue.front().unwrap(), "Crashed");
+        let queued = model.error_queue.front().unwrap();
+        assert_eq!(queued.severity, Severity::Error);
+        assert_eq!(queued.source, "pty");
+        assert_eq!(queued.message, "Crashed");
+        assert_eq!(queued.detail.as_deref(), Some("stack trace"));
         assert_eq!(model.logs.entries.len(), 1);
         assert_eq!(model.logs.entries[0].source, "pty");
         assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn update_notify_debug_logs_without_ui_surface() {
+        let mut model = test_model();
+        let notification = Notification::new(Severity::Debug, "pty", "raw bytes");
+
+        update(&mut model, Message::Notify(notification));
+
+        assert_eq!(model.logs.entries.len(), 1);
+        assert_eq!(model.logs.entries[0].severity, Severity::Debug);
+        assert!(model.current_notification.is_none());
+        assert!(model.error_queue.is_empty());
     }
 
     #[test]

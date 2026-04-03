@@ -10,9 +10,11 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `8/24` completed items.
+- Task traceability snapshot: `tasks.md` currently records `22/24` completed items.
 - Notes: Settings and profile artifacts are ready for more implementation work.
-- Notes: Voice-setting parity is an execution gap, not a missing-analysis or missing-artifact blocker.
+- Notes: Voice settings now cover serde defaults for both direct `[voice]` TOML parsing and a missing root voice section.
+- Notes: The remaining gap is manual completion evidence plus any future system-level validation beyond the current task set.
+- Notes: The current blocker is execution completeness, not artifact readiness.
 
 ## Next
 - `gwt-spec-implement`

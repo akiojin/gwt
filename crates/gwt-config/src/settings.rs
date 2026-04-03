@@ -200,4 +200,17 @@ debug = true
         assert_eq!(loaded.default_base_branch, "main");
         assert!(loaded.protected_branches.contains(&"main".to_string()));
     }
+
+    #[test]
+    fn missing_voice_section_uses_voice_defaults() {
+        let toml_str = r#"
+debug = true
+"#;
+        let loaded: Settings = toml::from_str(toml_str).unwrap();
+        assert!(loaded.voice.model_path.is_none());
+        assert_eq!(loaded.voice.hotkey, "Ctrl+G,v");
+        assert_eq!(loaded.voice.input_device, "system_default");
+        assert_eq!(loaded.voice.language, "auto");
+        assert!(!loaded.voice.enabled);
+    }
 }
