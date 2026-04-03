@@ -322,6 +322,14 @@ pub enum BranchesFocus {
     None,
 }
 
+/// Build a bordered block with focus-aware border color (Cyan when focused, Gray otherwise).
+fn focus_block(is_focused: bool) -> Block<'static> {
+    let color = if is_focused { Color::Cyan } else { Color::Gray };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+}
+
 /// Render the branches screen with split layout: top = list, bottom = detail.
 pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, focus: BranchesFocus) {
     // Split vertically: top 50% for list, bottom 50% for detail
@@ -379,7 +387,6 @@ fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
 
 /// Render the branch list grouped by category.
 fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
-    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
     let filtered = state.filtered_branches();
 
     if filtered.is_empty() {
@@ -388,11 +395,8 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
         } else {
             "No branches loaded"
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color));
         let p = Paragraph::new(msg)
-            .block(block)
+            .block(focus_block(is_focused))
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(p, area);
         return;
@@ -432,10 +436,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
     // Visual index = data index + number of headers inserted before it
     let visual_selected = state.selected + headers_before_selected;
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
-    let list = List::new(items).block(block).highlight_style(
+    let list = List::new(items).block(focus_block(is_focused)).highlight_style(
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -447,12 +448,8 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
 
 /// Render the branch detail panel (bottom half).
 fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
-    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
     let title = super::build_tab_title(&DETAIL_SECTION_LABELS, state.detail_section);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .title(title);
+    let block = focus_block(is_focused).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
