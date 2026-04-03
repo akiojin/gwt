@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -510,39 +510,19 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
 
 /// Render the settings screen.
 pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Category tabs
-            Constraint::Min(0),    // Fields
-        ])
-        .split(area);
-
-    render_category_tabs(state, frame, chunks[0]);
-    render_fields(state, frame, chunks[1]);
-}
-
-/// Render the category tab bar.
-fn render_category_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
-    let titles: Vec<Line> = SettingsCategory::ALL
-        .iter()
-        .map(|c| Line::from(c.label()))
-        .collect();
-
     let active_idx = SettingsCategory::ALL
         .iter()
         .position(|c| *c == state.category)
         .unwrap_or(0);
+    let labels: Vec<&str> = SettingsCategory::ALL.iter().map(|c| c.label()).collect();
+    let tab_title = super::build_tab_title(&labels, active_idx);
 
-    let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title("Settings"))
-        .select(active_idx)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_widget(tabs, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(tab_title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    render_fields(state, frame, inner);
 }
 
 /// Render the fields list for the current category.
@@ -1005,7 +985,7 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(text.contains("Settings"));
+        assert!(text.contains("General"));
     }
 
     #[test]

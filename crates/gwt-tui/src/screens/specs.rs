@@ -580,8 +580,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5), // Spec header
-            Constraint::Length(3), // Section tabs
-            Constraint::Min(0),    // Section content
+            Constraint::Min(0),    // Section content (tabs in block title)
         ])
         .split(area);
 
@@ -603,20 +602,11 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
 
-    // Section tabs
-    let section_titles: Vec<Line> = DETAIL_SECTIONS.iter().map(|s| Line::from(*s)).collect();
-    let section_tabs = ratatui::widgets::Tabs::new(section_titles)
-        .block(Block::default().borders(Borders::ALL).title("Sections"))
-        .select(state.detail_section)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_widget(section_tabs, chunks[1]);
-
-    // Section content placeholder
+    // Section content with tabs in block title
     let section_name = DETAIL_SECTIONS[state.detail_section];
+    let section_labels: Vec<&str> = DETAIL_SECTIONS.to_vec();
+    let tab_title = super::build_tab_title(&section_labels, state.detail_section);
+
     let content_text = if state.detail_editing {
         format!(
             "{}\n_\nEnter: save | Esc: cancel | Backspace: delete",
@@ -637,16 +627,12 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
     };
     let content_block = Block::default()
         .borders(Borders::ALL)
-        .title(if state.detail_editing {
-            format!("Editing {}", section_name)
-        } else {
-            section_name.to_string()
-        });
+        .title(tab_title);
     let content = Paragraph::new(content_text)
         .block(content_block)
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(Color::White));
-    frame.render_widget(content, chunks[2]);
+    frame.render_widget(content, chunks[1]);
 }
 
 #[cfg(test)]

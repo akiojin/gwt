@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -401,36 +401,22 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
 
 /// Render the branch detail panel (bottom half).
 fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Section tabs
-            Constraint::Min(0),    // Section content
-        ])
-        .split(area);
-
-    // Section tab bar
-    let titles: Vec<Line> = DETAIL_SECTION_LABELS
-        .iter()
-        .map(|label| Line::from(*label))
-        .collect();
-    let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title("Detail").border_style(Style::default().fg(if is_focused { Color::Cyan } else { Color::Gray })))
-        .select(state.detail_section)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_widget(tabs, chunks[0]);
+    let title = super::build_tab_title(&DETAIL_SECTION_LABELS, state.detail_section);
+    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(border_color));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     // Section content
     match state.detail_section {
-        0 => render_detail_overview(state, frame, chunks[1]),
-        1 => render_detail_specs(state, frame, chunks[1]),
-        2 => render_detail_git_status(state, frame, chunks[1]),
-        3 => render_detail_sessions(frame, chunks[1]),
-        4 => render_detail_actions(state, frame, chunks[1]),
+        0 => render_detail_overview(state, frame, inner),
+        1 => render_detail_specs(state, frame, inner),
+        2 => render_detail_git_status(state, frame, inner),
+        3 => render_detail_sessions(frame, inner),
+        4 => render_detail_actions(state, frame, inner),
         _ => {}
     }
 }

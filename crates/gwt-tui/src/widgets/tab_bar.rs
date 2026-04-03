@@ -1,43 +1,42 @@
 //! Session tab bar widget.
+//!
+//! Session tabs are now rendered as Block titles (same pattern as management tabs).
 
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Tabs,
+    widgets::{Block, Borders},
     Frame,
 };
 
 use crate::model::Model;
 
-/// Render the session tab bar.
+/// Render the session tab bar as a bordered block with tab title.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
-    let titles: Vec<Line> = model
-        .sessions
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let icon = s.tab_type.icon();
-            let style = if i == model.active_session {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, s) in model.sessions.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("│"));
+        }
+        let icon = s.tab_type.icon();
+        let label = format!(" {icon} {} ", s.name);
+        if i == model.active_session {
+            spans.push(Span::styled(
+                label,
                 Style::default()
                     .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            Line::from(Span::styled(format!(" {icon} {} ", s.name), style))
-        })
-        .collect();
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
+        }
+    }
 
-    let tabs = Tabs::new(titles)
-        .select(model.active_session)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    frame.render_widget(tabs, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(spans));
+    frame.render_widget(block, area);
 }
 
 #[cfg(test)]

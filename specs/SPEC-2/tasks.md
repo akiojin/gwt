@@ -121,3 +121,20 @@
 - [ ] T076 Verify coverage >= 90%.
 - [ ] T077 Run Skill tool with skill: "simplify".
 - [ ] T078 Update SPEC-2 metadata phase to Done.
+
+## Note: Unified Tab Display Pattern
+
+All tab displays across the TUI are now unified to use the Block title pattern
+(tab names rendered in the border title, active=yellow/bold, inactive=gray,
+separated by │). This includes:
+
+- Management tabs (app.rs) - already Block title
+- Session tabs (app.rs) - already Block title
+- Branch detail section tabs (branches.rs) - converted from Tabs::new
+- SPEC detail section tabs (specs.rs) - converted from Tabs::new
+- Settings category tabs (settings.rs) - converted from Tabs::new
+- Log filter tabs (logs.rs) - converted from Tabs::new
+- Session tab bar widget (widgets/tab_bar.rs) - converted from Tabs::new
+
+A shared `build_tab_title()` utility in `screens/mod.rs` is available for all
+screens to use.
