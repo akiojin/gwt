@@ -2,7 +2,14 @@
 
 ## Background
 
-gwt-tui extends terminal input with voice transcription (Qwen3-ASR), file paste from clipboard, and AI-assisted branch naming. The voice backend still lacks its end-to-end recorder path, but the TUI hotkey and disabled-config guard now exist. The AI branch naming flow is live in the wizard, including explicit manual-entry fallback in the suggestion list and normalization to `3..=5` git-safe names. File paste now shell-quotes injected paths for safer PTY input, but still needs the remaining platform-specific extraction gaps closed.
+gwt-tui extends terminal input with voice transcription (Qwen3-ASR), file
+paste from clipboard, and AI-assisted branch naming. The voice backend still
+lacks its end-to-end recorder path, but the TUI hotkey, disabled-config
+guard, status indicator, and PTY injection path now exist. The AI branch
+naming flow is live in the wizard, including explicit manual-entry fallback in
+the suggestion list and normalization to `3..=5` git-safe names. File paste
+now shell-quotes injected paths and parses `file://` clipboard payloads for
+safer PTY input.
 
 ## User Stories
 
@@ -19,7 +26,7 @@ As a developer, I want to dictate commands using voice input so that I can inter
 5. Given 3 seconds of silence during recording, when silence is detected, then recording stops and transcription begins.
 6. Given voice input is disabled in settings, when I press Ctrl+G,v, then nothing happens.
 
-### US-2: Paste File Paths from Clipboard (P1) -- NOT IMPLEMENTED
+### US-2: Paste File Paths from Clipboard (P1) -- IMPLEMENTED
 
 As a developer, I want to paste file paths from the system clipboard into the terminal so that I can quickly reference files without typing paths manually.
 
@@ -30,7 +37,7 @@ As a developer, I want to paste file paths from the system clipboard into the te
 3. Given the clipboard contains text (not file references), when I press Ctrl+G,p, then the text is pasted as-is.
 4. Given the clipboard is empty, when I press Ctrl+G,p, then nothing is pasted and no error is shown.
 
-### US-3: Get AI-Suggested Branch Names in Wizard (P2) -- PARTIALLY IMPLEMENTED
+### US-3: Get AI-Suggested Branch Names in Wizard (P2) -- IMPLEMENTED
 
 As a developer, I want AI-suggested branch names when creating a new worktree so that I can quickly pick a well-formatted name.
 

@@ -1,17 +1,22 @@
 # Progress: SPEC-4 - GitHub Integration
 
 ## Progress
-- Status: `open`
-- Phase: `Ready for Dev`
-- Task progress: `0/36` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T00:23:11Z`
+- Status: `in-progress`
+- Phase: `Implementation`
+- Task progress: `36/36` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T13:05:00Z`
 
 ## Done
 - The missing planning support files for this SPEC are now present.
-- Current notes distinguish between screen scaffolding and full GitHub workflow completion.
-- Review checklists now make the unfinished state explicit instead of leaving it implied.
+- Git View now has focused verification for file status parsing, diff preview
+  truncation, commit loading, and management-tab refresh behavior.
+- PR dashboard now has focused verification for parser coverage, screen
+  rendering, and snapshot coverage for the list/detail flow.
+- The remaining gap is completion-gate review and the explicitly partial
+  GitHub fields called out in `spec.md`, not unchecked execution tasks.
 
 ## Next
-- Finish GitHub data wiring for PR, review, CI, and divergence views.
-- Re-run reviewer quickstart once the live data surfaces are wired.
-- Update `tasks.md` only when the implemented behavior matches those flows.
+- Run the reviewer flow and capture final evidence for the partial GitHub data
+  surfaces that are already live.
+- Reconcile acceptance against the current partial implementation before any
+  `Done` transition.

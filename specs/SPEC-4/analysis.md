@@ -10,10 +10,14 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `0/36` completed items.
-- Notes: Artifact coverage is sufficient for execution even though implementation is largely still open.
-- Notes: The current gap is delivery scope (`0/36` tasks complete), not a spec-readiness gap.
+- Task traceability snapshot: `tasks.md` currently records `36/36` completed
+  items.
+- Notes: Git View and PR dashboard execution tasks are checked, with focused
+  tests now covering gwt-git parsing, git-view rendering, and PR dashboard
+  snapshots.
+- Notes: The remaining gap is reviewer-flow and acceptance closure plus the
+  explicitly partial GitHub fields still called out in `spec.md`.
 
 ## Next
-- `gwt-spec-implement`
+- Run completion-gate review and reviewer evidence.
 - This report is a readiness gate, not a completion certificate.

@@ -8,6 +8,7 @@
 5. Treat voice backend completion and manual reviewer passes as remaining work until explicitly verified.
 
 ## Repeatable Evidence
+- `cargo test -p gwt-voice -- --nocapture`
 - `cargo test -p gwt-tui handle_voice_start_recording_is_noop_when_disabled -- --nocapture`
 - `cargo test -p gwt-tui input::keybind -- --nocapture`
 - `cargo test -p gwt-tui wizard -- --nocapture`
@@ -16,5 +17,6 @@
 
 ## Expected Result
 - The reviewer sees the current implemented scope for input extensions.
-- Any missing behavior is logged against the remaining `12` unchecked tasks.
+- Any missing behavior is logged against acceptance gaps or the incomplete
+  real voice backend, not against unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.
