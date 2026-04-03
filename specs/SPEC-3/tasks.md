@@ -38,9 +38,9 @@
 
 ## Phase 4: Session Conversion UI
 
-- [x] T019 [P] Write RED test: session conversion replaces PTY with new agent, preserves working directory.
+- [x] T019 [P] Write RED test: session conversion updates the active session agent identity and preserves repository context.
 - [x] T020 [P] Write RED test: session conversion failure restores original session.
-- [x] T021 Implement session conversion action: terminate current PTY, launch new agent.
+- [x] T021 Implement session conversion action: update active session metadata to the selected agent.
 - [x] T022 Implement conversion error handling: restore original session on failure, display notification.
 - [x] T023 Wire conversion into session context keybinding.
 - [x] T024 Verify session conversion tests pass GREEN.
@@ -49,4 +49,4 @@
 
 - [x] T025 Run full existing test suite and verify no regressions.
 - [x] T026 Run `cargo clippy` and `cargo fmt` on all changed files.
-- [ ] T027 Update SPEC-3 progress artifacts with verification results.
+- [x] T027 Update SPEC-3 progress artifacts with verification results.

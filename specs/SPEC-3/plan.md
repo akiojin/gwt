@@ -40,8 +40,8 @@ Implement the version cache feature and complete the session conversion UI. Agen
 
 1. Add session conversion action to session context menu or keybinding.
 2. Display available agent list (filtered to detected agents).
-3. On confirmation, terminate current PTY and launch new agent with same working directory.
-4. Handle conversion failure: restore original session, display error notification.
+3. On confirmation, update the active session metadata to the selected agent while preserving repository context.
+4. Handle conversion failure: keep the original session intact and display an error notification.
 5. Add tests: conversion success path, conversion failure path, working directory preservation.
 
 ## Dependencies

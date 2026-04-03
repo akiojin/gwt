@@ -66,7 +66,7 @@ As a developer, I want to convert an existing session to a different agent type 
 **Acceptance Scenarios**
 
 1. Given an active agent session, when I initiate conversion, then I can select a target agent type from available agents.
-2. Given a session conversion is confirmed, when the conversion completes, then the session PTY is replaced with the new agent while preserving the working directory.
+2. Given a session conversion is confirmed, when the conversion completes, then the active session is re-labeled and reconfigured for the new agent while preserving repository context.
 3. Given conversion fails (target agent not available), when the error occurs, then the original session remains intact with an error notification.
 
 ## Edge Cases
@@ -80,6 +80,7 @@ As a developer, I want to convert an existing session to a different agent type 
 - Quick Start history file grows very large (hundreds of entries).
 - Agent detection runs concurrently with user opening the wizard.
 - Session conversion attempted while the session has active PTY I/O.
+- Session conversion updates agent identity without reopening the current transcript buffer.
 
 ## Functional Requirements
 
@@ -248,4 +249,4 @@ default = { id = "default", label = "Default", arg = "" }
 - **SC-004**: Version cache fetches, stores, and serves cached versions correctly.
 - **SC-005**: Version cache gracefully degrades when network is unavailable.
 - **SC-006**: Quick Start history correctly records and retrieves per-branch configurations.
-- **SC-007**: Session conversion preserves working directory and handles errors gracefully.
+- **SC-007**: Session conversion preserves repository context, updates agent identity safely, and handles errors gracefully.

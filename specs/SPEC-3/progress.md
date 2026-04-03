@@ -3,15 +3,16 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `32/33` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T00:23:11Z`
+- Task progress: `33/33` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T01:45:40Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
-- Progress tracking no longer implies that PTY relaunch exists when the code currently performs metadata-driven conversion.
+- Session conversion artifacts now consistently describe the implemented metadata-driven agent switch instead of PTY relaunch.
 - Supporting artifacts now cover execution, review, and completion-gate reconciliation for this near-finished SPEC.
+- Recent verification exists for SPEC-3 slices: `cargo fmt --all`, `cargo test -p gwt-tui`, `cargo test -p gwt-core -p gwt-tui`, `cargo clippy -p gwt-tui --all-targets --all-features -- -D warnings`, `cargo clippy --all-targets --all-features -- -D warnings`, `bunx markdownlint-cli specs/SPEC-3/tasks.md`, and `bunx commitlint --from HEAD~1 --to HEAD`.
 
 ## Next
-- Resolve the final unchecked task around PTY replacement versus accepted conversion semantics.
-- Re-run focused session-conversion verification once that decision lands.
+- Run the reviewer flow in `quickstart.md` and capture completion evidence.
+- Reconcile acceptance scenarios against the live branch before changing SPEC status.
 - Only then move the SPEC to a true completion state.
