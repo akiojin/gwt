@@ -15,6 +15,7 @@ use crate::screens::logs::LogsState;
 use crate::screens::port_select::PortSelectState;
 use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
+use crate::screens::specs::SpecsState;
 use crate::screens::service_select::ServiceSelectState;
 use crate::screens::settings::SettingsState;
 use crate::screens::versions::VersionsState;
@@ -79,6 +80,7 @@ pub enum SessionLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementTab {
     Branches,
+    Specs,
     Issues,
     PrDashboard,
     Profiles,
@@ -90,8 +92,9 @@ pub enum ManagementTab {
 
 impl ManagementTab {
     /// All tabs in display order.
-    pub const ALL: [ManagementTab; 8] = [
+    pub const ALL: [ManagementTab; 9] = [
         ManagementTab::Branches,
+        ManagementTab::Specs,
         ManagementTab::Issues,
         ManagementTab::PrDashboard,
         ManagementTab::Profiles,
@@ -105,6 +108,7 @@ impl ManagementTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Branches => "Branches",
+            Self::Specs => "Specs",
             Self::Issues => "Issues",
             Self::PrDashboard => "PRs",
             Self::Profiles => "Profiles",
@@ -236,6 +240,8 @@ pub struct Model {
     pub(crate) terminal_size: (u16, u16),
     /// Branches screen state.
     pub(crate) branches: BranchesState,
+    /// Specs screen state.
+    pub(crate) specs: SpecsState,
     /// Profiles screen state.
     pub(crate) profiles: ProfilesState,
     /// Issues screen state.
@@ -298,6 +304,7 @@ impl Model {
             repo_path,
             terminal_size: (80, 24),
             branches: BranchesState::default(),
+            specs: SpecsState::default(),
             profiles: ProfilesState::default(),
             issues: IssuesState::default(),
             git_view: GitViewState::default(),
@@ -492,13 +499,21 @@ mod tests {
     #[test]
     fn management_tab_labels() {
         assert_eq!(ManagementTab::Branches.label(), "Branches");
+        assert_eq!(ManagementTab::Specs.label(), "Specs");
         assert_eq!(ManagementTab::Settings.label(), "Settings");
         assert_eq!(ManagementTab::Logs.label(), "Logs");
     }
 
     #[test]
-    fn management_tab_all_has_eight_entries() {
-        assert_eq!(ManagementTab::ALL.len(), 8);
+    fn management_tab_all_has_nine_entries() {
+        assert_eq!(ManagementTab::ALL.len(), 9);
+    }
+
+    #[test]
+    fn management_tab_labels_include_specs() {
+        assert!(ManagementTab::ALL
+            .iter()
+            .any(|tab| tab.label() == "Specs"));
     }
 
     #[test]

@@ -10,8 +10,9 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `12/37` completed items.
-- Notes: The SPEC now explicitly reflects the disconnected live-shell entry point and includes persisted `analysis.md` in the local artifact model.
+- Task traceability snapshot: `tasks.md` currently records `18/43` completed items.
+- Notes: The SPEC now reflects the restored live-shell Specs entry point and includes persisted `analysis.md` in the local artifact model.
+- Notes: The shell can now load local metadata, open detail, return with `Esc`, and prefill the wizard from the selected SPEC.
 - Notes: Further work can proceed from the repaired artifact set without another clarification loop.
 
 ## Next

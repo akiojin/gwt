@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Issues │ PRs │ Profiles │ ┐┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │ PRs │ Pro┐┌ ▶ Shell ─────────────────────────────┐
 │Versions                              ││Session: Shell (80x24)                │
 │No version tags found                 ││                                      │
 │                                      ││                                      │

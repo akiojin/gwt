@@ -1,5 +1,16 @@
 # SPEC-5: Tasks
 
+## Phase 0: Live Shell Reintegration
+
+### 0.1 Management Shell Reachability
+
+- [x] TEST: Unit test for `ManagementTab::ALL` and labels including `Specs`
+- [x] TEST: Integration test for `load_initial_data` populating Specs state from local `metadata.json`
+- [x] TEST: Integration test for live shell `Enter` / `Esc` Specs detail navigation
+- [x] TEST: Integration test for live shell `Shift+Enter` opening the wizard with SPEC id/title prefill
+- [x] IMPL: Reconnect `Specs` to the management shell tab set and management rendering path
+- [x] IMPL: Load local `specs/SPEC-*/metadata.json` into `model.specs` during startup
+
 ## Phase 1: Semantic Search
 
 ### 1.1 ChromaDB Indexing [P]

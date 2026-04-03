@@ -3,15 +3,16 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `12/37` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T00:23:11Z`
+- Task progress: `18/43` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T04:29:59Z`
 
 ## Done
-- Supporting artifacts now describe the real disconnected state of SPEC management in the product shell.
-- The completion gate no longer implies that the screen is user-reachable just because implementation files exist.
-- Checklists now separate artifact truth from pending product reintegration work.
+- The management shell now exposes a live Specs tab again.
+- Startup loading now reads local `specs/SPEC-*/metadata.json` into `model.specs` in sorted SPEC order.
+- The live Specs tab now supports `Enter` to open detail, `Esc` to return to the list, and `Shift+Enter` to open the wizard with SPEC id/title prefill.
+- Supporting artifacts now reflect that reachability is back, while semantic search and richer editing remain open.
 
 ## Next
-- Choose and implement the live entry point for local SPEC management.
 - Add semantic search and persistent artifact editing with verification.
-- Re-run acceptance only after the feature is reachable from the shell.
+- Strengthen SPEC launch context beyond id/title prefill to include richer SPEC-derived context.
+- Re-run acceptance against the now-reachable shell flow and keep the artifact set aligned.

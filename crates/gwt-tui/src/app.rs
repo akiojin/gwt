@@ -373,6 +373,77 @@ pub fn load_initial_data(model: &mut Model) {
             screens::versions::VersionsMessage::SetTags(tags),
         );
     }
+
+    // -- Specs --
+    model.specs.spec_root = Some(model.repo_path.clone());
+    if let Some(specs) = load_specs_from_disk(&model.repo_path) {
+        screens::specs::update(&mut model.specs, screens::specs::SpecsMessage::SetSpecs(specs));
+    }
+}
+
+fn load_specs_from_disk(root: &std::path::Path) -> Option<Vec<screens::specs::SpecItem>> {
+    let specs_root = root.join("specs");
+    let entries = std::fs::read_dir(specs_root).ok()?;
+    let mut specs = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !dir_name.starts_with("SPEC-") {
+            continue;
+        }
+
+        let metadata_path = path.join("metadata.json");
+        let Ok(content) = std::fs::read_to_string(&metadata_path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+
+        let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let title = value
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let phase = value
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let status = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        specs.push(screens::specs::SpecItem {
+            id: id.to_string(),
+            title,
+            phase,
+            status,
+        });
+    }
+
+    specs.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
+    Some(specs)
+}
+
+fn spec_sort_key(spec_id: &str) -> (u64, String) {
+    let numeric = spec_id
+        .strip_prefix("SPEC-")
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    (numeric, spec_id.to_string())
 }
 
 /// Route a key event to the initialization screen.
@@ -492,6 +563,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::logs::LogsMessage;
     use screens::pr_dashboard::PrDashboardMessage;
     use screens::profiles::ProfilesMessage;
+    use screens::specs::SpecsMessage;
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
 
@@ -541,6 +613,64 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::branches::update(&mut model.branches, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
+            }
+        }
+        ManagementTab::Specs => {
+            if model.specs.search_active {
+                let msg = match key.code {
+                    KeyCode::Esc => Some(SpecsMessage::SearchClear),
+                    KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
+                    _ => search_input_char(&key).map(SpecsMessage::SearchInput),
+                };
+                if let Some(m) = msg {
+                    screens::specs::update(&mut model.specs, m);
+                    return;
+                }
+            }
+
+            if model.specs.detail_view {
+                match key.code {
+                    KeyCode::Esc => {
+                        screens::specs::update(&mut model.specs, SpecsMessage::ToggleDetail);
+                    }
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        if let Some((spec_id, spec_title)) = model
+                            .specs
+                            .selected_spec()
+                            .map(|spec| (spec.id.clone(), spec.title.clone()))
+                        {
+                            update(
+                                model,
+                                Message::OpenWizardWithSpec(spec_id, spec_title),
+                            );
+                        }
+                    }
+                    KeyCode::Enter => {
+                        screens::specs::update(&mut model.specs, SpecsMessage::ToggleDetail);
+                    }
+                    KeyCode::Tab => {
+                        screens::specs::update(&mut model.specs, SpecsMessage::NextSection);
+                    }
+                    KeyCode::BackTab => {
+                        screens::specs::update(&mut model.specs, SpecsMessage::PrevSection);
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            let msg = match key.code {
+                KeyCode::Down => Some(SpecsMessage::MoveDown),
+                KeyCode::Up => Some(SpecsMessage::MoveUp),
+                KeyCode::Enter => Some(SpecsMessage::ToggleDetail),
+                KeyCode::Char('/') => Some(SpecsMessage::SearchStart),
+                KeyCode::Char('r') => Some(SpecsMessage::Refresh),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                screens::specs::update(&mut model.specs, m);
             } else if key.code == KeyCode::Esc {
                 dismiss_warn_notification(model);
             }
@@ -1272,6 +1402,7 @@ fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
+        ManagementTab::Specs => model.specs.search_active || model.specs.editing || model.specs.detail_editing,
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -1374,6 +1505,7 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
             };
             screens::branches::render(&model.branches, frame, area, focus);
         }
+        ManagementTab::Specs => screens::specs::render(&model.specs, frame, area),
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -1526,6 +1658,7 @@ mod tests {
     use gwt_agent::{version_cache::VersionEntry, AgentId, DetectedAgent, VersionCache};
     use gwt_notification::{Notification, Severity};
     use std::path::PathBuf;
+    use std::{fs, path::Path};
 
     fn test_model() -> Model {
         Model::new(PathBuf::from("/tmp/test"))
@@ -1571,6 +1704,22 @@ mod tests {
         }
     }
 
+    fn write_spec_fixture(root: &Path, spec_id: &str, title: &str, phase: &str, status: &str) {
+        let spec_dir = root.join("specs").join(spec_id);
+        fs::create_dir_all(&spec_dir).unwrap();
+        fs::write(
+            spec_dir.join("metadata.json"),
+            serde_json::json!({
+                "id": spec_id,
+                "title": title,
+                "phase": phase,
+                "status": status,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn update_quit_sets_flag() {
         let mut model = test_model();
@@ -1599,6 +1748,24 @@ mod tests {
         );
         assert_eq!(model.management_tab, ManagementTab::Settings);
         assert_eq!(model.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn load_initial_data_populates_specs_from_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-10", "Tenth", "draft", "open");
+        write_spec_fixture(dir.path(), "SPEC-2", "Second", "implementation", "active");
+        write_spec_fixture(dir.path(), "SPEC-1", "First", "planning", "draft");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        assert_eq!(model.specs.spec_root.as_deref(), Some(dir.path()));
+        let ids: Vec<_> = model.specs.specs.iter().map(|spec| spec.id.as_str()).collect();
+        assert_eq!(ids, vec!["SPEC-1", "SPEC-2", "SPEC-10"]);
+        assert_eq!(model.specs.specs[0].title, "First");
+        assert_eq!(model.specs.specs[1].phase, "implementation");
+        assert_eq!(model.specs.specs[2].status, "open");
     }
 
     #[test]
@@ -2398,6 +2565,45 @@ mod tests {
         route_key_to_management(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert_eq!(model.issues.search_query, "b");
+    }
+
+    #[test]
+    fn route_key_to_management_specs_enter_opens_detail_and_escape_returns_list() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![crate::screens::specs::SpecItem {
+            id: "SPEC-5".to_string(),
+            title: "Local SPEC management".to_string(),
+            phase: "implementation".to_string(),
+            status: "in-progress".to_string(),
+        }];
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(model.specs.detail_view);
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!model.specs.detail_view);
+    }
+
+    #[test]
+    fn route_key_to_management_specs_shift_enter_opens_prefilled_wizard() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![crate::screens::specs::SpecItem {
+            id: "SPEC-42".to_string(),
+            title: "Answer".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        model.specs.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        let wizard = model.wizard.as_ref().unwrap();
+        let ctx = wizard.spec_context.as_ref().unwrap();
+        assert_eq!(ctx.spec_id, "SPEC-42");
+        assert_eq!(ctx.title, "Answer");
+        assert_eq!(wizard.branch_name, "feature/spec-42");
     }
 
     #[test]
