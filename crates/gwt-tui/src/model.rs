@@ -61,7 +61,11 @@ impl FocusPane {
 
     pub fn prev(self) -> Self {
         let idx = Self::ALL.iter().position(|&p| p == self).unwrap_or(0);
-        Self::ALL[if idx == 0 { Self::ALL.len() - 1 } else { idx - 1 }]
+        Self::ALL[if idx == 0 {
+            Self::ALL.len() - 1
+        } else {
+            idx - 1
+        }]
     }
 }
 
@@ -204,7 +208,7 @@ pub struct Model {
     /// Active management tab.
     pub management_tab: ManagementTab,
     /// Error queue (shown as overlays).
-    pub(crate) error_queue: VecDeque<String>,
+    pub(crate) error_queue: VecDeque<Notification>,
     /// Whether the app should quit.
     pub quit: bool,
     /// Repository path.

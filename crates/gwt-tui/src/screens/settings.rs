@@ -556,6 +556,18 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         return;
     }
 
+    let chunks = if state.category == SettingsCategory::Voice && state.save_error.is_some() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0)])
+            .split(area)
+    };
+
     let items: Vec<ListItem> = state
         .fields
         .iter()
@@ -633,7 +645,18 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
     );
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
-    frame.render_stateful_widget(list, area, &mut list_state);
+
+    frame.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    if let Some(error) = state.save_error.as_ref() {
+        let error_block = Block::default().borders(Borders::ALL).title("Save failed");
+        let error_paragraph = Paragraph::new(error.as_str())
+            .block(error_block)
+            .style(Style::default().fg(Color::Red));
+
+        let error_area = if chunks.len() > 1 { chunks[1] } else { area };
+        frame.render_widget(error_paragraph, error_area);
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +677,19 @@ mod tests {
         state.category = SettingsCategory::Voice;
         state.load_category_fields();
         state
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            text.push_str(line.trim_end());
+            text.push('\n');
+        }
+        text
     }
 
     #[test]
@@ -992,6 +1028,28 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_voice_save_error_is_visible() {
+        let mut state = voice_state_with_fields();
+        state.fields[0].value = "/nonexistent/model".to_string();
+        update(&mut state, SettingsMessage::Save);
+        assert!(state.save_error.is_some());
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text = buffer_text(&buf);
+        assert!(text.contains("Save failed"));
+        assert!(text.contains("voice model path does not exist"));
     }
 
     #[test]

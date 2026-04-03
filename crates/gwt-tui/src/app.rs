@@ -24,7 +24,8 @@ use crate::{
     input::voice::VoiceInputMessage,
     message::Message,
     model::{
-        ActiveLayer, ManagementTab, Model, PendingSessionConversion, SessionLayout, SessionTabType,
+        ActiveLayer, FocusPane, ManagementTab, Model, PendingSessionConversion, SessionLayout,
+        SessionTabType,
     },
     screens,
 };
@@ -99,11 +100,27 @@ pub fn update(model: &mut Model, msg: Message) {
             // Phase 2: feed data into vt100 parser for the matching pane
         }
         Message::PushError(err) => {
-            model.error_queue.push_back(err);
+            model
+                .error_queue
+                .push_back(Notification::new(Severity::Error, "app", err));
+        }
+        Message::PushErrorNotification(notification) => {
+            model.error_queue.push_back(notification);
         }
         Message::Notify(notification) => {
             apply_notification(model, notification);
         }
+        Message::ShowNotification(notification) => match notification.severity {
+            Severity::Info => {
+                model.current_notification = Some(notification);
+                model.current_notification_ttl = Some(Duration::from_secs(5));
+            }
+            Severity::Warn => {
+                model.current_notification = Some(notification);
+                model.current_notification_ttl = None;
+            }
+            Severity::Debug | Severity::Error => {}
+        },
         Message::DismissError => {
             model.error_queue.pop_front();
         }
@@ -357,9 +374,7 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     // Wizard overlay takes priority (fullscreen modal)
     if model.wizard.is_some() {
         let msg = match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                Some(screens::wizard::WizardMessage::MoveDown)
-            }
+            KeyCode::Char('j') | KeyCode::Down => Some(screens::wizard::WizardMessage::MoveDown),
             KeyCode::Char('k') | KeyCode::Up => Some(screens::wizard::WizardMessage::MoveUp),
             KeyCode::Enter => Some(screens::wizard::WizardMessage::Select),
             KeyCode::Esc => Some(screens::wizard::WizardMessage::Back),
@@ -647,18 +662,6 @@ fn apply_notification(model: &mut Model, notification: Notification) {
 
     if let Some(msg) = crate::notification_router::route(&notification) {
         update(model, msg);
-    }
-
-    match notification.severity {
-        Severity::Info => {
-            model.current_notification = Some(notification);
-            model.current_notification_ttl = Some(Duration::from_secs(5));
-        }
-        Severity::Warn => {
-            model.current_notification = Some(notification);
-            model.current_notification_ttl = None;
-        }
-        Severity::Debug | Severity::Error => {}
     }
 }
 
@@ -1236,6 +1239,15 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 }
 
+/// Return a border style based on whether the pane is focused.
+fn focused_border_style(is_focused: bool) -> Style {
+    if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
 /// Render the management panel (left side).
 fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
@@ -1254,8 +1266,14 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
         .position(|t| *t == model.management_tab)
         .unwrap_or(0);
 
+    let tab_header_focused = model.active_focus == FocusPane::TabHeader;
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title("Management"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(focused_border_style(tab_header_focused))
+                .title("Management"),
+        )
         .select(active_idx)
         .highlight_style(
             Style::default()
@@ -1264,8 +1282,14 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
         );
     frame.render_widget(tabs, chunks[0]);
 
-    // Tab content
-    render_management_tab_content(model, frame, chunks[1]);
+    // Tab content — wrap with focus-aware border
+    let content_focused = model.active_focus == FocusPane::TabContent;
+    let content_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(content_focused));
+    let inner = content_block.inner(chunks[1]);
+    frame.render_widget(content_block, chunks[1]);
+    render_management_tab_content(model, frame, inner);
 }
 
 /// Render the content of the active management tab.
@@ -1563,12 +1587,15 @@ mod tests {
     fn update_error_queue() {
         let mut model = test_model();
         update(&mut model, Message::PushError("e1".into()));
-        update(&mut model, Message::PushError("e2".into()));
+        update(
+            &mut model,
+            Message::PushErrorNotification(Notification::new(Severity::Error, "core", "e2")),
+        );
         assert_eq!(model.error_queue.len(), 2);
 
         update(&mut model, Message::DismissError);
         assert_eq!(model.error_queue.len(), 1);
-        assert_eq!(model.error_queue.front().unwrap(), "e2");
+        assert_eq!(model.error_queue.front().unwrap().message, "e2");
     }
 
     #[test]
@@ -2106,15 +2133,33 @@ mod tests {
     #[test]
     fn update_notify_error_routes_to_error_queue_and_log() {
         let mut model = test_model();
-        let notification = Notification::new(Severity::Error, "pty", "Crashed");
+        let notification =
+            Notification::new(Severity::Error, "pty", "Crashed").with_detail("stack trace");
 
         update(&mut model, Message::Notify(notification));
 
         assert_eq!(model.error_queue.len(), 1);
-        assert_eq!(model.error_queue.front().unwrap(), "Crashed");
+        let queued = model.error_queue.front().unwrap();
+        assert_eq!(queued.severity, Severity::Error);
+        assert_eq!(queued.source, "pty");
+        assert_eq!(queued.message, "Crashed");
+        assert_eq!(queued.detail.as_deref(), Some("stack trace"));
         assert_eq!(model.logs.entries.len(), 1);
         assert_eq!(model.logs.entries[0].source, "pty");
         assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn update_notify_debug_logs_without_ui_surface() {
+        let mut model = test_model();
+        let notification = Notification::new(Severity::Debug, "pty", "raw bytes");
+
+        update(&mut model, Message::Notify(notification));
+
+        assert_eq!(model.logs.entries.len(), 1);
+        assert_eq!(model.logs.entries[0].severity, Severity::Debug);
+        assert!(model.current_notification.is_none());
+        assert!(model.error_queue.is_empty());
     }
 
     #[test]
