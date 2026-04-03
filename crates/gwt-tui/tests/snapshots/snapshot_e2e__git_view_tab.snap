@@ -1,14 +1,12 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 161
 expression: output
 ---
-┌Management────────────────────────────┐  ▶ Shell
-│ Branches │ Issues │ PRs │ Profiles │ │┌Shell─────────────────────────────────┐
-└──────────────────────────────────────┘│Session: Shell (80x24)                │
-┌──────────────────────────────────────┐│                                      │
-│┌Files (0)───────────────────────────┐││                                      │
-││No changed files                    │││                                      │
+┌ Branches │ Issues │ PRs │ Profiles │ ┐  ▶ Shell
+│┌Files (0)───────────────────────────┐│┌Shell─────────────────────────────────┐
+││No changed files                    │││Session: Shell (80x24)                │
+││                                    │││                                      │
+││                                    │││                                      │
 ││                                    │││                                      │
 ││                                    │││                                      │
 ││                                    │││                                      │
@@ -20,6 +18,7 @@ expression: output
 │└────────────────────────────────────┘││                                      │
 │┌Commits (0)─────────────────────────┐││                                      │
 ││No commits loaded                   │││                                      │
+││                                    │││                                      │
 ││                                    │││                                      │
 ││                                    │││                                      │
 ││                                    │││                                      │

@@ -35,9 +35,7 @@ pub enum ActiveLayer {
 /// Which pane currently owns keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPane {
-    /// Management tab header (Left/Right switches tabs).
-    TabHeader,
-    /// Tab content area (↑↓ navigates list).
+    /// Tab content area (↑↓ navigates list, Left/Right switches tabs).
     #[default]
     TabContent,
     /// Branch detail panel (←→ sections, ↑↓ actions).
@@ -47,8 +45,7 @@ pub enum FocusPane {
 }
 
 impl FocusPane {
-    const ALL: [FocusPane; 4] = [
-        FocusPane::TabHeader,
+    const ALL: [FocusPane; 3] = [
         FocusPane::TabContent,
         FocusPane::BranchDetail,
         FocusPane::Terminal,

@@ -13,8 +13,8 @@ use gwt_notification::{Notification, Severity};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, Paragraph, Tabs},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -167,7 +167,6 @@ pub fn update(model: &mut Model, msg: Message) {
 
                 // Dispatch based on focused pane
                 match model.active_focus {
-                    FocusPane::TabHeader => route_key_to_tab_header(model, key),
                     FocusPane::TabContent => route_key_to_management(model, key),
                     FocusPane::BranchDetail => route_key_to_branch_detail(model, key),
                     FocusPane::Terminal => forward_key_to_active_session(model, key),
@@ -466,32 +465,6 @@ fn branch_detail_action_message(model: &Model) -> Option<screens::branches::Bran
     }
 }
 
-/// Route a key event to the tab header pane (Left/Right switches tabs, Enter focuses content).
-fn route_key_to_tab_header(model: &mut Model, key: crossterm::event::KeyEvent) {
-    let tab_count = ManagementTab::ALL.len();
-    let idx = ManagementTab::ALL
-        .iter()
-        .position(|t| *t == model.management_tab)
-        .unwrap_or(0);
-
-    match key.code {
-        KeyCode::Right => {
-            model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
-        }
-        KeyCode::Left => {
-            model.management_tab =
-                ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
-        }
-        KeyCode::Enter => {
-            model.active_focus = FocusPane::TabContent;
-        }
-        KeyCode::Esc => {
-            dismiss_warn_notification(model);
-        }
-        _ => {}
-    }
-}
-
 /// Route a key event to the branch detail pane (sections, actions, Enter dispatches).
 fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
@@ -521,6 +494,27 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::profiles::ProfilesMessage;
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
+
+    // Left/Right switches tabs when not in text input mode
+    if !is_in_text_input_mode(model) {
+        let tab_count = ManagementTab::ALL.len();
+        let idx = ManagementTab::ALL
+            .iter()
+            .position(|t| *t == model.management_tab)
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Right => {
+                model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
+                return;
+            }
+            KeyCode::Left => {
+                model.management_tab =
+                    ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
+                return;
+            }
+            _ => {}
+        }
+    }
 
     // Tab-specific key routing
     match model.management_tab {
@@ -1320,45 +1314,34 @@ fn focused_border_style(is_focused: bool) -> Style {
 
 /// Render the management panel (left side).
 fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
+    // Build tab title line with active tab highlighted
+    let mut title_line: Vec<Span> = Vec::new();
+    for (i, t) in ManagementTab::ALL.iter().enumerate() {
+        if i > 0 {
+            title_line.push(Span::raw("│"));
+        }
+        if *t == model.management_tab {
+            title_line.push(Span::styled(
+                format!(" {} ", t.label()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            title_line.push(Span::styled(
+                format!(" {} ", t.label()),
+                Style::default().fg(Color::Gray),
+            ));
+        }
+    }
 
-    // Tab bar
-    let titles: Vec<Line> = ManagementTab::ALL
-        .iter()
-        .map(|t| Line::from(t.label()))
-        .collect();
-
-    let active_idx = ManagementTab::ALL
-        .iter()
-        .position(|t| *t == model.management_tab)
-        .unwrap_or(0);
-
-    let tab_header_focused = model.active_focus == FocusPane::TabHeader;
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(focused_border_style(tab_header_focused))
-                .title("Management"),
-        )
-        .select(active_idx)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_widget(tabs, chunks[0]);
-
-    // Tab content — wrap with focus-aware border
     let content_focused = model.active_focus == FocusPane::TabContent;
     let content_block = Block::default()
         .borders(Borders::ALL)
+        .title(Line::from(title_line))
         .border_style(focused_border_style(content_focused));
-    let inner = content_block.inner(chunks[1]);
-    frame.render_widget(content_block, chunks[1]);
+    let inner = content_block.inner(area);
+    frame.render_widget(content_block, area);
     render_management_tab_content(model, frame, inner);
 }
 
