@@ -1,10 +1,10 @@
 # Progress: SPEC-2 - Workspace Shell
 
 ## Progress
-- Status: `in-progress`
-- Phase: `Implementation`
-- Task progress: `80/81` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T13:00:00Z`
+- Status: `done`
+- Phase: `Done`
+- Task progress: `81/81` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T15:20:00Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -15,4 +15,4 @@
 - Session layout now persists `display_mode`, `panel_visible`, and `active_management_tab`, restores on startup, and auto-creates the state directory on save.
 
 ## Next
-- Run the remaining `T077` simplification pass or explicitly retire it if the skill remains unavailable in this environment.
+- Run the reviewer walkthrough in `quickstart.md` if manual release evidence is still required.

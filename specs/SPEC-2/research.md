@@ -3,7 +3,7 @@
 ## Scope Snapshot
 - Canonical scope: Tabs, split grid layout, management panel routing, and keyboard-driven workspace navigation.
 - Current status: `in-progress` / `Implementation`.
-- Task progress: `80/81` checked in `tasks.md`.
+- Task progress: `81/81` checked in `tasks.md`.
 - Notes: Most shell behavior exists, but the supporting docs had drifted from the current management-shell shape and have been refreshed.
 
 ## Decisions
@@ -14,4 +14,4 @@
 - Persist the shell snapshot through a TOML artifact under `~/.gwt/sessions/` and restore it before initial data hydration.
 
 ## Open Questions
-- Decide whether `T077` should stay as a process checklist item now that the `simplify` skill is not exposed in the current session.
+- `T077` was retired after confirming that the referenced `simplify` skill is not exposed in the current session or repository skill set.

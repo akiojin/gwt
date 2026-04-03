@@ -14,5 +14,5 @@
 - The help overlay reflects the keybinding registry without orphaned or invented shortcuts.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.
-- Any missing behavior is logged against the remaining `1` unchecked task.
+- No implementation task remains unchecked in `tasks.md`.
 - No step should be treated as complete unless the code path is actually reachable today.
