@@ -4,6 +4,7 @@
 //! to list, start, stop, and restart them via the Docker CLI.
 
 use gwt_core::{GwtError, Result};
+use std::ffi::OsString;
 use tracing::debug;
 
 /// Status of a Docker container.
@@ -48,9 +49,13 @@ pub struct ContainerInfo {
     pub ports: String,
 }
 
+fn docker_binary() -> OsString {
+    std::env::var_os("GWT_DOCKER_BIN").unwrap_or_else(|| OsString::from("docker"))
+}
+
 /// List all containers (including stopped ones).
 pub fn list_containers() -> Result<Vec<ContainerInfo>> {
-    let output = std::process::Command::new("docker")
+    let output = std::process::Command::new(docker_binary())
         .args([
             "ps",
             "-a",
@@ -94,7 +99,7 @@ pub fn list_containers() -> Result<Vec<ContainerInfo>> {
 
 /// Run a docker lifecycle command (`start`, `stop`, `restart`) on a container.
 fn lifecycle(action: &str, id: &str) -> Result<()> {
-    let output = std::process::Command::new("docker")
+    let output = std::process::Command::new(docker_binary())
         .args([action, id])
         .output()
         .map_err(|e| GwtError::Docker(format!("failed to {action} container: {e}")))?;
@@ -131,6 +136,48 @@ pub fn restart(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let script_path = dir.path().join("docker");
+        let mut file = fs::File::create(&script_path).expect("create fake docker");
+        file.write_all(script_body.as_bytes())
+            .expect("write fake docker");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata().expect("stat fake docker").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
+        }
+
+        (dir, script_path)
+    }
+
+    fn with_fake_docker<R>(script_body: &str, f: impl FnOnce(&PathBuf) -> R) -> R {
+        let _guard = TEST_LOCK.lock().expect("lock tests");
+        let (_dir, script_path) = write_fake_docker(script_body);
+        let prev = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", &script_path);
+        let result = f(&script_path);
+        match prev {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+        result
+    }
+
+    fn read_invocation(path: &PathBuf) -> String {
+        fs::read_to_string(path).expect("read invocation log")
+    }
 
     #[test]
     fn container_status_from_docker_state() {
@@ -214,5 +261,65 @@ mod tests {
         };
         assert_eq!(info.status, ContainerStatus::Exited);
         assert!(info.ports.is_empty());
+    }
+
+    #[test]
+    fn start_invokes_docker_with_expected_arguments() {
+        let log_dir = tempfile::tempdir().expect("temp log dir");
+        let log_path = log_dir.path().join("args.txt");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            log_path.display()
+        );
+
+        with_fake_docker(&script, |_| {
+            start("abc123").expect("start container");
+        });
+
+        assert_eq!(read_invocation(&log_path), "start\nabc123\n");
+    }
+
+    #[test]
+    fn stop_invokes_docker_with_expected_arguments() {
+        let log_dir = tempfile::tempdir().expect("temp log dir");
+        let log_path = log_dir.path().join("args.txt");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            log_path.display()
+        );
+
+        with_fake_docker(&script, |_| {
+            stop("abc123").expect("stop container");
+        });
+
+        assert_eq!(read_invocation(&log_path), "stop\nabc123\n");
+    }
+
+    #[test]
+    fn restart_invokes_docker_with_expected_arguments() {
+        let log_dir = tempfile::tempdir().expect("temp log dir");
+        let log_path = log_dir.path().join("args.txt");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            log_path.display()
+        );
+
+        with_fake_docker(&script, |_| {
+            restart("abc123").expect("restart container");
+        });
+
+        assert_eq!(read_invocation(&log_path), "restart\nabc123\n");
+    }
+
+    #[test]
+    fn lifecycle_returns_docker_stderr_on_failure() {
+        let script = "#!/bin/sh\necho 'permission denied' >&2\nexit 17\n";
+
+        let err = with_fake_docker(script, |_| start("abc123").expect_err("start should fail"));
+
+        assert!(
+            format!("{err:?}").contains("docker start failed: permission denied"),
+            "unexpected error: {err:?}"
+        );
     }
 }
