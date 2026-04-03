@@ -80,7 +80,7 @@ pub fn render(state: &VersionsState, frame: &mut Frame, area: Rect) {
 /// Render the tag list.
 fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
     if state.tags.is_empty() {
-        let block = super::bordered_block().title("Versions");
+        let block = Block::default().title("Versions");
         let paragraph = Paragraph::new("No version tags found")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -116,7 +116,7 @@ fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = super::bordered_block().title("Versions");
+    let block = Block::default().title("Versions");
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)

@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -142,7 +142,7 @@ pub fn render(state: &GitViewState, frame: &mut Frame, area: Rect) {
 /// Render the file list with expandable diffs.
 fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
     if state.files.is_empty() {
-        let block = super::bordered_block().title("Files (0)");
+        let block = Block::default().title("Files (0)");
         let paragraph = Paragraph::new("No changed files")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -188,7 +188,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
         }
     }
 
-    let block = super::bordered_block().title(title);
+    let block = Block::default().title(title);
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -202,7 +202,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
 /// Render the commits section.
 fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
     if state.commits.is_empty() {
-        let block = super::bordered_block().title("Commits (0)");
+        let block = Block::default().title("Commits (0)");
         let paragraph = Paragraph::new("No commits loaded")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -230,7 +230,7 @@ fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = super::bordered_block().title(title);
+    let block = Block::default().title(title);
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)

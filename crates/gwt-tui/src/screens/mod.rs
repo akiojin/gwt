@@ -103,7 +103,7 @@ pub fn bordered_block() -> Block<'static> {
         .border_style(Style::default().fg(Color::Gray))
 }
 
-/// Render an empty list placeholder.
+/// Render an empty list placeholder (borderless).
 pub fn render_empty_list(frame: &mut Frame, area: Rect, has_data: bool, noun: &str) {
     let msg = if has_data {
         format!("No matching {}", noun)
@@ -111,7 +111,7 @@ pub fn render_empty_list(frame: &mut Frame, area: Rect, has_data: bool, noun: &s
         format!("No {} loaded", noun)
     };
     let p = Paragraph::new(msg)
-        .block(Block::default().borders(Borders::ALL))
+        .block(Block::default())
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(p, area);
 }

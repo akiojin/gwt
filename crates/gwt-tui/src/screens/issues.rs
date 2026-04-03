@@ -205,7 +205,7 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = super::bordered_block();
+    let block = Block::default();
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
