@@ -121,6 +121,10 @@ pub fn update(model: &mut Model, msg: Message) {
             }
             Severity::Debug | Severity::Error => {}
         },
+        Message::DismissNotification => {
+            model.current_notification = None;
+            model.current_notification_ttl = None;
+        }
         Message::DismissError => {
             model.error_queue.pop_front();
         }
@@ -149,9 +153,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 // Focus cycling with Tab/BackTab (before pane-specific dispatch)
                 if !is_in_text_input_mode(model) {
                     match key.code {
-                        KeyCode::Tab
-                            if !key.modifiers.contains(KeyModifiers::SHIFT) =>
-                        {
+                        KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                             model.active_focus = model.active_focus.next();
                             return;
                         }
@@ -421,9 +423,7 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
 
     if model.service_select.is_some() {
         let msg = match key.code {
-            KeyCode::Down => {
-                Some(screens::service_select::ServiceSelectMessage::MoveDown)
-            }
+            KeyCode::Down => Some(screens::service_select::ServiceSelectMessage::MoveDown),
             KeyCode::Up => Some(screens::service_select::ServiceSelectMessage::MoveUp),
             KeyCode::Enter => Some(screens::service_select::ServiceSelectMessage::Select),
             KeyCode::Esc => Some(screens::service_select::ServiceSelectMessage::Cancel),
@@ -453,9 +453,7 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     false
 }
 
-fn branch_detail_action_message(
-    model: &Model,
-) -> Option<screens::branches::BranchesMessage> {
+fn branch_detail_action_message(model: &Model) -> Option<screens::branches::BranchesMessage> {
     use screens::branches::BranchesMessage;
     if model.branches.detail_section == 4 {
         Some(match model.branches.detail_action_selected {
@@ -487,6 +485,9 @@ fn route_key_to_tab_header(model: &mut Model, key: crossterm::event::KeyEvent) {
         KeyCode::Enter => {
             model.active_focus = FocusPane::TabContent;
         }
+        KeyCode::Esc => {
+            dismiss_warn_notification(model);
+        }
         _ => {}
     }
 }
@@ -505,6 +506,8 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     };
     if let Some(m) = msg {
         screens::branches::update(&mut model.branches, m);
+    } else if key.code == KeyCode::Esc {
+        dismiss_warn_notification(model);
     }
 }
 
@@ -537,8 +540,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
                 KeyCode::Enter => {
-                    branch_detail_action_message(model)
-                        .or(Some(BranchesMessage::Select))
+                    branch_detail_action_message(model).or(Some(BranchesMessage::Select))
                 }
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
                 KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
@@ -547,11 +549,12 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     load_initial_data(model);
                     return;
                 }
-                KeyCode::Esc => Some(BranchesMessage::SearchClear),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::branches::update(&mut model.branches, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Issues => {
@@ -572,11 +575,12 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Enter => Some(IssuesMessage::ToggleDetail),
                 KeyCode::Char('/') => Some(IssuesMessage::SearchStart),
                 KeyCode::Char('r') => Some(IssuesMessage::Refresh),
-                KeyCode::Esc => Some(IssuesMessage::SearchClear),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::issues::update(&mut model.issues, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Settings => {
@@ -590,6 +594,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 };
                 if let Some(m) = msg {
                     screens::settings::update(&mut model.settings, m);
+                } else if key.code == KeyCode::Esc {
+                    dismiss_warn_notification(model);
                 }
             } else {
                 let msg = match key.code {
@@ -604,6 +610,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 };
                 if let Some(m) = msg {
                     screens::settings::update(&mut model.settings, m);
+                } else if key.code == KeyCode::Esc {
+                    dismiss_warn_notification(model);
                 }
             }
         }
@@ -617,6 +625,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::logs::update(&mut model.logs, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Versions => {
@@ -631,6 +641,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::versions::update(&mut model.versions, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::GitView => {
@@ -643,6 +655,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::git_view::update(&mut model.git_view, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::PrDashboard => {
@@ -655,6 +669,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::pr_dashboard::update(&mut model.pr_dashboard, m);
+            } else if key.code == KeyCode::Esc {
+                dismiss_warn_notification(model);
             }
         }
         ManagementTab::Profiles => {
@@ -726,6 +742,18 @@ fn tick_notification(model: &mut Model) {
         model.current_notification_ttl = None;
     } else {
         model.current_notification_ttl = Some(ttl - step);
+    }
+}
+
+fn dismiss_warn_notification(model: &mut Model) {
+    if matches!(
+        model
+            .current_notification
+            .as_ref()
+            .map(|notification| notification.severity),
+        Some(Severity::Warn)
+    ) {
+        update(model, Message::DismissNotification);
     }
 }
 
@@ -1335,7 +1363,14 @@ fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
 /// Render the content of the active management tab.
 fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
     match model.management_tab {
-        ManagementTab::Branches => screens::branches::render(&model.branches, frame, area),
+        ManagementTab::Branches => {
+            let focus = match model.active_focus {
+                FocusPane::TabContent => screens::branches::BranchesFocus::List,
+                FocusPane::BranchDetail => screens::branches::BranchesFocus::Detail,
+                _ => screens::branches::BranchesFocus::None,
+            };
+            screens::branches::render(&model.branches, frame, area, focus);
+        }
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -2162,6 +2197,63 @@ mod tests {
             model.current_notification.as_ref().unwrap().message,
             "Detached HEAD"
         );
+    }
+
+    #[test]
+    fn update_key_input_esc_dismisses_warn_notification_when_unclaimed() {
+        let mut model = test_model();
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn update_key_input_esc_preserves_warn_notification_during_branch_search() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.search_active = true;
+        model.branches.search_query = "detached".into();
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_some());
+        assert!(!model.branches.search_active);
+        assert!(model.branches.search_query.is_empty());
+    }
+
+    #[test]
+    fn update_key_input_esc_preserves_warn_notification_during_settings_edit() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Settings;
+        model.settings.editing = true;
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_some());
+        assert!(!model.settings.editing);
     }
 
     #[test]

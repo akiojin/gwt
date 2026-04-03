@@ -288,8 +288,16 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     }
 }
 
+/// Which sub-pane of the branches screen is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchesFocus {
+    List,
+    Detail,
+    None,
+}
+
 /// Render the branches screen with split layout: top = list, bottom = detail.
-pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, focus: BranchesFocus) {
     // Split vertically: top 50% for list, bottom 50% for detail
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -306,10 +314,10 @@ pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect) {
         .split(main_chunks[0]);
 
     render_header(state, frame, list_chunks[0]);
-    render_branch_list(state, frame, list_chunks[1]);
+    render_branch_list(state, frame, list_chunks[1], focus == BranchesFocus::List);
 
     // Bottom half: branch detail
-    render_branch_detail(state, frame, main_chunks[1]);
+    render_branch_detail(state, frame, main_chunks[1], focus == BranchesFocus::Detail);
 }
 
 /// Render the header bar with view mode, sort mode, and search.
@@ -337,7 +345,7 @@ fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
 }
 
 /// Render the branch list grouped by category.
-fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
+fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
     let filtered = state.filtered_branches();
 
     if filtered.is_empty() {
@@ -379,7 +387,8 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     // Visual index = data index + number of headers inserted before it
     let visual_selected = state.selected + headers_before_selected;
 
-    let block = Block::default().borders(Borders::ALL);
+    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(border_color));
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -391,7 +400,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
 }
 
 /// Render the branch detail panel (bottom half).
-fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect) {
+fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -406,7 +415,7 @@ fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect) {
         .map(|label| Line::from(*label))
         .collect();
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title("Detail"))
+        .block(Block::default().borders(Borders::ALL).title("Detail").border_style(Style::default().fg(if is_focused { Color::Cyan } else { Color::Gray })))
         .select(state.detail_section)
         .highlight_style(
             Style::default()
@@ -724,7 +733,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f, area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -742,7 +751,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f, area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
     }
@@ -950,7 +959,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f, area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -970,7 +979,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f, area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -998,7 +1007,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f, area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -1028,7 +1037,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f, area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -1056,7 +1065,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f, area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();

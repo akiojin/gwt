@@ -59,6 +59,8 @@ pub enum Message {
     Notify(Notification),
     /// Show a structured notification in the status bar.
     ShowNotification(Notification),
+    /// Dismiss the current status-bar notification.
+    DismissNotification,
     /// Dismiss the top error.
     DismissError,
     /// Branches screen message.
@@ -135,6 +137,7 @@ mod tests {
             "test",
             "warning",
         ));
+        let _ = Message::DismissNotification;
         let _ = Message::DismissError;
         let _ = Message::Resize(80, 24);
         let _ = Message::PtyOutput("id".into(), vec![0x41]);

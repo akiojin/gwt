@@ -164,6 +164,16 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_missing_fields_uses_defaults() {
+        let v: VoiceConfig = toml::from_str("enabled = true").unwrap();
+        assert!(v.model_path.is_none());
+        assert_eq!(v.hotkey, "Ctrl+G,v");
+        assert_eq!(v.input_device, "system_default");
+        assert_eq!(v.language, "auto");
+        assert!(v.enabled);
+    }
+
+    #[test]
     fn validate_fails_when_enabled_without_model_path() {
         let v = VoiceConfig {
             enabled: true,

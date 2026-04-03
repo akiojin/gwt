@@ -976,6 +976,12 @@ mod tests {
     }
 
     #[test]
+    fn voice_category_is_seventh_in_sidebar_order() {
+        assert_eq!(SettingsCategory::ALL.len(), 7);
+        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Voice);
+    }
+
+    #[test]
     fn category_prev_full_round() {
         let mut cat = SettingsCategory::General;
         for _ in 0..7 {
