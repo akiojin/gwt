@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `42/44` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T06:10:00Z`
+- Task progress: `44/44` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T06:24:00Z`
 
 ## Done
 - Severity routing is now wired through structured notifications: debug logs only, info/warn feed the status bar, and errors keep their detail in the modal queue.
@@ -18,7 +18,7 @@
 - A focused regression test now proves the error modal queue preserves order across dismiss transitions.
 - A focused E2E test now proves Info notifications render in the status bar and auto-dismiss after the 5-second timeout.
 - A focused E2E test now proves dismissing one error keeps the next error visible in the modal queue.
+- A burst-load E2E test now proves 100 queued errors do not break rendering or queue progression.
 
 ## Next
-- Add the remaining log-entry format coverage and the 100-error performance test.
-- Keep the SPEC artifacts aligned as the remaining unchecked tasks are implemented.
+- Run the reviewer flow and close the remaining acceptance gate items.

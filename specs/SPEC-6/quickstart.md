@@ -25,5 +25,5 @@
 - A focused E2E test now proves every notification severity lands in the structured log rendering path.
 - A focused regression test now proves the error modal queue keeps the next error visible after dismiss.
 - A focused E2E test now proves Info notifications appear in the status bar and disappear after timeout ticks.
-- Any missing behavior is logged against the remaining `2` unchecked tasks.
+- Any missing behavior is logged against the remaining `0` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

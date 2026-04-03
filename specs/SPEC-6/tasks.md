@@ -55,7 +55,7 @@
 ### 3.1 Structured Log Store [P]
 
 - [x] TEST: Unit test for ring buffer: inserts, capacity limit, oldest evicted
-- [ ] TEST: Unit test for log entry format (timestamp, severity, source, message)
+- [x] TEST: Unit test for log entry format (timestamp, severity, source, message)
 - [x] IMPL: Add `StructuredLog` ring buffer store
   - File: `crates/gwt-notification/src/log.rs`
 - [x] IMPL: Configurable capacity (default: 10,000 entries)
@@ -83,4 +83,4 @@
 - [x] TEST: End-to-end test: Error notification appears in modal, dismiss shows next
 - [x] TEST: End-to-end test: all severity levels logged in structured log
 - [x] TEST: Regression test: existing error queue behavior preserved
-- [ ] TEST: Performance test: 100 simultaneous errors do not freeze UI
+- [x] TEST: Performance test: 100 simultaneous errors do not freeze UI
