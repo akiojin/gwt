@@ -17,7 +17,9 @@ impl<'a> TerminalView<'a> {
 
 impl Widget for TerminalView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        renderer::render_vt_screen(self.screen, buf, area);
+        // URL regions are returned but discarded here; callers needing
+        // click-to-open should call `renderer::render_vt_screen` directly.
+        let _ = renderer::render_vt_screen(self.screen, buf, area);
     }
 }
 

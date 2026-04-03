@@ -2664,23 +2664,30 @@ mod tests {
         model.settings.selected = 0;
 
         let skill_name = model.settings.fields[0].label.clone();
-        assert!(model
-            .embedded_skills()
-            .list()
-            .iter()
-            .find(|skill| skill.name == skill_name)
-            .expect("skill exists")
-            .enabled);
+        assert!(
+            model
+                .embedded_skills()
+                .list()
+                .iter()
+                .find(|skill| skill.name == skill_name)
+                .expect("skill exists")
+                .enabled
+        );
 
-        update(&mut model, Message::Settings(screens::settings::SettingsMessage::ToggleBool));
+        update(
+            &mut model,
+            Message::Settings(screens::settings::SettingsMessage::ToggleBool),
+        );
 
         assert_eq!(model.settings.fields[0].value, "false");
-        assert!(!model
-            .embedded_skills()
-            .list()
-            .iter()
-            .find(|skill| skill.name == skill_name)
-            .expect("skill exists")
-            .enabled);
+        assert!(
+            !model
+                .embedded_skills()
+                .list()
+                .iter()
+                .find(|skill| skill.name == skill_name)
+                .expect("skill exists")
+                .enabled
+        );
     }
 }
