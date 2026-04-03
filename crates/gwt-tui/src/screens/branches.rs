@@ -345,13 +345,17 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Build items with category headers
+    // Build items with category headers, tracking visual index offset
     let mut items: Vec<ListItem> = Vec::new();
     let mut current_category: Option<BranchCategory> = None;
+    let mut headers_before_selected: usize = 0;
 
     for (idx, branch) in filtered.iter().enumerate() {
         if current_category != Some(branch.category) {
             current_category = Some(branch.category);
+            if idx <= state.selected {
+                headers_before_selected += 1;
+            }
             let header = Line::from(Span::styled(
                 format!("── {} ──", branch.category.label()),
                 Style::default()
@@ -364,18 +368,16 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         let head_indicator = if branch.is_head { "* " } else { "  " };
         let locality = if branch.is_local { "L" } else { "R" };
 
-        let style = super::list_item_style(idx == state.selected);
-
         let line = Line::from(vec![
-            Span::styled(
-                head_indicator.to_string(),
-                Style::default().fg(Color::Green),
-            ),
+            Span::styled(head_indicator, Style::default().fg(Color::Green)),
             Span::styled(format!("[{}] ", locality), Style::default().fg(Color::Cyan)),
-            Span::styled(branch.name.clone(), style),
+            Span::styled(&branch.name, Style::default().fg(Color::White)),
         ]);
         items.push(ListItem::new(line));
     }
+
+    // Visual index = data index + number of headers inserted before it
+    let visual_selected = state.selected + headers_before_selected;
 
     let block = Block::default().borders(Borders::ALL);
     let list = List::new(items).block(block).highlight_style(
@@ -384,7 +386,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
     let mut list_state = ratatui::widgets::ListState::default();
-    list_state.select(Some(state.selected));
+    list_state.select(Some(visual_selected));
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 

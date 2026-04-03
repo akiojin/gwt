@@ -354,6 +354,33 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
 }
 
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
+    // Wizard overlay takes priority (fullscreen modal)
+    if model.wizard.is_some() {
+        let msg = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                Some(screens::wizard::WizardMessage::MoveDown)
+            }
+            KeyCode::Char('k') | KeyCode::Up => Some(screens::wizard::WizardMessage::MoveUp),
+            KeyCode::Enter => Some(screens::wizard::WizardMessage::Select),
+            KeyCode::Esc => Some(screens::wizard::WizardMessage::Back),
+            KeyCode::Backspace => Some(screens::wizard::WizardMessage::Backspace),
+            KeyCode::Char(ch) => Some(screens::wizard::WizardMessage::InputChar(ch)),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            update(model, Message::Wizard(msg));
+        }
+        return true; // Always consume keys when wizard is open
+    }
+
+    // Error overlay
+    if !model.error_queue.is_empty() {
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+            update(model, Message::DismissError);
+        }
+        return true;
+    }
+
     if model.service_select.is_some() {
         let msg = match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
