@@ -64,6 +64,17 @@ impl FilterLevel {
             Self::DebugUp => Self::All,
         }
     }
+
+    /// Cycle to the previous filter level.
+    pub fn prev(self) -> Self {
+        match self {
+            Self::All => Self::DebugUp,
+            Self::ErrorOnly => Self::All,
+            Self::WarnUp => Self::ErrorOnly,
+            Self::InfoUp => Self::WarnUp,
+            Self::DebugUp => Self::InfoUp,
+        }
+    }
 }
 
 /// State for the logs screen.
@@ -374,6 +385,15 @@ mod tests {
         assert_eq!(FilterLevel::WarnUp.next(), FilterLevel::InfoUp);
         assert_eq!(FilterLevel::InfoUp.next(), FilterLevel::DebugUp);
         assert_eq!(FilterLevel::DebugUp.next(), FilterLevel::All);
+    }
+
+    #[test]
+    fn filter_level_prev_cycles_through_all_levels() {
+        assert_eq!(FilterLevel::All.prev(), FilterLevel::DebugUp);
+        assert_eq!(FilterLevel::DebugUp.prev(), FilterLevel::InfoUp);
+        assert_eq!(FilterLevel::InfoUp.prev(), FilterLevel::WarnUp);
+        assert_eq!(FilterLevel::WarnUp.prev(), FilterLevel::ErrorOnly);
+        assert_eq!(FilterLevel::ErrorOnly.prev(), FilterLevel::All);
     }
 
     #[test]

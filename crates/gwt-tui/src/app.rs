@@ -496,7 +496,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::versions::VersionsMessage;
 
     // Left/Right switches tabs when not in text input mode
-    if !is_in_text_input_mode(model) {
+    // (Ctrl+Left/Right is reserved for sub-tab switching within individual tabs)
+    if !is_in_text_input_mode(model) && !key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Right => {
                 model.management_tab = model.management_tab.next();
@@ -594,6 +595,12 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         Some(SettingsMessage::Save)
                     }
+                    KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(SettingsMessage::PrevCategory)
+                    }
+                    KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(SettingsMessage::NextCategory)
+                    }
                     _ => None,
                 };
                 if let Some(m) = msg {
@@ -615,6 +622,16 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     model.logs.filter_level,
                 ))),
                 KeyCode::Char('r') => Some(LogsMessage::Refresh),
+                KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(LogsMessage::SetFilter(next_logs_filter_level(
+                        model.logs.filter_level,
+                    )))
+                }
+                KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(LogsMessage::SetFilter(prev_logs_filter_level(
+                        model.logs.filter_level,
+                    )))
+                }
                 _ => None,
             };
             if let Some(m) = msg {
@@ -752,14 +769,11 @@ fn dismiss_warn_notification(model: &mut Model) {
 }
 
 fn next_logs_filter_level(level: screens::logs::FilterLevel) -> screens::logs::FilterLevel {
-    use screens::logs::FilterLevel;
-    match level {
-        FilterLevel::All => FilterLevel::ErrorOnly,
-        FilterLevel::ErrorOnly => FilterLevel::WarnUp,
-        FilterLevel::WarnUp => FilterLevel::InfoUp,
-        FilterLevel::InfoUp => FilterLevel::DebugUp,
-        FilterLevel::DebugUp => FilterLevel::All,
-    }
+    level.next()
+}
+
+fn prev_logs_filter_level(level: screens::logs::FilterLevel) -> screens::logs::FilterLevel {
+    level.prev()
 }
 
 fn toggle_logs_debug_filter(level: screens::logs::FilterLevel) -> screens::logs::FilterLevel {

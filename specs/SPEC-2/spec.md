@@ -185,6 +185,7 @@ Management tabs are displayed in the Block title of the management panel area. T
 | `e` | Edit (Profiles only) |
 | `d` | Delete (Profiles only) |
 | `Space` | Toggle boolean (Settings only) |
+| `Ctrl+←` / `Ctrl+→` | Switch sub-tab (Settings categories, Logs filters) |
 
 ### Focus: Branch Detail
 

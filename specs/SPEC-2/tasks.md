@@ -114,6 +114,14 @@
 - [x] T072 Confirm: ←→ toggle, Enter accept, Esc cancel
 - [x] T073 Error: Enter/Esc dismiss
 
+### 5.5: Sub-Tab Switching with Ctrl+Arrow Keys
+
+- [x] T079 Add FilterLevel::prev() to logs.rs for reverse filter cycling
+- [x] T080 Exclude Ctrl-modified arrow keys from management tab switching in route_key_to_management
+- [x] T081 Add Ctrl+Left/Right for Settings category switching (PrevCategory/NextCategory)
+- [x] T082 Add Ctrl+Left/Right for Logs filter cycling (prev/next filter level)
+- [x] T083 Add tests for FilterLevel::prev() and Ctrl+Arrow key routing
+
 ## Phase 6: Regression and Polish
 
 - [ ] T074 Run full existing test suite and verify no regressions.
