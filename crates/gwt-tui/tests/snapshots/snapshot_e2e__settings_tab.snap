@@ -3,26 +3,26 @@ source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
 ┌ Branches │ Specs │ Issues │ PRs │ Pro┐┌ ▶ Shell ─────────────────────────────┐
-│┌ General │ Worktree │ Agent │ Custom┐││Session: Shell (80x24)                │
-││No settings in this category        │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-│└────────────────────────────────────┘│└──────────────────────────────────────┘
-└──────────────────────────────────────┘ ▣ Shell  [Mgmt]  /tmp/test-repo  Ctrl+G
+│ General │ Worktree │ Agent │ Custom A││Session: Shell (80x24)                │
+│No settings in this category          ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  ?:help

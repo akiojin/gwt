@@ -4,25 +4,25 @@ expression: output
 ---
 ┌ Branches │ Specs │ Issues │ PRs │ Pro┐┌ ▶ Shell ─────────────────────────────┐
 │ View: All │ Sort: Default            ││Session: Shell (80x24)                │
-│┌────────────────────────────────────┐││                                      │
-││── Main ──                          │││                                      │
-││* [L] main                          │││                                      │
-││── Feature ──                       │││                                      │
-││  [L] feature/api                   │││                                      │
-││  [L] feature/app-shell             │││                                      │
-││── Other ──                         │││                                      │
-││  [R] origin/release/1.0            │││                                      │
-││                                    │││                                      │
-│└────────────────────────────────────┘││                                      │
-│┌ Overview │ SPECs │ Git │ Sessions ─┐││                                      │
-││Overview                            │││                                      │
-││ Branch: main (HEAD)                │││                                      │
-││ Category: Main                     │││                                      │
-││ Type: Local                        │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-││                                    │││                                      │
-│└────────────────────────────────────┘│└──────────────────────────────────────┘
-└──────────────────────────────────────┘ ▣ Shell  [Mgmt]  /tmp/test-repo  Ctrl+G
+│── Main ──                            ││                                      │
+│* [L] main                            ││                                      │
+│── Feature ──                         ││                                      │
+│  [L] feature/api                     ││                                      │
+│  [L] feature/app-shell               ││                                      │
+│── Other ──                           ││                                      │
+│  [R] origin/release/1.0              ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘│                                      │
+┌ Overview │ SPECs │ Git │ Sessions ───┐│                                      │
+│Overview                              ││                                      │
+│ Branch: main (HEAD)                  ││                                      │
+│ Category: Main                       ││                                      │
+│ Type: Local                          ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  ?:help

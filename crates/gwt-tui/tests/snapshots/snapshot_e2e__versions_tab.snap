@@ -21,8 +21,8 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
-│                                      ││                                      │
 │Detail                                ││                                      │
 │No tag selected                       ││                                      │
-│                                      │└──────────────────────────────────────┘
-└──────────────────────────────────────┘ ▣ Shell  [Mgmt]  /tmp/test-repo  Ctrl+G
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  ?:help

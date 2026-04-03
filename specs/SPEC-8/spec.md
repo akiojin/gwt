@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt-tui extends terminal input with voice transcription (Qwen3-ASR), file paste from clipboard, and AI-assisted branch naming. The voice backend still lacks its end-to-end recorder path, but the TUI hotkey and disabled-config guard now exist. The AI branch naming flow is live in the wizard, including explicit manual-entry fallback in the suggestion list. File paste now shell-quotes injected paths for safer PTY input, but still needs the remaining platform-specific extraction gaps closed.
+gwt-tui extends terminal input with voice transcription (Qwen3-ASR), file paste from clipboard, and AI-assisted branch naming. The voice backend still lacks its end-to-end recorder path, but the TUI hotkey and disabled-config guard now exist. The AI branch naming flow is live in the wizard, including explicit manual-entry fallback in the suggestion list and normalization to `3..=5` git-safe names. File paste now shell-quotes injected paths for safer PTY input, but still needs the remaining platform-specific extraction gaps closed.
 
 ## User Stories
 

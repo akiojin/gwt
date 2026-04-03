@@ -60,8 +60,8 @@
 
 ### 3.1 Branch Name Suggestion Display
 
-- [ ] **T-035**: Write test for `BranchNameSuggester::suggest()` returning 3-5 valid names.
-- [ ] **T-036**: Write test for all suggestions passing `git check-ref-format` validation.
+- [x] **T-035**: Write test for `BranchNameSuggester::suggest()` returning 3-5 valid names.
+- [x] **T-036**: Write test for all suggestions passing `git check-ref-format` validation.
 - [ ] **T-037**: Write test for suggestion list rendering in wizard AgentSelect step.
 - [x] **T-038**: Write test for "Manual input" option always present at bottom of list.
 - [x] **T-039**: Implement suggestion list UI in wizard AgentSelect step.

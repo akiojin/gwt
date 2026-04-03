@@ -2,7 +2,7 @@
 
 use gwt_notification::Severity;
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
@@ -180,7 +180,9 @@ pub fn update(state: &mut LogsState, msg: LogsMessage) {
 }
 
 /// Render the logs screen.
+/// Render the logs screen (borderless — outer pane border is handled by app.rs).
 pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
+    // Filter sub-tab header line
     let active_idx = FilterLevel::ALL
         .iter()
         .position(|f| *f == state.filter_level)
@@ -189,18 +191,22 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
     let mut tab_title = super::build_tab_title(&labels, active_idx);
     // Append debug visibility indicator
     tab_title.spans.push(Span::raw(format!(
-        " │ Debug: {}",
+        " \u{2502} Debug: {}",
         if state.show_debug { "on" } else { "off" }
     )));
 
-    let block = super::bordered_block().title(tab_title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    let header = Paragraph::new(tab_title);
+    frame.render_widget(header, chunks[0]);
 
     if state.detail_view {
-        render_detail(state, frame, inner);
+        render_detail(state, frame, chunks[1]);
     } else {
-        render_log_list(state, frame, inner);
+        render_log_list(state, frame, chunks[1]);
     }
 }
 
@@ -251,8 +257,7 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default()
-        .title(" Enter: detail | r: refresh");
+    let block = Block::default().title(" Enter: detail | r: refresh");
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -266,8 +271,7 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
 /// Render the detail view for the selected entry.
 fn render_detail(state: &LogsState, frame: &mut Frame, area: Rect) {
     let entry = state.selected_entry();
-    let block = Block::default()
-        .title("Log Detail — Esc: back");
+    let block = Block::default().title("Log Detail — Esc: back");
 
     match entry {
         Some(e) => {

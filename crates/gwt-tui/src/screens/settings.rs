@@ -508,8 +508,9 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
     }
 }
 
-/// Render the settings screen.
+/// Render the settings screen (borderless — outer pane border is handled by app.rs).
 pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    // Category sub-tab header line
     let active_idx = SettingsCategory::ALL
         .iter()
         .position(|c| *c == state.category)
@@ -517,10 +518,14 @@ pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let labels: Vec<&str> = SettingsCategory::ALL.iter().map(|c| c.label()).collect();
     let tab_title = super::build_tab_title(&labels, active_idx);
 
-    let block = super::bordered_block().title(tab_title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    render_fields(state, frame, inner);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    let header = Paragraph::new(tab_title);
+    frame.render_widget(header, chunks[0]);
+    render_fields(state, frame, chunks[1]);
 }
 
 /// Render the fields list for the current category.
@@ -611,11 +616,7 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         " Enter: edit | Space: toggle bool | Tab/Shift+Tab: category"
     };
 
-    let block = Block::default().title(format!(
-        "{}{}",
-        state.category.label(),
-        hints
-    ));
+    let block = Block::default().title(format!("{}{}", state.category.label(), hints));
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)

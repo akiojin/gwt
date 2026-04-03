@@ -25,4 +25,4 @@ expression: output
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
- ▦ Shell  [Main]  /tmp/test-repo  Ctrl+G,? Help
+↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  ?:help

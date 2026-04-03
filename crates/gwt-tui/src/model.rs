@@ -15,9 +15,9 @@ use crate::screens::logs::LogsState;
 use crate::screens::port_select::PortSelectState;
 use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
-use crate::screens::specs::SpecsState;
 use crate::screens::service_select::ServiceSelectState;
 use crate::screens::settings::SettingsState;
+use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
 use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
@@ -128,7 +128,11 @@ impl ManagementTab {
     /// Previous tab (wraps around).
     pub fn prev(self) -> Self {
         let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
-        Self::ALL[if idx == 0 { Self::ALL.len() - 1 } else { idx - 1 }]
+        Self::ALL[if idx == 0 {
+            Self::ALL.len() - 1
+        } else {
+            idx - 1
+        }]
     }
 }
 
@@ -511,9 +515,7 @@ mod tests {
 
     #[test]
     fn management_tab_labels_include_specs() {
-        assert!(ManagementTab::ALL
-            .iter()
-            .any(|tab| tab.label() == "Specs"));
+        assert!(ManagementTab::ALL.iter().any(|tab| tab.label() == "Specs"));
     }
 
     #[test]

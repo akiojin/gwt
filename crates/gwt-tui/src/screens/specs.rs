@@ -623,8 +623,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
             section_name, spec.id,
         )
     };
-    let content_block = Block::default()
-        .title(tab_title);
+    let content_block = Block::default().title(tab_title);
     let content = Paragraph::new(content_text)
         .block(content_block)
         .wrap(Wrap { trim: false })

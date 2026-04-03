@@ -377,7 +377,10 @@ pub fn load_initial_data(model: &mut Model) {
     // -- Specs --
     model.specs.spec_root = Some(model.repo_path.clone());
     if let Some(specs) = load_specs_from_disk(&model.repo_path) {
-        screens::specs::update(&mut model.specs, screens::specs::SpecsMessage::SetSpecs(specs));
+        screens::specs::update(
+            &mut model.specs,
+            screens::specs::SpecsMessage::SetSpecs(specs),
+        );
     }
 }
 
@@ -563,8 +566,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::logs::LogsMessage;
     use screens::pr_dashboard::PrDashboardMessage;
     use screens::profiles::ProfilesMessage;
-    use screens::specs::SpecsMessage;
     use screens::settings::SettingsMessage;
+    use screens::specs::SpecsMessage;
     use screens::versions::VersionsMessage;
 
     // Left/Right switches tabs when not in text input mode
@@ -641,10 +644,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                             .selected_spec()
                             .map(|spec| (spec.id.clone(), spec.title.clone()))
                         {
-                            update(
-                                model,
-                                Message::OpenWizardWithSpec(spec_id, spec_title),
-                            );
+                            update(model, Message::OpenWizardWithSpec(spec_id, spec_title));
                         }
                     }
                     KeyCode::Enter => {
@@ -752,16 +752,12 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     model.logs.filter_level,
                 ))),
                 KeyCode::Char('r') => Some(LogsMessage::Refresh),
-                KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(LogsMessage::SetFilter(next_logs_filter_level(
-                        model.logs.filter_level,
-                    )))
-                }
-                KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(LogsMessage::SetFilter(prev_logs_filter_level(
-                        model.logs.filter_level,
-                    )))
-                }
+                KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => Some(
+                    LogsMessage::SetFilter(next_logs_filter_level(model.logs.filter_level)),
+                ),
+                KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => Some(
+                    LogsMessage::SetFilter(prev_logs_filter_level(model.logs.filter_level)),
+                ),
                 _ => None,
             };
             if let Some(m) = msg {
@@ -1402,7 +1398,9 @@ fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
-        ManagementTab::Specs => model.specs.search_active || model.specs.editing || model.specs.detail_editing,
+        ManagementTab::Specs => {
+            model.specs.search_active || model.specs.editing || model.specs.detail_editing
+        }
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -1425,19 +1423,205 @@ pub fn view(model: &Model, frame: &mut Frame) {
         return;
     }
 
+    // Reserve 1 line at bottom for keybind hints
+    let main_area = Rect {
+        height: size.height.saturating_sub(1),
+        ..size
+    };
+    let hint_area = Rect {
+        y: size.height.saturating_sub(1),
+        height: 1,
+        ..size
+    };
+
     if model.active_layer == ActiveLayer::Management {
-        // Split: left = management panel, right = sessions
-        let chunks = Layout::default()
+        // 50/50 split: left = management panes, right = session pane
+        let lr = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(size);
+            .split(main_area);
 
-        render_management_panel(model, frame, chunks[0]);
-        render_sessions_area(model, frame, chunks[1]);
+        render_management_panes(model, frame, lr[0]);
+        render_session_pane(model, frame, lr[1]);
     } else {
-        render_sessions_area(model, frame, size);
+        render_session_pane(model, frame, main_area);
     }
 
+    render_keybind_hints(model, frame, hint_area);
+
+    // Overlays on top
+    render_overlays(model, frame, size);
+}
+
+/// Build a bordered block with focus-aware border color (Green when focused, White otherwise).
+fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
+    let border_color = if is_focused {
+        Color::Green
+    } else {
+        Color::White
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(title)
+}
+
+/// Build the management tab title line for embedding in a pane border.
+fn management_tab_title(model: &Model) -> Line<'static> {
+    let labels: Vec<&str> = ManagementTab::ALL.iter().map(|t| t.label()).collect();
+    let active_idx = ManagementTab::ALL
+        .iter()
+        .position(|t| *t == model.management_tab)
+        .unwrap_or(0);
+    screens::build_tab_title(&labels, active_idx)
+}
+
+/// Render the management panes (left side — 2 stacked for Branches, 1 for others).
+fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
+    if model.management_tab == ManagementTab::Branches {
+        // Two stacked panes: top = branch list, bottom = branch detail
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+
+        // Top pane: management tab names in title, branch list content
+        let list_focused = model.active_focus == FocusPane::TabContent;
+        let list_block = pane_block(management_tab_title(model), list_focused);
+        let list_inner = list_block.inner(chunks[0]);
+        frame.render_widget(list_block, chunks[0]);
+        screens::branches::render_list(&model.branches, frame, list_inner);
+
+        // Bottom pane: detail section names in title, detail content
+        let detail_focused = model.active_focus == FocusPane::BranchDetail;
+        let detail_labels: Vec<&str> = screens::branches::detail_section_labels().to_vec();
+        let detail_title = screens::build_tab_title(&detail_labels, model.branches.detail_section);
+        let detail_block = pane_block(detail_title, detail_focused);
+        let detail_inner = detail_block.inner(chunks[1]);
+        frame.render_widget(detail_block, chunks[1]);
+        screens::branches::render_detail_content(&model.branches, frame, detail_inner);
+
+        // Action modal overlay (rendered on top of detail pane)
+        if model.branches.action_modal_visible {
+            screens::branches::render_action_modal_overlay(&model.branches, frame, chunks[1]);
+        }
+    } else {
+        // Single pane for all other tabs
+        let focused = model.active_focus == FocusPane::TabContent;
+        let block = pane_block(management_tab_title(model), focused);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        render_management_tab_content(model, frame, inner);
+    }
+}
+
+/// Render the content of the active management tab (non-Branches).
+fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
+    match model.management_tab {
+        ManagementTab::Branches => {
+            // Handled by render_management_panes directly
+        }
+        ManagementTab::Specs => screens::specs::render(&model.specs, frame, area),
+        ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
+        ManagementTab::PrDashboard => {
+            screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
+        }
+        ManagementTab::Profiles => screens::profiles::render(&model.profiles, frame, area),
+        ManagementTab::GitView => screens::git_view::render(&model.git_view, frame, area),
+        ManagementTab::Versions => screens::versions::render(&model.versions, frame, area),
+        ManagementTab::Settings => screens::settings::render(&model.settings, frame, area),
+        ManagementTab::Logs => screens::logs::render(&model.logs, frame, area),
+    }
+}
+
+/// Render the session pane (right side, or full screen).
+fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
+    let terminal_focused = model.active_focus == FocusPane::Terminal;
+    match model.session_layout {
+        SessionLayout::Tab => {
+            if let Some(session) = model.active_session_tab() {
+                let title = build_session_title(model);
+                let block = pane_block(title, terminal_focused);
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+
+                // Phase 2: render vt100 screen buffer here
+                let placeholder = Paragraph::new(format!(
+                    "Session: {} ({}x{})",
+                    session.name,
+                    session.vt.cols(),
+                    session.vt.rows()
+                ))
+                .style(Style::default().fg(Color::DarkGray));
+                frame.render_widget(placeholder, inner);
+            }
+        }
+        SessionLayout::Grid => {
+            render_grid_sessions(model, frame, area);
+        }
+    }
+}
+
+/// Build session tab title line (same pattern as management tabs in Block title).
+fn build_session_title(model: &Model) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, s) in model.sessions.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("│"));
+        }
+        let label = format!(" {} {} ", s.tab_type.icon(), s.name);
+        if i == model.active_session {
+            spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Render context-sensitive keybind hints at the bottom of the screen.
+///
+/// When a notification is active, it is shown alongside the hints.
+fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
+    // Show notification if active, otherwise show keybind hints
+    if let Some(ref notification) = model.current_notification {
+        let severity_style = match notification.severity {
+            gwt_notification::Severity::Info => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            gwt_notification::Severity::Warn => Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            _ => Style::default().fg(Color::DarkGray),
+        };
+        let summary = format!(
+            " {} {}: {} ",
+            notification.severity, notification.source, notification.message
+        );
+        let line = Paragraph::new(Span::styled(summary, severity_style));
+        frame.render_widget(line, area);
+    } else {
+        let hints = match model.active_focus {
+            FocusPane::TabContent => {
+                "\u{2191}\u{2193}:select  \u{2190}\u{2192}:tab  Ctrl+\u{2190}\u{2192}:sub-tab  Enter:action  Tab:focus  ?:help"
+            }
+            FocusPane::BranchDetail => {
+                "\u{2190}\u{2192}:section  Enter:action  Tab:focus  Esc:back"
+            }
+            FocusPane::Terminal => "Ctrl+G,g:management  Tab:focus  Ctrl+C\u{00d7}2:quit",
+        };
+        let line = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(line, area);
+    }
+}
+
+/// Render all overlay widgets on top of the main layout.
+fn render_overlays(model: &Model, frame: &mut Frame, size: Rect) {
     // Confirm dialog overlay
     screens::confirm::render(&model.confirm, frame, size);
 
@@ -1465,138 +1649,6 @@ pub fn view(model: &Model, frame: &mut Frame) {
     if !model.error_queue.is_empty() {
         screens::error::render(&model.error_queue, frame, size);
     }
-}
-
-fn focused_border_style(is_focused: bool) -> Style {
-    if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Gray)
-    }
-}
-
-/// Render the management panel (left side).
-fn render_management_panel(model: &Model, frame: &mut Frame, area: Rect) {
-    let labels: Vec<&str> = ManagementTab::ALL.iter().map(|t| t.label()).collect();
-    let active_idx = ManagementTab::ALL
-        .iter()
-        .position(|t| *t == model.management_tab)
-        .unwrap_or(0);
-    let title = screens::build_tab_title(&labels, active_idx);
-
-    let content_focused = model.active_focus == FocusPane::TabContent;
-    let content_block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(focused_border_style(content_focused));
-    let inner = content_block.inner(area);
-    frame.render_widget(content_block, area);
-    render_management_tab_content(model, frame, inner);
-}
-
-/// Render the content of the active management tab.
-fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
-    match model.management_tab {
-        ManagementTab::Branches => {
-            let focus = match model.active_focus {
-                FocusPane::TabContent => screens::branches::BranchesFocus::List,
-                FocusPane::BranchDetail => screens::branches::BranchesFocus::Detail,
-                _ => screens::branches::BranchesFocus::None,
-            };
-            screens::branches::render(&model.branches, frame, area, focus);
-        }
-        ManagementTab::Specs => screens::specs::render(&model.specs, frame, area),
-        ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
-        ManagementTab::PrDashboard => {
-            screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
-        }
-        ManagementTab::Profiles => screens::profiles::render(&model.profiles, frame, area),
-        ManagementTab::GitView => screens::git_view::render(&model.git_view, frame, area),
-        ManagementTab::Versions => screens::versions::render(&model.versions, frame, area),
-        ManagementTab::Settings => screens::settings::render(&model.settings, frame, area),
-        ManagementTab::Logs => screens::logs::render(&model.logs, frame, area),
-    }
-}
-
-/// Render the sessions area (right side, or full screen).
-fn render_sessions_area(model: &Model, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),    // Terminal content
-            Constraint::Length(1), // Status bar
-        ])
-        .split(area);
-
-    // Session content (session tabs are rendered in the Block title)
-    render_session_content(model, frame, chunks[0]);
-
-    // Status bar — delegate to widget
-    crate::widgets::status_bar::render(model, frame, chunks[1]);
-}
-
-/// Build session tab title line (same pattern as management tabs in Block title).
-fn build_session_title(model: &Model) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, s) in model.sessions.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("│"));
-        }
-        let label = format!(" {} {} ", s.tab_type.icon(), s.name);
-        if i == model.active_session {
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
-        }
-    }
-    Line::from(spans)
-}
-
-/// Render session content (Tab mode = single, Grid mode = tiled).
-fn render_session_content(model: &Model, frame: &mut Frame, area: Rect) {
-    let terminal_focused = model.active_focus == FocusPane::Terminal;
-    match model.session_layout {
-        SessionLayout::Tab => {
-            if let Some(session) = model.active_session_tab() {
-                let title = build_session_title(model);
-                render_single_session(session, terminal_focused, title, frame, area);
-            }
-        }
-        SessionLayout::Grid => {
-            render_grid_sessions(model, frame, area);
-        }
-    }
-}
-
-/// Render a single session pane.
-fn render_single_session(
-    session: &crate::model::SessionTab,
-    terminal_focused: bool,
-    title: Line<'static>,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focused_border_style(terminal_focused))
-        .title(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Phase 2: render vt100 screen buffer here
-    let placeholder = Paragraph::new(format!(
-        "Session: {} ({}x{})",
-        session.name,
-        session.vt.cols(),
-        session.vt.rows()
-    ))
-    .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(placeholder, inner);
 }
 
 /// Render sessions in a grid layout.
@@ -1761,7 +1813,12 @@ mod tests {
         load_initial_data(&mut model);
 
         assert_eq!(model.specs.spec_root.as_deref(), Some(dir.path()));
-        let ids: Vec<_> = model.specs.specs.iter().map(|spec| spec.id.as_str()).collect();
+        let ids: Vec<_> = model
+            .specs
+            .specs
+            .iter()
+            .map(|spec| spec.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["SPEC-1", "SPEC-2", "SPEC-10"]);
         assert_eq!(model.specs.specs[0].title, "First");
         assert_eq!(model.specs.specs[1].phase, "implementation");

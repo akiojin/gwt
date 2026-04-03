@@ -117,6 +117,11 @@ const DETAIL_SECTION_COUNT: usize = 4;
 const DETAIL_SECTION_LABELS: [&str; DETAIL_SECTION_COUNT] =
     ["Overview", "SPECs", "Git", "Sessions"];
 
+/// Public accessor for detail section labels (used by app.rs for pane titles).
+pub fn detail_section_labels() -> &'static [&'static str] {
+    &DETAIL_SECTION_LABELS
+}
+
 /// Action labels shown in the action modal overlay.
 const ACTION_LABELS: [&str; 3] = ["Launch Agent", "Open Shell", "Delete Worktree"];
 
@@ -322,39 +327,65 @@ pub enum BranchesFocus {
     None,
 }
 
-/// Build a bordered block with focus-aware border color (Cyan when focused, Gray otherwise).
-fn focus_block(is_focused: bool) -> Block<'static> {
-    let color = if is_focused { Color::Cyan } else { Color::Gray };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(color))
-}
-
-/// Render the branches screen with split layout: top = list, bottom = detail.
-pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, focus: BranchesFocus) {
-    // Split vertically: top 50% for list, bottom 50% for detail
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    // Top half: header + branch list
+/// Render the branch list pane content (header + list, no borders).
+///
+/// Called by app.rs which provides the bordered pane. This renders borderless
+/// content into the inner area of the top management pane.
+pub fn render_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let list_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Header: view/sort/search (no border)
             Constraint::Min(0),    // Branch list
         ])
-        .split(main_chunks[0]);
-
-    let list_focused = focus == BranchesFocus::List;
-    let detail_focused = focus == BranchesFocus::Detail;
+        .split(area);
 
     render_header(state, frame, list_chunks[0]);
-    render_branch_list(state, frame, list_chunks[1], list_focused);
+    render_branch_list(state, frame, list_chunks[1]);
+}
 
-    // Bottom half: branch detail
-    render_branch_detail(state, frame, main_chunks[1], detail_focused);
+/// Render the branch detail content (no borders, no title).
+///
+/// Called by app.rs which provides the bordered pane. This renders borderless
+/// content into the inner area of the bottom detail pane.
+pub fn render_detail_content(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    match state.detail_section {
+        0 => render_detail_overview(state, frame, area),
+        1 => render_detail_specs(state, frame, area),
+        2 => render_detail_git_status(state, frame, area),
+        3 => render_detail_sessions(frame, area),
+        _ => {}
+    }
+}
+
+/// Render the action modal overlay on top of a given area.
+///
+/// Called by app.rs when the action modal is visible.
+pub fn render_action_modal_overlay(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    render_action_modal(state, frame, area);
+}
+
+/// Render the branches screen (legacy entry point).
+///
+/// In the lazygit layout, app.rs calls render_list / render_detail_content directly.
+pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, _focus: BranchesFocus) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let list_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(main_chunks[0]);
+
+    render_header(state, frame, list_chunks[0]);
+    render_branch_list(state, frame, list_chunks[1]);
+    render_detail_content(state, frame, main_chunks[1]);
+
+    if state.action_modal_visible {
+        render_action_modal(state, frame, main_chunks[1]);
+    }
 }
 
 /// Render the header bar with view mode, sort mode, and search (plain bar, no borders).
@@ -380,13 +411,12 @@ fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
         Span::styled(search_display, Style::default().fg(Color::Yellow)),
     ]);
 
-    let paragraph = Paragraph::new(line)
-        .style(Style::default().bg(Color::DarkGray));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
 }
 
-/// Render the branch list grouped by category.
-fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
+/// Render the branch list grouped by category (borderless).
+fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_branches();
 
     if filtered.is_empty() {
@@ -396,7 +426,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
             "No branches loaded"
         };
         let p = Paragraph::new(msg)
-            .block(focus_block(is_focused))
+            .block(Block::default())
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(p, area);
         return;
@@ -436,7 +466,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
     // Visual index = data index + number of headers inserted before it
     let visual_selected = state.selected + headers_before_selected;
 
-    let list = List::new(items).block(focus_block(is_focused)).highlight_style(
+    let list = List::new(items).block(Block::default()).highlight_style(
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -444,28 +474,6 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(visual_selected));
     frame.render_stateful_widget(list, area, &mut list_state);
-}
-
-/// Render the branch detail panel (bottom half).
-fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
-    let title = super::build_tab_title(&DETAIL_SECTION_LABELS, state.detail_section);
-    let block = focus_block(is_focused).title(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Section content
-    match state.detail_section {
-        0 => render_detail_overview(state, frame, inner),
-        1 => render_detail_specs(state, frame, inner),
-        2 => render_detail_git_status(state, frame, inner),
-        3 => render_detail_sessions(frame, inner),
-        _ => {}
-    }
-
-    // Action modal overlay (rendered on top of detail)
-    if state.action_modal_visible {
-        render_action_modal(state, frame, area);
-    }
 }
 
 /// Overview section: branch name, HEAD indicator, category.
@@ -1128,37 +1136,16 @@ mod tests {
     }
 
     #[test]
-    fn render_detail_sections_shows_correct_tab_labels() {
-        let mut state = BranchesState::default();
-        state.branches = sample_branches();
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f, area, BranchesFocus::List);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let mut full_text = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                full_text.push_str(buf[(x, y)].symbol());
-            }
-        }
-        assert!(
-            full_text.contains("SPECs"),
-            "Tab bar should contain 'SPECs'"
-        );
-        assert!(
-            full_text.contains("Sessions"),
-            "Tab bar should contain 'Sessions'"
-        );
-        // Actions is no longer a tab section — it's an overlay modal
-        assert!(
-            !full_text.contains("Actions"),
-            "Tab bar should NOT contain 'Actions'"
-        );
+    fn detail_section_labels_are_correct() {
+        // Detail section tab labels are now rendered by app.rs in the pane border.
+        // Verify the labels returned by detail_section_labels().
+        let labels = detail_section_labels();
+        assert!(labels.contains(&"Overview"));
+        assert!(labels.contains(&"SPECs"));
+        assert!(labels.contains(&"Git"));
+        assert!(labels.contains(&"Sessions"));
+        // Actions is an overlay modal, not a section tab
+        assert!(!labels.contains(&"Actions"));
     }
 
     #[test]
