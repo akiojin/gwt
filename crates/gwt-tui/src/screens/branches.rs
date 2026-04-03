@@ -294,7 +294,8 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         }
         BranchesMessage::Select => {
             if !state.filtered_branches().is_empty() {
-                state.detail_view = !state.detail_view;
+                state.action_modal_visible = true;
+                state.action_modal_selected = 0;
             }
         }
         BranchesMessage::ToggleSort => {

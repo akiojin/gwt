@@ -183,6 +183,9 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Branches(msg) => {
             screens::branches::update(&mut model.branches, msg);
+            if let Some(action) = model.branches.pending_docker_action.take() {
+                handle_pending_branch_docker_action(model, action);
+            }
         }
         Message::Profiles(msg) => {
             screens::profiles::update(&mut model.profiles, msg);
@@ -525,10 +528,23 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
         KeyCode::Enter => Some(BranchesMessage::OpenActionModal),
+        KeyCode::Up if model.branches.detail_section == 0 => Some(BranchesMessage::DockerContainerUp),
+        KeyCode::Down if model.branches.detail_section == 0 => {
+            Some(BranchesMessage::DockerContainerDown)
+        }
+        KeyCode::Char('s') if model.branches.detail_section == 0 => {
+            Some(BranchesMessage::DockerContainerStart)
+        }
+        KeyCode::Char('t') if model.branches.detail_section == 0 => {
+            Some(BranchesMessage::DockerContainerStop)
+        }
+        KeyCode::Char('r') if model.branches.detail_section == 0 => {
+            Some(BranchesMessage::DockerContainerRestart)
+        }
         _ => None,
     };
     if let Some(m) = msg {
-        screens::branches::update(&mut model.branches, m);
+        update(model, Message::Branches(m));
     } else if key.code == KeyCode::Esc {
         dismiss_warn_notification(model);
     }
@@ -829,6 +845,63 @@ fn dismiss_warn_notification(model: &mut Model) {
         Some(Severity::Warn)
     ) {
         update(model, Message::DismissNotification);
+    }
+}
+
+fn handle_pending_branch_docker_action(
+    model: &mut Model,
+    action: screens::branches::PendingDockerAction,
+) {
+    use screens::branches::DockerLifecycleAction;
+
+    let container_label = model
+        .branches
+        .docker_containers
+        .iter()
+        .find(|container| container.id == action.container_id)
+        .map(|container| container.name.clone())
+        .unwrap_or_else(|| action.container_id.clone());
+
+    let (verb_past, verb_base, result) = match action.action {
+        DockerLifecycleAction::Start => (
+            "Started",
+            "start",
+            gwt_docker::start(&action.container_id),
+        ),
+        DockerLifecycleAction::Stop => ("Stopped", "stop", gwt_docker::stop(&action.container_id)),
+        DockerLifecycleAction::Restart => (
+            "Restarted",
+            "restart",
+            gwt_docker::restart(&action.container_id),
+        ),
+    };
+
+    match result {
+        Ok(()) => {
+            let repo_path = model.repo_path.clone();
+            screens::branches::load_branch_detail(&mut model.branches, &repo_path);
+            update(
+                model,
+                Message::Notify(Notification::new(
+                    Severity::Info,
+                    "docker",
+                    format!("{verb_past} container {container_label}"),
+                )),
+            );
+        }
+        Err(err) => {
+            update(
+                model,
+                Message::Notify(
+                    Notification::new(
+                        Severity::Error,
+                        "docker",
+                        format!("Failed to {verb_base} container {container_label}"),
+                    )
+                    .with_detail(err.to_string()),
+                ),
+            );
+        }
     }
 }
 
@@ -1649,7 +1722,13 @@ mod tests {
     use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
     use gwt_agent::{version_cache::VersionEntry, AgentId, DetectedAgent, VersionCache};
     use gwt_notification::{Notification, Severity};
+    use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static DOCKER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_model() -> Model {
         Model::new(PathBuf::from("/tmp/test"))
@@ -1693,6 +1772,54 @@ mod tests {
             versions: versions.iter().map(|value| value.to_string()).collect(),
             updated_at: Utc::now() - Duration::seconds(age_seconds),
         }
+    }
+
+    fn docker_container(
+        id: &str,
+        name: &str,
+        status: gwt_docker::ContainerStatus,
+    ) -> gwt_docker::ContainerInfo {
+        gwt_docker::ContainerInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            status,
+            image: "nginx:latest".to_string(),
+            ports: "0.0.0.0:8080->80/tcp".to_string(),
+        }
+    }
+
+    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let script_path = dir.path().join("docker");
+        let mut file = fs::File::create(&script_path).expect("create fake docker");
+        file.write_all(script_body.as_bytes())
+            .expect("write fake docker");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata().expect("stat fake docker").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
+        }
+
+        (dir, script_path)
+    }
+
+    fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
+        let _guard = DOCKER_TEST_LOCK.lock().expect("lock docker tests");
+        let (_dir, script_path) = write_fake_docker(script_body);
+        let previous = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", &script_path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        result
     }
 
     #[test]
@@ -2587,6 +2714,92 @@ mod tests {
         );
 
         assert_eq!(model.service_select.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_overview_moves_docker_selection() {
+        let mut model = test_model();
+        model.branches.detail_section = 0;
+        model.branches.docker_containers = vec![
+            docker_container("abc123", "web", gwt_docker::ContainerStatus::Running),
+            docker_container("def456", "db", gwt_docker::ContainerStatus::Stopped),
+        ];
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(model.branches.docker_selected, 1);
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(model.branches.docker_selected, 0);
+    }
+
+    #[test]
+    fn update_branches_docker_stop_executes_and_refreshes_detail() {
+        let tmp = tempfile::tempdir().expect("temp worktree");
+        fs::write(
+            tmp.path().join("docker-compose.yml"),
+            "services:\n  web:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+
+        let script = "#!/bin/sh\nif [ \"$1\" = \"stop\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\texited\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = test_model();
+            model.branches.branches = vec![screens::branches::BranchItem {
+                name: "feature/docker".into(),
+                is_head: true,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(tmp.path().to_path_buf()),
+            }];
+            model.branches.docker_containers =
+                vec![docker_container("abc123", "web", gwt_docker::ContainerStatus::Running)];
+
+            update(
+                &mut model,
+                Message::Branches(screens::branches::BranchesMessage::DockerContainerStop),
+            );
+
+            assert!(model.branches.pending_docker_action.is_none());
+            assert_eq!(model.branches.docker_containers.len(), 1);
+            assert_eq!(
+                model.branches.docker_containers[0].status,
+                gwt_docker::ContainerStatus::Exited
+            );
+            let notification = model.current_notification.as_ref().expect("status notification");
+            assert_eq!(notification.source, "docker");
+            assert_eq!(notification.message, "Stopped container web");
+            assert!(model.error_queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn update_branches_docker_restart_failure_routes_error_notification() {
+        let script = "#!/bin/sh\nif [ \"$1\" = \"restart\" ]; then\n  printf 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = test_model();
+            model.branches.docker_containers =
+                vec![docker_container("abc123", "web", gwt_docker::ContainerStatus::Running)];
+
+            update(
+                &mut model,
+                Message::Branches(screens::branches::BranchesMessage::DockerContainerRestart),
+            );
+
+            assert!(model.current_notification.is_none());
+            assert_eq!(model.error_queue.len(), 1);
+            let notification = model.error_queue.front().unwrap();
+            assert_eq!(notification.source, "docker");
+            assert_eq!(notification.message, "Failed to restart container web");
+            assert!(
+                notification
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("permission denied")
+            );
+        });
     }
 
     #[test]
