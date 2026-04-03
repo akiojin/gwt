@@ -14,6 +14,7 @@ mod tests {
     use super::*;
     use fs2::FileExt;
     use std::path::PathBuf;
+    use std::process::Command;
 
     // ── SkillRegistry tests ──
 
@@ -441,9 +442,39 @@ mod tests {
     }
 
     #[test]
+    fn gwt_spec_brainstorm_is_registered_and_assets_exist() {
+        let has_builtin = BuiltinSkill::all()
+            .iter()
+            .any(|builtin| builtin.name() == "gwt-spec-brainstorm");
+        assert!(has_builtin);
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        assert!(repo_root
+            .join(".claude/skills/gwt-spec-brainstorm/SKILL.md")
+            .exists());
+        assert!(repo_root
+            .join(".claude/commands/gwt-spec-brainstorm.md")
+            .exists());
+
+        let tracked = Command::new("git")
+            .args([
+                "ls-files",
+                "--error-unmatch",
+                ".claude/skills/gwt-spec-brainstorm/SKILL.md",
+                ".claude/commands/gwt-spec-brainstorm.md",
+            ])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap();
+        assert!(tracked.success());
+    }
+
+    #[test]
     fn builtin_all_returns_expected_count() {
-        // We defined 8 builtins
-        assert_eq!(BuiltinSkill::all().len(), 8);
+        // We defined 9 builtins
+        assert_eq!(BuiltinSkill::all().len(), 9);
     }
 
     #[test]

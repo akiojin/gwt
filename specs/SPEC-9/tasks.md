@@ -60,6 +60,14 @@
 - [ ] **T-034**: Implement extended gwt-pr-check status report in gwt-core.
 - [ ] **T-035**: Verify T-032, T-033 pass (GREEN).
 
+### 2.4 Pre-SPEC Brainstorming Skill
+
+- [x] **T-078**: Write a failing test for `gwt-spec-brainstorm` registration and tracked asset presence.
+- [x] **T-079**: Add `.claude/skills/gwt-spec-brainstorm/SKILL.md` and `.claude/commands/gwt-spec-brainstorm.md` as the cross-agent pre-SPEC intake entrypoint.
+- [x] **T-080**: Register `gwt-spec-brainstorm` in the embedded skill builtin catalog.
+- [x] **T-081**: Update `SPEC-9` artifacts and the managed skill catalog in `AGENTS.md` to include `gwt-spec-brainstorm`.
+- [x] **T-082**: Verify `gwt-spec-brainstorm` via targeted cargo tests, embedded skill lint, and build/catalog refresh.
+
 ## Phase 3: Hooks Merge Completion (carried over from SPEC-1786)
 
 > Progress: 20/31 tasks from SPEC-1786 completed. Tasks below are the remaining 11.
