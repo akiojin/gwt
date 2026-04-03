@@ -104,24 +104,28 @@ fn sample_branches() -> Vec<BranchItem> {
             is_head: true,
             is_local: true,
             category: BranchCategory::Main,
+            worktree_path: None,
         },
         BranchItem {
             name: "feature/api".to_string(),
             is_head: false,
             is_local: true,
             category: BranchCategory::Feature,
+            worktree_path: None,
         },
         BranchItem {
             name: "feature/app-shell".to_string(),
             is_head: false,
             is_local: true,
             category: BranchCategory::Feature,
+            worktree_path: None,
         },
         BranchItem {
             name: "origin/release/1.0".to_string(),
             is_head: false,
             is_local: false,
             category: BranchCategory::Other,
+            worktree_path: None,
         },
     ]
 }

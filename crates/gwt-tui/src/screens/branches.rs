@@ -108,6 +108,16 @@ pub struct BranchItem {
     pub is_head: bool,
     pub is_local: bool,
     pub category: BranchCategory,
+    pub worktree_path: Option<std::path::PathBuf>,
+}
+
+/// A SPEC entry loaded from a branch worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailSpecItem {
+    pub id: String,
+    pub title: String,
+    pub phase: String,
+    pub status: String,
 }
 
 /// Number of detail sections in the branch detail view.
@@ -147,6 +157,12 @@ pub struct BranchesState {
     pub(crate) pending_open_shell: bool,
     /// Flag: caller should show worktree delete confirmation.
     pub(crate) pending_delete_worktree: bool,
+    /// SPECs loaded from the selected branch worktree.
+    pub(crate) detail_specs: Vec<DetailSpecItem>,
+    /// Git status files for the selected branch worktree.
+    pub(crate) detail_files: Vec<String>,
+    /// Recent commits for the selected branch worktree.
+    pub(crate) detail_commits: Vec<String>,
 }
 
 impl BranchesState {
@@ -319,6 +335,106 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     }
 }
 
+/// Load detail data (SPECs, git status, commits) for the selected branch.
+///
+/// Best-effort: all errors are silently ignored.
+pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Path) {
+    state.detail_specs.clear();
+    state.detail_files.clear();
+    state.detail_commits.clear();
+
+    let worktree_path = state
+        .selected_branch()
+        .and_then(|b| b.worktree_path.clone());
+
+    let Some(wt_path) = worktree_path else {
+        return;
+    };
+
+    // Load SPECs from worktree specs/ directory
+    if let Ok(entries) = std::fs::read_dir(wt_path.join("specs")) {
+        let mut specs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !dir_name.starts_with("SPEC-") {
+                continue;
+            }
+            let metadata_path = path.join("metadata.json");
+            let Ok(content) = std::fs::read_to_string(&metadata_path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            let id = value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(dir_name)
+                .to_string();
+            let title = value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let phase = value
+                .get("phase")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let status = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            specs.push(DetailSpecItem {
+                id,
+                title,
+                phase,
+                status,
+            });
+        }
+        specs.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
+        state.detail_specs = specs;
+    }
+
+    // Load git status
+    if let Ok(entries) = gwt_git::diff::get_status(&wt_path) {
+        state.detail_files = entries
+            .iter()
+            .map(|e| {
+                let tag = match e.status {
+                    gwt_git::FileStatus::Staged => "[S]",
+                    gwt_git::FileStatus::Unstaged => "[U]",
+                    gwt_git::FileStatus::Untracked => "[?]",
+                };
+                format!("{} {}", tag, e.path.display())
+            })
+            .collect();
+    }
+
+    // Load recent commits
+    if let Ok(commits) = gwt_git::commit::recent_commits(&wt_path, 5) {
+        state.detail_commits = commits
+            .iter()
+            .map(|c| format!("{} {}", c.hash, c.subject))
+            .collect();
+    }
+}
+
+fn spec_sort_key(spec_id: &str) -> (u64, String) {
+    let numeric = spec_id
+        .strip_prefix("SPEC-")
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    (numeric, spec_id.to_string())
+}
+
 /// Which sub-pane of the branches screen is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchesFocus {
@@ -348,12 +464,18 @@ pub fn render_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
 ///
 /// Called by app.rs which provides the bordered pane. This renders borderless
 /// content into the inner area of the bottom detail pane.
-pub fn render_detail_content(state: &BranchesState, frame: &mut Frame, area: Rect) {
+/// `session_count` is the number of active sessions matching this branch.
+pub fn render_detail_content(
+    state: &BranchesState,
+    frame: &mut Frame,
+    area: Rect,
+    session_count: usize,
+) {
     match state.detail_section {
         0 => render_detail_overview(state, frame, area),
         1 => render_detail_specs(state, frame, area),
         2 => render_detail_git_status(state, frame, area),
-        3 => render_detail_sessions(frame, area),
+        3 => render_detail_sessions(frame, area, session_count),
         _ => {}
     }
 }
@@ -381,7 +503,7 @@ pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, _focus: Bran
 
     render_header(state, frame, list_chunks[0]);
     render_branch_list(state, frame, list_chunks[1]);
-    render_detail_content(state, frame, main_chunks[1]);
+    render_detail_content(state, frame, main_chunks[1], 0);
 
     if state.action_modal_visible {
         render_action_modal(state, frame, main_chunks[1]);
@@ -476,18 +598,24 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-/// Overview section: branch name, HEAD indicator, category.
+/// Overview section: branch name, HEAD indicator, category, worktree path.
 fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let content = match state.selected_branch() {
         Some(branch) => {
             let head = if branch.is_head { " (HEAD)" } else { "" };
             let locality = if branch.is_local { "Local" } else { "Remote" };
+            let wt = branch
+                .worktree_path
+                .as_ref()
+                .map(|p| format!("\n Worktree: {}", p.display()))
+                .unwrap_or_default();
             format!(
-                " Branch: {}{}\n Category: {}\n Type: {}",
+                " Branch: {}{}\n Category: {}\n Type: {}{}",
                 branch.name,
                 head,
                 branch.category.label(),
                 locality,
+                wt,
             )
         }
         None => " No branch selected".to_string(),
@@ -500,40 +628,154 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
     frame.render_widget(paragraph, area);
 }
 
-/// SPECs section: placeholder list.
+/// SPECs section: list loaded from the worktree.
 fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
-    let content = match state.selected_branch() {
-        Some(branch) => format!(" SPECs for branch: {}\n\n No SPECs loaded", branch.name),
-        None => " No branch selected".to_string(),
-    };
+    if state.selected_branch().is_none() {
+        let block = Block::default().title("SPECs");
+        let paragraph = Paragraph::new(" No branch selected")
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
 
-    let block = Block::default().title("SPECs");
-    let paragraph = Paragraph::new(content)
-        .block(block)
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(paragraph, area);
+    if state.detail_specs.is_empty() {
+        let has_worktree = state
+            .selected_branch()
+            .and_then(|b| b.worktree_path.as_ref())
+            .is_some();
+        let msg = if has_worktree {
+            " No SPECs found in worktree"
+        } else {
+            " No worktree (no SPECs available)"
+        };
+        let block = Block::default().title("SPECs");
+        let paragraph = Paragraph::new(msg)
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .detail_specs
+        .iter()
+        .map(|spec| {
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {} ", spec.id),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(&spec.title, Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("  [{}]", spec.status),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let block = Block::default().title(format!("SPECs ({})", state.detail_specs.len()));
+    let list = List::new(items).block(block);
+    frame.render_widget(list, area);
 }
 
-/// Git Status section: placeholder.
+/// Git Status section: files and recent commits from the worktree.
 fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect) {
-    let content = match state.selected_branch() {
-        Some(branch) => format!(" Git status for {}", branch.name),
-        None => " No branch selected".to_string(),
-    };
+    if state.selected_branch().is_none() {
+        let block = Block::default().title("Git Status");
+        let paragraph = Paragraph::new(" No branch selected")
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let has_worktree = state
+        .selected_branch()
+        .and_then(|b| b.worktree_path.as_ref())
+        .is_some();
+
+    if !has_worktree {
+        let block = Block::default().title("Git Status");
+        let paragraph = Paragraph::new(" No worktree (no git status available)")
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Files section
+    if state.detail_files.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " Working tree clean",
+            Style::default().fg(Color::Green),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(" Changed files ({})", state.detail_files.len()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for file in &state.detail_files {
+            let color = if file.starts_with("[S]") {
+                Color::Green
+            } else if file.starts_with("[?]") {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {file}"),
+                Style::default().fg(color),
+            )));
+        }
+    }
+
+    // Commits section
+    if !state.detail_commits.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Recent commits",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for commit in &state.detail_commits {
+            lines.push(Line::from(Span::styled(
+                format!("  {commit}"),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
 
     let block = Block::default().title("Git Status");
-    let paragraph = Paragraph::new(content)
+    let paragraph = Paragraph::new(lines)
         .block(block)
         .style(Style::default().fg(Color::White));
     frame.render_widget(paragraph, area);
 }
 
-/// Sessions section: placeholder.
-fn render_detail_sessions(frame: &mut Frame, area: Rect) {
+/// Sessions section: shows count of active sessions on this branch.
+fn render_detail_sessions(frame: &mut Frame, area: Rect, session_count: usize) {
+    let content = if session_count == 0 {
+        " No active sessions".to_string()
+    } else {
+        format!(" {} active session(s) on this branch", session_count)
+    };
+    let style = if session_count > 0 {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let block = Block::default().title("Sessions");
-    let paragraph = Paragraph::new(" No active sessions")
-        .block(block)
-        .style(Style::default().fg(Color::DarkGray));
+    let paragraph = Paragraph::new(content).block(block).style(style);
     frame.render_widget(paragraph, area);
 }
 
@@ -579,30 +821,35 @@ mod tests {
                 is_head: false,
                 is_local: true,
                 category: BranchCategory::Main,
+                worktree_path: None,
             },
             BranchItem {
                 name: "develop".to_string(),
                 is_head: true,
                 is_local: true,
                 category: BranchCategory::Develop,
+                worktree_path: None,
             },
             BranchItem {
                 name: "feature/login".to_string(),
                 is_head: false,
                 is_local: true,
                 category: BranchCategory::Feature,
+                worktree_path: None,
             },
             BranchItem {
                 name: "origin/feature/api".to_string(),
                 is_head: false,
                 is_local: false,
                 category: BranchCategory::Feature,
+                worktree_path: None,
             },
             BranchItem {
                 name: "hotfix/crash".to_string(),
                 is_head: false,
                 is_local: true,
                 category: BranchCategory::Other,
+                worktree_path: None,
             },
         ]
     }
