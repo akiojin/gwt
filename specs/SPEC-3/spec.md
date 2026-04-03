@@ -48,7 +48,7 @@ As a developer, I want to add, edit, and remove custom agents via Settings so th
 3. Given a custom agent exists, when I delete it, then it is removed from the agent selection list.
 4. Given a custom agent's command is invalid, when I try to launch it, then an error message is displayed with the failing command.
 
-### US-5: Cache Agent Version List at Startup (P1) -- NOT IMPLEMENTED
+### US-5: Cache Agent Version List at Startup (P1) -- IMPLEMENTED
 
 As a developer, I want gwt to cache available agent versions at startup so that version selection in the wizard is fast and does not block the UI.
 
@@ -59,7 +59,7 @@ As a developer, I want gwt to cache available agent versions at startup so that 
 3. Given the network is unavailable during cache refresh, when I open the wizard, then stale cached versions are shown with a "cache outdated" indicator.
 4. Given a new agent version is published, when the cache refreshes after TTL expiry, then the new version appears in the list.
 
-### US-6: Convert Sessions Between Agent Types (P2) -- PARTIALLY IMPLEMENTED
+### US-6: Convert Sessions Between Agent Types (P2) -- IMPLEMENTED
 
 As a developer, I want to convert an existing session to a different agent type so that I can switch tools mid-workflow.
 

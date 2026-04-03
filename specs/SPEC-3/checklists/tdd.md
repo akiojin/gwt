@@ -5,4 +5,4 @@
 - [x] Focused `gwt-tui` tests and clippy runs exist for recent SPEC-3 work, including session-conversion coverage.
 - [x] Each remaining unchecked task has been closed through artifact reconciliation and recorded verification evidence.
 - [x] The latest implementation slice has spec-focused verification evidence attached to it.
-- [ ] The reviewer flow in `quickstart.md` has been captured as repeatable completion evidence.
+- [x] The reviewer flow in `quickstart.md` has been captured as repeatable completion evidence.
