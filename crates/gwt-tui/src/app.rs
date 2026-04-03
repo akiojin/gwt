@@ -224,8 +224,12 @@ pub fn update(model: &mut Model, msg: Message) {
             if let Some(ref mut wizard) = model.wizard {
                 screens::wizard::update(wizard, msg);
                 maybe_start_wizard_branch_suggestions(wizard);
+                let completed = wizard.completed;
                 if wizard.completed || wizard.cancelled {
                     model.wizard = None;
+                }
+                if completed {
+                    model.active_focus = FocusPane::Terminal;
                 }
             }
         }
@@ -340,9 +344,6 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::OpenSessionConversion => {
             open_session_conversion(model);
-        }
-        Message::OpenWizard => {
-            open_wizard(model, None);
         }
         Message::OpenWizardWithSpec(spec_id, title) => {
             open_wizard(
@@ -579,14 +580,14 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     false
 }
 
-/// Route a key event to the branch detail pane (sections, Enter opens action modal).
+/// Route a key event to the branch detail pane (sections, Enter launches agent).
 fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
 
     let msg = match key.code {
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
-        KeyCode::Enter => Some(BranchesMessage::OpenActionModal),
+        KeyCode::Enter => Some(BranchesMessage::LaunchAgent),
         KeyCode::Up if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerUp)
         }
@@ -1648,14 +1649,40 @@ fn management_tab_title(model: &Model) -> Line<'static> {
     screens::build_tab_title(&labels, active_idx)
 }
 
+/// Render a 1-line header at the top of the management panel.
+fn render_management_header(model: &Model, frame: &mut Frame, area: Rect) {
+    let version = env!("CARGO_PKG_VERSION");
+    let repo = model.repo_path.display();
+    let branch_count = model.branches.branches.len();
+    let wt_count = model
+        .branches
+        .branches
+        .iter()
+        .filter(|b| b.worktree_path.is_some())
+        .count();
+    let text = format!(
+        " GWT v{} | {} | {} branches ({} worktrees)",
+        version, repo, branch_count, wt_count
+    );
+    let p = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(p, area);
+}
+
 /// Render the management panes (left side — 2 stacked for Branches, 1 for others).
 fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    render_management_header(model, frame, outer[0]);
+    let content_area = outer[1];
+
     if model.management_tab == ManagementTab::Branches {
-        // Two stacked panes: top = branch list, bottom = branch detail
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
+            .split(content_area);
 
         // Top pane: management tab names in title, branch list content
         let list_focused = model.active_focus == FocusPane::TabContent;
@@ -1678,15 +1705,12 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
             detail_inner,
             branch_session_count,
         );
-        if model.branches.action_modal_visible {
-            screens::branches::render_action_modal_overlay(&model.branches, frame, chunks[1]);
-        }
     } else {
         // Single pane for all other tabs
         let focused = model.active_focus == FocusPane::TabContent;
         let block = pane_block(management_tab_title(model), focused);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = block.inner(content_area);
+        frame.render_widget(block, content_area);
         render_management_tab_content(model, frame, inner);
     }
 }

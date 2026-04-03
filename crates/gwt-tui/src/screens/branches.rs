@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -147,9 +147,6 @@ pub fn detail_section_labels() -> &'static [&'static str] {
     &DETAIL_SECTION_LABELS
 }
 
-/// Action labels shown in the action modal overlay.
-const ACTION_LABELS: [&str; 3] = ["Launch Agent", "Open Shell", "Delete Worktree"];
-
 /// State for the branches screen.
 #[derive(Debug, Clone, Default)]
 pub struct BranchesState {
@@ -161,10 +158,6 @@ pub struct BranchesState {
     pub(crate) search_active: bool,
     /// Active detail section: 0=Overview, 1=SPECs, 2=Git, 3=Sessions.
     pub(crate) detail_section: usize,
-    /// Whether the action modal overlay is visible.
-    pub(crate) action_modal_visible: bool,
-    /// Selected action index within the action modal.
-    pub(crate) action_modal_selected: usize,
     /// Flag: caller should open agent selection.
     pub(crate) pending_launch_agent: bool,
     /// Flag: caller should spawn shell in worktree cwd.
@@ -252,16 +245,6 @@ pub enum BranchesMessage {
     NextDetailSection,
     /// Cycle to the previous detail section.
     PrevDetailSection,
-    /// Open the action modal overlay.
-    OpenActionModal,
-    /// Close the action modal overlay.
-    CloseActionModal,
-    /// Move up within the action modal.
-    ActionModalUp,
-    /// Move down within the action modal.
-    ActionModalDown,
-    /// Select the current action in the modal.
-    ActionModalSelect,
     /// Launch agent action.
     LaunchAgent,
     /// Open shell action.
@@ -339,30 +322,6 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             } else {
                 state.detail_section - 1
             };
-        }
-        BranchesMessage::OpenActionModal => {
-            if !state.filtered_branches().is_empty() {
-                state.action_modal_visible = true;
-                state.action_modal_selected = 0;
-            }
-        }
-        BranchesMessage::CloseActionModal => {
-            state.action_modal_visible = false;
-        }
-        BranchesMessage::ActionModalUp => {
-            super::move_up(&mut state.action_modal_selected, ACTION_LABELS.len());
-        }
-        BranchesMessage::ActionModalDown => {
-            super::move_down(&mut state.action_modal_selected, ACTION_LABELS.len());
-        }
-        BranchesMessage::ActionModalSelect => {
-            let selected = state.action_modal_selected;
-            state.action_modal_visible = false;
-            match selected {
-                0 => state.pending_launch_agent = true,
-                1 => state.pending_open_shell = true,
-                _ => state.pending_delete_worktree = true,
-            }
         }
         BranchesMessage::LaunchAgent => {
             state.pending_launch_agent = true;
@@ -563,13 +522,6 @@ pub fn render_detail_content(
     }
 }
 
-/// Render the action modal overlay on top of a given area.
-///
-/// Called by app.rs when the action modal is visible.
-pub fn render_action_modal_overlay(state: &BranchesState, frame: &mut Frame, area: Rect) {
-    render_action_modal(state, frame, area);
-}
-
 /// Render the branches screen (legacy entry point).
 ///
 /// In the lazygit layout, app.rs calls render_list / render_detail_content directly.
@@ -588,9 +540,6 @@ pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, _focus: Bran
     render_branch_list(state, frame, list_chunks[1]);
     render_detail_content(state, frame, main_chunks[1], 0);
 
-    if state.action_modal_visible {
-        render_action_modal(state, frame, main_chunks[1]);
-    }
 }
 
 /// Render the header bar with view mode, sort mode, and search (plain bar, no borders).
@@ -620,7 +569,7 @@ fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the branch list grouped by category (borderless).
+/// Render the branch list (borderless, simple format: name + worktree/HEAD indicators).
 fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_branches();
 
@@ -900,34 +849,6 @@ fn render_detail_sessions(frame: &mut Frame, area: Rect, session_count: usize) {
     let block = Block::default().title("Sessions");
     let paragraph = Paragraph::new(content).block(block).style(style);
     frame.render_widget(paragraph, area);
-}
-
-/// Action modal: centered overlay with selectable action list.
-fn render_action_modal(state: &BranchesState, frame: &mut Frame, area: Rect) {
-    let dialog = super::centered_rect(30, 7, area);
-
-    frame.render_widget(Clear, dialog);
-
-    let items: Vec<ListItem> = ACTION_LABELS
-        .iter()
-        .enumerate()
-        .map(|(idx, label)| {
-            let style = super::list_item_style(idx == state.action_modal_selected);
-            let prefix = if idx == state.action_modal_selected {
-                "\u{25B6} "
-            } else {
-                "  "
-            };
-            ListItem::new(Line::from(Span::styled(format!("{prefix}{label}"), style)))
-        })
-        .collect();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Actions")
-        .border_style(Style::default().fg(Color::Yellow));
-    let list = List::new(items).block(block);
-    frame.render_widget(list, dialog);
 }
 
 #[cfg(test)]
@@ -1391,87 +1312,6 @@ mod tests {
     }
 
     #[test]
-    fn action_modal_defaults_to_hidden() {
-        let state = BranchesState::default();
-        assert!(!state.action_modal_visible);
-        assert_eq!(state.action_modal_selected, 0);
-    }
-
-    #[test]
-    fn open_action_modal_sets_visible() {
-        let mut state = BranchesState::default();
-        state.branches = sample_branches();
-        update(&mut state, BranchesMessage::OpenActionModal);
-        assert!(state.action_modal_visible);
-        assert_eq!(state.action_modal_selected, 0);
-    }
-
-    #[test]
-    fn open_action_modal_ignored_when_empty() {
-        let mut state = BranchesState::default();
-        update(&mut state, BranchesMessage::OpenActionModal);
-        assert!(!state.action_modal_visible);
-    }
-
-    #[test]
-    fn close_action_modal_hides() {
-        let mut state = BranchesState::default();
-        state.action_modal_visible = true;
-        update(&mut state, BranchesMessage::CloseActionModal);
-        assert!(!state.action_modal_visible);
-    }
-
-    #[test]
-    fn action_modal_down_cycles() {
-        let mut state = BranchesState::default();
-        state.action_modal_visible = true;
-        update(&mut state, BranchesMessage::ActionModalDown);
-        assert_eq!(state.action_modal_selected, 1);
-        update(&mut state, BranchesMessage::ActionModalDown);
-        assert_eq!(state.action_modal_selected, 2);
-        update(&mut state, BranchesMessage::ActionModalDown);
-        assert_eq!(state.action_modal_selected, 0); // wraps
-    }
-
-    #[test]
-    fn action_modal_up_wraps() {
-        let mut state = BranchesState::default();
-        state.action_modal_visible = true;
-        update(&mut state, BranchesMessage::ActionModalUp);
-        assert_eq!(state.action_modal_selected, 2); // wraps to last
-    }
-
-    #[test]
-    fn action_modal_select_launch_agent() {
-        let mut state = BranchesState::default();
-        state.action_modal_visible = true;
-        state.action_modal_selected = 0;
-        update(&mut state, BranchesMessage::ActionModalSelect);
-        assert!(!state.action_modal_visible);
-        assert!(state.pending_launch_agent);
-    }
-
-    #[test]
-    fn action_modal_select_open_shell() {
-        let mut state = BranchesState::default();
-        state.action_modal_visible = true;
-        state.action_modal_selected = 1;
-        update(&mut state, BranchesMessage::ActionModalSelect);
-        assert!(!state.action_modal_visible);
-        assert!(state.pending_open_shell);
-    }
-
-    #[test]
-    fn action_modal_select_delete_worktree() {
-        let mut state = BranchesState::default();
-        state.action_modal_visible = true;
-        state.action_modal_selected = 2;
-        update(&mut state, BranchesMessage::ActionModalSelect);
-        assert!(!state.action_modal_visible);
-        assert!(state.pending_delete_worktree);
-    }
-
-    #[test]
     fn launch_agent_sets_flag() {
         let mut state = BranchesState::default();
         assert!(!state.pending_launch_agent);
@@ -1687,37 +1527,6 @@ mod tests {
     }
 
     #[test]
-    fn render_action_modal_shows_action_list() {
-        let mut state = BranchesState::default();
-        state.branches = sample_branches();
-        state.action_modal_visible = true;
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f, area, BranchesFocus::List);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let mut found_actions = false;
-        let mut found_launch = false;
-        for y in 0..buf.area.height {
-            let line: String = (0..buf.area.width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect();
-            if line.contains("Actions") {
-                found_actions = true;
-            }
-            if line.contains("Launch Agent") {
-                found_launch = true;
-            }
-        }
-        assert!(found_actions, "Should contain 'Actions' title");
-        assert!(found_launch, "Should contain 'Launch Agent' action");
-    }
-
-    #[test]
     fn detail_section_labels_are_correct() {
         // Detail section tab labels are now rendered by app.rs in the pane border.
         // Verify the labels returned by detail_section_labels().
@@ -1726,8 +1535,6 @@ mod tests {
         assert!(labels.contains(&"SPECs"));
         assert!(labels.contains(&"Git"));
         assert!(labels.contains(&"Sessions"));
-        // Actions is an overlay modal, not a section tab
-        assert!(!labels.contains(&"Actions"));
     }
 
     #[test]

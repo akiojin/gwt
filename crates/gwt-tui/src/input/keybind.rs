@@ -144,11 +144,6 @@ impl KeybindRegistry {
                 category: KeybindingCategory::Global,
             },
             Keybinding {
-                keys: "Ctrl+G, n".into(),
-                description: "Open agent launch wizard".into(),
-                category: KeybindingCategory::Global,
-            },
-            Keybinding {
                 keys: "Ctrl+G, b".into(),
                 description: "Switch to Branches tab".into(),
                 category: KeybindingCategory::Management,
@@ -239,7 +234,6 @@ impl KeybindRegistry {
                     }
                     KeyCode::Char('i') => Some(Message::SwitchManagementTab(ManagementTab::Issues)),
                     KeyCode::Char('p') => Some(Message::PasteFiles),
-                    KeyCode::Char('n') => Some(Message::OpenWizard),
                     KeyCode::Char('?') => Some(Message::ToggleHelp),
                     KeyCode::Esc => Some(Message::Tick), // Cancel prefix
                     _ => None,                           // Unknown, discard
@@ -418,7 +412,6 @@ mod tests {
         for expected in [
             "Ctrl+G, g",
             "Ctrl+G, c",
-            "Ctrl+G, n",
             "Ctrl+G, ?",
             "Ctrl+G, 1-9",
             "Ctrl+C, Ctrl+C",

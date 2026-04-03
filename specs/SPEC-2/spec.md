@@ -102,11 +102,11 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
   - **Git Status**: Staged/unstaged/untracked files, recent commits
   - **Sessions**: Active agent/shell sessions on this branch
   - Left/Right cycles between sections within the detail view.
-  - Enter in the detail pane opens an **action modal** (centered overlay) with choices: Launch Agent, Open Shell, Delete Worktree. Up/Down navigates, Enter selects, Esc closes.
-  - Agent launch: shows agent selection list only (branch already determined). No full wizard.
-  - Shell: opens in the branch's worktree directory. Requires worktree to exist.
-  - Worktree creation is automatic (on agent launch). Manual creation not available. Deletion available with confirmation.
+  - Enter in the detail pane directly launches agent (no action modal).
   - PR creation and branch deletion are NOT included (use CLI).
+- **FR-006b**: Branch line display: name + worktree icon (U+25CF/U+25CB) + HEAD indicator. No category headers.
+- **FR-006c**: Header line: 1-line header at top of management panel.
+- **FR-006d**: Branch list: Enter=Wizard, Shift+Enter=Shell, Space=select, Ctrl+C=delete
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-009**: Session navigation: Ctrl+G,] (next), Ctrl+G,[ (prev), Ctrl+G,1-9 (direct).
@@ -152,7 +152,6 @@ Tab →  Tab Content (list) → Branch Detail → Terminal → ...
 | `Shift+Tab` | Move focus to previous pane |
 | `Ctrl+G, g` | Toggle management panel visibility |
 | `Ctrl+G, c` | New shell session |
-| `Ctrl+G, n` | Open agent launch wizard |
 | `Ctrl+G, q` | Quit |
 | `Ctrl+G, ?` | Show help overlay |
 | `Ctrl+G, v` | Voice input (start recording) |

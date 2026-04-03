@@ -99,8 +99,6 @@ pub enum Message {
     ToggleHelp,
     /// Paste file paths from clipboard.
     PasteFiles,
-    /// Open the wizard overlay.
-    OpenWizard,
     /// Open the wizard overlay with SPEC context for prefilling (spec_id, title).
     OpenWizardWithSpec(String, String),
     /// Close the wizard overlay.
@@ -161,7 +159,6 @@ mod tests {
         let _ = Message::Initialization(InitializationMessage::Exit);
         let _ = Message::OpenSessionConversion;
         let _ = Message::PasteFiles;
-        let _ = Message::OpenWizard;
         let _ = Message::OpenWizardWithSpec("SPEC-1".into(), "Title".into());
         let _ = Message::CloseWizard;
     }

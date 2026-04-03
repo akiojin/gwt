@@ -146,3 +146,7 @@ separated by │). This includes:
 
 A shared `build_tab_title()` utility in `screens/mod.rs` is available for all
 screens to use.
+
+## Phase 7: TUI Operation Flow Overhaul
+
+- [x] T084-T103 All tasks completed
