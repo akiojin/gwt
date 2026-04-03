@@ -1363,20 +1363,42 @@ fn render_sessions_area(model: &Model, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Tab bar
             Constraint::Min(0),    // Terminal content
             Constraint::Length(1), // Status bar
         ])
         .split(area);
 
-    // Session tab bar — delegate to widget
-    crate::widgets::tab_bar::render(model, frame, chunks[0]);
-
-    // Session content
-    render_session_content(model, frame, chunks[1]);
+    // Session content (session tabs are rendered in the Block title)
+    render_session_content(model, frame, chunks[0]);
 
     // Status bar — delegate to widget
-    crate::widgets::status_bar::render(model, frame, chunks[2]);
+    crate::widgets::status_bar::render(model, frame, chunks[1]);
+}
+
+/// Build session tab title line (same pattern as management tabs in Block title).
+fn build_session_title(model: &Model) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, s) in model.sessions.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("│"));
+        }
+        let icon = match &s.tab_type {
+            SessionTabType::Shell => "\u{25B6}",
+            SessionTabType::Agent { .. } => "\u{2B50}",
+        };
+        let label = format!(" {icon} {} ", s.name);
+        if i == model.active_session {
+            spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
+        }
+    }
+    Line::from(spans)
 }
 
 /// Render session content (Tab mode = single, Grid mode = tiled).
@@ -1385,7 +1407,8 @@ fn render_session_content(model: &Model, frame: &mut Frame, area: Rect) {
     match model.session_layout {
         SessionLayout::Tab => {
             if let Some(session) = model.active_session_tab() {
-                render_single_session(session, terminal_focused, frame, area);
+                let title = build_session_title(model);
+                render_single_session(session, terminal_focused, title, frame, area);
             }
         }
         SessionLayout::Grid => {
@@ -1398,13 +1421,14 @@ fn render_session_content(model: &Model, frame: &mut Frame, area: Rect) {
 fn render_single_session(
     session: &crate::model::SessionTab,
     terminal_focused: bool,
+    title: Line<'static>,
     frame: &mut Frame,
     area: Rect,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(focused_border_style(terminal_focused))
-        .title(session.name.as_str());
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

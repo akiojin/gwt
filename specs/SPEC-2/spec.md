@@ -90,7 +90,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 
 ## Functional Requirements
 
-- **FR-001**: Tab mode shows single active session with a tab bar listing all sessions.
+- **FR-001**: Tab mode shows single active session with session tabs in the Block title (active session yellow/bold, inactive gray, separated by │).
 - **FR-002**: Split mode shows an equal grid of all sessions (e.g., 2x2 for 4 sessions, 2x3 for 5-6).
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.
@@ -115,7 +115,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-012**: Restore session layout on gwt restart (best-effort: working directories, display mode, active tab).
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion.
-- **FR-015**: Focus system: 4 focusable panes cycled with Tab/Shift+Tab. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
+- **FR-015**: Focus system: 3 focusable panes (TabContent, BranchDetail, Terminal) cycled with Tab/Shift+Tab. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 
@@ -131,14 +131,16 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 
 ### Focus System
 
-4 focusable panes, cycled with Tab / Shift+Tab:
+3 focusable panes, cycled with Tab / Shift+Tab:
 
 ```
-Tab →  Management Tab Header → Tab Content (list) → Branch Detail → Terminal → ...
+Tab →  Tab Content (list) → Branch Detail → Terminal → ...
 ```
 
 - Focused pane: **blue** border (`Color::Cyan`)
 - Unfocused pane: **white** border (`Color::Gray`)
+- Management tabs are rendered in the Block title of the management panel (Left/Right switches tabs within TabContent focus)
+- Session tabs are rendered in the Block title of the terminal content area (active session highlighted yellow/bold, inactive gray)
 - Ctrl+G,g toggles management panel visibility (same as before)
 - Overlays (Wizard, Confirm, Error) capture all input when visible
 
@@ -165,12 +167,9 @@ Tab →  Management Tab Header → Tab Content (list) → Branch Detail → Term
 | `Ctrl+G, x` | Close current session |
 | `Ctrl+C, Ctrl+C` | Quit (double-tap, 500ms window) |
 
-### Focus: Management Tab Header
+### Management Tab Header (in Block title)
 
-| Keybinding | Action |
-|------------|--------|
-| `←` / `→` | Switch management tab |
-| `Enter` | Activate selected tab (move focus to Tab Content) |
+Management tabs are displayed in the Block title of the management panel area. Tab switching (Left/Right) is available when TabContent has focus. There is no separate TabHeader focus pane.
 
 ### Focus: Tab Content (list area)
 
