@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -20,7 +21,7 @@ use ratatui::{
     Frame,
 };
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::{
     input::voice::VoiceInputMessage,
@@ -101,8 +102,10 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Resize(w, h) => {
             model.terminal_size = (w, h);
         }
-        Message::PtyOutput(_pane_id, _data) => {
-            // Phase 2: feed data into vt100 parser for the matching pane
+        Message::PtyOutput(pane_id, data) => {
+            if let Some(session) = model.session_tab_mut(&pane_id) {
+                session.vt.process(&data);
+            }
         }
         Message::PushError(err) => {
             model
@@ -187,8 +190,8 @@ pub fn update(model: &mut Model, msg: Message) {
                 forward_key_to_active_session(model, key);
             }
         }
-        Message::MouseInput(_) => {
-            // Phase 2: mouse routing
+        Message::MouseInput(mouse) => {
+            handle_mouse_input(model, mouse);
         }
         Message::Branches(msg) => {
             screens::branches::update(&mut model.branches, msg);
@@ -1510,13 +1513,13 @@ fn apply_pending_session_conversion_with(
     pending: PendingSessionConversion,
     detected_agents: Vec<DetectedAgent>,
 ) -> Result<(), String> {
-    let original_session = model
+    let original_tab_type = model
         .sessions
         .get(pending.session_index)
-        .cloned()
+        .map(|session| session.tab_type.clone())
         .ok_or_else(|| format!("Session index {} is out of bounds", pending.session_index))?;
 
-    if !matches!(original_session.tab_type, SessionTabType::Agent { .. }) {
+    if !matches!(original_tab_type, SessionTabType::Agent { .. }) {
         return Err("Active session is not an agent session".to_string());
     }
 
@@ -1611,6 +1614,194 @@ fn is_in_text_input_mode(model: &Model) -> bool {
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
+    }
+}
+
+fn handle_mouse_input(model: &mut Model, mouse: MouseEvent) {
+    if let Err(err) = handle_mouse_input_with(model, mouse, open_url) {
+        model.error_queue.push_back(
+            Notification::new(Severity::Error, "terminal", "Failed to open URL").with_detail(err),
+        );
+    }
+}
+
+fn handle_mouse_input_with<F>(
+    model: &mut Model,
+    mouse: MouseEvent,
+    mut opener: F,
+) -> Result<bool, String>
+where
+    F: FnMut(&str) -> Result<(), String>,
+{
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return Ok(false);
+    }
+    if !mouse.modifiers.contains(KeyModifiers::CONTROL) {
+        return Ok(false);
+    }
+
+    let Some(url) = url_at_mouse_position(model, mouse) else {
+        return Ok(false);
+    };
+
+    opener(&url)?;
+    Ok(true)
+}
+
+fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
+    let area = active_session_content_area(model)?;
+    if mouse.column < area.x
+        || mouse.column >= area.right()
+        || mouse.row < area.y
+        || mouse.row >= area.bottom()
+    {
+        return None;
+    }
+
+    let session = model.active_session_tab()?;
+    crate::renderer::collect_url_regions(
+        session.vt.screen(),
+        Rect::new(0, 0, area.width, area.height),
+    )
+    .into_iter()
+    .find(|region| {
+        let row = area.y + region.row;
+        let start_col = area.x + region.start_col;
+        let end_col = area.x + region.end_col;
+        mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
+    })
+    .map(|region| region.url)
+}
+
+fn active_session_content_area(model: &Model) -> Option<Rect> {
+    if model.active_layer == ActiveLayer::Initialization {
+        return None;
+    }
+
+    let (width, height) = model.terminal_size;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let size = Rect::new(0, 0, width, height);
+    let main_area = Rect {
+        height: size.height.saturating_sub(1),
+        ..size
+    };
+    let session_area = if model.active_layer == ActiveLayer::Management {
+        let lr = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(main_area);
+        lr[1]
+    } else {
+        main_area
+    };
+
+    session_content_area(model, session_area)
+}
+
+fn session_content_area(model: &Model, session_area: Rect) -> Option<Rect> {
+    match model.session_layout {
+        SessionLayout::Tab => {
+            model.active_session_tab()?;
+            Some(
+                pane_block(
+                    build_session_title(model),
+                    model.active_focus == FocusPane::Terminal,
+                )
+                .inner(session_area),
+            )
+        }
+        SessionLayout::Grid => active_grid_session_content_area(model, session_area),
+    }
+}
+
+fn active_grid_session_content_area(model: &Model, area: Rect) -> Option<Rect> {
+    let count = model.sessions.len();
+    if count == 0 || model.active_session >= count {
+        return None;
+    }
+
+    let cols = (count as f64).sqrt().ceil() as usize;
+    let rows = count.div_ceil(cols);
+    let row_constraints: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Ratio(1, rows as u32))
+        .collect();
+    let row_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(area);
+
+    let target_row = model.active_session / cols;
+    let start = target_row * cols;
+    let end = (start + cols).min(count);
+    let n = end - start;
+    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let col_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(col_constraints)
+        .split(row_chunks[target_row]);
+
+    let target_col = model.active_session - start;
+    let session = model.sessions.get(model.active_session)?;
+    Some(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(session.name.as_str())
+            .inner(col_chunks[target_col]),
+    )
+}
+
+fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+
+    command
+        .status()
+        .map_err(|err| format!("failed to spawn URL opener: {err}"))
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("URL opener exited with status {status}"))
+            }
+        })
+}
+
+fn render_session_surface(session: &crate::model::SessionTab, frame: &mut Frame, area: Rect) {
+    if session.vt.screen().contents().trim().is_empty() {
+        let placeholder = Paragraph::new(format!(
+            "Session: {} ({}x{})",
+            session.name,
+            session.vt.cols(),
+            session.vt.rows()
+        ))
+        .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(placeholder, area);
+    } else {
+        frame.render_widget(
+            crate::widgets::terminal_view::TerminalView::new(session.vt.screen()),
+            area,
+        );
     }
 }
 
@@ -1777,16 +1968,7 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
                 let block = pane_block(title, terminal_focused);
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
-
-                // Phase 2: render vt100 screen buffer here
-                let placeholder = Paragraph::new(format!(
-                    "Session: {} ({}x{})",
-                    session.name,
-                    session.vt.cols(),
-                    session.vt.rows()
-                ))
-                .style(Style::default().fg(Color::DarkGray));
-                frame.render_widget(placeholder, inner);
+                render_session_surface(session, frame, inner);
             }
         }
         SessionLayout::Grid => {
@@ -1944,7 +2126,9 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+    use crossterm::event::{
+        KeyEvent, KeyEventKind, KeyEventState, MouseButton, MouseEvent, MouseEventKind,
+    };
     use gwt_agent::{version_cache::VersionEntry, AgentId, DetectedAgent, VersionCache};
     use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
@@ -1977,6 +2161,15 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    fn render_model_text(model: &Model, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| view(model, frame))
+            .expect("draw model");
+        buffer_text(terminal.backend().buffer())
     }
 
     fn detected_agent(agent_id: AgentId, version: Option<&str>) -> DetectedAgent {
@@ -2070,6 +2263,106 @@ mod tests {
         }
 
         panic!("timed out waiting for docker worker: {context}");
+    }
+
+    #[test]
+    fn pty_output_renders_into_session_surface() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"https://example.com".to_vec()),
+        );
+
+        let rendered = render_model_text(&model, 80, 24);
+        assert!(rendered.contains("https://example.com"));
+    }
+
+    #[test]
+    fn ctrl_click_on_url_invokes_opener_with_full_url() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.terminal_size = (80, 24);
+        let expected_url = "https://example.com/docs";
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), expected_url.as_bytes().to_vec()),
+        );
+        let area = active_session_content_area(&model).expect("active session area");
+        let region = crate::renderer::collect_url_regions(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .screen(),
+            Rect::new(0, 0, area.width, area.height),
+        )
+        .into_iter()
+        .find(|region| region.url == expected_url)
+        .expect("url region");
+
+        let mut opened = None;
+        let opened_result = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + region.start_col,
+                row: area.y + region.row,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            |url| {
+                opened = Some(url.to_string());
+                Ok(())
+            },
+        )
+        .expect("mouse handler succeeds");
+
+        assert!(opened_result);
+        assert_eq!(opened.as_deref(), Some(expected_url));
+    }
+
+    #[test]
+    fn click_without_ctrl_does_not_invoke_opener() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        let expected_url = "https://example.com";
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), expected_url.as_bytes().to_vec()),
+        );
+        let area = active_session_content_area(&model).expect("active session area");
+        let region = crate::renderer::collect_url_regions(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .screen(),
+            Rect::new(0, 0, area.width, area.height),
+        )
+        .into_iter()
+        .find(|region| region.url == expected_url)
+        .expect("url region");
+
+        let mut opened = false;
+        let opened_result = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + region.start_col,
+                row: area.y + region.row,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| {
+                opened = true;
+                Ok(())
+            },
+        )
+        .expect("mouse handler succeeds");
+
+        assert!(!opened_result);
+        assert!(!opened);
     }
 
     fn init_git_repo(path: &std::path::Path) {
@@ -2520,7 +2813,8 @@ mod tests {
         let mut model = test_model();
         model.sessions[0] =
             agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
-        let original = model.sessions[0].clone();
+        let original_name = model.sessions[0].name.clone();
+        let original_tab_type = model.sessions[0].tab_type.clone();
 
         let err = apply_pending_session_conversion_with(
             &mut model,
@@ -2534,8 +2828,8 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("gemini"));
-        assert_eq!(model.sessions[0].name, original.name);
-        assert_eq!(model.sessions[0].tab_type, original.tab_type);
+        assert_eq!(model.sessions[0].name, original_name);
+        assert_eq!(model.sessions[0].tab_type, original_tab_type);
     }
 
     #[test]
@@ -2626,7 +2920,8 @@ mod tests {
         let mut model = test_model();
         model.sessions[0] =
             agent_session_tab("Claude Code", "claude", crate::model::AgentColor::Green);
-        let original = model.sessions[0].clone();
+        let original_name = model.sessions[0].name.clone();
+        let original_tab_type = model.sessions[0].tab_type.clone();
         model.pending_session_conversion = Some(PendingSessionConversion {
             session_index: 0,
             target_agent_id: "missing-agent".to_string(),
@@ -2637,8 +2932,8 @@ mod tests {
 
         handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Accept, vec![]);
 
-        assert_eq!(model.sessions[0].name, original.name);
-        assert_eq!(model.sessions[0].tab_type, original.tab_type);
+        assert_eq!(model.sessions[0].name, original_name);
+        assert_eq!(model.sessions[0].tab_type, original_tab_type);
         assert_eq!(model.error_queue.len(), 1);
         assert!(model
             .logs

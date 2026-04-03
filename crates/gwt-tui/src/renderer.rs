@@ -119,6 +119,102 @@ pub struct UrlRegion {
     pub end_col: u16,
 }
 
+fn build_row_text(screen: &vt100::Screen, row: u16, cols: u16) -> (String, Vec<u16>) {
+    let mut row_text = String::with_capacity(cols as usize);
+    let mut byte_to_col: Vec<u16> = Vec::with_capacity(cols as usize);
+
+    for col in 0..cols {
+        if let Some(cell) = screen.cell(row, col) {
+            let ch = cell.contents().chars().next().unwrap_or(' ');
+            let byte_start = row_text.len();
+            row_text.push(ch);
+            let byte_end = row_text.len();
+            for _ in byte_start..byte_end {
+                byte_to_col.push(col);
+            }
+        } else {
+            let byte_start = row_text.len();
+            row_text.push(' ');
+            let byte_end = row_text.len();
+            for _ in byte_start..byte_end {
+                byte_to_col.push(col);
+            }
+        }
+    }
+
+    (row_text, byte_to_col)
+}
+
+/// Collect detected URL regions for the visible screen area.
+///
+/// Wrapped rows are joined into a single logical line before URL detection so
+/// multi-row URLs remain clickable across the full wrapped span.
+pub fn collect_url_regions(screen: &vt100::Screen, area: Rect) -> Vec<UrlRegion> {
+    let rows = area.height.min(screen.size().0);
+    let cols = area.width.min(screen.size().1);
+    let mut url_regions: Vec<UrlRegion> = Vec::new();
+    let mut row = 0;
+
+    while row < rows {
+        let mut logical_text = String::new();
+        let mut byte_to_coord: Vec<(u16, u16)> = Vec::new();
+
+        loop {
+            let current_row = row;
+            let (row_text, byte_to_col) = build_row_text(screen, current_row, cols);
+            logical_text.push_str(&row_text);
+            byte_to_coord.extend(byte_to_col.into_iter().map(|col| (current_row, col)));
+
+            row += 1;
+            if row >= rows || !screen.row_wrapped(current_row) {
+                break;
+            }
+        }
+
+        for (start, end) in detect_urls(&logical_text) {
+            let url = logical_text[start..end].to_string();
+            let mut segment_row = None;
+            let mut segment_start_col = 0;
+            let mut segment_end_col = 0;
+
+            for &(coord_row, coord_col) in byte_to_coord.iter().take(end).skip(start) {
+                match segment_row {
+                    Some(active_row) if active_row == coord_row => {
+                        segment_end_col = coord_col;
+                    }
+                    Some(active_row) => {
+                        url_regions.push(UrlRegion {
+                            url: url.clone(),
+                            row: active_row,
+                            start_col: segment_start_col,
+                            end_col: segment_end_col,
+                        });
+                        segment_row = Some(coord_row);
+                        segment_start_col = coord_col;
+                        segment_end_col = coord_col;
+                    }
+                    None => {
+                        segment_row = Some(coord_row);
+                        segment_start_col = coord_col;
+                        segment_end_col = coord_col;
+                    }
+                }
+            }
+
+            if let Some(active_row) = segment_row {
+                url_regions.push(UrlRegion {
+                    url,
+                    row: active_row,
+                    start_col: segment_start_col,
+                    end_col: segment_end_col,
+                });
+            }
+        }
+    }
+
+    url_regions
+}
+
 /// Render a vt100 screen into a ratatui Buffer at the given area.
 ///
 /// Returns detected URL regions with their screen coordinates so that
@@ -126,59 +222,15 @@ pub struct UrlRegion {
 pub fn render_vt_screen(screen: &vt100::Screen, buf: &mut Buffer, area: Rect) -> Vec<UrlRegion> {
     let rows = area.height.min(screen.size().0);
     let cols = area.width.min(screen.size().1);
-    let mut url_regions: Vec<UrlRegion> = Vec::new();
+    let url_regions = collect_url_regions(screen, area);
+    let mut url_cells = std::collections::HashSet::new();
+    for region in &url_regions {
+        for col in region.start_col..=region.end_col {
+            url_cells.insert((region.row, col));
+        }
+    }
 
     for row in 0..rows {
-        // Build the visible text for this row to detect URLs.
-        let mut row_text = String::with_capacity(cols as usize);
-        // Track the mapping from byte offset to column index.
-        let mut byte_to_col: Vec<u16> = Vec::with_capacity(cols as usize);
-
-        for col in 0..cols {
-            if let Some(cell) = screen.cell(row, col) {
-                let ch = cell.contents().chars().next().unwrap_or(' ');
-                let byte_start = row_text.len();
-                row_text.push(ch);
-                let byte_end = row_text.len();
-                // Map each byte of this character to the column.
-                for _ in byte_start..byte_end {
-                    byte_to_col.push(col);
-                }
-            } else {
-                let byte_start = row_text.len();
-                row_text.push(' ');
-                let byte_end = row_text.len();
-                for _ in byte_start..byte_end {
-                    byte_to_col.push(col);
-                }
-            }
-        }
-
-        // Detect URLs in the row text.
-        let urls = detect_urls(&row_text);
-
-        // Build a set of columns that belong to a URL for fast lookup.
-        let mut url_cols = std::collections::HashSet::new();
-        for &(start, end) in &urls {
-            let start_col_idx = byte_to_col.get(start).copied().unwrap_or(0);
-            // end is exclusive byte position; map the last included byte.
-            let end_col_idx = if end > 0 {
-                byte_to_col.get(end - 1).copied().unwrap_or(0)
-            } else {
-                0
-            };
-            let url_str = &row_text[start..end];
-            url_regions.push(UrlRegion {
-                url: url_str.to_string(),
-                row,
-                start_col: start_col_idx,
-                end_col: end_col_idx,
-            });
-            for c in start_col_idx..=end_col_idx {
-                url_cols.insert(c);
-            }
-        }
-
         // Render cells into the buffer.
         for col in 0..cols {
             let cell = screen.cell(row, col);
@@ -190,7 +242,7 @@ pub fn render_vt_screen(screen: &vt100::Screen, buf: &mut Buffer, area: Rect) ->
                     let buf_cell = &mut buf[(x, y)];
                     buf_cell.set_char(cell.contents().chars().next().unwrap_or(' '));
 
-                    let is_url = url_cols.contains(&col);
+                    let is_url = url_cells.contains(&(row, col));
                     let fg = if is_url {
                         Some(Color::Cyan)
                     } else {
@@ -401,6 +453,23 @@ mod tests {
     }
 
     #[test]
+    fn url_region_tracking_wrapped_url_spans_multiple_rows() {
+        let url = "https://example.com/docs";
+        let mut parser = vt100::Parser::new(2, 12, 0);
+        parser.process(url.as_bytes());
+        let area = Rect::new(0, 0, 12, 2);
+        let regions = collect_url_regions(parser.screen(), area);
+
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].url, url);
+        assert_eq!(regions[1].url, url);
+        assert_eq!(regions[0].row, 0);
+        assert_eq!(regions[1].row, 1);
+        assert_eq!(regions[0].start_col, 0);
+        assert_eq!(regions[1].start_col, 0);
+    }
+
+    #[test]
     fn url_cells_styled_cyan_underline() {
         let mut parser = vt100::Parser::new(1, 30, 0);
         parser.process(b"go https://x.co end");
@@ -416,6 +485,44 @@ mod tests {
         // Column 0 is 'g' — should NOT be cyan
         let plain = &buf[(0, 0)];
         assert_ne!(plain.fg, Color::Cyan);
+    }
+
+    #[test]
+    fn wrapped_url_cells_styled_cyan_underline_across_rows() {
+        let mut parser = vt100::Parser::new(2, 12, 0);
+        parser.process(b"https://example.com/docs");
+        let area = Rect::new(0, 0, 12, 2);
+        let mut buf = Buffer::empty(area);
+        render_vt_screen(parser.screen(), &mut buf, area);
+
+        let first_row = &buf[(0, 0)];
+        let second_row = &buf[(0, 1)];
+        assert_eq!(first_row.fg, Color::Cyan);
+        assert_eq!(second_row.fg, Color::Cyan);
+        assert!(first_row.modifier.contains(Modifier::UNDERLINED));
+        assert!(second_row.modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn render_vt_screen_tracks_wrapped_url_segments() {
+        let mut parser = vt100::Parser::new(2, 12, 0);
+        parser.process(b"https://example.com/path");
+        let area = Rect::new(0, 0, 12, 2);
+        let mut buf = Buffer::empty(area);
+
+        let regions = render_vt_screen(parser.screen(), &mut buf, area);
+
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].url, "https://example.com/path");
+        assert_eq!(regions[0].row, 0);
+        assert_eq!(regions[0].start_col, 0);
+        assert_eq!(regions[0].end_col, 11);
+        assert_eq!(regions[1].url, "https://example.com/path");
+        assert_eq!(regions[1].row, 1);
+        assert_eq!(regions[1].start_col, 0);
+        assert!(regions[1].end_col > 0);
+        assert_eq!(buf[(0, 1)].fg, Color::Cyan);
+        assert!(buf[(0, 1)].modifier.contains(Modifier::UNDERLINED));
     }
 
     // ---- Alt-screen buffer tests (T011, T012) ----

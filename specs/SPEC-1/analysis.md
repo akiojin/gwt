@@ -2,20 +2,20 @@
 
 ## Analysis Report: SPEC-1
 
-Status: BLOCKED BY MISSING FOUNDATION
+Status: CLEAR
 
 ## Blocking Items
-- The current `gwt-tui` does not yet have a real vt100 session surface: `PtyOutput` is a stub, `SessionTab` stores only terminal dimensions, the session pane is still a placeholder, and mouse input is discarded before any URL hit test can happen.
+- None.
 
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `13/17` completed items.
-- Notes: Renderer-level URL detection and alt-screen verification exist, but they are not wired into the session pane.
-- Notes: Wrapped URL detection is also blocked by the current per-row URL scan design.
-- Notes: Artifact set is complete, but execution is blocked on a missing foundation task.
+- Task traceability snapshot: `tasks.md` currently records `17/17` completed items.
+- Notes: `PtyOutput` now updates a per-session vt100 surface and the rendered session pane shows live terminal output.
+- Notes: `Ctrl+click` URL open is now wired through session hit testing and a platform opener path.
+- Notes: Wrapped URLs are collected across soft-wrapped rows, preserving underline styling and click hit testing.
+- Notes: Artifact set is complete and aligned with the current implementation.
 
 ## Next
-- Add a foundation task for a real session surface (`PtyOutput` -> vt100 parser -> rendered pane -> stored URL regions).
-- Keep `T006-T009` open until the session surface exists.
+- Run the manual reviewer walkthrough in `quickstart.md` if release evidence needs a human pass.
 - This report is a readiness gate, not a completion certificate.

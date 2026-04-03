@@ -200,15 +200,41 @@ pub enum DockerProgressResult {
 }
 
 /// Minimal vt100 screen state wrapper.
-#[derive(Debug, Clone)]
 pub struct VtState {
+    parser: vt100::Parser,
     rows: u16,
     cols: u16,
 }
 
+impl std::fmt::Debug for VtState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VtState")
+            .field("rows", &self.rows)
+            .field("cols", &self.cols)
+            .finish()
+    }
+}
+
+impl Clone for VtState {
+    fn clone(&self) -> Self {
+        let mut parser = vt100::Parser::new(self.rows, self.cols, 10_000);
+        let state = self.parser.screen().state_formatted();
+        parser.process(&state);
+        Self {
+            parser,
+            rows: self.rows,
+            cols: self.cols,
+        }
+    }
+}
+
 impl VtState {
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self { rows, cols }
+        Self {
+            parser: vt100::Parser::new(rows, cols, 10_000),
+            rows,
+            cols,
+        }
     }
 
     pub fn rows(&self) -> u16 {
@@ -217,6 +243,20 @@ impl VtState {
 
     pub fn cols(&self) -> u16 {
         self.cols
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.rows = rows;
+        self.cols = cols;
+        self.parser.set_size(rows, cols);
+    }
+
+    pub fn process(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+    }
+
+    pub fn screen(&self) -> &vt100::Screen {
+        self.parser.screen()
     }
 }
 
@@ -372,6 +412,18 @@ impl Model {
     /// Get the active session, if any.
     pub fn active_session_tab(&self) -> Option<&SessionTab> {
         self.sessions.get(self.active_session)
+    }
+
+    /// Get the active session mutably, if any.
+    pub fn active_session_tab_mut(&mut self) -> Option<&mut SessionTab> {
+        self.sessions.get_mut(self.active_session)
+    }
+
+    /// Find a session by its stable id.
+    pub fn session_tab_mut(&mut self, session_id: &str) -> Option<&mut SessionTab> {
+        self.sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
     }
 
     /// Buffered PTY input awaiting delivery to sessions.

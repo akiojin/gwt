@@ -7,10 +7,10 @@
 - [x] T003 Implement URL regex matching utility that returns match ranges for a given string.
 - [x] T004 Integrate URL detection into renderer: scan visible lines, apply underline style to URL regions.
 - [x] T005 Implement URL region coordinate tracking for click detection.
-- [ ] T006 Write RED test for Ctrl+click on URL: verify platform opener is invoked with correct URL. *(future work: requires OS integration)*
-- [ ] T007 Implement Ctrl+click handler: detect click within URL region, invoke `open`/`xdg-open` with URL. *(future work: requires OS integration)*
-- [ ] T008 Write RED test for wrapped URLs spanning two terminal lines. *(future work)*
-- [ ] T009 Implement wrapped URL detection across adjacent lines. *(future work)*
+- [x] T006 Write RED test for Ctrl+click on URL: verify platform opener is invoked with correct URL.
+- [x] T007 Implement Ctrl+click handler: detect click within URL region, invoke `open`/`xdg-open` with URL.
+- [x] T008 Write RED test for wrapped URLs spanning two terminal lines.
+- [x] T009 Implement wrapped URL detection across adjacent lines.
 - [x] T010 Verify all URL detection tests pass GREEN.
 
 ## Phase 2: Alt-Screen Buffer Verification
