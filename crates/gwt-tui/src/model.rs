@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -188,6 +189,16 @@ pub struct PendingSessionConversion {
     pub target_display_name: String,
 }
 
+/// Shared queue of terminal Docker lifecycle results produced in the background.
+pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
+
+/// Result sent from the background Docker lifecycle worker back into the TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DockerProgressResult {
+    Completed { message: String },
+    Failed { message: String, detail: String },
+}
+
 /// Minimal vt100 screen state wrapper.
 #[derive(Debug, Clone)]
 pub struct VtState {
@@ -266,6 +277,8 @@ pub struct Model {
     pub(crate) wizard: Option<WizardState>,
     /// Docker progress overlay state.
     pub(crate) docker_progress: Option<DockerProgressState>,
+    /// Background Docker lifecycle completion queue polled from the tick loop.
+    pub(crate) docker_progress_events: Option<DockerProgressQueue>,
     /// Service selection overlay state.
     pub(crate) service_select: Option<ServiceSelectState>,
     /// Port conflict resolution overlay state.
@@ -323,6 +336,7 @@ impl Model {
             embedded_skills,
             wizard: None,
             docker_progress: None,
+            docker_progress_events: None,
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),

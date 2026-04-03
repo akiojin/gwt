@@ -1,7 +1,9 @@
 //! App — Update and View functions for the Elm Architecture.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -24,8 +26,8 @@ use crate::{
     input::voice::VoiceInputMessage,
     message::Message,
     model::{
-        ActiveLayer, FocusPane, ManagementTab, Model, PendingSessionConversion, SessionLayout,
-        SessionTabType,
+        ActiveLayer, DockerProgressQueue, DockerProgressResult, FocusPane, ManagementTab, Model,
+        PendingSessionConversion, SessionLayout, SessionTabType,
     },
     screens,
 };
@@ -136,6 +138,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Tick => {
             drain_notification_bus(model);
+            drain_docker_progress_events(model);
             tick_notification(model);
             // Forward tick to wizard (AI suggest spinner) when active
             if let Some(ref mut wizard) = model.wizard {
@@ -546,22 +549,18 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
             return true;
         }
     }
-
-    // Branch action modal overlay
-    if model.branches.action_modal_visible {
-        let msg = match key.code {
-            KeyCode::Down => Some(screens::branches::BranchesMessage::ActionModalDown),
-            KeyCode::Up => Some(screens::branches::BranchesMessage::ActionModalUp),
-            KeyCode::Enter => Some(screens::branches::BranchesMessage::ActionModalSelect),
-            KeyCode::Esc => Some(screens::branches::BranchesMessage::CloseActionModal),
-            _ => None,
-        };
-        if let Some(msg) = msg {
-            screens::branches::update(&mut model.branches, msg);
-        }
+    if model
+        .docker_progress
+        .as_ref()
+        .is_some_and(|progress| progress.visible)
+        && key.code == KeyCode::Esc
+    {
+        update(
+            model,
+            Message::DockerProgress(screens::docker_progress::DockerProgressMessage::Hide),
+        );
         return true;
     }
-
     if model.confirm.visible {
         let msg = match key.code {
             KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
@@ -917,7 +916,17 @@ fn handle_pending_branch_docker_action(
     model: &mut Model,
     action: screens::branches::PendingDockerAction,
 ) {
-    use screens::branches::DockerLifecycleAction;
+    if model.docker_progress_events.is_some() {
+        update(
+            model,
+            Message::ShowNotification(Notification::new(
+                Severity::Warn,
+                "docker",
+                "Docker action already running",
+            )),
+        );
+        return;
+    }
 
     let container_label = model
         .branches
@@ -927,44 +936,136 @@ fn handle_pending_branch_docker_action(
         .map(|container| container.name.clone())
         .unwrap_or_else(|| action.container_id.clone());
 
-    let (verb_past, verb_base, result) = match action.action {
-        DockerLifecycleAction::Start => {
-            ("Started", "start", gwt_docker::start(&action.container_id))
-        }
-        DockerLifecycleAction::Stop => ("Stopped", "stop", gwt_docker::stop(&action.container_id)),
-        DockerLifecycleAction::Restart => (
-            "Restarted",
-            "restart",
-            gwt_docker::restart(&action.container_id),
+    emit_branch_docker_progress(
+        model,
+        screens::docker_progress::DockerStage::StartingContainer,
+        format!(
+            "{} container {container_label}",
+            start_message_for_action(action.action)
         ),
+    );
+
+    let events = Arc::new(Mutex::new(VecDeque::new()));
+    model.docker_progress_events = Some(events.clone());
+    spawn_docker_progress_worker(events, action, container_label);
+}
+
+fn emit_branch_docker_progress(
+    model: &mut Model,
+    stage: screens::docker_progress::DockerStage,
+    message: String,
+) {
+    update(
+        model,
+        Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetStage {
+            stage,
+            message,
+        }),
+    );
+}
+
+fn spawn_docker_progress_worker(
+    events: DockerProgressQueue,
+    action: screens::branches::PendingDockerAction,
+    container_label: String,
+) {
+    use screens::branches::DockerLifecycleAction;
+
+    thread::spawn(move || {
+        let outcome = match action.action {
+            DockerLifecycleAction::Start => {
+                gwt_docker::start(&action.container_id).map(|()| DockerProgressResult::Completed {
+                    message: format!("Started container {container_label}"),
+                })
+            }
+            DockerLifecycleAction::Stop => {
+                gwt_docker::stop(&action.container_id).map(|()| DockerProgressResult::Completed {
+                    message: format!("Stopped container {container_label}"),
+                })
+            }
+            DockerLifecycleAction::Restart => gwt_docker::restart(&action.container_id).map(|()| {
+                DockerProgressResult::Completed {
+                    message: format!("Restarted container {container_label}"),
+                }
+            }),
+        };
+
+        let event = match outcome {
+            Ok(result) => result,
+            Err(err) => DockerProgressResult::Failed {
+                message: format!(
+                    "Failed to {} container {container_label}",
+                    verb_for_action(action.action)
+                ),
+                detail: err.to_string(),
+            },
+        };
+
+        if let Ok(mut queue) = events.lock() {
+            queue.push_back(event);
+        }
+    });
+}
+
+fn drain_docker_progress_events(model: &mut Model) {
+    let Some(events) = model.docker_progress_events.as_ref().cloned() else {
+        return;
     };
 
-    match result {
-        Ok(()) => {
+    let event = events.lock().ok().and_then(|mut queue| queue.pop_front());
+    let Some(event) = event else {
+        return;
+    };
+
+    model.docker_progress_events = None;
+    match event {
+        DockerProgressResult::Completed { message } => {
+            emit_branch_docker_progress(
+                model,
+                screens::docker_progress::DockerStage::Ready,
+                message.clone(),
+            );
             let repo_path = model.repo_path.clone();
             screens::branches::load_branch_detail(&mut model.branches, &repo_path);
             update(
                 model,
-                Message::Notify(Notification::new(
-                    Severity::Info,
-                    "docker",
-                    format!("{verb_past} container {container_label}"),
-                )),
+                Message::Notify(Notification::new(Severity::Info, "docker", message)),
             );
         }
-        Err(err) => {
+        DockerProgressResult::Failed { message, detail } => {
+            update(
+                model,
+                Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetError(
+                    format!("{message}: {detail}"),
+                )),
+            );
             update(
                 model,
                 Message::Notify(
-                    Notification::new(
-                        Severity::Error,
-                        "docker",
-                        format!("Failed to {verb_base} container {container_label}"),
-                    )
-                    .with_detail(err.to_string()),
+                    Notification::new(Severity::Error, "docker", message).with_detail(detail),
                 ),
             );
         }
+    }
+}
+
+fn start_message_for_action(action: screens::branches::DockerLifecycleAction) -> &'static str {
+    use screens::branches::DockerLifecycleAction;
+
+    match action {
+        DockerLifecycleAction::Start => "Starting",
+        DockerLifecycleAction::Stop => "Stopping",
+        DockerLifecycleAction::Restart => "Restarting",
+    }
+}
+
+fn verb_for_action(action: screens::branches::DockerLifecycleAction) -> &'static str {
+    use screens::branches::DockerLifecycleAction;
+
+    match action {
+        DockerLifecycleAction::Start => "start",
+        DockerLifecycleAction::Stop => "stop",
+        DockerLifecycleAction::Restart => "restart",
     }
 }
 
@@ -1577,8 +1678,6 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
             detail_inner,
             branch_session_count,
         );
-
-        // Action modal overlay (rendered on top of detail pane)
         if model.branches.action_modal_visible {
             screens::branches::render_action_modal_overlay(&model.branches, frame, chunks[1]);
         }
@@ -1901,6 +2000,18 @@ mod tests {
         }
 
         result
+    }
+
+    fn drive_docker_worker_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
+        for _ in 0..40 {
+            update(model, Message::Tick);
+            if done(model) {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        panic!("timed out waiting for docker worker: {context}");
     }
 
     fn init_git_repo(path: &std::path::Path) {
@@ -2886,6 +2997,23 @@ mod tests {
     }
 
     #[test]
+    fn route_overlay_key_escape_hides_docker_progress_overlay() {
+        let mut model = test_model();
+        model.docker_progress = Some(screens::docker_progress::DockerProgressState {
+            visible: true,
+            stage: screens::docker_progress::DockerStage::StartingContainer,
+            message: "Starting container web".into(),
+            error: None,
+        });
+
+        assert!(route_overlay_key(
+            &mut model,
+            key(KeyCode::Esc, KeyModifiers::NONE)
+        ));
+        assert!(model.docker_progress.is_none());
+    }
+
+    #[test]
     fn render_help_overlay_lists_all_registered_keybindings_only() {
         let mut model = test_model();
         model.help_visible = true;
@@ -3005,7 +3133,7 @@ mod tests {
         )
         .expect("compose");
 
-        let script = "#!/bin/sh\nif [ \"$1\" = \"stop\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\texited\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"stop\" ]; then\n  sleep 0.1\n  exit 0\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\texited\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, || {
             let mut model = test_model();
@@ -3028,11 +3156,39 @@ mod tests {
             );
 
             assert!(model.branches.pending_docker_action.is_none());
+            assert!(model.docker_progress_events.is_some());
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert!(docker_progress.visible);
+            assert_eq!(
+                docker_progress.stage,
+                screens::docker_progress::DockerStage::StartingContainer
+            );
+            assert_eq!(docker_progress.message, "Stopping container web");
+            assert_eq!(
+                model.branches.docker_containers[0].status,
+                gwt_docker::ContainerStatus::Running
+            );
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| {
+                    model.docker_progress_events.is_none() && model.current_notification.is_some()
+                },
+                "docker stop completion",
+            );
+
             assert_eq!(model.branches.docker_containers.len(), 1);
             assert_eq!(
                 model.branches.docker_containers[0].status,
                 gwt_docker::ContainerStatus::Exited
             );
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert_eq!(
+                docker_progress.stage,
+                screens::docker_progress::DockerStage::Ready
+            );
+            assert_eq!(docker_progress.message, "Stopped container web");
+            assert!(docker_progress.error.is_none());
             let notification = model
                 .current_notification
                 .as_ref()
@@ -3045,7 +3201,7 @@ mod tests {
 
     #[test]
     fn update_branches_docker_restart_failure_routes_error_notification() {
-        let script = "#!/bin/sh\nif [ \"$1\" = \"restart\" ]; then\n  printf 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"restart\" ]; then\n  sleep 0.1\n  printf 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, || {
             let mut model = test_model();
@@ -3060,8 +3216,34 @@ mod tests {
                 Message::Branches(screens::branches::BranchesMessage::DockerContainerRestart),
             );
 
+            assert!(model.docker_progress_events.is_some());
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert!(docker_progress.visible);
+            assert_eq!(
+                docker_progress.stage,
+                screens::docker_progress::DockerStage::StartingContainer
+            );
+            assert_eq!(docker_progress.message, "Restarting container web");
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| model.docker_progress_events.is_none() && !model.error_queue.is_empty(),
+                "docker restart failure",
+            );
+
             assert!(model.current_notification.is_none());
             assert_eq!(model.error_queue.len(), 1);
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert!(docker_progress.visible);
+            assert_eq!(
+                docker_progress.stage,
+                screens::docker_progress::DockerStage::Failed
+            );
+            assert!(docker_progress
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Failed to restart container web"));
             let notification = model.error_queue.front().unwrap();
             assert_eq!(notification.source, "docker");
             assert_eq!(notification.message, "Failed to restart container web");

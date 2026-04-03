@@ -8,7 +8,7 @@
 - [x] **T-002**: Write test for DockerProgress screen rendering at each state with correct status message.
 - [x] **T-003**: Write test for DockerProgress error state handling (Docker daemon not running).
 - [x] **T-004**: Implement `DockerProgress` screen in `crates/gwt-tui/src/screens/docker_progress.rs`.
-- [ ] **T-005**: Wire DockerProgress screen to DockerManager async event stream.
+- [x] **T-005**: Wire DockerProgress screen to an app-side background producer that bridges `gwt-docker` lifecycle results into `DockerProgress` events.
 - [x] **T-006**: Verify T-001 through T-003 pass (GREEN).
 
 ### 1.2 Service Select Screen
