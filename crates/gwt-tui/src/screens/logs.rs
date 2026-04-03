@@ -53,15 +53,39 @@ impl FilterLevel {
             Self::ErrorOnly => Some(Severity::Error),
         }
     }
+
+    /// Cycle to the next filter level.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::ErrorOnly,
+            Self::ErrorOnly => Self::WarnUp,
+            Self::WarnUp => Self::InfoUp,
+            Self::InfoUp => Self::DebugUp,
+            Self::DebugUp => Self::All,
+        }
+    }
 }
 
 /// State for the logs screen.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LogsState {
     pub(crate) entries: Vec<LogEntry>,
     pub(crate) selected: usize,
     pub(crate) filter_level: FilterLevel,
     pub(crate) detail_view: bool,
+    pub(crate) show_debug: bool,
+}
+
+impl Default for LogsState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            selected: 0,
+            filter_level: FilterLevel::default(),
+            detail_view: false,
+            show_debug: true,
+        }
+    }
 }
 
 impl LogsState {
@@ -72,8 +96,13 @@ impl LogsState {
                 .entries
                 .iter()
                 .filter(|entry| entry.severity >= min_severity)
+                .filter(|entry| self.show_debug || entry.severity != Severity::Debug)
                 .collect(),
-            None => self.entries.iter().collect(),
+            None => self
+                .entries
+                .iter()
+                .filter(|entry| self.show_debug || entry.severity != Severity::Debug)
+                .collect(),
         }
     }
 
@@ -96,6 +125,8 @@ pub enum LogsMessage {
     MoveUp,
     MoveDown,
     ToggleDetail,
+    CycleFilter,
+    ToggleDebugVisibility,
     SetFilter(FilterLevel),
     Refresh,
     SetEntries(Vec<LogEntry>),
@@ -114,6 +145,14 @@ pub fn update(state: &mut LogsState, msg: LogsMessage) {
         }
         LogsMessage::ToggleDetail => {
             state.detail_view = !state.detail_view;
+        }
+        LogsMessage::CycleFilter => {
+            state.filter_level = state.filter_level.next();
+            state.clamp_selected();
+        }
+        LogsMessage::ToggleDebugVisibility => {
+            state.show_debug = !state.show_debug;
+            state.clamp_selected();
         }
         LogsMessage::SetFilter(level) => {
             state.filter_level = level;
@@ -161,7 +200,10 @@ fn render_filter_tabs(state: &LogsState, frame: &mut Frame, area: Rect) {
         .unwrap_or(0);
 
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title("Logs"))
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Logs | Debug: {}",
+            if state.show_debug { "on" } else { "off" }
+        )))
         .select(active_idx)
         .highlight_style(
             Style::default()
@@ -194,20 +236,24 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, entry)| {
             let style = super::list_item_style(idx == state.selected);
+            let severity = format!("[{:5}]", entry.severity);
 
             let line = Line::from(vec![
                 Span::styled(
-                    format!("{} ", entry.timestamp),
+                    format!("{:<32}", entry.timestamp),
                     Style::default().fg(Color::DarkGray),
                 ),
+                Span::raw(" "),
                 Span::styled(
-                    format!("[{:5}] ", entry.severity),
+                    format!("{:<8}", severity),
                     Style::default().fg(severity_color(entry.severity)),
                 ),
+                Span::raw(" "),
                 Span::styled(
-                    format!("{}: ", entry.source),
+                    format!("{:<12}", entry.source),
                     Style::default().fg(Color::Cyan),
                 ),
+                Span::raw(" "),
                 Span::styled(entry.message.clone(), style),
             ]);
             ListItem::new(line)
@@ -290,6 +336,7 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.filter_level, FilterLevel::All);
         assert!(!state.detail_view);
+        assert!(state.show_debug);
     }
 
     #[test]
@@ -340,6 +387,47 @@ mod tests {
         update(&mut state, LogsMessage::SetFilter(FilterLevel::ErrorOnly));
         assert_eq!(state.filter_level, FilterLevel::ErrorOnly);
         assert_eq!(state.selected, 0); // clamped (only 1 error entry)
+    }
+
+    #[test]
+    fn filter_level_next_cycles_through_all_levels() {
+        assert_eq!(FilterLevel::All.next(), FilterLevel::ErrorOnly);
+        assert_eq!(FilterLevel::ErrorOnly.next(), FilterLevel::WarnUp);
+        assert_eq!(FilterLevel::WarnUp.next(), FilterLevel::InfoUp);
+        assert_eq!(FilterLevel::InfoUp.next(), FilterLevel::DebugUp);
+        assert_eq!(FilterLevel::DebugUp.next(), FilterLevel::All);
+    }
+
+    #[test]
+    fn cycle_filter_advances_through_levels() {
+        let mut state = LogsState::default();
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::ErrorOnly);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::WarnUp);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::InfoUp);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::DebugUp);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::All);
+    }
+
+    #[test]
+    fn toggle_debug_visibility_hides_and_restores_debug_entries() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        assert_eq!(state.filtered_entries().len(), 4);
+
+        update(&mut state, LogsMessage::ToggleDebugVisibility);
+        assert_eq!(state.filtered_entries().len(), 3);
+        assert!(state
+            .filtered_entries()
+            .iter()
+            .all(|entry| entry.severity != Severity::Debug));
+
+        update(&mut state, LogsMessage::ToggleDebugVisibility);
+        assert_eq!(state.filtered_entries().len(), 4);
     }
 
     #[test]
@@ -403,7 +491,7 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(text.contains("Logs"));
+        assert!(text.contains("Debug: on"));
     }
 
     #[test]
@@ -476,5 +564,93 @@ mod tests {
             .join("\n");
         assert!(text.contains("Log Detail"));
         assert!(text.contains("connection timed out"));
+    }
+
+    #[test]
+    fn render_log_list_uses_stable_columns() {
+        let mut state = LogsState::default();
+        let entries = sample_entries();
+        let expected_timestamp = format!("{}", entries[1].timestamp);
+        state.entries = entries;
+        state.filter_level = FilterLevel::WarnUp;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let mut found = None;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if row.contains("Slow render") {
+                found = Some(row);
+                break;
+            }
+        }
+
+        let row = found.expect("rendered log row");
+        let row = row.trim_start_matches('│').trim_start();
+        assert!(row.contains(&expected_timestamp), "{row:?}");
+        assert!(row.contains("[WARN]"));
+        assert!(row.contains("tui"));
+        assert!(row.contains("Slow render"));
+        let time_pos = row.find(&expected_timestamp).unwrap();
+        let severity_pos = row.find("[WARN]").unwrap();
+        let source_pos = row.find("tui").unwrap();
+        let message_pos = row.find("Slow render").unwrap();
+        assert!(time_pos < severity_pos);
+        assert!(severity_pos < source_pos);
+        assert!(source_pos < message_pos);
+    }
+
+    #[test]
+    fn render_filter_tabs_show_active_warn_filter() {
+        let mut state = LogsState::default();
+        state.filter_level = FilterLevel::WarnUp;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Warn+"));
+        assert!(text.contains("Debug: on"));
+    }
+
+    #[test]
+    fn render_filter_title_reflects_debug_visibility() {
+        let mut state = LogsState::default();
+        state.show_debug = false;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(row.contains("Debug: off"));
     }
 }
