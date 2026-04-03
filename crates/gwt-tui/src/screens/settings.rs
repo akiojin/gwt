@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use gwt_config::{ConfigError, Settings, VoiceConfig};
+use gwt_skills::BuiltinSkill;
 
 /// Settings category tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,18 +21,20 @@ pub enum SettingsCategory {
     CustomAgents,
     Environment,
     Ai,
+    Skills,
     Voice,
 }
 
 impl SettingsCategory {
     /// All categories in display order.
-    pub const ALL: [SettingsCategory; 7] = [
+    pub const ALL: [SettingsCategory; 8] = [
         SettingsCategory::General,
         SettingsCategory::Worktree,
         SettingsCategory::Agent,
         SettingsCategory::CustomAgents,
         SettingsCategory::Environment,
         SettingsCategory::Ai,
+        SettingsCategory::Skills,
         SettingsCategory::Voice,
     ];
 
@@ -44,6 +47,7 @@ impl SettingsCategory {
             Self::CustomAgents => "Custom Agents",
             Self::Environment => "Environment",
             Self::Ai => "AI",
+            Self::Skills => "Skills",
             Self::Voice => "Voice",
         }
     }
@@ -227,11 +231,24 @@ pub fn fields_for_category_with_settings(
                 field_type: FieldType::Bool,
             },
         ],
+        SettingsCategory::Skills => skill_fields(),
         SettingsCategory::Voice => {
             let voice = settings.map(|s| &s.voice);
             voice_fields(voice)
         }
     }
+}
+
+/// Build the embedded skill fields from the builtin registry.
+pub fn skill_fields() -> Vec<SettingField> {
+    BuiltinSkill::all()
+        .iter()
+        .map(|skill| SettingField {
+            label: skill.name().to_string(),
+            value: "true".to_string(),
+            field_type: FieldType::Bool,
+        })
+        .collect()
 }
 
 /// Build the Voice settings fields from the persisted voice config.
@@ -948,25 +965,63 @@ mod tests {
     #[test]
     fn category_cycle_full_round() {
         let mut cat = SettingsCategory::General;
-        for _ in 0..7 {
+        for _ in 0..8 {
             cat = cat.next();
         }
         assert_eq!(cat, SettingsCategory::General); // full cycle
     }
 
     #[test]
-    fn voice_category_is_seventh_in_sidebar_order() {
-        assert_eq!(SettingsCategory::ALL.len(), 7);
-        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Voice);
+    fn voice_and_skills_categories_are_last_in_sidebar_order() {
+        assert_eq!(SettingsCategory::ALL.len(), 8);
+        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Skills);
+        assert_eq!(SettingsCategory::ALL[7], SettingsCategory::Voice);
     }
 
     #[test]
     fn category_prev_full_round() {
         let mut cat = SettingsCategory::General;
-        for _ in 0..7 {
+        for _ in 0..8 {
             cat = cat.prev();
         }
         assert_eq!(cat, SettingsCategory::General); // full cycle
+    }
+
+    #[test]
+    fn skills_category_renders_registered_skill_names() {
+        let mut state = SettingsState::default();
+        state.category = SettingsCategory::Skills;
+        state.load_category_fields();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text = buffer_text(&buf);
+        assert!(text.contains("gwt-pr"));
+        assert!(text.contains("gwt-pr-check"));
+        assert!(text.contains("Skills"));
+    }
+
+    #[test]
+    fn skills_toggle_bool_updates_enabled_state() {
+        let mut state = SettingsState::default();
+        state.category = SettingsCategory::Skills;
+        state.load_category_fields();
+        assert_eq!(state.fields[0].label, "gwt-pr");
+        assert_eq!(state.fields[0].value, "true");
+
+        update(&mut state, SettingsMessage::ToggleBool);
+        assert_eq!(state.fields[0].value, "false");
+
+        update(&mut state, SettingsMessage::ToggleBool);
+        assert_eq!(state.fields[0].value, "true");
     }
 
     #[test]
