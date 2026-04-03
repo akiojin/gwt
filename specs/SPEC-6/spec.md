@@ -17,7 +17,7 @@ As a developer, I want errors to appear in a modal dialog that I must manually d
 - AC-1.3: Multiple errors stack in a queue; dismissing one shows the next
 - AC-1.4: Error queue handles 100+ simultaneous errors without UI freeze
 
-### US-2 (P1): See Warnings/Info in Status Bar — NOT IMPLEMENTED
+### US-2 (P1): See Warnings/Info in Status Bar — PARTIALLY IMPLEMENTED
 
 As a developer, I want warnings and info messages to appear in the status bar so that I am informed without interrupting my workflow.
 
@@ -39,7 +39,7 @@ As a developer, I want to view a structured log of all notifications so that I c
 - AC-3.2: Logs tab displays the structured log with filtering by severity
 - AC-3.3: Log entries are scrollable and searchable
 
-### US-4 (P2): Debug Messages Logged but Not Displayed — NOT IMPLEMENTED
+### US-4 (P2): Debug Messages Logged but Not Displayed — PARTIALLY IMPLEMENTED
 
 As a developer, I want debug-level messages to be logged without being displayed so that I can review them when troubleshooting.
 

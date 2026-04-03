@@ -33,10 +33,10 @@
 
 ### 2.2 Validation UI (gwt-tui)
 
-- [ ] **T-019**: Write test for inline validation error display on invalid model_path.
-- [ ] **T-020**: Implement inline validation error rendering in Voice settings form.
-- [ ] **T-021**: Block save when validation fails; show error summary.
-- [ ] **T-022**: Verify T-019 passes (GREEN).
+- [x] **T-019**: Write test for inline validation error display on invalid model_path.
+- [x] **T-020**: Implement inline validation error rendering in Voice settings form.
+- [x] **T-021**: Block save when validation fails; show error summary.
+- [x] **T-022**: Verify T-019 passes (GREEN).
 
 ### 2.3 Integration Verification
 

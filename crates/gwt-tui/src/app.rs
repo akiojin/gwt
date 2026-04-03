@@ -146,7 +146,30 @@ pub fn update(model: &mut Model, msg: Message) {
             if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
-                route_key_to_management(model, key);
+                // Focus cycling with Tab/BackTab (before pane-specific dispatch)
+                if !is_in_text_input_mode(model) {
+                    match key.code {
+                        KeyCode::Tab
+                            if !key.modifiers.contains(KeyModifiers::SHIFT) =>
+                        {
+                            model.active_focus = model.active_focus.next();
+                            return;
+                        }
+                        KeyCode::BackTab => {
+                            model.active_focus = model.active_focus.prev();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Dispatch based on focused pane
+                match model.active_focus {
+                    FocusPane::TabHeader => route_key_to_tab_header(model, key),
+                    FocusPane::TabContent => route_key_to_management(model, key),
+                    FocusPane::BranchDetail => route_key_to_branch_detail(model, key),
+                    FocusPane::Terminal => forward_key_to_active_session(model, key),
+                }
             } else {
                 forward_key_to_active_session(model, key);
             }
@@ -374,8 +397,8 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     // Wizard overlay takes priority (fullscreen modal)
     if model.wizard.is_some() {
         let msg = match key.code {
-            KeyCode::Char('j') | KeyCode::Down => Some(screens::wizard::WizardMessage::MoveDown),
-            KeyCode::Char('k') | KeyCode::Up => Some(screens::wizard::WizardMessage::MoveUp),
+            KeyCode::Down => Some(screens::wizard::WizardMessage::MoveDown),
+            KeyCode::Up => Some(screens::wizard::WizardMessage::MoveUp),
             KeyCode::Enter => Some(screens::wizard::WizardMessage::Select),
             KeyCode::Esc => Some(screens::wizard::WizardMessage::Back),
             KeyCode::Backspace => Some(screens::wizard::WizardMessage::Backspace),
@@ -398,12 +421,10 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
 
     if model.service_select.is_some() {
         let msg = match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 Some(screens::service_select::ServiceSelectMessage::MoveDown)
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                Some(screens::service_select::ServiceSelectMessage::MoveUp)
-            }
+            KeyCode::Up => Some(screens::service_select::ServiceSelectMessage::MoveUp),
             KeyCode::Enter => Some(screens::service_select::ServiceSelectMessage::Select),
             KeyCode::Esc => Some(screens::service_select::ServiceSelectMessage::Cancel),
             _ => None,
@@ -432,6 +453,56 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     false
 }
 
+/// Route a key event to the tab header pane (Left/Right switches tabs, Enter focuses content).
+fn route_key_to_tab_header(model: &mut Model, key: crossterm::event::KeyEvent) {
+    let tab_count = ManagementTab::ALL.len();
+    let idx = ManagementTab::ALL
+        .iter()
+        .position(|t| *t == model.management_tab)
+        .unwrap_or(0);
+
+    match key.code {
+        KeyCode::Right => {
+            model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
+        }
+        KeyCode::Left => {
+            model.management_tab =
+                ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
+        }
+        KeyCode::Enter => {
+            model.active_focus = FocusPane::TabContent;
+        }
+        _ => {}
+    }
+}
+
+/// Route a key event to the branch detail pane (sections, actions, Enter dispatches).
+fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent) {
+    use screens::branches::BranchesMessage;
+
+    let msg = match key.code {
+        KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
+        KeyCode::Right => Some(BranchesMessage::NextDetailSection),
+        KeyCode::Up => Some(BranchesMessage::DetailActionUp),
+        KeyCode::Down => Some(BranchesMessage::DetailActionDown),
+        KeyCode::Enter => {
+            if model.branches.detail_section == 4 {
+                Some(match model.branches.detail_action_selected {
+                    0 => BranchesMessage::LaunchAgent,
+                    1 => BranchesMessage::OpenShell,
+                    _ => BranchesMessage::DeleteWorktree,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    if let Some(m) = msg {
+        screens::branches::update(&mut model.branches, m);
+    }
+}
+
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
@@ -442,29 +513,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::profiles::ProfilesMessage;
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
-
-    // Global management keys: tab switching with Left/Right arrows
-    // (only when not in text input mode like search or edit)
-    if !is_in_text_input_mode(model) {
-        let tab_count = ManagementTab::ALL.len();
-        let idx = ManagementTab::ALL
-            .iter()
-            .position(|t| *t == model.management_tab)
-            .unwrap_or(0);
-
-        match key.code {
-            KeyCode::Right => {
-                model.management_tab = ManagementTab::ALL[(idx + 1) % tab_count];
-                return;
-            }
-            KeyCode::Left => {
-                model.management_tab =
-                    ManagementTab::ALL[if idx == 0 { tab_count - 1 } else { idx - 1 }];
-                return;
-            }
-            _ => {}
-        }
-    }
 
     // Tab-specific key routing
     match model.management_tab {
@@ -481,10 +529,9 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
 
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(BranchesMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(BranchesMessage::MoveUp),
+                KeyCode::Down => Some(BranchesMessage::MoveDown),
+                KeyCode::Up => Some(BranchesMessage::MoveUp),
                 KeyCode::Enter => {
-                    // In Actions section, dispatch the selected action
                     if model.branches.detail_section == 4 {
                         Some(match model.branches.detail_action_selected {
                             0 => BranchesMessage::LaunchAgent,
@@ -502,8 +549,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     load_initial_data(model);
                     return;
                 }
-                KeyCode::Tab => Some(BranchesMessage::NextDetailSection),
-                KeyCode::BackTab => Some(BranchesMessage::PrevDetailSection),
                 KeyCode::Esc => Some(BranchesMessage::SearchClear),
                 _ => None,
             };
@@ -524,8 +569,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
 
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(IssuesMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(IssuesMessage::MoveUp),
+                KeyCode::Down => Some(IssuesMessage::MoveDown),
+                KeyCode::Up => Some(IssuesMessage::MoveUp),
                 KeyCode::Enter => Some(IssuesMessage::ToggleDetail),
                 KeyCode::Char('/') => Some(IssuesMessage::SearchStart),
                 KeyCode::Char('r') => Some(IssuesMessage::Refresh),
@@ -550,12 +595,10 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 }
             } else {
                 let msg = match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => Some(SettingsMessage::MoveDown),
-                    KeyCode::Char('k') | KeyCode::Up => Some(SettingsMessage::MoveUp),
+                    KeyCode::Down => Some(SettingsMessage::MoveDown),
+                    KeyCode::Up => Some(SettingsMessage::MoveUp),
                     KeyCode::Enter => Some(SettingsMessage::StartEdit),
                     KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
-                    KeyCode::Tab => Some(SettingsMessage::NextCategory),
-                    KeyCode::BackTab => Some(SettingsMessage::PrevCategory),
                     KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         Some(SettingsMessage::Save)
                     }
@@ -568,8 +611,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::Logs => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(LogsMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(LogsMessage::MoveUp),
+                KeyCode::Down => Some(LogsMessage::MoveDown),
+                KeyCode::Up => Some(LogsMessage::MoveUp),
                 KeyCode::Enter => Some(LogsMessage::ToggleDetail),
                 KeyCode::Char('r') => Some(LogsMessage::Refresh),
                 _ => None,
@@ -580,8 +623,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::Versions => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(VersionsMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(VersionsMessage::MoveUp),
+                KeyCode::Down => Some(VersionsMessage::MoveDown),
+                KeyCode::Up => Some(VersionsMessage::MoveUp),
                 KeyCode::Char('r') => {
                     load_initial_data(model);
                     return;
@@ -594,8 +637,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::GitView => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(GitViewMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(GitViewMessage::MoveUp),
+                KeyCode::Down => Some(GitViewMessage::MoveDown),
+                KeyCode::Up => Some(GitViewMessage::MoveUp),
                 KeyCode::Enter => Some(GitViewMessage::ToggleExpand),
                 KeyCode::Char('r') => Some(GitViewMessage::Refresh),
                 _ => None,
@@ -606,8 +649,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::PrDashboard => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(PrDashboardMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(PrDashboardMessage::MoveUp),
+                KeyCode::Down => Some(PrDashboardMessage::MoveDown),
+                KeyCode::Up => Some(PrDashboardMessage::MoveUp),
                 KeyCode::Enter => Some(PrDashboardMessage::ToggleDetail),
                 KeyCode::Char('r') => Some(PrDashboardMessage::Refresh),
                 _ => None,
@@ -618,8 +661,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::Profiles => {
             let msg = match key.code {
-                KeyCode::Char('j') | KeyCode::Down => Some(ProfilesMessage::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(ProfilesMessage::MoveUp),
+                KeyCode::Down => Some(ProfilesMessage::MoveDown),
+                KeyCode::Up => Some(ProfilesMessage::MoveUp),
                 KeyCode::Enter => Some(ProfilesMessage::ToggleActive),
                 KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
                 KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
@@ -1331,10 +1374,11 @@ fn render_sessions_area(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Render session content (Tab mode = single, Grid mode = tiled).
 fn render_session_content(model: &Model, frame: &mut Frame, area: Rect) {
+    let terminal_focused = model.active_focus == FocusPane::Terminal;
     match model.session_layout {
         SessionLayout::Tab => {
             if let Some(session) = model.active_session_tab() {
-                render_single_session(session, frame, area);
+                render_single_session(session, terminal_focused, frame, area);
             }
         }
         SessionLayout::Grid => {
@@ -1344,9 +1388,15 @@ fn render_session_content(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 /// Render a single session pane.
-fn render_single_session(session: &crate::model::SessionTab, frame: &mut Frame, area: Rect) {
+fn render_single_session(
+    session: &crate::model::SessionTab,
+    terminal_focused: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(focused_border_style(terminal_focused))
         .title(session.name.as_str());
     let inner = block.inner(area);
     frame.render_widget(block, area);

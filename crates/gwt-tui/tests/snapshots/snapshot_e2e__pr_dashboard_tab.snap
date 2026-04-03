@@ -1,5 +1,6 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 197
 expression: output
 ---
 ┌Management────────────────────────────┐  ▶ Shell

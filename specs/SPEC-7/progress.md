@@ -3,15 +3,15 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `8/24` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T00:23:11Z`
+- Task progress: `12/24` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T02:05:11Z`
 
 ## Done
-- Supporting artifacts now cover profiles, env vars, and voice settings in one coherent execution record.
-- The docs explicitly call out incomplete voice-setting parity instead of implying full support.
-- Acceptance and TDD checklists are now available for future completion-gate use.
+- The Voice category now renders the saved configuration shape and blocks invalid saves with inline error feedback.
+- Focused settings tests now cover the invalid `model_path` render path.
+- Acceptance and TDD checklists now point at concrete verification for the latest validation slice.
 
 ## Next
-- Finish the missing voice fields and validation paths.
-- Verify profile persistence and voice-config round trips together.
-- Only then update `tasks.md` and acceptance state.
+- Run the remaining manual verification for save/reopen behavior and invalid save UX.
+- Add the still-missing system-level validation for input device availability and hotkey conflicts.
+- Keep task tracking aligned with the actual implementation state.
