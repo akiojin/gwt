@@ -527,6 +527,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         ManagementTab::Branches => {
             if model.branches.search_active {
                 let msg = match key.code {
+                    KeyCode::Esc => Some(BranchesMessage::SearchClear),
                     KeyCode::Backspace => Some(BranchesMessage::SearchBackspace),
                     _ => search_input_char(&key).map(BranchesMessage::SearchInput),
                 };
@@ -560,6 +561,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         ManagementTab::Issues => {
             if model.issues.search_active {
                 let msg = match key.code {
+                    KeyCode::Esc => Some(IssuesMessage::SearchClear),
                     KeyCode::Backspace => Some(IssuesMessage::SearchBackspace),
                     _ => search_input_char(&key).map(IssuesMessage::SearchInput),
                 };
@@ -2254,6 +2256,27 @@ mod tests {
 
         assert!(model.current_notification.is_some());
         assert!(!model.settings.editing);
+    }
+
+    #[test]
+    fn update_key_input_esc_preserves_warn_notification_during_issue_search() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Issues;
+        model.issues.search_active = true;
+        model.issues.search_query = "warn".into();
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(model.current_notification.is_some());
+        assert!(!model.issues.search_active);
+        assert!(model.issues.search_query.is_empty());
     }
 
     #[test]

@@ -28,7 +28,7 @@
   - File: `crates/gwt-tui/src/widgets/status_bar.rs`
 - [x] IMPL: Auto-dismiss timer for Info notifications
 - [x] IMPL: Warn notification rendering with amber/yellow color
-- [ ] IMPL: Dismiss keybinding for Warn notifications
+- [x] IMPL: Dismiss keybinding for Warn notifications
 
 ## Phase 2: Severity Routing
 

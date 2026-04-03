@@ -6,14 +6,14 @@
 
 - [P] [x] **T-001**: Write test for `VoiceConfig` default values (hotkey="Ctrl+G,v", input_device="system_default", language="auto", enabled=false).
 - [P] [x] **T-002**: Write test for `VoiceConfig` serialization to TOML `[voice]` section.
-- [P] [ ] **T-003**: Write test for `VoiceConfig` deserialization from TOML, including missing `[voice]` section (defaults applied).
-- [ ] **T-004**: Implement `VoiceConfig` struct with serde derive in `crates/gwt-core/src/config.rs`.
-- [ ] **T-005**: Add `voice: VoiceConfig` field to the root `Config` struct with `#[serde(default)]`.
+- [P] [x] **T-003**: Write test for `VoiceConfig` deserialization from TOML, including missing `[voice]` section (defaults applied).
+- [x] **T-004**: Implement `VoiceConfig` struct with serde derive in `crates/gwt-config/src/voice_config.rs`.
+- [x] **T-005**: Add `voice: VoiceConfig` field to the root `Settings` struct with `#[serde(default)]` in `crates/gwt-config/src/settings.rs`.
 - [x] **T-006**: Verify T-001, T-002, T-003 pass (GREEN).
 
 ### 1.2 Voice Settings Category (gwt-tui)
 
-- [ ] **T-007**: Write test for `SettingsCategory::Voice` variant existence and sidebar ordering (7th position).
+- [x] **T-007**: Write test for `SettingsCategory::Voice` variant existence and sidebar ordering (7th position).
 - [x] **T-008**: Write test for Voice settings form rendering with 5 fields.
 - [x] **T-009**: Add `Voice` variant to `SettingsCategory` enum in `crates/gwt-tui/src/screens/settings.rs`.
 - [x] **T-010**: Implement Voice category rendering: model_path (text input), hotkey (text input), input_device (text input), language (text input), enabled (toggle).
