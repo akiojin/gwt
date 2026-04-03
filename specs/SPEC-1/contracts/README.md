@@ -1,9 +1,8 @@
 # Contracts: SPEC-1 - Terminal Emulation
 
-This SPEC does not yet freeze a dedicated wire-format or API markdown contract.
+No standalone contract artifact is required yet.
 
-Current contract candidates:
-- URL region mapping between the renderer and mouse input handler.
-- Browser opener abstraction used by Ctrl+click URL handling.
-
-Add concrete contract files here once these boundaries are stable enough to version independently.
+## Promotion Rule
+- Add a concrete contract file here when a stable schema, payload, or interface is shared across modules.
+- Until then, keep interface details in `spec.md`, `plan.md`, and implementation tests.
+- Promote a real contract file only if terminal URL hit-testing or clipboard payloads become shared cross-crate interfaces.

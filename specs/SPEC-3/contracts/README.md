@@ -1,9 +1,8 @@
 # Contracts: SPEC-3 - Agent Management
 
-This SPEC does not yet freeze a dedicated wire-format or API markdown contract.
+No standalone contract artifact is required yet.
 
-Current contract candidates:
-- The version-cache file schema used by wizard startup and background refresh.
-- The session-conversion boundary between overlay selection and runtime agent relaunch.
-
-Add concrete contract files here once these boundaries are stable enough to version independently.
+## Promotion Rule
+- Add a concrete contract file here when a stable schema, payload, or interface is shared across modules.
+- Until then, keep interface details in `spec.md`, `plan.md`, and implementation tests.
+- Add concrete contracts here only if custom-agent manifests or session-conversion payloads become stable shared schemas.

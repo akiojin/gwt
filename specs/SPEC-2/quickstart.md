@@ -1,7 +1,12 @@
 # Quickstart: SPEC-2 - Workspace Shell
 
-## Minimum Validation Flow
-1. **Launch the TUI** - `cargo run -p gwt-tui`
-2. **Verify branch detail flow** - Use `Tab` and `Shift+Tab` inside Branches and confirm the lower detail panel updates.
-3. **Verify session shell flow** - Use `Ctrl+G,c`, `Ctrl+G,g`, `Ctrl+G,z`, and session switching chords.
-4. **Verify management tabs** - Cycle through all 8 tabs and confirm Branches, Issues, PRs, Profiles, Git View, Versions, Settings, and Logs render.
+## Reviewer Flow
+1. Run `cargo run -p gwt-tui` and enter the main workspace shell.
+2. Move across terminal tabs and split panes using the documented keybindings.
+3. Open the management panel and verify the visible tabs match the current product shell, without assuming a live Specs tab.
+4. Record any remaining persistence or help-overlay gaps against `tasks.md` before claiming the shell complete.
+
+## Expected Result
+- The reviewer sees the current implemented scope for workspace shell.
+- Any missing behavior is logged against the remaining `23` unchecked tasks.
+- No step should be treated as complete unless the code path is actually reachable today.

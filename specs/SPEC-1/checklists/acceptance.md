@@ -1,8 +1,8 @@
 # Acceptance Checklist: SPEC-1 - Terminal Emulation
 
-Mark each item only after direct verification evidence exists.
-- [ ] Confirm ANSI color and attribute rendering remains correct on visible output.
-- [ ] Confirm scrollback preserves viewport position while new output arrives.
-- [ ] Confirm selection and clipboard copy still preserve multi-line boundaries.
-- [ ] Confirm Ctrl+click URL open is implemented and manually verified.
-- [ ] Confirm alt-screen enter and exit behavior is covered by automated verification.
+- [x] The local artifact set now includes supporting planning and execution files.
+- [x] `0/17` task progress is reflected in `progress.md` and related notes.
+- [x] The artifact set now reflects the current gap around URL opening and alt-screen verification.
+- [ ] All acceptance scenarios in `spec.md` are satisfied end to end on the current branch.
+- [ ] The reviewer flow in `quickstart.md` has been completed without open gaps.
+- [ ] Every task in `tasks.md` is checked and backed by evidence.

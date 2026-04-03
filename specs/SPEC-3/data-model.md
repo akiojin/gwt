@@ -1,7 +1,18 @@
 # Data Model: SPEC-3 - Agent Management
 
-## Primary Objects
-- **Detected agents** - `DetectedAgent` carries `AgentId`, optional version, and binary path from detection.
-- **Version cache** - `VersionCache` stores recent versions and fetched-at timestamps per agent key.
-- **Wizard options** - `AgentOption` carries agent id, display name, cached versions, and cache staleness state.
-- **Session conversion** - `PendingSessionConversion` links the active session index to the selected target agent.
+## Primary Entities
+### AgentDefinition
+- Role: Describes a built-in or custom agent that can be launched from the wizard.
+- Invariant: Definitions must remain valid across cache refreshes and session conversion.
+
+### VersionCache
+- Role: Stores discovered version information for launch-time decisions.
+- Invariant: Refresh scheduling must not block startup flow.
+
+### SessionConversionRequest
+- Role: Carries the target agent and current session context during conversion.
+- Invariant: Repo path and session identity must survive a conversion attempt.
+
+## Lifecycle Notes
+- `metadata.json`, `tasks.md`, and `progress.md` must stay aligned.
+- Completion cannot be claimed from implementation alone; the checklists must agree.

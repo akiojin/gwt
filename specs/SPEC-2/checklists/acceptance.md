@@ -1,8 +1,8 @@
 # Acceptance Checklist: SPEC-2 - Workspace Shell
 
-Mark each item only after direct verification evidence exists.
-- [ ] Confirm tab and grid session layout switching still works with multiple sessions.
-- [ ] Confirm management panel visibility toggles without losing active tab state.
-- [ ] Confirm branch detail actions can trigger agent launch and shell launch flows.
-- [ ] Confirm help overlay auto-collects current keybindings before this SPEC is closed.
-- [ ] Confirm session persistence restore is verified with corrupted and missing files.
+- [x] The local artifact set now includes supporting planning and execution files.
+- [x] `32/55` task progress is reflected in `progress.md` and related notes.
+- [x] The supporting docs now match the current workspace shell rather than the older seven-tab planning snapshot.
+- [ ] All acceptance scenarios in `spec.md` are satisfied end to end on the current branch.
+- [ ] The reviewer flow in `quickstart.md` has been completed without open gaps.
+- [ ] Every task in `tasks.md` is checked and backed by evidence.

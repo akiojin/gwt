@@ -1,7 +1,16 @@
 # Research: SPEC-4 - GitHub Integration
 
-## Context
-- The TUI already has `git_view.rs`, `pr_dashboard.rs`, and `issues.rs` screens, but the data plumbing is still partial.
-- GitHub-backed views depend on `gh` availability and stable parsing of PR and check status output.
-- Git View and PR Dashboard should stay separate tabs because they answer different navigation questions.
-- Branch linkage, issue detail launch flows, and merge-readiness reporting still need a single canonical data path.
+## Scope Snapshot
+- Canonical scope: Issues, pull requests, Git view state, and local branch linkage to GitHub records.
+- Current status: `open` / `Ready for Dev`.
+- Task progress: `0/36` checked in `tasks.md`.
+- Notes: Only part of the supporting artifact set existed before this refresh, and the execution scope remains largely incomplete.
+
+## Decisions
+- Keep Issues, PRs, Git View, and branch linkage together because they share GitHub and local-git context.
+- Treat existing screen scaffolding as partial delivery, not as evidence that the full GitHub workflow is complete.
+- Preserve room for connector-driven details such as CI, reviews, and divergence state without inventing them in docs.
+
+## Open Questions
+- Confirm which GitHub data must be available offline versus fetched live at view time.
+- Decide whether branch linkage should be driven from local git metadata, GitHub queries, or both.

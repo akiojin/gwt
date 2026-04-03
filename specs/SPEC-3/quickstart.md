@@ -1,7 +1,12 @@
 # Quickstart: SPEC-3 - Agent Management
 
-## Minimum Validation Flow
-1. **Verify cache-backed startup** - `cargo test -p gwt-tui app::tests::prepare_wizard_startup_prefills_spec_context_and_versions -- --nocapture`
-2. **Open the wizard locally** - `cargo run -p gwt-tui` and trigger `Ctrl+G,n` to inspect cached version labels.
-3. **Exercise session conversion** - Open an agent session, trigger `Ctrl+G,a`, choose a target agent, and inspect the confirm flow.
-4. **Reconcile with acceptance** - Before closure, confirm process-level PTY replacement matches the SPEC rather than only metadata updates.
+## Reviewer Flow
+1. Run `cargo run -p gwt-tui` and open the agent launch or conversion flow from the current session.
+2. Verify built-in detection, custom agent listing, and cached version display in the wizard.
+3. Trigger session conversion and confirm the active session metadata changes while repository context is preserved.
+4. Treat real PTY replacement as an explicit follow-up until the last remaining task is reconciled.
+
+## Expected Result
+- The reviewer sees the current implemented scope for agent management.
+- Any missing behavior is logged against the remaining `1` unchecked tasks.
+- No step should be treated as complete unless the code path is actually reachable today.

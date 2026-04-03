@@ -1,8 +1,8 @@
 # TDD Checklist: SPEC-3 - Agent Management
 
-Use this checklist to reconcile test-first execution against the SPEC scope.
-- [ ] RED: Version cache expiry, corruption, and fallback tests exist and stay authoritative.
-- [ ] RED: Session conversion success tests fail until working-directory preservation is implemented.
-- [ ] RED: Session conversion failure tests fail until the original session is restored cleanly.
-- [ ] GREEN: `cargo test -p gwt-tui` covers startup cache flow and session-conversion paths.
-- [ ] REFACTOR: Wizard startup and conversion helpers stay separated from overlay rendering concerns.
+- [x] `tasks.md` remains the source of truth for execution order.
+- [x] Broad regression evidence exists on this branch (`cargo test -p gwt-core -p gwt-tui`, `cargo clippy --all-targets --all-features -- -D warnings`).
+- [x] Focused `gwt-tui` tests and clippy runs exist for recent SPEC-3 work, but the last task still needs closure evidence.
+- [ ] Each remaining unchecked task has a focused failing test or repeatable manual check defined.
+- [ ] The latest implementation slice has spec-focused verification evidence attached to it.
+- [ ] The reviewer flow in `quickstart.md` has been captured as repeatable completion evidence.
