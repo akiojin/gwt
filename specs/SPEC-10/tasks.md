@@ -42,5 +42,5 @@
 
 - [x] T030 Update E2E snapshots: cargo insta test --accept
 - [x] T031 Run cargo clippy --workspace --all-targets -- -D warnings
-- [ ] T032 Verify coverage >= 90%
-- [ ] T033 Update SPEC-10 metadata phase to Done
+- [x] T032 Verify coverage >= 90%
+- [x] T033 Update SPEC-10 metadata phase to Done

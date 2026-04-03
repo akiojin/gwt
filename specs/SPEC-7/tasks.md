@@ -40,5 +40,5 @@
 
 ### 2.3 Integration Verification
 
-- [ ] **T-023**: Manual verification: open Settings, navigate to Voice, configure all fields, save, reopen, verify persistence.
-- [ ] **T-024**: Manual verification: set invalid model_path, attempt save, verify error displayed.
+- [x] **T-023**: Manual verification: open Settings, navigate to Voice, configure all fields, save, reopen, verify persistence.
+- [x] **T-024**: Manual verification: set invalid model_path, attempt save, verify error displayed.

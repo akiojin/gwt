@@ -215,7 +215,7 @@ mod tests {
             result,
             vec!["feature/add-auth", "bugfix/fix-crash", "hotfix/patch-1"]
         );
-        assert!(result.iter().all(is_git_safe_branch_name));
+        assert!(result.iter().all(|s| is_git_safe_branch_name(s)));
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod tests {
             r#"{"suggestions": ["feature/ok", "bad/name", "hotfix/good", "bugfix/fix-this"]}"#;
         let result = parse_suggestions(json).unwrap();
         assert_eq!(result, vec!["feature/ok", "hotfix/good", "bugfix/fix-this"]);
-        assert!(result.iter().all(is_git_safe_branch_name));
+        assert!(result.iter().all(|s| is_git_safe_branch_name(s)));
     }
 
     #[test]
@@ -255,7 +255,7 @@ mod tests {
                 "feature/five"
             ]
         );
-        assert!(result.iter().all(is_git_safe_branch_name));
+        assert!(result.iter().all(|s| is_git_safe_branch_name(s)));
     }
 
     #[test]
@@ -280,7 +280,7 @@ mod tests {
         assert!(matches!(err, AIError::ConfigError(_)));
     }
 
-    fn is_git_safe_branch_name(name: &String) -> bool {
+    fn is_git_safe_branch_name(name: &str) -> bool {
         Command::new("git")
             .args(["check-ref-format", "--branch", name])
             .output()

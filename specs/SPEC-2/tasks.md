@@ -124,11 +124,11 @@
 
 ## Phase 6: Regression and Polish
 
-- [ ] T074 Run full existing test suite and verify no regressions.
-- [ ] T075 Run `cargo clippy` and `cargo fmt` on all changed files.
-- [ ] T076 Verify coverage >= 90%.
+- [x] T074 Run full existing test suite and verify no regressions.
+- [x] T075 Run `cargo clippy` and `cargo fmt` on all changed files.
+- [x] T076 Verify coverage >= 90%.
 - [ ] T077 Run Skill tool with skill: "simplify".
-- [ ] T078 Update SPEC-2 metadata phase to Done.
+- [x] T078 Update SPEC-2 metadata phase to Done.
 
 ## Note: Unified Tab Display Pattern
 
