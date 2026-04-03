@@ -6,8 +6,9 @@
 
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use gwt_notification::{Notification, Severity};
+use gwt_notification::Severity;
 use gwt_tui::app;
 use gwt_tui::input::keybind::KeybindRegistry;
 use gwt_tui::message::Message;
@@ -126,12 +127,41 @@ fn sample_branches() -> Vec<BranchItem> {
 }
 
 fn sample_log_entries() -> Vec<LogEntry> {
+    let timestamp: DateTime<Utc> = "2026-04-03T02:43:22.996912Z".parse().unwrap();
+
     vec![
-        Notification::new(Severity::Error, "core", "Failed to connect")
-            .with_detail("connection timed out"),
-        Notification::new(Severity::Warn, "tui", "Slow render"),
-        Notification::new(Severity::Info, "core", "Started session"),
-        Notification::new(Severity::Debug, "pty", "Buffer flush"),
+        LogEntry {
+            id: 1,
+            severity: Severity::Error,
+            source: "core".to_string(),
+            message: "Failed to connect".to_string(),
+            detail: Some("connection timed out".to_string()),
+            timestamp,
+        },
+        LogEntry {
+            id: 2,
+            severity: Severity::Warn,
+            source: "tui".to_string(),
+            message: "Slow render".to_string(),
+            detail: None,
+            timestamp,
+        },
+        LogEntry {
+            id: 3,
+            severity: Severity::Info,
+            source: "core".to_string(),
+            message: "Started session".to_string(),
+            detail: None,
+            timestamp,
+        },
+        LogEntry {
+            id: 4,
+            severity: Severity::Debug,
+            source: "pty".to_string(),
+            message: "Buffer flush".to_string(),
+            detail: None,
+            timestamp,
+        },
     ]
 }
 

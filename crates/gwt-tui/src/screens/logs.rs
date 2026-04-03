@@ -2,10 +2,10 @@
 
 use gwt_notification::Severity;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -170,47 +170,27 @@ pub fn update(state: &mut LogsState, msg: LogsMessage) {
 
 /// Render the logs screen.
 pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Filter tabs
-            Constraint::Min(0),    // Log list / detail
-        ])
-        .split(area);
-
-    render_filter_tabs(state, frame, chunks[0]);
-
-    if state.detail_view {
-        render_detail(state, frame, chunks[1]);
-    } else {
-        render_log_list(state, frame, chunks[1]);
-    }
-}
-
-/// Render the filter tab bar.
-fn render_filter_tabs(state: &LogsState, frame: &mut Frame, area: Rect) {
-    let titles: Vec<Line> = FilterLevel::ALL
-        .iter()
-        .map(|f| Line::from(f.label()))
-        .collect();
-
     let active_idx = FilterLevel::ALL
         .iter()
         .position(|f| *f == state.filter_level)
         .unwrap_or(0);
+    let labels: Vec<&str> = FilterLevel::ALL.iter().map(|f| f.label()).collect();
+    let mut tab_title = super::build_tab_title(&labels, active_idx);
+    // Append debug visibility indicator
+    tab_title.spans.push(Span::raw(format!(
+        " │ Debug: {}",
+        if state.show_debug { "on" } else { "off" }
+    )));
 
-    let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(format!(
-            "Logs | Debug: {}",
-            if state.show_debug { "on" } else { "off" }
-        )))
-        .select(active_idx)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_widget(tabs, area);
+    let block = Block::default().borders(Borders::ALL).title(tab_title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.detail_view {
+        render_detail(state, frame, inner);
+    } else {
+        render_log_list(state, frame, inner);
+    }
 }
 
 /// Render the log entry list.

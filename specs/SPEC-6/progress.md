@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `26/44` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T02:42:09Z`
+- Task progress: `27/44` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T02:45:09Z`
 
 ## Done
 - Severity routing is now wired through structured notifications: debug logs only, info/warn feed the status bar, and errors keep their detail in the modal queue.
@@ -13,6 +13,7 @@
 - Warn notifications can now be dismissed with `Esc` when no overlay, search field, or settings edit session has already claimed that key.
 - The Logs tab now exposes `f` to cycle severity filters and `d` to toggle the debug filter state.
 - Snapshot coverage now includes a Logs tab render with an active filter state.
+- The Logs list now renders stable timestamp / severity / source / message columns instead of a loose inline row.
 
 ## Next
 - Add the remaining richer log affordances and end-to-end coverage.

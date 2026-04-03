@@ -68,7 +68,7 @@
   - File: `crates/gwt-tui/src/screens/logs.rs`
 - [x] IMPL: Severity filter toggle (keybinding to cycle filters)
 - [x] IMPL: Debug filter toggle (show/hide Debug entries)
-- [ ] IMPL: Scrollable log list with timestamp and severity columns
+- [x] IMPL: Scrollable log list with timestamp and severity columns
 
 ### 3.3 Bus-to-Log Integration
 

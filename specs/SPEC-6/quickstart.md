@@ -17,5 +17,6 @@
 - The reviewer sees the current implemented scope for notification and error bus.
 - Warn notifications can be dismissed without stealing `Esc` from existing search/edit flows.
 - The Logs tab can show an active filter state and react to `f`/`d` controls from the app layer.
-- Any missing behavior is logged against the remaining `18` unchecked tasks.
+- The Logs tab presents structured entries in stable columns that are easier to scan by eye.
+- Any missing behavior is logged against the remaining `17` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.
