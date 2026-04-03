@@ -697,8 +697,16 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 }
                 KeyCode::Enter => Some(BranchesMessage::Select),
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
-                KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
-                KeyCode::Char('/') => Some(BranchesMessage::SearchStart),
+                KeyCode::Char('m') => Some(BranchesMessage::ToggleView),
+                KeyCode::Char('v') => {
+                    update(model, Message::SwitchManagementTab(ManagementTab::GitView));
+                    return;
+                }
+                KeyCode::Char('f') | KeyCode::Char('/') => Some(BranchesMessage::SearchStart),
+                KeyCode::Char('?') | KeyCode::Char('h') => {
+                    update(model, Message::ToggleHelp);
+                    return;
+                }
                 KeyCode::Char('r') => {
                     load_initial_data(model);
                     return;
@@ -1330,13 +1338,20 @@ fn materialize_pending_launch(model: &mut Model) {
     if let Err(err) = materialize_pending_launch_with(model, &gwt_sessions_dir()) {
         apply_notification(
             model,
-            Notification::new(Severity::Warn, "session", "Launch metadata was not persisted")
-                .with_detail(err),
+            Notification::new(
+                Severity::Warn,
+                "session",
+                "Launch metadata was not persisted",
+            )
+            .with_detail(err),
         );
     }
 }
 
-fn materialize_pending_launch_with(model: &mut Model, sessions_dir: &std::path::Path) -> Result<(), String> {
+fn materialize_pending_launch_with(
+    model: &mut Model,
+    sessions_dir: &std::path::Path,
+) -> Result<(), String> {
     let Some(config) = model.pending_launch_config.take() else {
         return Ok(());
     };
@@ -1346,7 +1361,10 @@ fn materialize_pending_launch_with(model: &mut Model, sessions_dir: &std::path::
         config.branch.clone().unwrap_or_default(),
         config.agent_id.clone(),
     );
-    session.model = config.model.clone().filter(|model| is_explicit_model_selection(model));
+    session.model = config
+        .model
+        .clone()
+        .filter(|model| is_explicit_model_selection(model));
     session.tool_version = config.tool_version.clone();
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
@@ -1572,9 +1590,7 @@ fn build_wizard_agent_options(
 
     // Always list all builtin agents (installed or not), like old TUI
     for builtin_id in &BUILTIN_AGENTS {
-        let detected = detected_agents
-            .iter()
-            .find(|d| &d.agent_id == builtin_id);
+        let detected = detected_agents.iter().find(|d| &d.agent_id == builtin_id);
         let available = detected.is_some();
         let installed_version = detected.and_then(|d| d.version.clone());
 
@@ -2214,7 +2230,7 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
     } else {
         let hints = match model.active_focus {
             FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-                "\u{2191}\u{2193}:move  \u{2190}\u{2192}:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  Tab:focus"
+                "\u{2191}\u{2193}:move  \u{2190}\u{2192}:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  ?:help"
             }
             FocusPane::TabContent => {
                 "\u{2191}\u{2193}:select  \u{2190}\u{2192}:tab  Ctrl+\u{2190}\u{2192}:sub-tab  Enter:action  Tab:focus  ?:help"
@@ -2918,7 +2934,7 @@ mod tests {
         assert!(!wizard.detected_agents[1].available); // Codex not installed
         assert!(!wizard.detected_agents[2].available); // Gemini not installed
         assert!(!wizard.detected_agents[3].available); // Copilot not installed
-        // All npm agents need refresh (empty cache)
+                                                       // All npm agents need refresh (empty cache)
         assert!(refresh_targets.contains(&AgentId::ClaudeCode));
         assert!(refresh_targets.contains(&AgentId::Codex));
         assert!(refresh_targets.contains(&AgentId::Gemini));
@@ -3877,6 +3893,16 @@ mod tests {
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(model.branches.docker_selected, 0);
+    }
+
+    #[test]
+    fn route_key_to_management_branches_h_toggles_help_overlay() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(model.help_visible);
     }
 
     #[test]

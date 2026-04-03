@@ -639,6 +639,73 @@ fn e2e_ctrl_g_b_returns_to_branches_with_list_focus() {
 }
 
 #[test]
+fn e2e_branches_m_cycles_view_mode() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
+
+    send_key(&mut model, &mut kb, press(KeyCode::Char('m')));
+
+    assert_eq!(
+        model.filtered_branch_names(),
+        vec![
+            "main".to_string(),
+            "feature/api".to_string(),
+            "feature/app-shell".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn e2e_branches_v_switches_to_git_view() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+
+    assert_eq!(model.management_tab, ManagementTab::Branches);
+    send_key(&mut model, &mut kb, press(KeyCode::Char('v')));
+
+    assert_eq!(model.management_tab, ManagementTab::GitView);
+    assert_eq!(model.active_focus, FocusPane::TabContent);
+}
+
+#[test]
+fn e2e_branches_f_starts_search() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
+
+    send_key(&mut model, &mut kb, press(KeyCode::Char('f')));
+
+    let _ = send_key(&mut model, &mut kb, press(KeyCode::Char('a')));
+    let _ = send_key(&mut model, &mut kb, press(KeyCode::Char('p')));
+    let _ = send_key(&mut model, &mut kb, press(KeyCode::Char('i')));
+
+    assert_eq!(model.branches_search_query(), "api");
+    assert_eq!(
+        model.filtered_branch_names(),
+        vec!["feature/api".to_string()]
+    );
+}
+
+#[test]
+fn e2e_branches_question_mark_opens_help_overlay() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+
+    send_key(&mut model, &mut kb, press(KeyCode::Char('?')));
+
+    let output = render_to_string(&model, 80, 24);
+    assert!(output.contains("Help"));
+    assert!(output.contains("Ctrl+G, g"));
+}
+
+#[test]
 fn e2e_search_in_branches() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();

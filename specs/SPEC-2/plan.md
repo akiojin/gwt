@@ -64,6 +64,19 @@ but not fully reflected in the new TUI implementation.
 8.3: Regression and verification (1 task)
 - Add focused routing/render coverage and re-run workspace verification.
 
+### Phase 9: Branch Mnemonic Restoration (5 tasks)
+Restore the old-TUI branch-local mnemonic shortcuts that make Branches usable as a daily
+entry point without requiring Ctrl+G for every follow-up action.
+
+9.1: Branch-local shortcuts (3 tasks)
+- Restore `m` as the Branches-local view-mode cycle.
+- Restore `v` as a direct jump from Branches to Git View.
+- Restore `f` as a search alias and `?` / `h` as local help entry points.
+
+9.2: UX polish and regression (2 tasks)
+- Update branch-specific footer hints to advertise the restored mnemonic set.
+- Add focused regression coverage and re-run workspace verification.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

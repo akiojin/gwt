@@ -41,4 +41,4 @@ expression: output
 │                                                          ││                                                          │
 │                                                          ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
-↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  Tab:focus
+↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  ?:help

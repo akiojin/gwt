@@ -158,3 +158,11 @@ screens to use.
 - [x] T106 Update `branches.rs` list rendering to the old-TUI style branch line format (`name + worktree indicator + HEAD indicator`) with no category headers.
 - [x] T107 Update `app.rs` branch key routing and footer hints to restore branch-first primary actions without regressing existing focus-aware behavior.
 - [x] T108 Verify focused branch UX tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 9: Branch Mnemonic Restoration
+
+- [x] T109 [P] Write RED test: Branches tab restores `m` for view-mode cycling and `v` for direct Git View navigation.
+- [x] T110 [P] Write RED test: Branches tab restores `f` as a search alias and `?` / `h` as local help entry points.
+- [x] T111 Update `app.rs` Branches key routing to use old-TUI branch-local mnemonics without regressing search or overlay behavior.
+- [x] T112 Update branch-specific footer hints and snapshots so the restored mnemonics are discoverable.
+- [x] T113 Verify focused mnemonic tests, workspace checks, and refresh SPEC-2 artifacts.
