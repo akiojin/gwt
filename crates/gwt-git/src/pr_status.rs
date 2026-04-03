@@ -186,8 +186,14 @@ pub fn pr_check_report(repo_path: &Path) -> Result<PrCheckReport> {
         });
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| GwtError::Other(format!("gh pr view JSON: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_pr_check_report_json(&stdout)
+}
+
+/// Parse `gh pr view --json` output into an extended PR check report.
+pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
+    let json: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr view JSON: {e}")))?;
 
     let ci = match json.get("statusCheckRollup") {
         Some(serde_json::Value::Array(checks)) => {
@@ -333,6 +339,49 @@ mod tests {
     fn parse_pr_status_invalid_json() {
         let result = parse_pr_status_json("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_pr_check_report_structured_statuses() {
+        let json = r#"{
+            "title": "Add feature",
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "statusCheckRollup": [
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "lint", "status": "COMPLETED", "conclusion": "NEUTRAL"}
+            ]
+        }"#;
+
+        let report = parse_pr_check_report_json(json).unwrap();
+
+        assert_eq!(report.ci, CiStatus::Passing);
+        assert_eq!(report.merge, MergeStatus::Ready);
+        assert_eq!(report.review, ReviewStatus::Approved);
+        assert_eq!(
+            report.summary,
+            "PR: Add feature | CI: Passing | Merge: Ready | Review: Approved"
+        );
+    }
+
+    #[test]
+    fn parse_pr_check_report_empty_checks() {
+        let json = r#"{
+            "title": "Waiting on CI",
+            "mergeable": "CONFLICTING",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": []
+        }"#;
+
+        let report = parse_pr_check_report_json(json).unwrap();
+
+        assert_eq!(report.ci, CiStatus::Pending);
+        assert_eq!(report.merge, MergeStatus::Conflicts);
+        assert_eq!(report.review, ReviewStatus::Pending);
+        assert_eq!(
+            report.summary,
+            "PR: Waiting on CI | CI: Pending | Merge: Conflicts | Review: Pending"
+        );
     }
 
     #[test]
