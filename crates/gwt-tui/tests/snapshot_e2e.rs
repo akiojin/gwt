@@ -246,6 +246,39 @@ fn snapshot_logs_tab_filter_active() {
 }
 
 #[test]
+fn e2e_notifications_land_in_structured_log_for_all_severities() {
+    let mut model = test_model();
+    model.active_layer = ActiveLayer::Management;
+    model.management_tab = ManagementTab::Logs;
+
+    let notifications = [
+        gwt_notification::Notification::new(Severity::Debug, "pty", "Buffer flush"),
+        gwt_notification::Notification::new(Severity::Info, "core", "Started session"),
+        gwt_notification::Notification::new(Severity::Warn, "tui", "Slow render"),
+        gwt_notification::Notification::new(Severity::Error, "core", "Failed to connect"),
+    ];
+
+    for notification in notifications {
+        app::update(&mut model, Message::Notify(notification));
+    }
+
+    app::update(&mut model, Message::DismissError);
+
+    let output = render_to_string(&model, 160, 24);
+    assert!(output.contains("DEBUG"));
+    assert!(output.contains("INFO"));
+    assert!(output.contains("WARN"));
+    assert!(output.contains("ERROR"));
+    assert!(output.contains("pty"));
+    assert!(output.contains("core"));
+    assert!(output.contains("tui"));
+    assert!(output.contains("Buffer flush"));
+    assert!(output.contains("Started session"));
+    assert!(output.contains("Slow render"));
+    assert!(output.contains("Failed to connect"));
+}
+
+#[test]
 fn snapshot_pr_dashboard_tab() {
     let mut model = test_model();
     model.active_layer = ActiveLayer::Management;

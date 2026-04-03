@@ -7,6 +7,7 @@
 4. Record any missing severity routing as remaining SPEC-6 execution work.
 
 ## Repeatable Evidence
+- `cargo test -p gwt-tui e2e_notifications_land_in_structured_log_for_all_severities -- --nocapture`
 - `cargo test -p gwt-tui notification -- --nocapture`
 - `cargo test -p gwt-tui error -- --nocapture`
 - `cargo test -p gwt-tui logs -- --nocapture`
@@ -18,5 +19,6 @@
 - Warn notifications can be dismissed without stealing `Esc` from existing search/edit flows.
 - The Logs tab can show an active filter state and react to `f`/`d` controls from the app layer.
 - The Logs tab presents structured entries in stable columns that are easier to scan by eye.
-- Any missing behavior is logged against the remaining `17` unchecked tasks.
+- A focused E2E test now proves every notification severity lands in the structured log rendering path.
+- Any missing behavior is logged against the remaining `16` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

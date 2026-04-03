@@ -81,6 +81,6 @@
 
 - [ ] TEST: End-to-end test: Info notification appears in status bar and auto-dismisses
 - [ ] TEST: End-to-end test: Error notification appears in modal, dismiss shows next
-- [ ] TEST: End-to-end test: all severity levels logged in structured log
+- [x] TEST: End-to-end test: all severity levels logged in structured log
 - [ ] TEST: Regression test: existing error queue behavior preserved
 - [ ] TEST: Performance test: 100 simultaneous errors do not freeze UI
