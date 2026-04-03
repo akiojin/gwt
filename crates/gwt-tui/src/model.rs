@@ -21,6 +21,7 @@ use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
 use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
+use gwt_skills::{register_builtins, SkillRegistry};
 
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +261,8 @@ pub struct Model {
     pub(crate) logs: LogsState,
     /// Versions screen state.
     pub(crate) versions: VersionsState,
+    /// Embedded skill registry seeded with builtin skills at startup.
+    pub(crate) embedded_skills: SkillRegistry,
     /// Wizard overlay state (None when not active).
     pub(crate) wizard: Option<WizardState>,
     /// Docker progress overlay state.
@@ -290,6 +293,8 @@ impl Model {
             vt: VtState::new(24, 80),
         };
         let (notification_bus, notification_receiver) = NotificationBus::new();
+        let mut embedded_skills = SkillRegistry::new();
+        register_builtins(&mut embedded_skills);
 
         Self {
             current_notification: None,
@@ -316,6 +321,7 @@ impl Model {
             settings: SettingsState::default(),
             logs: LogsState::default(),
             versions: VersionsState::default(),
+            embedded_skills,
             wizard: None,
             docker_progress: None,
             service_select: None,
@@ -358,6 +364,11 @@ impl Model {
     /// Buffered PTY input awaiting delivery to sessions.
     pub fn pending_pty_inputs(&self) -> &VecDeque<PendingPtyInput> {
         &self.pending_pty_inputs
+    }
+
+    /// Embedded builtin skills available to the application at startup.
+    pub fn embedded_skills(&self) -> &SkillRegistry {
+        &self.embedded_skills
     }
 
     /// Cloneable handle for sending notifications into the TUI.
@@ -490,6 +501,15 @@ mod tests {
             "test",
             "queued",
         )));
+        assert!(
+            !model.embedded_skills().list().is_empty(),
+            "builtin skill registry should be initialized at startup"
+        );
+        assert!(model
+            .embedded_skills()
+            .list()
+            .iter()
+            .any(|skill| skill.name == "gwt-pr"));
     }
 
     #[test]
