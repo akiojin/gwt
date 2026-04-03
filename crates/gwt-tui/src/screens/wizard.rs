@@ -792,8 +792,8 @@ fn render_confirm_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use ratatui::buffer::Buffer;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
     fn sample_agents() -> Vec<AgentOption> {

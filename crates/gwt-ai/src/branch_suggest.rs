@@ -223,10 +223,7 @@ mod tests {
         let json =
             r#"{"suggestions": ["feature/ok", "bad/name", "hotfix/good", "bugfix/fix-this"]}"#;
         let result = parse_suggestions(json).unwrap();
-        assert_eq!(
-            result,
-            vec!["feature/ok", "hotfix/good", "bugfix/fix-this"]
-        );
+        assert_eq!(result, vec!["feature/ok", "hotfix/good", "bugfix/fix-this"]);
         assert!(result.iter().all(is_git_safe_branch_name));
     }
 
@@ -270,10 +267,7 @@ mod tests {
     fn handles_surrounding_text() {
         let text = r#"Here are suggestions: {"suggestions": ["release/v2", "release/v2-1", "release/v2-2"]} hope this helps"#;
         let result = parse_suggestions(text).unwrap();
-        assert_eq!(
-            result,
-            vec!["release/v2", "release/v2-1", "release/v2-2"]
-        );
+        assert_eq!(result, vec!["release/v2", "release/v2-1", "release/v2-2"]);
     }
 
     // ── suggest_branch_name ────────────────────────────────────────────
