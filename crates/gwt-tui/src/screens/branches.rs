@@ -117,7 +117,7 @@ const DETAIL_SECTION_COUNT: usize = 4;
 const DETAIL_SECTION_LABELS: [&str; DETAIL_SECTION_COUNT] =
     ["Overview", "SPECs", "Git", "Sessions"];
 
-/// Action labels in the Actions detail section.
+/// Action labels shown in the action modal overlay.
 const ACTION_LABELS: [&str; 3] = ["Launch Agent", "Open Shell", "Delete Worktree"];
 
 /// State for the branches screen.
@@ -323,7 +323,7 @@ pub enum BranchesFocus {
 }
 
 /// Render the branches screen with split layout: top = list, bottom = detail.
-pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, focus: BranchesFocus) {
+pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, _focus: BranchesFocus) {
     // Split vertically: top 50% for list, bottom 50% for detail
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -340,10 +340,10 @@ pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, focus: Branc
         .split(main_chunks[0]);
 
     render_header(state, frame, list_chunks[0]);
-    render_branch_list(state, frame, list_chunks[1], focus == BranchesFocus::List);
+    render_branch_list(state, frame, list_chunks[1]);
 
     // Bottom half: branch detail
-    render_branch_detail(state, frame, main_chunks[1], focus == BranchesFocus::Detail);
+    render_branch_detail(state, frame, main_chunks[1]);
 }
 
 /// Render the header bar with view mode, sort mode, and search (plain bar, no borders).
@@ -375,7 +375,7 @@ fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
 }
 
 /// Render the branch list grouped by category.
-fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
+fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_branches();
 
     if filtered.is_empty() {
@@ -417,8 +417,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
     // Visual index = data index + number of headers inserted before it
     let visual_selected = state.selected + headers_before_selected;
 
-    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(border_color));
+    let block = Block::default();
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -430,13 +429,9 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect, is_f
 }
 
 /// Render the branch detail panel (bottom half).
-fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect, is_focused: bool) {
+fn render_branch_detail(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let title = super::build_tab_title(&DETAIL_SECTION_LABELS, state.detail_section);
-    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(border_color));
+    let block = Block::default().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -472,7 +467,7 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
         None => " No branch selected".to_string(),
     };
 
-    let block = Block::default().borders(Borders::ALL).title("Overview");
+    let block = Block::default().title("Overview");
     let paragraph = Paragraph::new(content)
         .block(block)
         .style(Style::default().fg(Color::White));
@@ -486,7 +481,7 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
         None => " No branch selected".to_string(),
     };
 
-    let block = Block::default().borders(Borders::ALL).title("SPECs");
+    let block = Block::default().title("SPECs");
     let paragraph = Paragraph::new(content)
         .block(block)
         .style(Style::default().fg(Color::White));
@@ -500,7 +495,7 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
         None => " No branch selected".to_string(),
     };
 
-    let block = Block::default().borders(Borders::ALL).title("Git Status");
+    let block = Block::default().title("Git Status");
     let paragraph = Paragraph::new(content)
         .block(block)
         .style(Style::default().fg(Color::White));
@@ -509,7 +504,7 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
 
 /// Sessions section: placeholder.
 fn render_detail_sessions(frame: &mut Frame, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Sessions");
+    let block = Block::default().title("Sessions");
     let paragraph = Paragraph::new(" No active sessions")
         .block(block)
         .style(Style::default().fg(Color::DarkGray));

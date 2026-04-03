@@ -190,7 +190,7 @@ pub fn render(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 /// Render the profile list view.
 fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
     if state.profiles.is_empty() {
-        let block = Block::default().borders(Borders::ALL).title("Profiles");
+        let block = Block::default().title("Profiles");
         let paragraph = Paragraph::new("No profiles. Press 'c' to create one.")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -234,7 +234,7 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default().borders(Borders::ALL).title("Profiles");
+    let block = Block::default().title("Profiles");
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -247,13 +247,10 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 
 /// Render a single form field with active/inactive styling.
 fn render_form_field(title: &str, value: &str, is_active: bool, frame: &mut Frame, area: Rect) {
-    let (text_style, border_style) = if is_active {
-        (
-            Style::default().fg(Color::Yellow),
-            Style::default().fg(Color::Yellow),
-        )
+    let text_style = if is_active {
+        Style::default().fg(Color::Yellow)
     } else {
-        (Style::default().fg(Color::White), Style::default())
+        Style::default().fg(Color::White)
     };
 
     let display = if is_active {
@@ -262,10 +259,7 @@ fn render_form_field(title: &str, value: &str, is_active: bool, frame: &mut Fram
         value.to_string()
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(border_style);
+    let block = Block::default().title(title);
     let paragraph = Paragraph::new(display).block(block).style(text_style);
     frame.render_widget(paragraph, area);
 }

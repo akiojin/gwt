@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -155,7 +155,7 @@ fn render_header(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let total = state.issues.len();
     let header_text = format!(" Issues ({}/{})  |{}", count, total, search_display);
 
-    let block = Block::default().borders(Borders::ALL).title("Issues");
+    let block = Block::default().title("Issues");
     let paragraph = Paragraph::new(header_text)
         .block(block)
         .style(Style::default().fg(Color::Cyan));
@@ -205,7 +205,7 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default().borders(Borders::ALL);
+    let block = Block::default();
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -221,7 +221,7 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let issue = match state.selected_issue() {
         Some(i) => i,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Issue Detail");
+            let block = Block::default().title("Issue Detail");
             let paragraph = Paragraph::new("No issue selected")
                 .block(block)
                 .style(Style::default().fg(Color::DarkGray));
@@ -249,14 +249,14 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
         " #{} - {}\n State: {} | Labels: {}\n Press Enter to go back",
         issue.number, issue.title, issue.state, labels_str,
     );
-    let header_block = Block::default().borders(Borders::ALL).title("Issue Detail");
+    let header_block = Block::default().title("Issue Detail");
     let header = Paragraph::new(header_text)
         .block(header_block)
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
 
     // Body section
-    let body_block = Block::default().borders(Borders::ALL).title("Description");
+    let body_block = Block::default().title("Description");
     let body_text = if issue.body.is_empty() {
         "No description provided.".to_string()
     } else {

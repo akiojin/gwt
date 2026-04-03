@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -182,7 +182,7 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
         if state.show_debug { "on" } else { "off" }
     )));
 
-    let block = Block::default().borders(Borders::ALL).title(tab_title);
+    let block = Block::default().title(tab_title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -198,7 +198,7 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_entries();
 
     if filtered.is_empty() {
-        let block = Block::default().borders(Borders::ALL);
+        let block = Block::default();
         let msg = if state.entries.is_empty() {
             "No log entries"
         } else {
@@ -241,7 +241,6 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default()
-        .borders(Borders::ALL)
         .title(" Enter: detail | r: refresh");
     let list = List::new(items).block(block).highlight_style(
         Style::default()
@@ -257,7 +256,6 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
 fn render_detail(state: &LogsState, frame: &mut Frame, area: Rect) {
     let entry = state.selected_entry();
     let block = Block::default()
-        .borders(Borders::ALL)
         .title("Log Detail — Esc: back");
 
     match entry {

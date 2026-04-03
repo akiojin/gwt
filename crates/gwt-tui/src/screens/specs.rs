@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -491,7 +491,7 @@ fn render_header(state: &SpecsState, frame: &mut Frame, area: Rect) {
         format!(" Specs ({}/{})  |{}", count, total, search_display)
     };
 
-    let block = Block::default().borders(Borders::ALL).title("Specs");
+    let block = Block::default().title("Specs");
     let paragraph = Paragraph::new(header_text)
         .block(block)
         .style(Style::default().fg(Color::Cyan));
@@ -551,7 +551,7 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default().borders(Borders::ALL);
+    let block = Block::default();
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)
@@ -567,7 +567,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
     let spec = match state.selected_spec() {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Spec Detail");
+            let block = Block::default().title("Spec Detail");
             let paragraph = Paragraph::new("No spec selected")
                 .block(block)
                 .style(Style::default().fg(Color::DarkGray));
@@ -596,7 +596,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
             spec.id, spec.title, spec.phase, spec.status,
         )
     };
-    let header_block = Block::default().borders(Borders::ALL).title("Spec Detail");
+    let header_block = Block::default().title("Spec Detail");
     let header = Paragraph::new(header_text)
         .block(header_block)
         .style(Style::default().fg(Color::Cyan));
@@ -624,7 +624,6 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         )
     };
     let content_block = Block::default()
-        .borders(Borders::ALL)
         .title(tab_title);
     let content = Paragraph::new(content_text)
         .block(content_block)

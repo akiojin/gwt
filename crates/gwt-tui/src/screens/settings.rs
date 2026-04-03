@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -517,9 +517,7 @@ pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let labels: Vec<&str> = SettingsCategory::ALL.iter().map(|c| c.label()).collect();
     let tab_title = super::build_tab_title(&labels, active_idx);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(tab_title);
+    let block = Block::default().title(tab_title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     render_fields(state, frame, inner);
@@ -528,7 +526,7 @@ pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
 /// Render the fields list for the current category.
 fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
     if state.fields.is_empty() {
-        let block = Block::default().borders(Borders::ALL);
+        let block = Block::default();
         let paragraph = Paragraph::new("No settings in this category")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -613,7 +611,7 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         " Enter: edit | Space: toggle bool | Tab/Shift+Tab: category"
     };
 
-    let block = Block::default().borders(Borders::ALL).title(format!(
+    let block = Block::default().title(format!(
         "{}{}",
         state.category.label(),
         hints
@@ -629,7 +627,7 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
     if let Some(error) = state.save_error.as_ref() {
-        let error_block = Block::default().borders(Borders::ALL).title("Save failed");
+        let error_block = Block::default().title("Save failed");
         let error_paragraph = Paragraph::new(error.as_str())
             .block(error_block)
             .style(Style::default().fg(Color::Red));
