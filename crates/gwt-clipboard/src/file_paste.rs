@@ -66,7 +66,7 @@ pub fn clipboard_payload_to_bytes(paths: &[PathBuf], text: &str) -> Option<Vec<u
     if !paths.is_empty() {
         let joined = paths
             .iter()
-            .map(|path| path.to_string_lossy().into_owned())
+            .map(|path| shell_quote_path(path))
             .collect::<Vec<_>>()
             .join("\n");
         return Some(joined.into_bytes());
@@ -78,6 +78,25 @@ pub fn clipboard_payload_to_bytes(paths: &[PathBuf], text: &str) -> Option<Vec<u
     } else {
         Some(text.as_bytes().to_vec())
     }
+}
+
+/// Quote a path so it can be pasted safely into a POSIX shell.
+///
+/// Each path is rendered on its own line and wrapped in single quotes. Single
+/// quotes inside the path are escaped using the standard `'"'"'"'"'"'"'"'"'` sequence.
+fn shell_quote_path(path: &PathBuf) -> String {
+    let raw = path.to_string_lossy();
+    let mut escaped = String::with_capacity(raw.len() + 2);
+    escaped.push('\'');
+    for ch in raw.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\"'\"'");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
 }
 
 // ── Shared clipboard helpers (crate-internal) ──
@@ -165,4 +184,35 @@ pub enum ClipboardError {
 
     #[error("Unsupported platform for clipboard access")]
     UnsupportedPlatform,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_payload_to_bytes_quotes_paths_with_spaces_and_special_chars() {
+        let paths = vec![PathBuf::from("/tmp/dir with spaces/it's $file&(1).txt")];
+        let bytes = clipboard_payload_to_bytes(&paths, "").unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "'/tmp/dir with spaces/it'\"'\"'s $file&(1).txt'"
+        );
+    }
+
+    #[test]
+    fn clipboard_payload_to_bytes_joins_each_quoted_path_on_its_own_line() {
+        let paths = vec![PathBuf::from("/tmp/one path"), PathBuf::from("/tmp/two path")];
+        let bytes = clipboard_payload_to_bytes(&paths, "").unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "'/tmp/one path'\n'/tmp/two path'"
+        );
+    }
+
+    #[test]
+    fn clipboard_payload_to_bytes_keeps_text_when_no_paths_exist() {
+        let bytes = clipboard_payload_to_bytes(&[], "plain text").unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "plain text");
+    }
 }
