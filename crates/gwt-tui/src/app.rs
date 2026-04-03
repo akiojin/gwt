@@ -54,6 +54,7 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::SwitchManagementTab(tab) => {
             model.management_tab = tab;
             model.active_layer = ActiveLayer::Management;
+            model.active_focus = FocusPane::TabContent;
             if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
                 model.settings.load_category_fields();
             }
@@ -676,8 +677,24 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
 
             let is_cursor_move = matches!(key.code, KeyCode::Down | KeyCode::Up);
             let msg = match key.code {
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(BranchesMessage::OpenShell)
+                }
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
+                KeyCode::Char(' ') => {
+                    model.active_focus = FocusPane::BranchDetail;
+                    return;
+                }
+                KeyCode::Char('c')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && model
+                            .branches
+                            .selected_branch()
+                            .is_some_and(|branch| branch.worktree_path.is_some()) =>
+                {
+                    Some(BranchesMessage::DeleteWorktree)
+                }
                 KeyCode::Enter => Some(BranchesMessage::Select),
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
                 KeyCode::Char('v') => Some(BranchesMessage::ToggleView),
@@ -881,6 +898,16 @@ fn check_branch_pending_actions(model: &mut Model) {
                 model.active_session = idx;
                 model.active_focus = FocusPane::Terminal;
             }
+        }
+    }
+    if model.branches.pending_delete_worktree && !model.confirm.visible {
+        if let Some(branch) = model.branches.selected_branch() {
+            model.confirm = screens::confirm::ConfirmState::with_message(format!(
+                "Delete worktree for {}?",
+                branch.name
+            ));
+        } else {
+            model.branches.pending_delete_worktree = false;
         }
     }
 }
@@ -1406,7 +1433,12 @@ fn handle_confirm_message_with(
     let should_apply_session_conversion = matches!(msg, screens::confirm::ConfirmMessage::Accept)
         && model.confirm.accepted()
         && model.pending_session_conversion.is_some();
+    let should_delete_worktree = matches!(msg, screens::confirm::ConfirmMessage::Accept)
+        && model.confirm.accepted()
+        && model.branches.pending_delete_worktree;
     let dismisses_session_conversion = matches!(msg, screens::confirm::ConfirmMessage::Cancel)
+        || (matches!(msg, screens::confirm::ConfirmMessage::Accept) && !model.confirm.accepted());
+    let dismisses_worktree_delete = matches!(msg, screens::confirm::ConfirmMessage::Cancel)
         || (matches!(msg, screens::confirm::ConfirmMessage::Accept) && !model.confirm.accepted());
     screens::confirm::update(&mut model.confirm, msg);
     if should_apply_session_conversion {
@@ -1426,8 +1458,44 @@ fn handle_confirm_message_with(
                 }
             }
         }
+    } else if should_delete_worktree {
+        let worktree_target = model.branches.selected_branch().and_then(|branch| {
+            branch
+                .worktree_path
+                .as_ref()
+                .map(|path| (branch.name.clone(), path.clone()))
+        });
+        model.branches.pending_delete_worktree = false;
+        if let Some((branch_name, path)) = worktree_target {
+            let manager = gwt_git::worktree::WorktreeManager::new(&model.repo_path);
+            match manager.remove(&path) {
+                Ok(()) => {
+                    load_initial_data(model);
+                    apply_notification(
+                        model,
+                        Notification::new(
+                            Severity::Info,
+                            "worktree",
+                            format!("Removed worktree for {branch_name}"),
+                        ),
+                    );
+                }
+                Err(err) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Error,
+                        "worktree",
+                        format!("Failed to remove worktree for {branch_name}"),
+                    )
+                    .with_detail(err.to_string()),
+                ),
+            }
+        }
     } else if dismisses_session_conversion {
         model.pending_session_conversion = None;
+    }
+    if dismisses_worktree_delete {
+        model.branches.pending_delete_worktree = false;
     }
 }
 
@@ -2145,6 +2213,9 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
         frame.render_widget(line, area);
     } else {
         let hints = match model.active_focus {
+            FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
+                "\u{2191}\u{2193}:move  \u{2190}\u{2192}:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  Tab:focus"
+            }
             FocusPane::TabContent => {
                 "\u{2191}\u{2193}:select  \u{2190}\u{2192}:tab  Ctrl+\u{2190}\u{2192}:sub-tab  Enter:action  Tab:focus  ?:help"
             }
@@ -3219,6 +3290,61 @@ mod tests {
             .message
             .contains("missing-agent"));
         assert!(model.pending_session_conversion.is_none());
+    }
+
+    #[test]
+    fn handle_confirm_message_with_accept_removes_pending_branch_worktree() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let worktree_path = dir.path().join("wt-feature-delete");
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                worktree_path.to_str().expect("worktree path"),
+                "-b",
+                "feature/delete-me",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/delete-me".into(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(worktree_path.clone()),
+        }];
+
+        update(
+            &mut model,
+            Message::Branches(screens::branches::BranchesMessage::DeleteWorktree),
+        );
+        assert!(model.confirm.visible);
+        model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
+
+        handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Accept, vec![]);
+
+        assert!(!worktree_path.exists(), "worktree should be removed");
+        assert!(!model.branches.pending_delete_worktree);
+        let notification = model
+            .current_notification
+            .as_ref()
+            .expect("worktree notification");
+        assert_eq!(notification.source, "worktree");
+        assert_eq!(
+            notification.message,
+            "Removed worktree for feature/delete-me"
+        );
     }
 
     #[test]

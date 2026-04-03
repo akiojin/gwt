@@ -48,6 +48,22 @@ Implement Git View management tab component.
 
 ### Phase 5: Regression and Polish (5 tasks)
 
+### Phase 8: Branch-First UX Restoration (5 tasks)
+Reconcile remaining old-TUI branch-first UX requirements that are already present in `spec.md`
+but not fully reflected in the new TUI implementation.
+
+8.1: Branch list display (2 tasks)
+- Remove category headers and locality badges from the branch list.
+- Render `name + worktree indicator + HEAD indicator` in a stable old-TUI style.
+
+8.2: Primary branch actions (2 tasks)
+- Restore `Enter=Wizard`, `Shift+Enter=Shell`, `Space=select detail`, `Ctrl+C=delete worktree`
+  on the Branches tab without regressing existing focus-aware routing.
+- Update contextual footer hints so Branches communicates the restored actions directly.
+
+8.3: Regression and verification (1 task)
+- Add focused routing/render coverage and re-run workspace verification.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

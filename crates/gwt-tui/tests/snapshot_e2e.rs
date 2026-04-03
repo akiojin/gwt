@@ -41,6 +41,15 @@ fn ctrl(ch: char) -> KeyEvent {
     }
 }
 
+fn modified(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::empty(),
+    }
+}
+
 fn backspace() -> KeyEvent {
     press(KeyCode::Backspace)
 }
@@ -559,7 +568,6 @@ fn e2e_ctrl_g_z_toggles_layout() {
     assert_eq!(model.session_layout, SessionLayout::Grid);
 }
 
-
 #[test]
 fn e2e_ctrl_c_double_tap_quits() {
     let mut model = test_model();
@@ -614,6 +622,20 @@ fn e2e_management_tab_switch_via_ctrl_g_i() {
     send_key(&mut model, &mut kb, press(KeyCode::Char('i')));
 
     assert_eq!(model.management_tab, ManagementTab::Issues);
+}
+
+#[test]
+fn e2e_ctrl_g_b_returns_to_branches_with_list_focus() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    model.management_tab = ManagementTab::Issues;
+    model.active_focus = FocusPane::Terminal;
+
+    send_key(&mut model, &mut kb, ctrl('g'));
+    send_key(&mut model, &mut kb, press(KeyCode::Char('b')));
+
+    assert_eq!(model.management_tab, ManagementTab::Branches);
+    assert_eq!(model.active_focus, FocusPane::TabContent);
 }
 
 #[test]
@@ -739,4 +761,67 @@ fn e2e_enter_on_branch_opens_wizard() {
         output.contains("Wizard") || output.contains("Agent") || output.contains("Quick"),
         "Wizard overlay should be visible after Enter"
     );
+}
+
+#[test]
+fn e2e_shift_enter_on_branch_opens_shell_session() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    let mut branches = sample_branches();
+    branches[1].worktree_path = Some(PathBuf::from("/tmp/feature-api"));
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(branches)),
+    );
+    app::update(&mut model, Message::Branches(BranchesMessage::MoveDown));
+
+    let initial_sessions = model.session_count();
+    send_key(
+        &mut model,
+        &mut kb,
+        modified(KeyCode::Enter, KeyModifiers::SHIFT),
+    );
+
+    assert_eq!(model.session_count(), initial_sessions + 1);
+    assert_eq!(model.active_focus, FocusPane::Terminal);
+    let output = render_to_string(&model, 80, 24);
+    assert!(output.contains("Shell: feature/api"));
+}
+
+#[test]
+fn e2e_space_on_branch_moves_focus_to_detail_without_opening_wizard() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(sample_branches())),
+    );
+
+    assert!(!model.has_wizard());
+    assert_eq!(model.active_focus, FocusPane::TabContent);
+
+    send_key(&mut model, &mut kb, press(KeyCode::Char(' ')));
+
+    assert_eq!(model.active_focus, FocusPane::BranchDetail);
+    assert!(!model.has_wizard());
+}
+
+#[test]
+fn e2e_ctrl_c_on_branch_opens_delete_confirm() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+    let mut branches = sample_branches();
+    branches[1].worktree_path = Some(PathBuf::from("/tmp/feature-api"));
+    app::update(
+        &mut model,
+        Message::Branches(BranchesMessage::SetBranches(branches)),
+    );
+    app::update(&mut model, Message::Branches(BranchesMessage::MoveDown));
+
+    let status = send_key(&mut model, &mut kb, ctrl('c'));
+    assert!(matches!(status, DispatchStatus::Forwarded));
+
+    let output = render_to_string(&model, 80, 24);
+    assert!(output.contains("Confirm"));
+    assert!(output.contains("Delete worktree for feature/api?"));
 }

@@ -539,7 +539,6 @@ pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, _focus: Bran
     render_header(state, frame, list_chunks[0]);
     render_branch_list(state, frame, list_chunks[1]);
     render_detail_content(state, frame, main_chunks[1], 0);
-
 }
 
 /// Render the header bar with view mode, sort mode, and search (plain bar, no borders).
@@ -569,7 +568,7 @@ fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the branch list (borderless, simple format: name + worktree/HEAD indicators).
+/// Render the branch list (borderless, old-TUI style inline indicators).
 fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_branches();
 
@@ -586,39 +585,24 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Build items with category headers, tracking visual index offset
-    let mut items: Vec<ListItem> = Vec::new();
-    let mut current_category: Option<BranchCategory> = None;
-    let mut headers_before_selected: usize = 0;
-
-    for (idx, branch) in filtered.iter().enumerate() {
-        if current_category != Some(branch.category) {
-            current_category = Some(branch.category);
-            if idx <= state.selected {
-                headers_before_selected += 1;
-            }
-            let header = Line::from(Span::styled(
-                format!("── {} ──", branch.category.label()),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            items.push(ListItem::new(header));
-        }
-
-        let head_indicator = if branch.is_head { "* " } else { "  " };
-        let locality = if branch.is_local { "L" } else { "R" };
-
-        let line = Line::from(vec![
-            Span::styled(head_indicator, Style::default().fg(Color::Green)),
-            Span::styled(format!("[{}] ", locality), Style::default().fg(Color::Cyan)),
-            Span::styled(&branch.name, Style::default().fg(Color::White)),
-        ]);
-        items.push(ListItem::new(line));
-    }
-
-    // Visual index = data index + number of headers inserted before it
-    let visual_selected = state.selected + headers_before_selected;
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .map(|branch| {
+            let worktree_icon = if branch.worktree_path.is_some() {
+                "\u{25CF}"
+            } else {
+                "\u{25CB}"
+            };
+            let head_indicator = if branch.is_head { " *" } else { "" };
+            let line = Line::from(vec![
+                Span::styled(&branch.name, Style::default().fg(Color::White)),
+                Span::raw(" "),
+                Span::styled(worktree_icon, Style::default().fg(Color::Cyan)),
+                Span::styled(head_indicator, Style::default().fg(Color::Green)),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
 
     let list = List::new(items).block(Block::default()).highlight_style(
         Style::default()
@@ -626,7 +610,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
     let mut list_state = ratatui::widgets::ListState::default();
-    list_state.select(Some(visual_selected));
+    list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -1353,6 +1337,44 @@ mod tests {
             .collect();
         // Header bar shows view/sort info (no bordered block title)
         assert!(text.contains("View:"));
+    }
+
+    #[test]
+    fn render_branch_list_uses_inline_indicators_without_headers_or_locality_badges() {
+        let mut state = BranchesState::default();
+        state.branches = vec![
+            BranchItem {
+                name: "main".to_string(),
+                is_head: true,
+                is_local: true,
+                category: BranchCategory::Main,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "feature/worktree".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/worktree")),
+            },
+        ];
+
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_list(&state, f, f.area());
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        let joined = lines.join("\n");
+
+        assert!(!joined.contains("── Main ──"));
+        assert!(!joined.contains("[L]"));
+        assert!(!joined.contains("[R]"));
+        assert!(joined.contains("main ○ *"));
+        assert!(joined.contains("feature/worktree ●"));
     }
 
     #[test]

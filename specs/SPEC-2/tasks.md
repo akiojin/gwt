@@ -150,3 +150,11 @@ screens to use.
 ## Phase 7: TUI Operation Flow Overhaul
 
 - [x] T084-T103 All tasks completed
+
+## Phase 8: Branch-First UX Restoration
+
+- [x] T104 [P] Write RED test: branch list renders without category headers or locality badges and shows HEAD/worktree indicators in-line.
+- [x] T105 [P] Write RED test: Branches tab routes `Enter`, `Shift+Enter`, `Space`, and `Ctrl+C` to wizard, shell, detail focus, and worktree delete respectively.
+- [x] T106 Update `branches.rs` list rendering to the old-TUI style branch line format (`name + worktree indicator + HEAD indicator`) with no category headers.
+- [x] T107 Update `app.rs` branch key routing and footer hints to restore branch-first primary actions without regressing existing focus-aware behavior.
+- [x] T108 Verify focused branch UX tests, workspace checks, and refresh SPEC-2 artifacts.

@@ -16,4 +16,4 @@ expression: output
 │                  ││                  │
 │ Docker status    ││                  │
 └──────────────────┘└──────────────────┘
-↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Ente
+↑↓:move  ←→:tab  Enter:wizard  Shift+Ent
