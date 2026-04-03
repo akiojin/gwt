@@ -115,6 +115,9 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-012**: Restore session layout on gwt restart (best-effort: working directories, display mode, active tab).
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion.
+- **FR-015**: Focus system: 4 focusable panes cycled with Tab/Shift+Tab. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
+- **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
+- **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 
 ## Non-Functional Requirements
 
@@ -126,42 +129,101 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 
 ## Implementation Details
 
-### Complete Keybinding Map
+### Focus System
 
-| Keybinding | Action | Context |
-|------------|--------|---------|
-| `Ctrl+G, g` | Toggle Main/Management layer | Global |
-| `Ctrl+G, ]` | Next session | Main layer |
-| `Ctrl+G, [` | Previous session | Main layer |
-| `Ctrl+G, 1-9` | Switch to session N | Main layer |
-| `Ctrl+G, z` | Toggle Tab/Grid layout | Main layer |
-| `Ctrl+G, c` | New shell session | Global |
-| `Ctrl+G, x` | Close current session | Main layer |
-| `Ctrl+G, q` | Quit | Global |
-| `Ctrl+G, ?` | Show help overlay | Global |
-| `Ctrl+G, n` | Open agent launch wizard | Global |
-| `Ctrl+G, v` | Voice input (start recording) | Main layer |
-| `Ctrl+G, p` | Paste file paths from clipboard | Main layer |
-| `Ctrl+G, b` | Switch to Branches tab | Global |
-| `Ctrl+G, s` | Switch to Settings tab | Global |
-| `Ctrl+G, i` | Switch to Issues tab | Global |
-| `Ctrl+C, Ctrl+C` | Quit (double-tap, 500ms window) | Global |
-| `Esc` | Close overlay / go back / cancel search | Overlays, Management |
-| `Enter` | Select / Confirm / Toggle detail | Lists, dialogs |
-| `Up/k, Down/j` | Navigate list | Management tabs |
-| `PageUp/PageDown` | Page scroll | Lists, terminal |
-| `/` | Start search / filter | Management tabs (Branches, Issues, SPECs) |
-| `Tab` | Next category / section | Settings, SPECs detail |
-| `Shift+Tab` | Previous category / section | Settings, SPECs detail |
-| `s` | Toggle sort mode | Branches |
-| `v` | Toggle view mode (All/Local/Remote) | Branches |
-| `r` | Refresh data | All management tabs |
-| `n/a` | New / Add | Profiles |
-| `e` | Edit | Profiles, SPECs |
-| `d` | Delete | Profiles |
-| `Space` | Toggle boolean | Settings |
-| `Shift+S` | Save settings | Settings |
-| `Shift+Enter` | Launch agent from SPEC | SPECs |
+4 focusable panes, cycled with Tab / Shift+Tab:
+
+```
+Tab →  Management Tab Header → Tab Content (list) → Branch Detail → Terminal → ...
+```
+
+- Focused pane: **blue** border (`Color::Cyan`)
+- Unfocused pane: **white** border (`Color::Gray`)
+- Ctrl+G,g toggles management panel visibility (same as before)
+- Overlays (Wizard, Confirm, Error) capture all input when visible
+
+### Global Keybindings (work regardless of focus)
+
+| Keybinding | Action |
+|------------|--------|
+| `Tab` | Move focus to next pane |
+| `Shift+Tab` | Move focus to previous pane |
+| `Ctrl+G, g` | Toggle management panel visibility |
+| `Ctrl+G, c` | New shell session |
+| `Ctrl+G, n` | Open agent launch wizard |
+| `Ctrl+G, q` | Quit |
+| `Ctrl+G, ?` | Show help overlay |
+| `Ctrl+G, v` | Voice input (start recording) |
+| `Ctrl+G, p` | Paste file paths from clipboard |
+| `Ctrl+G, b` | Switch to Branches tab |
+| `Ctrl+G, s` | Switch to Settings tab |
+| `Ctrl+G, i` | Switch to Issues tab |
+| `Ctrl+G, ]` | Next session |
+| `Ctrl+G, [` | Previous session |
+| `Ctrl+G, 1-9` | Switch to session N |
+| `Ctrl+G, z` | Toggle Tab/Grid layout |
+| `Ctrl+G, x` | Close current session |
+| `Ctrl+C, Ctrl+C` | Quit (double-tap, 500ms window) |
+
+### Focus: Management Tab Header
+
+| Keybinding | Action |
+|------------|--------|
+| `←` / `→` | Switch management tab |
+| `Enter` | Activate selected tab (move focus to Tab Content) |
+
+### Focus: Tab Content (list area)
+
+| Keybinding | Action |
+|------------|--------|
+| `↑` / `↓` | Navigate list items |
+| `Enter` | Select / toggle detail view |
+| `Esc` | Cancel search / close detail |
+| `/` | Start search (Branches, Issues) |
+| `r` | Refresh data |
+| `s` | Toggle sort mode (Branches only) |
+| `n` | New / Add (Profiles only) |
+| `e` | Edit (Profiles only) |
+| `d` | Delete (Profiles only) |
+| `Space` | Toggle boolean (Settings only) |
+
+### Focus: Branch Detail
+
+| Keybinding | Action |
+|------------|--------|
+| `←` / `→` | Switch detail section (Overview/SPECs/Git/Sessions/Actions) |
+| `↑` / `↓` | Navigate within section (Actions list) |
+| `Enter` | Execute action (Launch Agent, Open Shell, Delete Worktree) |
+
+### Focus: Terminal
+
+| Keybinding | Action |
+|------------|--------|
+| All keys | Forwarded to PTY (except Ctrl+G prefix and Tab) |
+
+### Overlay: Wizard (captures all input)
+
+| Keybinding | Action |
+|------------|--------|
+| `↑` / `↓` | Navigate options |
+| `Enter` | Select / advance step |
+| `Esc` | Go back / cancel |
+| Character keys | Text input (branch name, URL, etc.) |
+| `Backspace` | Delete character |
+
+### Overlay: Confirm Dialog
+
+| Keybinding | Action |
+|------------|--------|
+| `←` / `→` | Toggle Yes/No |
+| `Enter` | Accept |
+| `Esc` | Cancel |
+
+### Overlay: Error
+
+| Keybinding | Action |
+|------------|--------|
+| `Enter` / `Esc` | Dismiss error |
 
 ### Ctrl+G Prefix State Machine
 

@@ -79,10 +79,45 @@
 - [x] T046 Write 15 tests for branch detail state transitions and rendering
 - [x] T047 Update all E2E snapshot tests
 
-## Phase 5: Regression and Polish
+## Phase 5: Focus System + Keybinding Rework
 
-- [ ] T048 Run full existing test suite and verify no regressions.
-- [ ] T049 Run `cargo clippy` and `cargo fmt` on all changed files.
-- [ ] T050 Verify coverage >= 90%.
-- [ ] T051 Run Skill tool with skill: "simplify".
-- [ ] T052 Update SPEC-2 metadata phase to Done.
+### 5.1: Focus State
+
+- [ ] T053 Add FocusPane enum to model.rs: TabHeader, TabContent, BranchDetail, Terminal
+- [ ] T054 Add active_focus: FocusPane field to Model
+- [ ] T055 Write RED test: Tab cycles through 4 focus panes in order
+- [ ] T056 Write RED test: Shift+Tab cycles in reverse
+- [ ] T057 Implement Tab/Shift+Tab focus cycling in app.rs update()
+- [ ] T058 Implement focus-aware border colors: Cyan (focused) / Gray (unfocused)
+- [ ] T059 Write render test: focused pane has Cyan border
+
+### 5.2: Replace j/k with Arrow Keys
+
+- [ ] T060 Replace KeyCode::Char('j') with KeyCode::Down in all screens
+- [ ] T061 Replace KeyCode::Char('k') with KeyCode::Up in all screens
+- [ ] T062 Update route_key_to_management to use arrow keys only
+- [ ] T063 Update all screen tests to use arrow keys
+- [ ] T064 Update E2E tests to use arrow keys
+
+### 5.3: Focus-Aware Key Routing
+
+- [ ] T065 In app.rs: route keys based on active_focus instead of active_layer
+- [ ] T066 TabHeader focus: Left/Right switch tabs, Enter moves focus to TabContent
+- [ ] T067 TabContent focus: ↑↓ navigate list, Enter select, / search, r refresh
+- [ ] T068 BranchDetail focus: ←→ switch sections, ↑↓ navigate actions, Enter execute
+- [ ] T069 Terminal focus: forward all keys to PTY (except Tab and Ctrl+G prefix)
+- [ ] T070 Write 10+ tests for focus-aware key routing
+
+### 5.4: Update Overlay Key Routing
+
+- [ ] T071 Wizard: ↑↓ navigate, Enter select, Esc back, char input
+- [ ] T072 Confirm: ←→ toggle, Enter accept, Esc cancel
+- [ ] T073 Error: Enter/Esc dismiss
+
+## Phase 6: Regression and Polish
+
+- [ ] T074 Run full existing test suite and verify no regressions.
+- [ ] T075 Run `cargo clippy` and `cargo fmt` on all changed files.
+- [ ] T076 Verify coverage >= 90%.
+- [ ] T077 Run Skill tool with skill: "simplify".
+- [ ] T078 Update SPEC-2 metadata phase to Done.
