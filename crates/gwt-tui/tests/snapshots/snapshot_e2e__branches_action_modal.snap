@@ -4,25 +4,25 @@ expression: output
 ---
 ┌ Branches │ Issues │ PRs │ Profiles │ ┐┌ ▶ Shell ─────────────────────────────┐
 │ View: All │ Sort: Default            ││Session: Shell (80x24)                │
-│── Main ──                            ││                                      │
-│* [L] main                            ││                                      │
-│── Feature ──                         ││                                      │
-│  [L] feature/api                     ││                                      │
-│  [L] feature/app-shell               ││                                      │
-│── Other ──                           ││                                      │
-│  [R] origin/release/1.0              ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│ Overview │ SPECs │ Git │ Sessions    ││                                      │
-│Overview                              ││                                      │
-│ Bra┌Actions─────────────────────┐    ││                                      │
-│ Cat│▶ Launch Agent              │    ││                                      │
-│ Typ│  Open Shell                │    ││                                      │
-│    │  Delete Worktree           │    ││                                      │
-│    │                            │    ││                                      │
-│    │                            │    ││                                      │
-│    └────────────────────────────┘    ││                                      │
-│                                      ││                                      │
-│                                      │└──────────────────────────────────────┘
+│┌────────────────────────────────────┐││                                      │
+││── Main ──                          │││                                      │
+││* [L] main                          │││                                      │
+││── Feature ──                       │││                                      │
+││  [L] feature/api                   │││                                      │
+││  [L] feature/app-shell             │││                                      │
+││── Other ──                         │││                                      │
+││  [R] origin/release/1.0            │││                                      │
+││                                    │││                                      │
+│└────────────────────────────────────┘││                                      │
+│┌ Overview │ SPECs │ Git │ Sessions ─┐││                                      │
+││Overview                            │││                                      │
+││ Br┌Actions─────────────────────┐   │││                                      │
+││ Ca│▶ Launch Agent              │   │││                                      │
+││ Ty│  Open Shell                │   │││                                      │
+││   │  Delete Worktree           │   │││                                      │
+││   │                            │   │││                                      │
+││   │                            │   │││                                      │
+││   └────────────────────────────┘   │││                                      │
+││                                    │││                                      │
+│└────────────────────────────────────┘│└──────────────────────────────────────┘
 └──────────────────────────────────────┘ ▣ Shell  [Mgmt]  /tmp/test-repo  Ctrl+G

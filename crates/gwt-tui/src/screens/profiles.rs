@@ -190,7 +190,10 @@ pub fn render(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 /// Render the profile list view.
 fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
     if state.profiles.is_empty() {
-        let block = Block::default().title("Profiles");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Gray))
+            .title("Profiles");
         let paragraph = Paragraph::new("No profiles. Press 'c' to create one.")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -234,7 +237,10 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default().title("Profiles");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray))
+        .title("Profiles");
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)

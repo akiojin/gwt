@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -113,7 +113,10 @@ pub fn render(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
 /// Render the PR list.
 fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
     if state.prs.is_empty() {
-        let block = Block::default().title("PR Dashboard");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Gray))
+            .title("PR Dashboard");
         let paragraph = Paragraph::new("No pull requests loaded")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
@@ -170,7 +173,10 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default().title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray))
+        .title(title);
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)

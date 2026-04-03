@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -551,7 +551,9 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Yellow)

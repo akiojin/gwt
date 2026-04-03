@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -182,7 +182,10 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
         if state.show_debug { "on" } else { "off" }
     )));
 
-    let block = Block::default().title(tab_title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray))
+        .title(tab_title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
