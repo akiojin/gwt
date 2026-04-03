@@ -1,6 +1,6 @@
 //! Extract file paths from the system clipboard.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Parsed clipboard paste payload.
@@ -49,14 +49,62 @@ pub fn parse_clipboard_paste(text: &str) -> ClipboardPasteContent {
 
     let mut paths = Vec::with_capacity(lines.len());
     for line in lines {
-        let path = PathBuf::from(line);
-        if !path.is_absolute() {
+        let Some(path) = parse_clipboard_path_line(line) else {
             return ClipboardPasteContent::Text(text.to_string());
-        }
+        };
         paths.push(path);
     }
 
     ClipboardPasteContent::FilePaths(paths)
+}
+
+fn parse_clipboard_path_line(line: &str) -> Option<PathBuf> {
+    if let Some(path) = parse_file_url(line) {
+        return Some(path);
+    }
+
+    let path = PathBuf::from(line);
+    path.is_absolute().then_some(path)
+}
+
+fn parse_file_url(line: &str) -> Option<PathBuf> {
+    let raw_path = line.strip_prefix("file://")?;
+    let raw_path = raw_path.strip_prefix("localhost").unwrap_or(raw_path);
+    let decoded = percent_decode(raw_path)?;
+    let path = PathBuf::from(decoded);
+    path.is_absolute().then_some(path)
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hi = hex_value(bytes[index + 1])?;
+                let lo = hex_value(bytes[index + 2])?;
+                decoded.push((hi << 4) | lo);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Convert clipboard payload into bytes suitable for PTY input.
@@ -66,7 +114,7 @@ pub fn clipboard_payload_to_bytes(paths: &[PathBuf], text: &str) -> Option<Vec<u
     if !paths.is_empty() {
         let joined = paths
             .iter()
-            .map(|path| shell_quote_path(path))
+            .map(|path| shell_quote_path(path.as_path()))
             .collect::<Vec<_>>()
             .join("\n");
         return Some(joined.into_bytes());
@@ -84,7 +132,7 @@ pub fn clipboard_payload_to_bytes(paths: &[PathBuf], text: &str) -> Option<Vec<u
 ///
 /// Each path is rendered on its own line and wrapped in single quotes. Single
 /// quotes inside the path are escaped using the standard `'"'"'"'"'"'"'"'"'` sequence.
-fn shell_quote_path(path: &PathBuf) -> String {
+fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let mut escaped = String::with_capacity(raw.len() + 2);
     escaped.push('\'');
@@ -202,7 +250,10 @@ mod tests {
 
     #[test]
     fn clipboard_payload_to_bytes_joins_each_quoted_path_on_its_own_line() {
-        let paths = vec![PathBuf::from("/tmp/one path"), PathBuf::from("/tmp/two path")];
+        let paths = vec![
+            PathBuf::from("/tmp/one path"),
+            PathBuf::from("/tmp/two path"),
+        ];
         let bytes = clipboard_payload_to_bytes(&paths, "").unwrap();
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
@@ -214,5 +265,30 @@ mod tests {
     fn clipboard_payload_to_bytes_keeps_text_when_no_paths_exist() {
         let bytes = clipboard_payload_to_bytes(&[], "plain text").unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "plain text");
+    }
+
+    #[test]
+    fn parse_clipboard_paste_returns_file_paths_for_file_urls() {
+        let parsed = parse_clipboard_paste("file:///Users/alice/Documents/report%20draft.txt\n");
+        assert!(matches!(
+            parsed,
+            ClipboardPasteContent::FilePaths(paths)
+                if paths == vec![PathBuf::from("/Users/alice/Documents/report draft.txt")]
+        ));
+    }
+
+    #[test]
+    fn parse_clipboard_paste_returns_multiple_file_paths_for_file_urls() {
+        let parsed = parse_clipboard_paste(
+            "file:///Users/alice/Documents/one.txt\nfile://localhost/Users/alice/Documents/two.txt\n",
+        );
+        assert!(matches!(
+            parsed,
+            ClipboardPasteContent::FilePaths(paths)
+                if paths == vec![
+                    PathBuf::from("/Users/alice/Documents/one.txt"),
+                    PathBuf::from("/Users/alice/Documents/two.txt"),
+                ]
+        ));
     }
 }
