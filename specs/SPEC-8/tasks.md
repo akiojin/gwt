@@ -5,8 +5,8 @@
 ### 1.1 Voice Hotkey Registration
 
 - [ ] **T-001**: Write test for Ctrl+G,v chord registration in keybinding system.
-- [ ] **T-002**: Write test for hotkey no-op when voice is disabled in config.
-- [ ] **T-003**: Implement Ctrl+G,v chord handler in `crates/gwt-tui/src/app.rs`.
+- [x] **T-002**: Write test for hotkey no-op when voice is disabled in config.
+- [x] **T-003**: Implement Ctrl+G,v chord handler in `crates/gwt-tui/src/app.rs`.
 - [ ] **T-004**: Verify T-001, T-002 pass (GREEN).
 
 ### 1.2 Voice Recorder Backend (gwt-core)
@@ -42,7 +42,7 @@
 - [P] [x] **T-022**: Write test for extracting multiple file paths from clipboard.
 - [P] [x] **T-023**: Write test for clipboard with text content (no file URIs) returning text as-is.
 - [P] [x] **T-024**: Write test for empty clipboard returning None.
-- [P] [ ] **T-025**: Write test for file paths with spaces being shell-escaped.
+- [P] [x] **T-025**: Write test for file paths with spaces being shell-escaped.
 - [x] **T-026**: Implement `ClipboardFilePaste` module in `crates/gwt-core/src/clipboard.rs`.
 - [ ] **T-027**: Implement macOS NSPasteboard file URI extraction.
 - [x] **T-028**: Implement Linux xclip/wl-paste file URI extraction.
@@ -63,8 +63,8 @@
 - [ ] **T-035**: Write test for `BranchNameSuggester::suggest()` returning 3-5 valid names.
 - [ ] **T-036**: Write test for all suggestions passing `git check-ref-format` validation.
 - [ ] **T-037**: Write test for suggestion list rendering in wizard AgentSelect step.
-- [ ] **T-038**: Write test for "Manual input" option always present at bottom of list.
-- [ ] **T-039**: Implement suggestion list UI in wizard AgentSelect step.
+- [x] **T-038**: Write test for "Manual input" option always present at bottom of list.
+- [x] **T-039**: Implement suggestion list UI in wizard AgentSelect step.
 - [x] **T-040**: Wire `BranchNameSuggester::suggest()` call with SPEC title / Issue description context.
 - [ ] **T-041**: Verify T-035 through T-038 pass (GREEN).
 

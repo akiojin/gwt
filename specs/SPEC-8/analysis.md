@@ -10,8 +10,10 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `22/49` completed items.
+- Task traceability snapshot: `tasks.md` currently records `31/49` completed items.
 - Notes: Input-extension artifacts are complete enough to keep implementing voice, paste, and branch-name flows.
+- Notes: File-path paste now shell-quotes individual paths before PTY injection, reducing breakage for spaces and shell metacharacters.
+- Notes: The AI branch-suggestion flow now exposes an in-list `Manual input` option instead of relying only on timeout/error fallback.
 - Notes: Pending backend/manual verification does not block the artifact set itself.
 
 ## Next
