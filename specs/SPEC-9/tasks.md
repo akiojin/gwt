@@ -4,12 +4,12 @@
 
 ### 1.1 Docker Progress Screen
 
-- [ ] **T-001**: Write test for DockerProgress screen 5-state FSM transitions (DetectingFiles -> BuildingImage -> StartingContainer -> WaitingForServices -> Ready).
-- [ ] **T-002**: Write test for DockerProgress screen rendering at each state with correct status message.
-- [ ] **T-003**: Write test for DockerProgress error state handling (Docker daemon not running).
-- [ ] **T-004**: Implement `DockerProgress` screen in `crates/gwt-tui/src/screens/docker_progress.rs`.
+- [x] **T-001**: Write test for DockerProgress screen 5-state FSM transitions (DetectingFiles -> BuildingImage -> StartingContainer -> WaitingForServices -> Ready).
+- [x] **T-002**: Write test for DockerProgress screen rendering at each state with correct status message.
+- [x] **T-003**: Write test for DockerProgress error state handling (Docker daemon not running).
+- [x] **T-004**: Implement `DockerProgress` screen in `crates/gwt-tui/src/screens/docker_progress.rs`.
 - [ ] **T-005**: Wire DockerProgress screen to DockerManager async event stream.
-- [ ] **T-006**: Verify T-001 through T-003 pass (GREEN).
+- [x] **T-006**: Verify T-001 through T-003 pass (GREEN).
 
 ### 1.2 Service Select Screen
 
@@ -55,10 +55,10 @@
 
 ### 2.3 gwt-pr-check Extended Report
 
-- [ ] **T-032**: Write test for structured status report containing CI, merge, and review states.
-- [ ] **T-033**: Write test for report when PR has no checks (empty CI section).
-- [ ] **T-034**: Implement extended gwt-pr-check status report in gwt-core.
-- [ ] **T-035**: Verify T-032, T-033 pass (GREEN).
+- [x] **T-032**: Write test for structured status report containing CI, merge, and review states.
+- [x] **T-033**: Write test for report when PR has no checks (empty CI section).
+- [x] **T-034**: Implement extended gwt-pr-check status report in `crates/gwt-git/src/pr_status.rs`.
+- [x] **T-035**: Verify T-032, T-033 pass (GREEN).
 
 ### 2.4 Pre-SPEC Brainstorming Skill
 

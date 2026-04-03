@@ -9,8 +9,10 @@
 ## Repeatable Evidence
 - `cargo test -p gwt-skills -- --nocapture`
 - `cargo test -p gwt-tui model_new_defaults -- --nocapture`
+- `cargo test -p gwt-tui docker_progress -- --nocapture`
+- `cargo test -p gwt-git -- --nocapture`
 
 ## Expected Result
 - The reviewer sees the current implemented scope for infrastructure.
-- Any missing behavior is logged against the remaining `42` unchecked tasks.
+- Any missing behavior is logged against the remaining `33` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.
