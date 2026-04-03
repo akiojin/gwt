@@ -2,8 +2,9 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Issues┐┌ ▶ Shell ─────────┐
-│ View: All │ Sort:││Session: Shell (80│
+ GWT v8.17.2 | /tmp/┌ ▶ Shell ─────────┐
+┌ Branches │ Issues┐│Session: Shell (80│
+│ View: All │ Sort:││                  │
 │No branches loaded││                  │
 │                  ││                  │
 │                  ││                  │
@@ -14,6 +15,5 @@ expression: output
 │ No branch selecte││                  │
 │                  ││                  │
 │ Docker status    ││                  │
-│ No containers fou││                  │
 └──────────────────┘└──────────────────┘
 ↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Ente

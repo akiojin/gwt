@@ -2,10 +2,10 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Issues │ PRs │ Profiles │ ┐┌ ▶ Shell ─────────────────────────────┐
-│Versions                              ││Session: Shell (80x24)                │
+ GWT v8.17.2 | /tmp/test-repo | 0 branch┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Issues │ PRs │ Profiles │ ┐│Session: Shell (80x24)                │
+│Versions                              ││                                      │
 │No version tags found                 ││                                      │
-│                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │

@@ -2,8 +2,9 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Issues │ PRs │ Profiles │ ┐┌ ▶ Shell ─────────────────────────────┐
-│ View: All │ Sort: Default            ││Session: Shell (80x24)                │
+ GWT v8.17.2 | /tmp/test-repo | 4 branch┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Issues │ PRs │ Profiles │ ┐│Session: Shell (80x24)                │
+│ View: All │ Sort: Default            ││                                      │
 │── Main ──                            ││                                      │
 │* [L] main                            ││                                      │
 │── Feature ──                         ││                                      │
@@ -11,7 +12,6 @@ expression: output
 │  [L] feature/app-shell               ││                                      │
 │── Other ──                           ││                                      │
 │  [R] origin/release/1.0              ││                                      │
-│                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘│                                      │
 ┌ Overview │ SPECs │ Git │ Sessions ───┐│                                      │
