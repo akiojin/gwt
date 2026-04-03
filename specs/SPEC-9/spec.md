@@ -39,7 +39,7 @@ As a developer, I want gwt to register its embedded skills on startup and expose
 2. Given I open the skill management panel, when I view registered skills, then each skill shows its name, description, and status.
 3. Given gwt-pr-check is invoked, when it runs, then it reports CI status, merge readiness, and review state in a structured format.
 4. Given the local SPEC workflow changes its persisted artifact model, when embedded gwt-spec skills are refreshed, then the bundled skill docs stay aligned with that model (including `analysis.md`).
-5. Given a user starts with a rough idea or asks whether an existing SPEC should be updated, when `gwt-spec-brainstorm` is invoked, then it performs one-question-at-a-time intake, searches existing owners first, and routes existing-SPEC updates into `gwt-spec-ops` instead of creating `spec.md` prematurely.
+5. Given a user starts with a rough idea or asks whether an existing SPEC should be updated, when `gwt-spec-brainstorm` is invoked, then it performs one-question-at-a-time intake, searches existing owners first, and routes existing-Issue matches into `gwt-issue-resolve` and existing-SPEC updates into `gwt-spec-ops` instead of creating duplicate artifacts prematurely.
 
 ### US-4: Merge hooks.json Preserving User Hooks (P1) -- PARTIALLY IMPLEMENTED
 
@@ -83,7 +83,7 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 ### Embedded Skills
 
 - **FR-009**: Skill registration on startup: register gwt-pr, gwt-pr-check, gwt-pr-fix, `gwt-spec-brainstorm`, and other embedded skills, and keep embedded gwt-spec workflow docs aligned with the local SPEC artifact model.
-- **FR-010**: `gwt-spec-brainstorm` must provide a cross-agent pre-SPEC intake workflow that performs duplicate search first, interviews the user one question at a time, and routes to `EXISTING-SPEC` via `gwt-spec-ops`, `NEW-SPEC`, or `ISSUE` before any new `spec.md` is drafted.
+- **FR-010**: `gwt-spec-brainstorm` must provide a cross-agent pre-SPEC intake workflow that performs duplicate search first, interviews the user one question at a time, and routes to `EXISTING-ISSUE` via `gwt-issue-resolve`, `EXISTING-SPEC` via `gwt-spec-ops`, `NEW-SPEC`, or `ISSUE` before any new `spec.md` is drafted.
 - **FR-011**: Skill management UI: display registered skills with name, description, and status in a settings panel or dedicated screen.
 - **FR-012**: gwt-pr-check extended status report: CI check status, merge readiness, review thread states, combined in a structured output.
 

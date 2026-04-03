@@ -28,7 +28,7 @@ Before deciding whether to create or update anything:
 
 1. Use `gwt-issue-search` with at least 2 semantic queries derived from the request.
 2. Use `gwt-spec-search` with at least 2 semantic queries derived from the request.
-3. If ownership is still unclear, also inspect local `specs/` via `spec_artifact.py --repo . --list-all`.
+3. If ownership is still unclear, also inspect local `specs/` via `.claude/skills/gwt-spec-ops/scripts/spec_artifact.py --repo . --list-all`.
 4. Prefer an existing canonical SPEC or Issue when a clear owner exists.
 5. Only continue toward new work when the duplicate check is clean or the remaining ambiguity is a true product decision.
 
@@ -87,7 +87,7 @@ After enough signal is gathered, produce this summary:
 ## Registration Decision
 
 **Duplicate Check:** CLEAN | EXISTING-ISSUE | EXISTING-SPEC | AMBIGUOUS
-**Chosen Path:** EXISTING-SPEC | NEW-SPEC | ISSUE | TOO-BROAD-SPLIT-FIRST
+**Chosen Path:** EXISTING-ISSUE | EXISTING-SPEC | NEW-SPEC | ISSUE | TOO-BROAD-SPLIT-FIRST
 **Action:** <specific next step>
 
 ### Intake Memo
@@ -103,6 +103,7 @@ After enough signal is gathered, produce this summary:
 Once the path is clear, continue automatically:
 
 - `EXISTING-SPEC` -> `gwt-spec-ops` to update the owning SPEC instead of creating a new one
+- `EXISTING-ISSUE` -> `gwt-issue-resolve` to continue with the existing owning Issue instead of filing a duplicate
 - `NEW-SPEC` -> `gwt-spec-register`, then `gwt-spec-ops`
 - `ISSUE` -> `gwt-issue-register`
 - `TOO-BROAD-SPLIT-FIRST` -> ask the user to choose the first slice, then continue with this skill

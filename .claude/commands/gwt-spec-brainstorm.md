@@ -20,7 +20,7 @@ Use this command when the user starts from a rough idea and needs interview-driv
 2. Search existing Issues and SPECs before proposing new work.
 3. Interview the user one question at a time until the routing decision is clear.
 4. Produce an `Intake Memo` and `Registration Decision` summary.
-5. Continue automatically into `gwt-spec-ops`, `gwt-spec-register`, or `gwt-issue-register` based on that decision.
+5. Continue automatically into `gwt-spec-ops`, `gwt-spec-register`, `gwt-issue-resolve`, or `gwt-issue-register` based on that decision.
 
 ## Examples
 

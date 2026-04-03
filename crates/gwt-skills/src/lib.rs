@@ -14,7 +14,6 @@ mod tests {
     use super::*;
     use fs2::FileExt;
     use std::path::PathBuf;
-    use std::process::Command;
 
     // ── SkillRegistry tests ──
 
@@ -448,33 +447,34 @@ mod tests {
             .any(|builtin| builtin.name() == "gwt-spec-brainstorm");
         assert!(has_builtin);
 
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
-        assert!(repo_root
-            .join(".claude/skills/gwt-spec-brainstorm/SKILL.md")
-            .exists());
-        assert!(repo_root
-            .join(".claude/commands/gwt-spec-brainstorm.md")
-            .exists());
-
-        let tracked = Command::new("git")
-            .args([
-                "ls-files",
-                "--error-unmatch",
-                ".claude/skills/gwt-spec-brainstorm/SKILL.md",
-                ".claude/commands/gwt-spec-brainstorm.md",
-            ])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap();
-        assert!(tracked.success());
+        let skill_md = include_str!("../../../.claude/skills/gwt-spec-brainstorm/SKILL.md");
+        let command_md = include_str!("../../../.claude/commands/gwt-spec-brainstorm.md");
+        assert!(!skill_md.trim().is_empty());
+        assert!(!command_md.trim().is_empty());
     }
 
     #[test]
-    fn builtin_all_returns_expected_count() {
-        // We defined 9 builtins
-        assert_eq!(BuiltinSkill::all().len(), 9);
+    fn builtin_all_returns_expected_names() {
+        let mut actual: Vec<&str> = BuiltinSkill::all()
+            .iter()
+            .map(|builtin| builtin.name())
+            .collect();
+        actual.sort_unstable();
+
+        let mut expected = vec![
+            "gwt-issue-register",
+            "gwt-issue-resolve",
+            "gwt-pr",
+            "gwt-pr-check",
+            "gwt-pr-fix",
+            "gwt-spec-brainstorm",
+            "gwt-spec-implement",
+            "gwt-spec-ops",
+            "gwt-spec-register",
+        ];
+        expected.sort_unstable();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
