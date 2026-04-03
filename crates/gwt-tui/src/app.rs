@@ -1461,8 +1461,17 @@ fn prepare_wizard_startup(
         .as_ref()
         .map(|ctx| format!("feature/{}", ctx.spec_id.to_lowercase()))
         .unwrap_or_default();
+    let starts_new_branch = spec_context.is_some();
 
     let mut wizard = screens::wizard::WizardState {
+        step: if starts_new_branch {
+            screens::wizard::WizardStep::BranchTypeSelect
+        } else {
+            screens::wizard::WizardStep::QuickStart
+        },
+        is_new_branch: starts_new_branch,
+        gh_cli_available: gwt_core::process::command_exists("gh"),
+        ai_enabled: true,
         branch_name,
         spec_context,
         ..Default::default()
@@ -1478,7 +1487,6 @@ fn prepare_wizard_startup(
 
     (wizard, refresh_targets)
 }
-
 /// All builtin agent IDs in display order.
 const BUILTIN_AGENTS: [AgentId; 4] = [
     AgentId::ClaudeCode,
@@ -2791,6 +2799,23 @@ mod tests {
             vec!["Installed (v1.0.55)", "latest", "1.0.54", "1.0.53"]
         );
         assert_eq!(refresh_targets, vec![AgentId::Codex, AgentId::Gemini]);
+    }
+
+    #[test]
+    fn prepare_wizard_startup_starts_spec_prefill_at_branch_type_select() {
+        let cache = VersionCache::new();
+
+        let (wizard, _) = prepare_wizard_startup(
+            Some(screens::wizard::SpecContext {
+                spec_id: "SPEC-42".into(),
+                title: "My Feature".into(),
+            }),
+            vec![],
+            &cache,
+        );
+
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.branch_name, "feature/spec-42");
     }
 
     #[test]

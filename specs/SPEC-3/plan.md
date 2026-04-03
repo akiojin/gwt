@@ -63,6 +63,18 @@ persisted agent session before activation.
    entry and activate the new agent tab.
 4. Add focused tests for launch-config normalization and session persistence.
 
+### Phase 4: Wizard UX Restoration
+
+1. Restore the branch-first wizard flow so existing-branch launches begin at
+   branch action and spec-prefilled launches begin at branch type selection.
+2. Reorder new-branch setup to run Branch Type -> Issue -> AI naming ->
+   Branch Name before agent selection while keeping the current Confirm step.
+3. Restore the old branch type and execution mode labels in the current
+   ratatui wizard without regressing version selection or spec-context AI
+   prompts.
+4. Add focused tests for branch-first transitions, spec-prefill startup, and
+   the updated option labels.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

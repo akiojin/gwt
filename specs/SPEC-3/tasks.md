@@ -64,3 +64,10 @@
   agent session.
 - [x] T032 Implement pending launch materialization and update SPEC-3
   artifacts with focused verification evidence.
+
+## Phase 7: Wizard UX Restoration
+
+- [x] T033 Write RED test: branch launch create-new path enters BranchTypeSelect instead of jumping directly to agent selection.
+- [x] T034 Write RED test: spec-prefilled wizard startup begins at BranchTypeSelect and preserves the SPEC branch seed.
+- [x] T035 Implement branch-first wizard ordering (Branch Type -> Issue -> AI naming -> Branch Name -> Agent) while keeping current Confirm handoff.
+- [x] T036 Restore old branch type and execution mode labels in the current wizard UI and update focused wizard tests.

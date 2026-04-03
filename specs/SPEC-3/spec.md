@@ -6,10 +6,11 @@ gwt detects and launches coding agents (Claude Code, Codex, Gemini,
 OpenCode, Copilot) with a dynamic wizard whose longest path is 12 steps.
 Agents are detected via PATH lookup combined with `--version` invocation.
 Custom agents are configurable via the Settings management tab. The launch
-wizard provides Quick Start from branch history, agent selection, model
-configuration, dedicated version selection, and session setup. This SPEC
-covers the complete agent management domain including detection, wizard
-flow, custom agents, version cache, and launch resolution.
+wizard now follows a branch-first flow again: existing-branch launches start
+with a branch action step, while spec-prefilled launches start at branch type
+selection before issue/AI naming and agent configuration. This SPEC covers
+the complete agent management domain including detection, wizard flow, custom
+agents, version cache, and launch resolution.
 
 ## User Stories
 
@@ -19,13 +20,14 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
 
 **Acceptance Scenarios**
 
-1. Given I initiate agent launch, when the wizard starts, then I see the Quick Start step with branch history options.
-2. Given I proceed through the wizard, when I reach the Confirm step, then
+1. Given I initiate agent launch from an existing branch, when the wizard starts, then I first see the branch action step before agent selection.
+2. Given I initiate agent launch from SPEC context, when the wizard starts, then I begin at branch type selection with the SPEC branch seed prefilled.
+3. Given I proceed through the wizard, when I reach the Confirm step, then
    all configured options (agent, model, version, reasoning level, mode,
    branch, issue) are summarized.
-3. Given I confirm the wizard, when the agent launches, then a new persisted
+4. Given I confirm the wizard, when the agent launches, then a new persisted
    session is created with the configured parameters.
-4. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
+5. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
 
 ### US-2: Detect Installed Agents (P0) -- IMPLEMENTED
 
@@ -104,10 +106,11 @@ As a developer, I want to convert an existing session to a different agent type 
 
 - **FR-001**: `AgentTrait::detect()` checks PATH for agent binary and invokes `--version` to confirm availability.
 - **FR-002**: `AgentLaunchBuilder` constructs launch configuration including model, fast_mode, reasoning_level, and environment variables.
-- **FR-003**: Wizard flow proceeds through dynamic steps chosen by agent
-  capabilities: QuickStart, Agent, Model, Reasoning, Version, Execution Mode,
-  Branch Type, Branch Name, AI Branch Suggestion, Issue, Skip Permissions,
-  Confirm.
+- **FR-003**: Wizard flow proceeds through dynamic steps chosen by branch
+  context and agent capabilities: existing-branch launches start at a branch
+  action step, new-branch launches run Branch Type -> Issue -> AI Branch
+  Suggestion -> Branch Name before Agent/Model/Reasoning/Version/Execution
+  Mode -> Skip Permissions -> Confirm.
 - **FR-004**: Custom agent CRUD operations available in Settings > Custom Agents tab.
 - **FR-005**: `CustomCodingAgent` structure: id, display_name, agent_type (Command/Path/Bunx), command string.
 - **FR-006**: Version list cache fetches last 10 versions per agent from npm registry on startup.

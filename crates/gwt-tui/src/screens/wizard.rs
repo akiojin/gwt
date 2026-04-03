@@ -1,4 +1,4 @@
-//! Wizard overlay screen — 11-step agent launch wizard.
+//! Wizard overlay screen — branch-first agent launch wizard.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -30,7 +30,7 @@ impl WizardStep {
     /// Human-readable title for this step.
     pub fn title(self) -> &'static str {
         match self {
-            Self::QuickStart => "Quick Start",
+            Self::QuickStart => "Branch Action",
             Self::AgentSelect => "Select Agent",
             Self::ModelSelect => "Select Model",
             Self::ReasoningLevel => "Reasoning Level",
@@ -48,15 +48,18 @@ impl WizardStep {
 
 /// Determine the next step based on current step and wizard context.
 ///
-/// Uses agent-specific logic from the old TUI:
-/// - AgentSelect → has_models? ModelSelect : has_npm? VersionSelect : ExecutionMode
-/// - ModelSelect → is_codex? ReasoningLevel : has_npm? VersionSelect : ExecutionMode
-/// - ReasoningLevel → has_npm? VersionSelect : ExecutionMode
-/// - VersionSelect → ExecutionMode
-/// - OpenCode/Copilot skip ModelSelect, ReasoningLevel, VersionSelect
+/// Restores the old branch-first flow while keeping the current confirm step:
+/// - Existing branch: QuickStart(Branch Action) → AgentSelect → ...
+/// - New branch: QuickStart(create) or spec prefill → BranchType → Issue → AI → Branch Name → AgentSelect → ...
 fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
-        WizardStep::QuickStart => Some(WizardStep::AgentSelect),
+        WizardStep::QuickStart => {
+            if state.selected == 1 {
+                Some(WizardStep::BranchTypeSelect)
+            } else {
+                Some(WizardStep::AgentSelect)
+            }
+        }
         WizardStep::AgentSelect => {
             if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
@@ -83,11 +86,25 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::VersionSelect => Some(WizardStep::ExecutionMode),
-        WizardStep::ExecutionMode => Some(WizardStep::BranchTypeSelect),
-        WizardStep::BranchTypeSelect => Some(WizardStep::BranchNameInput),
-        WizardStep::BranchNameInput => Some(WizardStep::AIBranchSuggest),
-        WizardStep::AIBranchSuggest => Some(WizardStep::IssueSelect),
-        WizardStep::IssueSelect => Some(WizardStep::SkipPermissions),
+        WizardStep::ExecutionMode => Some(WizardStep::SkipPermissions),
+        WizardStep::BranchTypeSelect => {
+            if state.gh_cli_available {
+                Some(WizardStep::IssueSelect)
+            } else if state.ai_enabled {
+                Some(WizardStep::AIBranchSuggest)
+            } else {
+                Some(WizardStep::BranchNameInput)
+            }
+        }
+        WizardStep::BranchNameInput => Some(WizardStep::AgentSelect),
+        WizardStep::AIBranchSuggest => Some(WizardStep::BranchNameInput),
+        WizardStep::IssueSelect => {
+            if state.ai_enabled {
+                Some(WizardStep::AIBranchSuggest)
+            } else {
+                Some(WizardStep::BranchNameInput)
+            }
+        }
         WizardStep::SkipPermissions => Some(WizardStep::Confirm),
         WizardStep::Confirm => None,
     }
@@ -97,7 +114,13 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
 fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
         WizardStep::QuickStart => None,
-        WizardStep::AgentSelect => Some(WizardStep::QuickStart),
+        WizardStep::AgentSelect => {
+            if state.is_new_branch {
+                Some(WizardStep::BranchNameInput)
+            } else {
+                Some(WizardStep::QuickStart)
+            }
+        }
         WizardStep::ModelSelect => Some(WizardStep::AgentSelect),
         WizardStep::ReasoningLevel => Some(WizardStep::ModelSelect),
         WizardStep::VersionSelect => {
@@ -120,11 +143,31 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::AgentSelect)
             }
         }
-        WizardStep::BranchTypeSelect => Some(WizardStep::ExecutionMode),
-        WizardStep::BranchNameInput => Some(WizardStep::BranchTypeSelect),
-        WizardStep::AIBranchSuggest => Some(WizardStep::BranchNameInput),
-        WizardStep::IssueSelect => Some(WizardStep::AIBranchSuggest),
-        WizardStep::SkipPermissions => Some(WizardStep::IssueSelect),
+        WizardStep::BranchTypeSelect => {
+            if state.base_branch_name.is_some() {
+                Some(WizardStep::QuickStart)
+            } else {
+                None
+            }
+        }
+        WizardStep::BranchNameInput => {
+            if state.ai_enabled {
+                Some(WizardStep::AIBranchSuggest)
+            } else if state.gh_cli_available {
+                Some(WizardStep::IssueSelect)
+            } else {
+                Some(WizardStep::BranchTypeSelect)
+            }
+        }
+        WizardStep::AIBranchSuggest => {
+            if state.gh_cli_available {
+                Some(WizardStep::IssueSelect)
+            } else {
+                Some(WizardStep::BranchTypeSelect)
+            }
+        }
+        WizardStep::IssueSelect => Some(WizardStep::BranchTypeSelect),
+        WizardStep::SkipPermissions => Some(WizardStep::ExecutionMode),
         WizardStep::Confirm => Some(WizardStep::SkipPermissions),
     }
 }
@@ -192,6 +235,10 @@ pub struct WizardState {
     pub step: WizardStep,
     pub detected_agents: Vec<AgentOption>,
     pub selected: usize,
+    pub is_new_branch: bool,
+    pub base_branch_name: Option<String>,
+    pub gh_cli_available: bool,
+    pub ai_enabled: bool,
     // Config fields accumulated during the wizard
     pub agent_id: String,
     pub model: String,
@@ -218,6 +265,10 @@ impl Default for WizardState {
             step: WizardStep::default(),
             detected_agents: Vec::new(),
             selected: 0,
+            is_new_branch: false,
+            base_branch_name: None,
+            gh_cli_available: true,
+            ai_enabled: true,
             agent_id: String::new(),
             model: String::new(),
             reasoning: "medium".to_string(),
@@ -236,6 +287,14 @@ impl Default for WizardState {
 }
 
 impl WizardState {
+    fn flow_start_step(&self) -> WizardStep {
+        if self.is_new_branch {
+            WizardStep::BranchTypeSelect
+        } else {
+            WizardStep::QuickStart
+        }
+    }
+
     fn effective_agent_id(&self) -> &str {
         self.selected_agent()
             .map(|agent| agent.id.as_str())
@@ -260,7 +319,7 @@ impl WizardState {
     /// Total steps visible for the current agent configuration.
     pub fn visible_step_count(&self) -> usize {
         let mut count = 0;
-        let mut step = Some(WizardStep::QuickStart);
+        let mut step = Some(self.flow_start_step());
         while let Some(s) = step {
             count += 1;
             step = next_step(s, self);
@@ -271,7 +330,7 @@ impl WizardState {
     /// 1-based index of the current step among visible steps.
     pub fn visible_step_index(&self) -> usize {
         let mut idx = 0;
-        let mut step = Some(WizardStep::QuickStart);
+        let mut step = Some(self.flow_start_step());
         while let Some(s) = step {
             idx += 1;
             if s == self.step {
@@ -340,13 +399,13 @@ impl WizardState {
     /// Number of selectable options for the current step.
     pub fn option_count(&self) -> usize {
         match self.step {
-            WizardStep::QuickStart => 2, // "New Agent" / "From Template"
+            WizardStep::QuickStart => 2, // existing branch / create new branch
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
-            WizardStep::ReasoningLevel => 3, // low, medium, high
+            WizardStep::ReasoningLevel => 4, // low, medium, high, xhigh
             WizardStep::VersionSelect => self.version_options.len().max(1),
-            WizardStep::ExecutionMode => 2, // autonomous, interactive
-            WizardStep::BranchTypeSelect => 3, // feature, fix, custom
+            WizardStep::ExecutionMode => 4, // normal, continue, resume, convert
+            WizardStep::BranchTypeSelect => 4, // feature, bugfix, hotfix, release
             WizardStep::BranchNameInput => 0, // text input, no list
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
@@ -366,10 +425,10 @@ impl WizardState {
     /// Static option labels for the current step.
     pub fn current_static_options(&self) -> Vec<&'static str> {
         match self.step {
-            WizardStep::QuickStart => vec!["New Agent", "From Template"],
-            WizardStep::ReasoningLevel => vec!["Low", "Medium", "High"],
-            WizardStep::ExecutionMode => vec!["Autonomous", "Interactive"],
-            WizardStep::BranchTypeSelect => vec!["feature/", "fix/", "custom"],
+            WizardStep::QuickStart => vec!["Use selected branch", "Create new from selected"],
+            WizardStep::ReasoningLevel => vec!["Low", "Medium", "High", "XHigh"],
+            WizardStep::ExecutionMode => vec!["Normal", "Continue", "Resume", "Convert"],
+            WizardStep::BranchTypeSelect => vec!["feature/", "bugfix/", "hotfix/", "release/"],
             WizardStep::SkipPermissions => vec!["Yes", "No"],
             WizardStep::Confirm => vec!["Launch", "Cancel"],
             _ => vec![],
@@ -620,6 +679,32 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
 fn apply_selection(state: &mut WizardState) {
     let options = state.current_options();
     match state.step {
+        WizardStep::QuickStart => {
+            if state.selected == 0 {
+                state.is_new_branch = false;
+                state.base_branch_name = None;
+            } else {
+                state.is_new_branch = true;
+                if state.base_branch_name.is_none() && !state.branch_name.is_empty() {
+                    state.base_branch_name = Some(state.branch_name.clone());
+                }
+                if state.spec_context.is_none() {
+                    state.branch_name.clear();
+                }
+            }
+        }
+        WizardStep::BranchTypeSelect => {
+            if let Some(prefix) = BRANCH_TYPE_PREFIXES.get(state.selected) {
+                let seed = if state.branch_name.is_empty() {
+                    state
+                        .spec_context_branch_seed()
+                        .unwrap_or_else(|| (*prefix).to_string())
+                } else {
+                    state.branch_name.clone()
+                };
+                state.branch_name = apply_branch_prefix(&seed, prefix);
+            }
+        }
         WizardStep::AgentSelect => {
             if let Some(agent) = state.detected_agents.get(state.selected) {
                 state.agent_id = agent.id.clone();
@@ -682,6 +767,22 @@ fn slugify_branch_component(value: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+const BRANCH_TYPE_PREFIXES: [&str; 4] = ["feature/", "bugfix/", "hotfix/", "release/"];
+
+fn apply_branch_prefix(seed: &str, prefix: &str) -> String {
+    let trimmed = seed.trim();
+    let suffix = BRANCH_TYPE_PREFIXES
+        .iter()
+        .find_map(|known| trimmed.strip_prefix(known))
+        .unwrap_or(trimmed);
+    let suffix = suffix.trim_matches('/');
+    if suffix.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}{suffix}")
+    }
 }
 
 fn ensure_branch_name_seed(state: &mut WizardState) {
@@ -1085,6 +1186,58 @@ mod tests {
     }
 
     #[test]
+    fn select_on_quick_start_create_new_branch_enters_branch_type_select() {
+        let mut state = WizardState::default();
+        state.selected = 1;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::BranchTypeSelect);
+    }
+
+    #[test]
+    fn branch_type_select_advances_to_issue_before_agent_selection() {
+        let state = WizardState::default();
+
+        assert_eq!(
+            next_step(WizardStep::BranchTypeSelect, &state),
+            Some(WizardStep::IssueSelect)
+        );
+    }
+
+    #[test]
+    fn branch_type_options_restore_old_prefixes() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::BranchTypeSelect;
+
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "feature/".to_string(),
+                "bugfix/".to_string(),
+                "hotfix/".to_string(),
+                "release/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn execution_mode_options_restore_old_labels() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ExecutionMode;
+
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Normal".to_string(),
+                "Continue".to_string(),
+                "Resume".to_string(),
+                "Convert".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn visible_step_count_varies_by_agent() {
         let mut state = WizardState::default();
         state.agent_id = "claude".to_string();
@@ -1452,8 +1605,8 @@ mod tests {
     #[test]
     fn ai_suggest_loading_on_enter_step() {
         let mut state = WizardState::default();
-        state.step = WizardStep::BranchNameInput;
-        // Advance from BranchNameInput to AIBranchSuggest via Select
+        state.step = WizardStep::IssueSelect;
+        // Advance from IssueSelect to AIBranchSuggest via Select
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.step, WizardStep::AIBranchSuggest);
         assert!(state.ai_suggest.loading);
@@ -1544,7 +1697,7 @@ mod tests {
         state.selected = 1;
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.branch_name, "feature/b");
-        assert_eq!(state.step, WizardStep::IssueSelect);
+        assert_eq!(state.step, WizardStep::BranchNameInput);
     }
 
     #[test]
