@@ -170,32 +170,9 @@ pub struct AgentOption {
 }
 
 impl AgentOption {
-    /// Render the option label shown in the wizard.
+    /// Render the option label shown in the wizard (name only, like old TUI).
     pub fn display_label(&self) -> String {
-        let status = if self.available { "+" } else { "-" };
-        let mut label = format!("[{}] {}", status, self.name);
-
-        if let Some(summary) = self.cached_version_summary() {
-            label.push_str(&format!(" ({summary})"));
-        }
-
-        if self.cache_outdated {
-            label.push_str(" [cache outdated]");
-        }
-
-        label
-    }
-
-    fn cached_version_summary(&self) -> Option<String> {
-        match self.versions.as_slice() {
-            [] => self.installed_version.clone(),
-            [single] => Some(single.clone()),
-            versions => Some(format!(
-                "{} (+{} older)",
-                versions.first().cloned().unwrap_or_default(),
-                versions.len().saturating_sub(1)
-            )),
-        }
+        self.name.clone()
     }
 }
 
@@ -366,11 +343,11 @@ impl WizardState {
             WizardStep::QuickStart => 2, // "New Agent" / "From Template"
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
-            WizardStep::ReasoningLevel => 3,   // low, medium, high
+            WizardStep::ReasoningLevel => 3, // low, medium, high
             WizardStep::VersionSelect => self.version_options.len().max(1),
-            WizardStep::ExecutionMode => 2,    // autonomous, interactive
+            WizardStep::ExecutionMode => 2, // autonomous, interactive
             WizardStep::BranchTypeSelect => 3, // feature, fix, custom
-            WizardStep::BranchNameInput => 0,  // text input, no list
+            WizardStep::BranchNameInput => 0, // text input, no list
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     0
@@ -1276,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_option_display_includes_versions_and_cache_status() {
+    fn agent_option_display_shows_name_only() {
         let option = AgentOption {
             id: "codex".to_string(),
             name: "Codex CLI".to_string(),
@@ -1286,14 +1263,11 @@ mod tests {
             cache_outdated: true,
         };
 
-        assert_eq!(
-            option.display_label(),
-            "[+] Codex CLI (1.3.0 (+1 older)) [cache outdated]"
-        );
+        assert_eq!(option.display_label(), "Codex CLI");
     }
 
     #[test]
-    fn current_options_show_cached_versions_for_agents() {
+    fn current_options_show_agent_names_for_agents() {
         let mut state = WizardState::default();
         state.step = WizardStep::AgentSelect;
         state.detected_agents = vec![AgentOption {
@@ -1307,7 +1281,7 @@ mod tests {
 
         assert_eq!(
             state.current_options(),
-            vec!["[+] Claude Code (1.0.54)".to_string()]
+            vec!["Claude Code".to_string()]
         );
     }
 

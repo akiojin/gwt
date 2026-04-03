@@ -1479,31 +1479,47 @@ fn prepare_wizard_startup(
     (wizard, refresh_targets)
 }
 
+/// All builtin agent IDs in display order.
+const BUILTIN_AGENTS: [AgentId; 4] = [
+    AgentId::ClaudeCode,
+    AgentId::Codex,
+    AgentId::Gemini,
+    AgentId::Copilot,
+];
+
 fn build_wizard_agent_options(
     detected_agents: Vec<DetectedAgent>,
     cache: &VersionCache,
 ) -> (Vec<screens::wizard::AgentOption>, Vec<AgentId>) {
     let mut refresh_targets = Vec::new();
-    let options = detected_agents
-        .into_iter()
-        .map(|detected| {
-            let cached_versions = cached_agent_versions(cache, &detected.agent_id);
-            let cache_refreshable = detected.agent_id.package_name().is_some();
-            let cache_outdated = cache_refreshable && cache.needs_refresh(&detected.agent_id);
-            if cache_outdated {
-                refresh_targets.push(detected.agent_id.clone());
-            }
+    let mut options = Vec::new();
 
-            screens::wizard::AgentOption {
-                id: detected.agent_id.command().to_string(),
-                name: detected.agent_id.display_name().to_string(),
-                available: true,
-                installed_version: detected.version,
-                versions: cached_versions,
-                cache_outdated,
-            }
-        })
-        .collect();
+    // Always list all builtin agents (installed or not), like old TUI
+    for builtin_id in &BUILTIN_AGENTS {
+        let detected = detected_agents
+            .iter()
+            .find(|d| &d.agent_id == builtin_id);
+        let available = detected.is_some();
+        let installed_version = detected.and_then(|d| d.version.clone());
+
+        let cached_versions = cached_agent_versions(cache, builtin_id);
+        let cache_refreshable = builtin_id.package_name().is_some();
+        let cache_outdated = cache_refreshable && cache.needs_refresh(builtin_id);
+        if cache_outdated {
+            refresh_targets.push(builtin_id.clone());
+        }
+
+        options.push(screens::wizard::AgentOption {
+            id: builtin_id.command().to_string(),
+            name: builtin_id.display_name().to_string(),
+            available,
+            installed_version,
+            versions: cached_versions,
+            cache_outdated,
+        });
+    }
+
+    // TODO: Add custom agents from Settings here
 
     (options, refresh_targets)
 }
@@ -2735,24 +2751,36 @@ mod tests {
         let ctx = wizard.spec_context.as_ref().unwrap();
         assert_eq!(ctx.spec_id, "SPEC-42");
         assert_eq!(ctx.title, "My Feature");
-        assert_eq!(wizard.detected_agents.len(), 3);
+        // All 4 builtins are always listed
+        assert_eq!(wizard.detected_agents.len(), 4);
+        // Claude Code: installed with cache
+        assert_eq!(wizard.detected_agents[0].name, "Claude Code");
+        assert!(wizard.detected_agents[0].available);
         assert_eq!(
             wizard.detected_agents[0].installed_version.as_deref(),
             Some("1.0.55")
         );
         assert_eq!(wizard.detected_agents[0].versions, vec!["1.0.54", "1.0.53"]);
+        // Codex: installed, stale cache
+        assert_eq!(wizard.detected_agents[1].name, "Codex");
+        assert!(wizard.detected_agents[1].available);
         assert_eq!(
             wizard.detected_agents[1].installed_version.as_deref(),
             Some("0.5.1")
         );
-        assert_eq!(wizard.detected_agents[1].versions, vec!["0.5.0"]);
         assert!(wizard.detected_agents[1].cache_outdated);
+        // Gemini: installed, no cache
+        assert_eq!(wizard.detected_agents[2].name, "Gemini CLI");
+        assert!(wizard.detected_agents[2].available);
         assert_eq!(
             wizard.detected_agents[2].installed_version.as_deref(),
             Some("0.2.0")
         );
-        assert!(wizard.detected_agents[2].versions.is_empty());
         assert!(wizard.detected_agents[2].cache_outdated);
+        // Copilot: not installed (not in detected list)
+        assert_eq!(wizard.detected_agents[3].name, "GitHub Copilot");
+        assert!(!wizard.detected_agents[3].available);
+        assert!(wizard.detected_agents[3].installed_version.is_none());
         assert_eq!(wizard.model, "Default (Opus 4.6)");
         assert_eq!(
             wizard
@@ -2774,7 +2802,9 @@ mod tests {
 
         assert!(wizard.spec_context.is_none());
         assert!(wizard.branch_name.is_empty());
-        assert_eq!(wizard.detected_agents.len(), 1);
+        // All 4 builtins listed; Claude installed, others not
+        assert_eq!(wizard.detected_agents.len(), 4);
+        assert!(wizard.detected_agents[0].available); // Claude installed
         assert_eq!(
             wizard.detected_agents[0].installed_version.as_deref(),
             Some("1.0.55")
@@ -2789,7 +2819,13 @@ mod tests {
             vec!["Installed (v1.0.55)", "latest"]
         );
         assert!(wizard.detected_agents[0].cache_outdated);
-        assert_eq!(refresh_targets, vec![AgentId::ClaudeCode]);
+        assert!(!wizard.detected_agents[1].available); // Codex not installed
+        assert!(!wizard.detected_agents[2].available); // Gemini not installed
+        assert!(!wizard.detected_agents[3].available); // Copilot not installed
+        // All npm agents need refresh (empty cache)
+        assert!(refresh_targets.contains(&AgentId::ClaudeCode));
+        assert!(refresh_targets.contains(&AgentId::Codex));
+        assert!(refresh_targets.contains(&AgentId::Gemini));
     }
 
     #[test]
@@ -2900,7 +2936,10 @@ mod tests {
 
         let (scheduled_path, targets) = scheduled.into_inner().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        assert_eq!(targets, vec![AgentId::ClaudeCode]);
+        // Claude stale, Codex fresh, Gemini missing → Claude + Gemini need refresh
+        assert!(targets.contains(&AgentId::ClaudeCode));
+        assert!(!targets.contains(&AgentId::Codex));
+        assert!(targets.contains(&AgentId::Gemini));
     }
 
     #[test]
@@ -2924,7 +2963,10 @@ mod tests {
 
         let (scheduled_path, targets) = scheduled.into_inner().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        assert_eq!(targets, vec![AgentId::Gemini]);
+        // All npm agents (Claude, Codex, Gemini) need refresh from empty cache
+        assert!(targets.contains(&AgentId::ClaudeCode));
+        assert!(targets.contains(&AgentId::Codex));
+        assert!(targets.contains(&AgentId::Gemini));
     }
 
     #[test]
