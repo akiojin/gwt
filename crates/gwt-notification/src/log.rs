@@ -104,6 +104,22 @@ mod tests {
     }
 
     #[test]
+    fn push_preserves_notification_fields() {
+        let mut log = StructuredLog::new();
+        let notification = Notification::new(Severity::Error, "git", "merge conflict");
+        let expected = notification.clone();
+
+        log.push(notification);
+
+        let entry = log.entries()[0];
+        assert_eq!(entry.id, expected.id);
+        assert_eq!(entry.timestamp, expected.timestamp);
+        assert_eq!(entry.severity, Severity::Error);
+        assert_eq!(entry.source, "git");
+        assert_eq!(entry.message, "merge conflict");
+    }
+
+    #[test]
     fn filter_by_severity() {
         let mut log = StructuredLog::new();
         log.push(make(Severity::Debug, "d"));
