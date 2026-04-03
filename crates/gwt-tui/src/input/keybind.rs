@@ -258,6 +258,17 @@ mod tests {
     }
 
     #[test]
+    fn prefix_v_starts_voice_recording() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(matches!(
+            result,
+            Some(Message::Voice(VoiceInputMessage::StartRecording))
+        ));
+    }
+
+    #[test]
     fn prefix_esc_cancels() {
         let mut reg = KeybindRegistry::new();
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
