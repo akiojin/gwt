@@ -792,6 +792,7 @@ fn render_confirm_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -819,6 +820,17 @@ mod tests {
                 cache_outdated: false,
             },
         ]
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let mut out = String::with_capacity(buf.area.width as usize * buf.area.height as usize);
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
     }
 
     #[test]
@@ -1265,6 +1277,33 @@ mod tests {
 
         assert_eq!(state.step, WizardStep::BranchNameInput);
         assert_eq!(state.branch_name, "");
+    }
+
+    #[test]
+    fn ai_suggest_render_includes_manual_input_and_candidates() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        state.ai_suggest.suggestions = vec![
+            "feature/add-auth".to_string(),
+            "feature/user-login".to_string(),
+            "feature/oauth-flow".to_string(),
+        ];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text = buffer_text(&buf);
+        assert!(text.contains("feature/add-auth"));
+        assert!(text.contains("feature/user-login"));
+        assert!(text.contains("feature/oauth-flow"));
+        assert!(text.contains("Manual input"));
     }
 
     #[test]
