@@ -2,8 +2,8 @@ use tokio::sync::mpsc;
 
 use crate::Notification;
 
-/// Bounded channel capacity for the notification bus.
-const CHANNEL_CAPACITY: usize = 1000;
+/// Default bounded channel capacity for the notification bus.
+const CHANNEL_CAPACITY: usize = 256;
 
 /// Sender half of the notification bus.
 #[derive(Clone, Debug)]
@@ -20,7 +20,12 @@ pub struct NotificationReceiver {
 impl NotificationBus {
     /// Create a new bus pair (sender, receiver).
     pub fn new() -> (Self, NotificationReceiver) {
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        Self::with_capacity(CHANNEL_CAPACITY)
+    }
+
+    /// Create a new bus pair with a custom bounded capacity.
+    pub fn with_capacity(capacity: usize) -> (Self, NotificationReceiver) {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
         (Self { tx }, NotificationReceiver { rx })
     }
 
@@ -121,14 +126,29 @@ mod tests {
 
     #[test]
     fn channel_bounded_at_capacity() {
-        let (bus, _rx) = NotificationBus::new();
+        let (bus, _rx) = NotificationBus::with_capacity(3);
         let mut sent = 0;
-        for _ in 0..1100 {
+        for _ in 0..10 {
             if bus.send(Notification::new(Severity::Debug, "test", "fill")) {
                 sent += 1;
             }
         }
-        // Should cap at 1000
-        assert_eq!(sent, 1000);
+        // Should cap at the configured capacity
+        assert_eq!(sent, 3);
+    }
+
+    #[test]
+    fn new_uses_default_capacity() {
+        let (bus, _rx) = NotificationBus::new();
+        let mut sent = 0;
+        for _ in 0..300 {
+            if bus.send(Notification::new(Severity::Debug, "test", "fill")) {
+                sent += 1;
+            } else {
+                break;
+            }
+        }
+
+        assert_eq!(sent, CHANNEL_CAPACITY);
     }
 }

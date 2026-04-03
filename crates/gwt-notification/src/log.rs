@@ -7,16 +7,25 @@ const MAX_ENTRIES: usize = 10_000;
 #[derive(Debug, Clone)]
 pub struct StructuredLog {
     entries: Vec<Notification>,
+    /// Maximum number of stored entries before wrapping.
+    capacity: usize,
     /// Write position in the ring buffer.
     head: usize,
-    /// Total entries written (may exceed MAX_ENTRIES).
+    /// Total entries written (may exceed capacity).
     len: usize,
 }
 
 impl StructuredLog {
     pub fn new() -> Self {
+        Self::with_capacity(MAX_ENTRIES)
+    }
+
+    /// Create a log with a custom ring buffer capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
-            entries: Vec::with_capacity(256),
+            entries: Vec::with_capacity(capacity),
+            capacity,
             head: 0,
             len: 0,
         }
@@ -24,19 +33,19 @@ impl StructuredLog {
 
     /// Push a notification into the ring buffer.
     pub fn push(&mut self, notification: Notification) {
-        if self.entries.len() < MAX_ENTRIES {
+        if self.entries.len() < self.capacity {
             self.entries.push(notification);
         } else {
             self.entries[self.head] = notification;
         }
-        self.head = (self.head + 1) % MAX_ENTRIES;
+        self.head = (self.head + 1) % self.capacity;
         self.len += 1;
     }
 
     /// Return entries in insertion order.
     pub fn entries(&self) -> Vec<&Notification> {
         let actual_len = self.entries.len();
-        if actual_len < MAX_ENTRIES || self.len <= MAX_ENTRIES {
+        if actual_len < self.capacity || self.len <= self.capacity {
             // Not yet wrapped
             self.entries.iter().collect()
         } else {
@@ -148,5 +157,25 @@ mod tests {
         let log = StructuredLog::default();
         assert_eq!(log.count(), 0);
         assert!(log.entries().is_empty());
+    }
+
+    #[test]
+    fn with_capacity_controls_ring_size() {
+        let mut log = StructuredLog::with_capacity(3);
+        for i in 0..10 {
+            log.push(make(Severity::Debug, &format!("msg-{i}")));
+        }
+
+        assert_eq!(log.count(), 3);
+        let entries = log.entries();
+        assert_eq!(entries[0].message, "msg-7");
+        assert_eq!(entries[1].message, "msg-8");
+        assert_eq!(entries[2].message, "msg-9");
+    }
+
+    #[test]
+    fn new_uses_default_capacity() {
+        let log = StructuredLog::new();
+        assert_eq!(log.entries.capacity(), MAX_ENTRIES);
     }
 }
