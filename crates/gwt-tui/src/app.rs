@@ -48,6 +48,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::SwitchManagementTab(tab) => {
             model.management_tab = tab;
             model.active_layer = ActiveLayer::Management;
+            if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
+                model.settings.load_category_fields();
+            }
         }
         Message::NextSession => {
             if !model.sessions.is_empty() {
@@ -195,6 +198,12 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Settings(msg) => {
             screens::settings::update(&mut model.settings, msg);
+            if model.settings.category == screens::settings::SettingsCategory::Skills {
+                for field in &model.settings.fields {
+                    let enabled = field.value == "true";
+                    let _ = model.embedded_skills.set_enabled(&field.label, enabled);
+                }
+            }
         }
         Message::Logs(msg) => {
             screens::logs::update(&mut model.logs, msg);
@@ -2631,5 +2640,47 @@ mod tests {
         );
 
         assert!(model.confirm.accepted());
+    }
+
+    #[test]
+    fn switch_management_tab_settings_loads_fields() {
+        let mut model = test_model();
+        assert!(model.settings.fields.is_empty());
+
+        update(
+            &mut model,
+            Message::SwitchManagementTab(ManagementTab::Settings),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Settings);
+        assert!(!model.settings.fields.is_empty());
+    }
+
+    #[test]
+    fn update_settings_toggle_bool_syncs_embedded_skill_registry() {
+        let mut model = test_model();
+        model.settings.category = screens::settings::SettingsCategory::Skills;
+        model.settings.load_category_fields();
+        model.settings.selected = 0;
+
+        let skill_name = model.settings.fields[0].label.clone();
+        assert!(model
+            .embedded_skills()
+            .list()
+            .iter()
+            .find(|skill| skill.name == skill_name)
+            .expect("skill exists")
+            .enabled);
+
+        update(&mut model, Message::Settings(screens::settings::SettingsMessage::ToggleBool));
+
+        assert_eq!(model.settings.fields[0].value, "false");
+        assert!(!model
+            .embedded_skills()
+            .list()
+            .iter()
+            .find(|skill| skill.name == skill_name)
+            .expect("skill exists")
+            .enabled);
     }
 }
