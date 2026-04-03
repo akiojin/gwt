@@ -4,25 +4,25 @@
 
 ### 1.1 Core Types [P]
 
-- [ ] TEST: Unit test for `Severity` enum ordering (Debug < Info < Warn < Error)
-- [ ] TEST: Unit test for `Notification` struct construction with timestamp, severity, source, message
-- [ ] IMPL: Add `Severity` enum in gwt-core
-  - File: `crates/gwt-core/src/notification.rs`
-- [ ] IMPL: Add `Notification` struct in gwt-core
-  - File: `crates/gwt-core/src/notification.rs`
+- [x] TEST: Unit test for `Severity` enum ordering (Debug < Info < Warn < Error)
+- [x] TEST: Unit test for `Notification` struct construction with timestamp, severity, source, message
+- [x] IMPL: Add `Severity` enum in gwt-notification
+  - File: `crates/gwt-notification/src/severity.rs`
+- [x] IMPL: Add `Notification` struct in gwt-notification
+  - File: `crates/gwt-notification/src/notification.rs`
 
 ### 1.2 Notification Bus [P]
 
-- [ ] TEST: Unit test for `NotificationBus` send/receive (async)
-- [ ] TEST: Unit test for bus non-blocking behavior (sender does not block on slow consumer)
-- [ ] IMPL: Add `NotificationBus` with tokio mpsc channel
-  - File: `crates/gwt-core/src/notification.rs`
-- [ ] IMPL: Bus capacity configuration (default: 256 pending notifications)
+- [x] TEST: Unit test for `NotificationBus` send/receive (async)
+- [x] TEST: Unit test for bus non-blocking behavior (sender does not block on slow consumer)
+- [x] IMPL: Add `NotificationBus` with tokio mpsc channel
+  - File: `crates/gwt-notification/src/bus.rs`
+- [x] IMPL: Bus capacity configuration (default: 256 pending notifications)
 
 ### 1.3 Status Bar Notification Area
 
-- [ ] TEST: Snapshot test for status bar with Info notification displayed
-- [ ] TEST: Snapshot test for status bar with Warn notification (distinct color)
+- [x] TEST: Widget render test for status bar with Info notification displayed
+- [x] TEST: Widget render test for status bar with Warn notification (distinct color)
 - [x] TEST: Unit test for auto-dismiss timer (Info dismissed after 5s)
 - [x] IMPL: Add notification area to status bar widget (right side)
   - File: `crates/gwt-tui/src/widgets/status_bar.rs`
@@ -57,8 +57,8 @@
 - [x] TEST: Unit test for ring buffer: inserts, capacity limit, oldest evicted
 - [ ] TEST: Unit test for log entry format (timestamp, severity, source, message)
 - [x] IMPL: Add `StructuredLog` ring buffer store
-  - File: `crates/gwt-core/src/notification.rs`
-- [ ] IMPL: Configurable capacity (default: 10,000 entries)
+  - File: `crates/gwt-notification/src/log.rs`
+- [x] IMPL: Configurable capacity (default: 10,000 entries)
 
 ### 3.2 Logs Tab Extension
 
@@ -80,7 +80,7 @@
 ## Phase 4: Integration Testing
 
 - [x] TEST: End-to-end test: Info notification appears in status bar and auto-dismisses
-- [ ] TEST: End-to-end test: Error notification appears in modal, dismiss shows next
+- [x] TEST: End-to-end test: Error notification appears in modal, dismiss shows next
 - [x] TEST: End-to-end test: all severity levels logged in structured log
 - [x] TEST: Regression test: existing error queue behavior preserved
 - [ ] TEST: Performance test: 100 simultaneous errors do not freeze UI

@@ -7,6 +7,7 @@
 4. Record any missing severity routing as remaining SPEC-6 execution work.
 
 ## Repeatable Evidence
+- `cargo test -p gwt-notification -- --nocapture`
 - `cargo test -p gwt-tui e2e_notifications_land_in_structured_log_for_all_severities -- --nocapture`
 - `cargo test -p gwt-tui e2e_error_modal_queue_preserved_after_dismiss -- --nocapture`
 - `cargo test -p gwt-tui e2e_info_notification_appears_in_status_bar_and_auto_dismisses -- --nocapture`
@@ -24,5 +25,5 @@
 - A focused E2E test now proves every notification severity lands in the structured log rendering path.
 - A focused regression test now proves the error modal queue keeps the next error visible after dismiss.
 - A focused E2E test now proves Info notifications appear in the status bar and disappear after timeout ticks.
-- Any missing behavior is logged against the remaining `14` unchecked tasks.
+- Any missing behavior is logged against the remaining `2` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

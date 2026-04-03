@@ -9,11 +9,12 @@
 
 ## Repeatable Evidence
 - `cargo test -p gwt-tui handle_voice_start_recording_is_noop_when_disabled -- --nocapture`
+- `cargo test -p gwt-tui input::keybind -- --nocapture`
 - `cargo test -p gwt-tui wizard -- --nocapture`
 - `cargo test -p gwt-clipboard -- --nocapture`
 - `cargo test -p gwt-ai branch_suggest -- --nocapture`
 
 ## Expected Result
 - The reviewer sees the current implemented scope for input extensions.
-- Any missing behavior is logged against the remaining `16` unchecked tasks.
+- Any missing behavior is logged against the remaining `12` unchecked tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

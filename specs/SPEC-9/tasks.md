@@ -39,12 +39,12 @@
 
 ### 2.1 Skill Registration
 
-- [P] [ ] **T-022**: Write test for EmbeddedSkill struct fields (name, description, entry_point, status).
-- [P] [ ] **T-023**: Write test for skill registry populated with expected skills on startup.
-- [P] [ ] **T-024**: Write test for partial registration failure (one skill fails, others succeed).
-- [ ] **T-025**: Implement `EmbeddedSkill` struct and registry in `crates/gwt-core/src/skills.rs`.
-- [ ] **T-026**: Register gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-ops at startup, and keep bundled gwt-spec skill docs aligned with the local SPEC artifact model (`analysis.md` included).
-- [ ] **T-027**: Verify T-022 through T-024 pass (GREEN).
+- [P] [x] **T-022**: Write test for EmbeddedSkill struct fields (name, description, entry_point, status).
+- [P] [x] **T-023**: Write test for skill registry populated with expected skills on startup.
+- [P] [x] **T-024**: Write test for partial registration failure (one skill fails, others succeed).
+- [x] **T-025**: Implement `EmbeddedSkill` struct and registry in `crates/gwt-skills/src/registry.rs`.
+- [x] **T-026**: Register gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-ops at startup, and keep bundled gwt-spec skill docs aligned with the local SPEC artifact model (`analysis.md` included).
+- [x] **T-027**: Verify T-022 through T-024 pass (GREEN).
 
 ### 2.2 Skill Management UI
 

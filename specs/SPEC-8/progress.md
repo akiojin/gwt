@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `33/49` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T05:15:00Z`
+- Task progress: `37/49` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T06:10:00Z`
 
 ## Done
 - Supporting artifacts now reflect the current partial delivery across voice, paste, and branch naming.
@@ -14,9 +14,10 @@
 - File paste now shell-quotes paths before PTY injection so spaces and shell metacharacters survive copy/paste safely.
 - AI branch suggestion parsing now enforces `3..=5` git-safe names before the wizard displays them.
 - The wizard AI suggestion step now keeps an explicit `Manual input` option at the bottom of the list.
+- The wizard now has a render-content regression test for the AI suggestion list, and the voice hotkey chord has its own keybinding test.
 
 ## Next
 - Finish or confirm the voice backend path and remaining recorder lifecycle gaps.
-- Add explicit suggestion-list rendering coverage in the wizard, then close the combined verification task for the display section.
+- Close the remaining recorder backend work, the macOS clipboard extraction path, and manual reviewer runs.
 - Run repeatable reviewer walkthroughs for all three input-extension flows.
-- Close the remaining clipboard extraction gaps, including platform-specific macOS handling.
+- Keep the SPEC artifacts aligned as those remaining execution slices land.

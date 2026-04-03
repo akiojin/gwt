@@ -10,8 +10,9 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `29/77` completed items.
+- Task traceability snapshot: `tasks.md` currently records `40/82` completed items.
 - Notes: The embedded-skills scope now explicitly includes keeping bundled gwt-spec skills aligned with the local SPEC artifact model, including `analysis.md`.
+- Notes: Builtin embedded skills are now initialized into the TUI model at startup, so the startup registration path is no longer speculative.
 - Notes: Infrastructure delivery is still partial, but the SPEC artifact set is ready for continued execution.
 
 ## Next
