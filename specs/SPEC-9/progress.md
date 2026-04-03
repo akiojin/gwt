@@ -4,12 +4,14 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `82/82` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T12:35:00Z`
+- Artifact refresh: `2026-04-03T13:05:00Z`
 
 ## Done
-- Supporting artifacts now cover the full infrastructure umbrella instead of only the core four files.
-- Progress notes distinguish the more advanced hooks work from the still-open Docker and release tasks.
-- Checklists are now present for future completion-gate reconciliation.
+- Supporting artifacts now cover the full infrastructure umbrella instead of
+  only the core four files.
+- Progress notes now reflect that the execution task list is fully checked and
+  only completion-gate evidence remains.
+- Checklists are now present for final completion-gate reconciliation.
 - Embedded skill registry tests and builtin catalog registration are in place, and the TUI model now initializes the builtin registry at startup.
 - DockerProgress now has explicit stage-status and failure-render tests, so the overlay itself is no longer speculative.
 - DockerProgress can now be driven by a TUI-local background producer that wraps synchronous `gwt-docker` lifecycle calls and drains completion events on `Tick`.
@@ -21,5 +23,5 @@
 - Branch detail `Overview` now exposes a Docker status area with container selection and background lifecycle feedback wired through `app.rs`, including ready/failure transitions after the worker drains.
 
 ## Next
-- Reconcile the remaining completion-gate items and reviewer evidence now that `tasks.md` is fully checked.
+- Reconcile the remaining reviewer evidence and acceptance checklist items.
 - Re-run infrastructure verification before any `Done` transition.
