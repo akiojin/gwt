@@ -610,6 +610,12 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => Some(LogsMessage::MoveDown),
                 KeyCode::Up => Some(LogsMessage::MoveUp),
                 KeyCode::Enter => Some(LogsMessage::ToggleDetail),
+                KeyCode::Char('f') => Some(LogsMessage::SetFilter(next_logs_filter_level(
+                    model.logs.filter_level,
+                ))),
+                KeyCode::Char('d') => Some(LogsMessage::SetFilter(toggle_logs_debug_filter(
+                    model.logs.filter_level,
+                ))),
                 KeyCode::Char('r') => Some(LogsMessage::Refresh),
                 _ => None,
             };
@@ -744,6 +750,26 @@ fn dismiss_warn_notification(model: &mut Model) {
         Some(Severity::Warn)
     ) {
         update(model, Message::DismissNotification);
+    }
+}
+
+fn next_logs_filter_level(level: screens::logs::FilterLevel) -> screens::logs::FilterLevel {
+    use screens::logs::FilterLevel;
+    match level {
+        FilterLevel::All => FilterLevel::ErrorOnly,
+        FilterLevel::ErrorOnly => FilterLevel::WarnUp,
+        FilterLevel::WarnUp => FilterLevel::InfoUp,
+        FilterLevel::InfoUp => FilterLevel::DebugUp,
+        FilterLevel::DebugUp => FilterLevel::All,
+    }
+}
+
+fn toggle_logs_debug_filter(level: screens::logs::FilterLevel) -> screens::logs::FilterLevel {
+    use screens::logs::FilterLevel;
+    if level == FilterLevel::DebugUp {
+        FilterLevel::All
+    } else {
+        FilterLevel::DebugUp
     }
 }
 
@@ -2315,6 +2341,33 @@ mod tests {
         assert_eq!(model.logs.entries[0].severity, Severity::Debug);
         assert!(model.current_notification.is_none());
         assert!(model.error_queue.is_empty());
+    }
+
+    #[test]
+    fn route_key_to_management_logs_f_cycles_filter_levels() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Logs;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(
+            model.logs.filter_level,
+            screens::logs::FilterLevel::ErrorOnly
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(model.logs.filter_level, screens::logs::FilterLevel::WarnUp);
+    }
+
+    #[test]
+    fn route_key_to_management_logs_d_toggles_debug_filter() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Logs;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(model.logs.filter_level, screens::logs::FilterLevel::DebugUp);
+
+        route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(model.logs.filter_level, screens::logs::FilterLevel::All);
     }
 
     #[test]

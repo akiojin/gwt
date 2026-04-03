@@ -62,12 +62,12 @@
 
 ### 3.2 Logs Tab Extension
 
-- [ ] TEST: Snapshot test for Logs tab with severity filter active
+- [x] TEST: Snapshot test for Logs tab with severity filter active
 - [x] TEST: Unit test for severity filtering (show only Warn+Error, show all, etc.)
 - [x] IMPL: Extend Logs tab to display structured log entries
   - File: `crates/gwt-tui/src/screens/logs.rs`
 - [x] IMPL: Severity filter toggle (keybinding to cycle filters)
-- [ ] IMPL: Debug filter toggle (show/hide Debug entries)
+- [x] IMPL: Debug filter toggle (show/hide Debug entries)
 - [ ] IMPL: Scrollable log list with timestamp and severity columns
 
 ### 3.3 Bus-to-Log Integration
