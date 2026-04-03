@@ -19,6 +19,10 @@ pub struct ServiceSelectState {
 }
 
 impl ServiceSelectState {
+    fn should_show_overlay(services: &[String]) -> bool {
+        services.len() != 1
+    }
+
     pub fn with_options(
         title: impl Into<String>,
         services: Vec<String>,
@@ -74,6 +78,7 @@ pub fn update(state: &mut ServiceSelectState, msg: ServiceSelectMessage) {
             state.values = services.clone();
             state.services = services;
             state.selected = 0;
+            state.visible = ServiceSelectState::should_show_overlay(&state.services);
         }
     }
 }
@@ -151,6 +156,18 @@ mod tests {
         ]
     }
 
+    fn single_service() -> Vec<String> {
+        vec!["web".to_string()]
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
     #[test]
     fn default_state() {
         let state = ServiceSelectState::default();
@@ -173,6 +190,55 @@ mod tests {
         assert_eq!(state.services.len(), 4);
         assert_eq!(state.values, sample_services());
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn set_services_shows_overlay_for_multiple_services() {
+        let mut state = ServiceSelectState::default();
+        update(
+            &mut state,
+            ServiceSelectMessage::SetServices(sample_services()),
+        );
+
+        assert!(state.visible);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.current_selection(), Some(("web", "web")));
+    }
+
+    #[test]
+    fn set_services_keeps_error_overlay_visible_when_empty() {
+        let mut state = ServiceSelectState::default();
+        update(&mut state, ServiceSelectMessage::SetServices(Vec::new()));
+
+        assert!(state.visible);
+        assert!(state.current_selection().is_none());
+    }
+
+    #[test]
+    fn set_services_auto_selects_single_service() {
+        let mut state = ServiceSelectState {
+            visible: true,
+            ..ServiceSelectState::default()
+        };
+        update(
+            &mut state,
+            ServiceSelectMessage::SetServices(single_service()),
+        );
+
+        assert!(!state.visible);
+        assert_eq!(state.current_selection(), Some(("web", "web")));
+    }
+
+    #[test]
+    fn with_options_keeps_overlay_visible_for_single_option() {
+        let state = ServiceSelectState::with_options(
+            "Select Agent",
+            single_service(),
+            vec!["web".to_string()],
+        );
+
+        assert!(state.visible);
+        assert_eq!(state.current_selection(), Some(("web", "web")));
     }
 
     #[test]
@@ -267,12 +333,54 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let full_text: String = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_string())
-            .collect();
-        assert!(full_text.contains("Select Service"));
+        assert!(buffer_text(&terminal).contains("Select Service"));
+    }
+
+    #[test]
+    fn render_lists_all_services_and_selection_marker() {
+        let mut state = ServiceSelectState {
+            visible: true,
+            ..ServiceSelectState::default()
+        };
+        update(
+            &mut state,
+            ServiceSelectMessage::SetServices(sample_services()),
+        );
+        state.visible = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let full_text = buffer_text(&terminal);
+        assert!(full_text.contains("web"));
+        assert!(full_text.contains("api"));
+        assert!(full_text.contains("db"));
+        assert!(full_text.contains("redis"));
+        assert!(full_text.contains("▶"));
+    }
+
+    #[test]
+    fn render_empty_state_shows_error_message() {
+        let state = ServiceSelectState {
+            visible: true,
+            ..ServiceSelectState::default()
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        assert!(buffer_text(&terminal).contains("No services found"));
     }
 
     #[test]
@@ -286,11 +394,6 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let full_text: String = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_string())
-            .collect();
-        assert!(!full_text.contains("Select Service"));
+        assert!(!buffer_text(&terminal).contains("Select Service"));
     }
 }
