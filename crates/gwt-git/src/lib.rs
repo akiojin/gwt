@@ -11,12 +11,12 @@ pub mod pr_status;
 pub mod repository;
 pub mod worktree;
 
-pub use branch::Branch;
+pub use branch::{git_divergence, Branch, DivergenceInfo};
 pub use commit::CommitEntry;
 pub use diff::{FileEntry, FileStatus};
 pub use issue::{Issue, IssueCache};
 pub use pr_status::{
-    pr_check_report, CiStatus, MergeStatus, PrCheckReport, PrStatus, ReviewStatus,
+    fetch_pr_list, pr_check_report, CiStatus, MergeStatus, PrCheckReport, PrStatus, ReviewStatus,
 };
 pub use repository::{
     clone_repo, detect_repo_type, initialize_workspace, install_develop_protection, RepoType,

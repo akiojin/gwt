@@ -122,6 +122,48 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
     })
 }
 
+/// Fetch a list of open PRs for the repository at `repo_path` using `gh pr list --json`.
+///
+/// Returns up to 20 open pull requests. Uses the GitHub CLI which handles
+/// authentication and GraphQL/REST negotiation internally.
+pub fn fetch_pr_list(repo_path: &Path) -> Result<Vec<PrStatus>> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--json",
+            "number,title,state,url,statusCheckRollup,mergeable,reviewDecision",
+            "--limit",
+            "20",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::Git(format!("gh pr list: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(GwtError::Git(format!("gh pr list: {stderr}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_pr_list_json(&stdout)
+}
+
+/// Parse `gh pr list --json` output (a JSON array) into a `Vec<PrStatus>`.
+pub fn parse_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
+
+    let mut results = Vec::with_capacity(arr.len());
+    for v in &arr {
+        // Reuse the single-PR parser by serializing back to string
+        let single_json =
+            serde_json::to_string(v).map_err(|e| GwtError::Other(e.to_string()))?;
+        results.push(parse_pr_status_json(&single_json)?);
+    }
+    Ok(results)
+}
+
 // ── Extended PR check report ──
 
 /// PR status check states.
@@ -382,6 +424,50 @@ mod tests {
             report.summary,
             "PR: Waiting on CI | CI: Pending | Merge: Conflicts | Review: Pending"
         );
+    }
+
+    #[test]
+    fn parse_pr_list_empty() {
+        let prs = parse_pr_list_json("[]").unwrap();
+        assert!(prs.is_empty());
+    }
+
+    #[test]
+    fn parse_pr_list_multiple() {
+        let json = r#"[
+            {
+                "number": 1,
+                "title": "First PR",
+                "state": "OPEN",
+                "url": "https://github.com/o/r/pull/1",
+                "mergeable": "MERGEABLE",
+                "statusCheckRollup": [],
+                "reviewDecision": "APPROVED"
+            },
+            {
+                "number": 2,
+                "title": "Second PR",
+                "state": "OPEN",
+                "url": "https://github.com/o/r/pull/2",
+                "mergeable": "CONFLICTING",
+                "statusCheckRollup": [
+                    {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}
+                ],
+                "reviewDecision": "CHANGES_REQUESTED"
+            }
+        ]"#;
+
+        let prs = parse_pr_list_json(json).unwrap();
+        assert_eq!(prs.len(), 2);
+        assert_eq!(prs[0].number, 1);
+        assert_eq!(prs[0].title, "First PR");
+        assert_eq!(prs[1].number, 2);
+        assert_eq!(prs[1].ci_status, "FAILURE");
+    }
+
+    #[test]
+    fn parse_pr_list_invalid_json() {
+        assert!(parse_pr_list_json("not json").is_err());
     }
 
     #[test]

@@ -5,6 +5,61 @@ use std::path::Path;
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
+/// Ahead/behind divergence between a branch and its upstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceInfo {
+    /// Commits ahead of upstream.
+    pub ahead: usize,
+    /// Commits behind upstream.
+    pub behind: usize,
+}
+
+/// Compute how far `branch` has diverged from `upstream` using `git rev-list --left-right`.
+///
+/// Returns `DivergenceInfo { ahead, behind }`. If either ref is missing the
+/// command will fail and an error is returned.
+pub fn git_divergence(repo_path: &Path, branch: &str, upstream: &str) -> Result<DivergenceInfo> {
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "rev-list",
+            "--count",
+            "--left-right",
+            &format!("{branch}...{upstream}"),
+        ])
+        .output()
+        .map_err(|e| GwtError::Git(format!("rev-list --left-right: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(GwtError::Git(format!("rev-list --left-right: {stderr}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_divergence_output(&stdout)
+}
+
+/// Parse the tab-separated output of `git rev-list --count --left-right`.
+///
+/// Expected format: `"<ahead>\t<behind>\n"`
+fn parse_divergence_output(output: &str) -> Result<DivergenceInfo> {
+    let trimmed = output.trim();
+    let parts: Vec<&str> = trimmed.split('\t').collect();
+    if parts.len() != 2 {
+        return Err(GwtError::Git(format!(
+            "unexpected rev-list output: {trimmed:?}"
+        )));
+    }
+    let ahead = parts[0]
+        .parse::<usize>()
+        .map_err(|e| GwtError::Git(format!("parse ahead: {e}")))?;
+    let behind = parts[1]
+        .parse::<usize>()
+        .map_err(|e| GwtError::Git(format!("parse behind: {e}")))?;
+    Ok(DivergenceInfo { ahead, behind })
+}
+
 /// Information about a Git branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Branch {
@@ -195,6 +250,34 @@ mod tests {
     #[test]
     fn parse_branch_line_empty() {
         assert!(parse_branch_line("").is_none());
+    }
+
+    #[test]
+    fn parse_divergence_zero() {
+        let info = parse_divergence_output("0\t0\n").unwrap();
+        assert_eq!(info, DivergenceInfo { ahead: 0, behind: 0 });
+    }
+
+    #[test]
+    fn parse_divergence_ahead_behind() {
+        let info = parse_divergence_output("3\t5\n").unwrap();
+        assert_eq!(info, DivergenceInfo { ahead: 3, behind: 5 });
+    }
+
+    #[test]
+    fn parse_divergence_no_trailing_newline() {
+        let info = parse_divergence_output("1\t2").unwrap();
+        assert_eq!(info, DivergenceInfo { ahead: 1, behind: 2 });
+    }
+
+    #[test]
+    fn parse_divergence_invalid_format() {
+        assert!(parse_divergence_output("bad").is_err());
+    }
+
+    #[test]
+    fn parse_divergence_non_numeric() {
+        assert!(parse_divergence_output("abc\tdef").is_err());
     }
 
     #[test]
