@@ -24,6 +24,28 @@ pub struct PortSelectState {
     pub visible: bool,
 }
 
+impl PortSelectState {
+    /// Create a visible port selector only when conflicts exist.
+    pub fn with_conflicts(conflicts: Vec<PortConflict>) -> Self {
+        let visible = !conflicts.is_empty();
+        Self {
+            conflicts,
+            selected: 0,
+            visible,
+        }
+    }
+
+    pub fn has_conflicts(&self) -> bool {
+        !self.conflicts.is_empty()
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        self.conflicts
+            .iter()
+            .all(|conflict| conflict.host_port == conflict.suggested)
+    }
+}
+
 /// Messages for the port selection overlay.
 #[derive(Debug, Clone)]
 pub enum PortSelectMessage {
@@ -53,11 +75,13 @@ pub fn update(state: &mut PortSelectState, msg: PortSelectMessage) {
             if let Some(conflict) = state.conflicts.get_mut(state.selected) {
                 conflict.host_port = conflict.suggested;
             }
+            state.visible = !state.is_resolved();
         }
         PortSelectMessage::AcceptAll => {
             for conflict in &mut state.conflicts {
                 conflict.host_port = conflict.suggested;
             }
+            state.visible = !state.is_resolved();
         }
         PortSelectMessage::Cancel => {
             state.visible = false;
@@ -170,12 +194,37 @@ mod tests {
         ]
     }
 
+    fn single_conflict() -> Vec<PortConflict> {
+        vec![PortConflict {
+            container_port: 3000,
+            host_port: 3000,
+            suggested: 3001,
+        }]
+    }
+
     #[test]
     fn default_state() {
         let state = PortSelectState::default();
         assert!(state.conflicts.is_empty());
         assert_eq!(state.selected, 0);
         assert!(!state.visible);
+    }
+
+    #[test]
+    fn with_conflicts_marks_visible_and_detects_conflicts() {
+        let state = PortSelectState::with_conflicts(sample_conflicts());
+        assert!(state.visible);
+        assert!(state.has_conflicts());
+        assert!(!state.is_resolved());
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn with_conflicts_empty_auto_hides_overlay() {
+        let state = PortSelectState::with_conflicts(vec![]);
+        assert!(!state.visible);
+        assert!(!state.has_conflicts());
+        assert!(state.is_resolved());
     }
 
     #[test]
@@ -256,6 +305,32 @@ mod tests {
         assert_eq!(state.conflicts[0].host_port, 8081);
         assert_eq!(state.conflicts[1].host_port, 5433);
         assert_eq!(state.conflicts[2].host_port, 6380);
+    }
+
+    #[test]
+    fn accept_closes_when_last_conflict_is_resolved() {
+        let mut state = PortSelectState::with_conflicts(single_conflict());
+        assert!(state.visible);
+
+        update(&mut state, PortSelectMessage::Accept);
+
+        assert_eq!(state.conflicts[0].host_port, 3001);
+        assert!(!state.visible);
+        assert!(state.is_resolved());
+    }
+
+    #[test]
+    fn accept_all_closes_overlay_after_resolving_everything() {
+        let mut state = PortSelectState::with_conflicts(sample_conflicts());
+        assert!(state.visible);
+
+        update(&mut state, PortSelectMessage::AcceptAll);
+
+        assert_eq!(state.conflicts[0].host_port, 8081);
+        assert_eq!(state.conflicts[1].host_port, 5433);
+        assert_eq!(state.conflicts[2].host_port, 6380);
+        assert!(!state.visible);
+        assert!(state.is_resolved());
     }
 
     #[test]
