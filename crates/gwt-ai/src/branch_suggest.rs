@@ -94,18 +94,19 @@ pub fn parse_suggestions(response: &str) -> Result<Vec<String>, AIError> {
     let parsed: SuggestionsResponse = serde_json::from_str(&response[start..=end])
         .map_err(|e| AIError::ParseError(format!("Invalid suggestions JSON: {e}")))?;
 
-    let valid: Vec<String> = parsed
+    let mut valid: Vec<String> = parsed
         .suggestions
         .iter()
         .filter_map(|s| validate_branch_name(s))
         .collect();
 
-    if valid.is_empty() {
+    if valid.len() < 3 {
         return Err(AIError::ParseError(
-            "No valid branch names in suggestions".into(),
+            "Need at least 3 valid branch names in suggestions".into(),
         ));
     }
 
+    valid.truncate(5);
     Ok(valid)
 }
 
@@ -136,6 +137,7 @@ pub fn suggest_branch_name(client: &AIClient, context: &str) -> Result<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     // ── validate_branch_name ───────────────────────────────────────────
 
@@ -207,16 +209,25 @@ mod tests {
 
     #[test]
     fn parses_valid_json() {
-        let json = r#"{"suggestions": ["feature/add-auth", "bugfix/fix-crash"]}"#;
+        let json = r#"{"suggestions": ["feature/add-auth", "bugfix/fix-crash", "hotfix/patch-1"]}"#;
         let result = parse_suggestions(json).unwrap();
-        assert_eq!(result, vec!["feature/add-auth", "bugfix/fix-crash"]);
+        assert_eq!(
+            result,
+            vec!["feature/add-auth", "bugfix/fix-crash", "hotfix/patch-1"]
+        );
+        assert!(result.iter().all(is_git_safe_branch_name));
     }
 
     #[test]
     fn filters_invalid_suggestions() {
-        let json = r#"{"suggestions": ["feature/ok", "bad/name", "hotfix/good"]}"#;
+        let json =
+            r#"{"suggestions": ["feature/ok", "bad/name", "hotfix/good", "bugfix/fix-this"]}"#;
         let result = parse_suggestions(json).unwrap();
-        assert_eq!(result, vec!["feature/ok", "hotfix/good"]);
+        assert_eq!(
+            result,
+            vec!["feature/ok", "hotfix/good", "bugfix/fix-this"]
+        );
+        assert!(result.iter().all(is_git_safe_branch_name));
     }
 
     #[test]
@@ -226,15 +237,43 @@ mod tests {
     }
 
     #[test]
+    fn fails_when_fewer_than_three_valid_suggestions_remain() {
+        let json = r#"{"suggestions": ["feature/ok", "bad/name", "hotfix/good"]}"#;
+        let err = parse_suggestions(json).unwrap_err();
+        assert!(matches!(err, AIError::ParseError(_)));
+    }
+
+    #[test]
+    fn truncates_to_five_valid_suggestions() {
+        let json = r#"{"suggestions": ["feature/one", "feature/two", "feature/three", "feature/four", "feature/five", "feature/six"]}"#;
+        let result = parse_suggestions(json).unwrap();
+        assert_eq!(result.len(), 5);
+        assert_eq!(
+            result,
+            vec![
+                "feature/one",
+                "feature/two",
+                "feature/three",
+                "feature/four",
+                "feature/five"
+            ]
+        );
+        assert!(result.iter().all(is_git_safe_branch_name));
+    }
+
+    #[test]
     fn fails_on_no_json() {
         assert!(parse_suggestions("no json here").is_err());
     }
 
     #[test]
     fn handles_surrounding_text() {
-        let text = r#"Here are suggestions: {"suggestions": ["release/v2"]} hope this helps"#;
+        let text = r#"Here are suggestions: {"suggestions": ["release/v2", "release/v2-1", "release/v2-2"]} hope this helps"#;
         let result = parse_suggestions(text).unwrap();
-        assert_eq!(result, vec!["release/v2"]);
+        assert_eq!(
+            result,
+            vec!["release/v2", "release/v2-1", "release/v2-2"]
+        );
     }
 
     // ── suggest_branch_name ────────────────────────────────────────────
@@ -245,5 +284,13 @@ mod tests {
         let client = AIClient::new("https://api.example.com", "k", "m").unwrap();
         let err = suggest_branch_name(&client, "").unwrap_err();
         assert!(matches!(err, AIError::ConfigError(_)));
+    }
+
+    fn is_git_safe_branch_name(name: &String) -> bool {
+        Command::new("git")
+            .args(["check-ref-format", "--branch", name])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
     }
 }
