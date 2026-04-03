@@ -95,6 +95,7 @@ pub struct BranchSuggestionOption {
 }
 
 const AI_SUGGEST_TIMEOUT_TICKS: usize = 12;
+const MANUAL_INPUT_LABEL: &str = "Manual input";
 
 #[derive(Debug, Clone, Default)]
 pub struct AISuggestState {
@@ -242,7 +243,7 @@ impl WizardState {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     0
                 } else if !self.ai_suggest.options.is_empty() {
-                    self.ai_suggest.options.len()
+                    self.ai_suggest.options.len() + 1
                 } else {
                     self.ai_suggest.suggestions.len().max(1)
                 }
@@ -284,15 +285,20 @@ impl WizardState {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     vec![]
                 } else if !self.ai_suggest.options.is_empty() {
-                    self.ai_suggest
+                    let mut labels = self
+                        .ai_suggest
                         .options
                         .iter()
                         .map(|option| option.label.clone())
-                        .collect()
+                        .collect::<Vec<_>>();
+                    labels.push(MANUAL_INPUT_LABEL.to_string());
+                    labels
                 } else if self.ai_suggest.suggestions.is_empty() {
                     vec!["(no suggestions)".to_string()]
                 } else {
-                    self.ai_suggest.suggestions.clone()
+                    let mut labels = self.ai_suggest.suggestions.clone();
+                    labels.push(MANUAL_INPUT_LABEL.to_string());
+                    labels
                 }
             }
             WizardStep::BranchNameInput | WizardStep::IssueSelect => vec![],
@@ -567,6 +573,13 @@ fn advance_from_ai_branch_step(state: &mut WizardState) {
     }
 
     if state.ai_suggest.options.is_empty() {
+        ensure_branch_name_seed(state);
+        state.step = WizardStep::BranchNameInput;
+        state.selected = 0;
+        return;
+    }
+
+    if state.selected >= state.ai_suggest.options.len() {
         ensure_branch_name_seed(state);
         state.step = WizardStep::BranchNameInput;
         state.selected = 0;
@@ -1197,6 +1210,8 @@ mod tests {
         update(&mut state, WizardMessage::MoveDown);
         assert_eq!(state.selected, 2);
         update(&mut state, WizardMessage::MoveDown);
+        assert_eq!(state.selected, 3);
+        update(&mut state, WizardMessage::MoveDown);
         assert_eq!(state.selected, 0); // wraps
     }
 
@@ -1215,6 +1230,41 @@ mod tests {
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.branch_name, "feature/b");
         assert_eq!(state.step, WizardStep::IssueSelect);
+    }
+
+    #[test]
+    fn ai_suggest_manual_input_is_always_last() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        update(
+            &mut state,
+            WizardMessage::SetBranchSuggestions(vec![
+                "feature/a".to_string(),
+                "feature/b".to_string(),
+            ]),
+        );
+
+        let options = state.current_options();
+        assert_eq!(options.last().map(String::as_str), Some("Manual input"));
+    }
+
+    #[test]
+    fn ai_suggest_selecting_manual_input_goes_to_branch_input() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        update(
+            &mut state,
+            WizardMessage::SetBranchSuggestions(vec![
+                "feature/a".to_string(),
+                "feature/b".to_string(),
+            ]),
+        );
+        state.selected = state.option_count().saturating_sub(1);
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+        assert_eq!(state.branch_name, "");
     }
 
     #[test]
@@ -1264,7 +1314,21 @@ mod tests {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
         state.ai_suggest.suggestions = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(state.option_count(), 3);
+        state.ai_suggest.options = vec![
+            BranchSuggestionOption {
+                branch_name: "a".to_string(),
+                label: "a".to_string(),
+            },
+            BranchSuggestionOption {
+                branch_name: "b".to_string(),
+                label: "b".to_string(),
+            },
+            BranchSuggestionOption {
+                branch_name: "c".to_string(),
+                label: "c".to_string(),
+            },
+        ];
+        assert_eq!(state.option_count(), 4);
     }
 
     #[test]
