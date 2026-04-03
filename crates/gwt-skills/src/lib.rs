@@ -56,6 +56,65 @@ mod tests {
     }
 
     #[test]
+    fn set_enabled_updates_matching_skill_and_reports_change() {
+        let mut reg = SkillRegistry::new();
+        reg.register(make_skill("alpha"));
+        reg.register(make_skill("beta"));
+
+        let result = reg.set_enabled("beta", false);
+
+        assert_eq!(
+            result,
+            crate::registry::SkillUpdateResult {
+                found: true,
+                changed: true,
+            }
+        );
+        assert!(reg
+            .list()
+            .iter()
+            .any(|skill| skill.name == "alpha" && skill.enabled));
+        assert!(reg
+            .list()
+            .iter()
+            .any(|skill| skill.name == "beta" && !skill.enabled));
+    }
+
+    #[test]
+    fn set_enabled_reports_found_without_change_when_state_matches() {
+        let mut reg = SkillRegistry::new();
+        reg.register(make_skill("alpha"));
+
+        let result = reg.set_enabled("alpha", true);
+
+        assert_eq!(
+            result,
+            crate::registry::SkillUpdateResult {
+                found: true,
+                changed: false,
+            }
+        );
+        assert!(reg.list()[0].enabled);
+    }
+
+    #[test]
+    fn set_enabled_reports_missing_skill() {
+        let mut reg = SkillRegistry::new();
+        reg.register(make_skill("alpha"));
+
+        let result = reg.set_enabled("ghost", false);
+
+        assert_eq!(
+            result,
+            crate::registry::SkillUpdateResult {
+                found: false,
+                changed: false,
+            }
+        );
+        assert!(reg.list().iter().all(|skill| skill.enabled));
+    }
+
+    #[test]
     fn load_from_dir_reads_skill_json_files() {
         let dir = tempfile::tempdir().unwrap();
         let skill_dir = dir.path().join("my-skill");

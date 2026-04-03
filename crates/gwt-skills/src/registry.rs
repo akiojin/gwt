@@ -22,6 +22,15 @@ pub struct SkillRegistry {
     skills: Vec<EmbeddedSkill>,
 }
 
+/// Result of updating a skill's enabled state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillUpdateResult {
+    /// Whether a skill with the requested name existed.
+    pub found: bool,
+    /// Whether the enabled flag actually changed.
+    pub changed: bool,
+}
+
 impl SkillRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -39,6 +48,23 @@ impl SkillRegistry {
         let before = self.skills.len();
         self.skills.retain(|s| s.name != name);
         self.skills.len() < before
+    }
+
+    /// Update a skill's enabled state by name.
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> SkillUpdateResult {
+        if let Some(skill) = self.skills.iter_mut().find(|skill| skill.name == name) {
+            let changed = skill.enabled != enabled;
+            skill.enabled = enabled;
+            SkillUpdateResult {
+                found: true,
+                changed,
+            }
+        } else {
+            SkillUpdateResult {
+                found: false,
+                changed: false,
+            }
+        }
     }
 
     /// List all registered skills.
