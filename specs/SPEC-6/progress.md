@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `29/44` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T04:24:46Z`
+- Task progress: `30/44` checked in `tasks.md`
+- Artifact refresh: `2026-04-03T04:29:16Z`
 
 ## Done
 - Severity routing is now wired through structured notifications: debug logs only, info/warn feed the status bar, and errors keep their detail in the modal queue.
@@ -15,6 +15,7 @@
 - Snapshot coverage now includes a Logs tab render with an active filter state.
 - The Logs list now renders stable timestamp / severity / source / message columns instead of a loose inline row.
 - A focused regression test now proves the error modal queue preserves order across dismiss transitions.
+- A focused E2E test now proves Info notifications render in the status bar and auto-dismiss after the 5-second timeout.
 
 ## Next
 - Add the remaining richer log affordances and the still-open status-bar E2E case.

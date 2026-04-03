@@ -79,7 +79,7 @@
 
 ## Phase 4: Integration Testing
 
-- [ ] TEST: End-to-end test: Info notification appears in status bar and auto-dismisses
+- [x] TEST: End-to-end test: Info notification appears in status bar and auto-dismisses
 - [ ] TEST: End-to-end test: Error notification appears in modal, dismiss shows next
 - [x] TEST: End-to-end test: all severity levels logged in structured log
 - [x] TEST: Regression test: existing error queue behavior preserved

@@ -279,6 +279,25 @@ fn e2e_notifications_land_in_structured_log_for_all_severities() {
 }
 
 #[test]
+fn e2e_info_notification_appears_in_status_bar_and_auto_dismisses() {
+    let mut model = test_model();
+    let notification = gwt_notification::Notification::new(Severity::Info, "core", "Started");
+
+    app::update(&mut model, Message::Notify(notification));
+
+    let output = render_to_string(&model, 120, 24);
+    assert!(output.contains("INFO core: Started"));
+
+    for _ in 0..50 {
+        app::update(&mut model, Message::Tick);
+    }
+
+    let output = render_to_string(&model, 120, 24);
+    assert!(!output.contains("INFO core: Started"));
+    assert!(!output.contains("Started"));
+}
+
+#[test]
 fn snapshot_pr_dashboard_tab() {
     let mut model = test_model();
     model.active_layer = ActiveLayer::Management;
