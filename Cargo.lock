@@ -552,6 +552,7 @@ dependencies = [
 name = "gwt-tui"
 version = "8.17.2"
 dependencies = [
+ "base64",
  "chrono",
  "crossterm",
  "gwt-agent",
@@ -567,9 +568,11 @@ dependencies = [
  "gwt-voice",
  "insta",
  "ratatui",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "vt100",

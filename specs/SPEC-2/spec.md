@@ -58,7 +58,7 @@ As a developer, I want to see a help overlay with all available keybindings so t
 2. Given the help overlay is visible, when I press Escape or Ctrl+G,?, then the overlay closes.
 3. Given keybindings are added or changed in code, when the help overlay renders, then it auto-collects current keybindings from code definitions (no manual sync needed).
 
-### US-6: Restore Session Layout on Restart (P1) -- PARTIALLY IMPLEMENTED
+### US-6: Restore Session Layout on Restart (P1) -- IMPLEMENTED
 
 As a developer, I want my session layout to be restored when I restart gwt so that I can resume work quickly.
 

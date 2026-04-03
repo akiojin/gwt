@@ -10,11 +10,12 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `43/55` completed items.
+- Task traceability snapshot: `tasks.md` currently records `80/81` completed items.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
-- Notes: Remaining shell work is now concentrated in the session persistence phase.
+- Notes: Session persistence now restores layout, panel visibility, and active management tab on startup.
+- Notes: The only unchecked task is `T077`, which references a `simplify` skill that is not exposed in the current session tool list.
 
 ## Next
 - `gwt-spec-implement`

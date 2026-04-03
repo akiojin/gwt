@@ -4,6 +4,9 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde::{Deserialize, Serialize};
+
 use crate::input::voice::VoiceInputState;
 use crate::screens::branches::BranchesState;
 use crate::screens::confirm::ConfirmState;
@@ -373,6 +376,11 @@ impl Model {
         self._notification_bus.clone()
     }
 
+    /// Repository root currently driving the workspace shell.
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
+    }
+
     /// Drain queued notifications from the in-process bus.
     pub(crate) fn drain_notifications(&mut self) -> Vec<Notification> {
         self.notification_receiver.drain()
@@ -424,54 +432,121 @@ impl Model {
 
     /// Save session state to a TOML file. Best-effort: errors are logged, not fatal.
     pub fn save_session_state(&self, path: &Path) -> Result<(), String> {
-        let display_mode = match self.session_layout {
-            SessionLayout::Tab => "tab",
-            SessionLayout::Grid => "grid",
+        let state = SessionState {
+            display_mode: match self.session_layout {
+                SessionLayout::Tab => "tab".to_string(),
+                SessionLayout::Grid => "grid".to_string(),
+            },
+            panel_visible: self.active_layer == ActiveLayer::Management,
+            active_management_tab: self.management_tab.label().to_string(),
+            session_count: self.sessions.len(),
         };
-        let management_visible = self.active_layer == ActiveLayer::Management;
-        let content = format!(
-            "display_mode = \"{}\"\nmanagement_visible = {}\nactive_management_tab = \"{}\"\nsession_count = {}\n",
-            display_mode, management_visible, self.management_tab.label(), self.sessions.len(),
-        );
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let content = toml::to_string_pretty(&state).map_err(|e| e.to_string())?;
         std::fs::write(path, content).map_err(|e| e.to_string())
     }
 
-    /// Load session state from a TOML file. Returns None on any error.
-    pub fn load_session_state(path: &Path) -> Option<SessionState> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let mut state = SessionState::default();
-        for line in content.lines() {
-            let line = line.trim();
-            if let Some(val) = line.strip_prefix("display_mode = ") {
-                state.display_mode = val.trim_matches('"').to_string();
-            } else if let Some(val) = line.strip_prefix("management_visible = ") {
-                state.management_visible = val == "true";
-            } else if let Some(val) = line.strip_prefix("active_management_tab = ") {
-                state.active_management_tab = val.trim_matches('"').to_string();
-            } else if let Some(val) = line.strip_prefix("session_count = ") {
-                state.session_count = val.parse().unwrap_or(0);
-            }
+    /// Load session state from a TOML file.
+    pub fn load_session_state(path: &Path) -> Result<SessionState, String> {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        toml::from_str(&content).map_err(|e| e.to_string())
+    }
+
+    /// Stable state-file location for a repository root.
+    pub fn session_state_path(repo_path: &Path) -> PathBuf {
+        let encoded = URL_SAFE_NO_PAD.encode(repo_path.to_string_lossy().as_bytes());
+        gwt_core::paths::gwt_sessions_dir().join(format!("{encoded}.toml"))
+    }
+
+    /// Restore persisted shell state from disk, returning a warning when fallback was needed.
+    pub fn restore_session_state_from_path(&mut self, path: &Path) -> Option<String> {
+        if !path.exists() {
+            return None;
         }
-        Some(state)
+
+        match Self::load_session_state(path) {
+            Ok(state) => self.apply_session_state(state),
+            Err(err) => Some(format!("failed to restore session state: {err}")),
+        }
+    }
+
+    fn apply_session_state(&mut self, state: SessionState) -> Option<String> {
+        let mut warnings = Vec::new();
+
+        self.session_layout = match state.display_mode.as_str() {
+            "tab" => SessionLayout::Tab,
+            "grid" => SessionLayout::Grid,
+            other => {
+                warnings.push(format!("unknown display_mode `{other}`"));
+                SessionLayout::Tab
+            }
+        };
+        self.active_layer = if state.panel_visible {
+            ActiveLayer::Management
+        } else {
+            ActiveLayer::Main
+        };
+        self.management_tab = match ManagementTab::ALL
+            .iter()
+            .copied()
+            .find(|tab| tab.label() == state.active_management_tab)
+        {
+            Some(tab) => tab,
+            None => {
+                warnings.push(format!(
+                    "unknown active_management_tab `{}`",
+                    state.active_management_tab
+                ));
+                ManagementTab::Branches
+            }
+        };
+
+        if warnings.is_empty() {
+            None
+        } else {
+            Some(warnings.join("; "))
+        }
     }
 }
 
 /// Persisted session layout state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    #[serde(default = "default_display_mode")]
     pub display_mode: String,
-    pub management_visible: bool,
+    #[serde(default = "default_panel_visible", alias = "management_visible")]
+    pub panel_visible: bool,
+    #[serde(default = "default_active_management_tab")]
     pub active_management_tab: String,
+    #[serde(default = "default_session_count")]
     pub session_count: usize,
+}
+
+fn default_display_mode() -> String {
+    "tab".to_string()
+}
+
+fn default_panel_visible() -> bool {
+    false
+}
+
+fn default_active_management_tab() -> String {
+    "Branches".to_string()
+}
+
+fn default_session_count() -> usize {
+    1
 }
 
 impl Default for SessionState {
     fn default() -> Self {
         Self {
-            display_mode: "tab".to_string(),
-            management_visible: false,
-            active_management_tab: "Branches".to_string(),
-            session_count: 1,
+            display_mode: default_display_mode(),
+            panel_visible: default_panel_visible(),
+            active_management_tab: default_active_management_tab(),
+            session_count: default_session_count(),
         }
     }
 }
@@ -542,22 +617,22 @@ mod tests {
     fn session_state_default() {
         let state = SessionState::default();
         assert_eq!(state.display_mode, "tab");
-        assert!(!state.management_visible);
+        assert!(!state.panel_visible);
         assert_eq!(state.active_management_tab, "Branches");
         assert_eq!(state.session_count, 1);
     }
 
     #[test]
-    fn save_and_load_session_state_roundtrip() {
+    fn save_and_load_session_state_roundtrip_preserves_layout_visibility_and_tab() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
 
         let model = Model::new(PathBuf::from("/tmp/repo"));
         model.save_session_state(&path).unwrap();
 
-        let loaded = Model::load_session_state(&path).unwrap();
+        let loaded = Model::load_session_state(&path).expect("load state");
         assert_eq!(loaded.display_mode, "tab");
-        assert!(loaded.management_visible);
+        assert!(loaded.panel_visible);
         assert_eq!(loaded.active_management_tab, "Branches");
         assert_eq!(loaded.session_count, 1);
     }
@@ -573,16 +648,16 @@ mod tests {
         model.management_tab = ManagementTab::Settings;
         model.save_session_state(&path).unwrap();
 
-        let loaded = Model::load_session_state(&path).unwrap();
+        let loaded = Model::load_session_state(&path).expect("load state");
         assert_eq!(loaded.display_mode, "grid");
-        assert!(loaded.management_visible);
+        assert!(loaded.panel_visible);
         assert_eq!(loaded.active_management_tab, "Settings");
     }
 
     #[test]
-    fn load_session_state_missing_file_returns_none() {
+    fn load_session_state_missing_file_returns_error() {
         let result = Model::load_session_state(Path::new("/nonexistent/path/session.toml"));
-        assert!(result.is_none());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -639,7 +714,54 @@ mod tests {
         });
         model.save_session_state(&path).unwrap();
 
-        let loaded = Model::load_session_state(&path).unwrap();
+        let loaded = Model::load_session_state(&path).expect("load state");
         assert_eq!(loaded.session_count, 3);
+    }
+
+    #[test]
+    fn save_session_state_creates_missing_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("state.toml");
+
+        let model = Model::new(PathBuf::from("/tmp/repo"));
+        model.save_session_state(&path).unwrap();
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn restore_session_state_from_corrupted_file_returns_warning_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(&path, "display_mode = [").unwrap();
+
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.session_layout = SessionLayout::Grid;
+        model.management_tab = ManagementTab::Settings;
+
+        let warning = model.restore_session_state_from_path(&path);
+
+        assert!(warning.is_some());
+        assert_eq!(model.session_layout, SessionLayout::Grid);
+        assert_eq!(model.management_tab, ManagementTab::Settings);
+    }
+
+    #[test]
+    fn restore_session_state_from_path_applies_saved_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let mut original = Model::new(PathBuf::from("/tmp/repo"));
+        original.session_layout = SessionLayout::Grid;
+        original.active_layer = ActiveLayer::Main;
+        original.management_tab = ManagementTab::Logs;
+        original.save_session_state(&path).unwrap();
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restored.restore_session_state_from_path(&path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.session_layout, SessionLayout::Grid);
+        assert_eq!(restored.active_layer, ActiveLayer::Main);
+        assert_eq!(restored.management_tab, ManagementTab::Logs);
     }
 }

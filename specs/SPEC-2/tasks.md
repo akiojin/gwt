@@ -13,20 +13,20 @@
 
 - [x] T001 [P] Write RED test: help overlay output contains all registered keybindings.
 - [x] T002 [P] Write RED test: help overlay does not contain unregistered key sequences.
-- [ ] T003 Define keybinding registry data structure (key sequence, description, category).
-- [ ] T004 Populate registry from existing keybind.rs match arms.
+- [x] T003 Define keybinding registry data structure (key sequence, description, category).
+- [x] T004 Populate registry from existing keybind.rs match arms.
 - [x] T005 Render help overlay (Ctrl+G,?) using registry data, grouped by category.
 - [x] T006 Verify help overlay tests pass GREEN.
 
 ## Phase 2: Session Persistence Improvement
 
-- [ ] T007 [P] Write RED test: session save/restore round-trip preserves display mode, panel visibility, active tab.
-- [ ] T008 [P] Write RED test: corrupted session file triggers graceful fallback with warning.
-- [ ] T009 [P] Write RED test: missing session directory is auto-created on save.
-- [ ] T010 Extend session persistence TOML schema with display_mode, panel_visible, active_management_tab fields.
-- [ ] T011 Implement save logic for new fields.
-- [ ] T012 Implement restore logic with graceful fallback for missing/corrupted fields.
-- [ ] T013 Verify session persistence tests pass GREEN.
+- [x] T007 [P] Write RED test: session save/restore round-trip preserves display mode, panel visibility, active tab.
+- [x] T008 [P] Write RED test: corrupted session file triggers graceful fallback with warning.
+- [x] T009 [P] Write RED test: missing session directory is auto-created on save.
+- [x] T010 Extend session persistence TOML schema with display_mode, panel_visible, active_management_tab fields.
+- [x] T011 Implement save logic for new fields.
+- [x] T012 Implement restore logic with graceful fallback for missing/corrupted fields.
+- [x] T013 Verify session persistence tests pass GREEN.
 
 ## Phase 3: Git View Tab
 

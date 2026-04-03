@@ -2,7 +2,10 @@
 //!
 //! Initializes the terminal, creates the Model, and runs the event loop.
 
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -12,6 +15,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use gwt_git::RepoType;
+use gwt_notification::{Notification, Severity};
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
@@ -69,6 +73,18 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    if model.active_layer != ActiveLayer::Initialization {
+        let session_state_path = Model::session_state_path(model.repo_path());
+        if let Some(warning) = restore_startup_session_state_with(&mut model, &session_state_path) {
+            app::update(
+                &mut model,
+                Message::Notify(
+                    Notification::new(Severity::Warn, "session", "Session restore fell back")
+                        .with_detail(warning),
+                ),
+            );
+        }
+    }
     // Load initial data (branches, specs, tags) — best-effort
     if model.active_layer != ActiveLayer::Initialization {
         app::load_initial_data(&mut model);
@@ -103,5 +119,72 @@ fn run_app(
         }
     }
 
+    if model.active_layer != ActiveLayer::Initialization {
+        let session_state_path = Model::session_state_path(model.repo_path());
+        if let Err(err) = persist_session_state_for_shutdown_with(&model, &session_state_path) {
+            eprintln!("Warning: failed to save session state: {err}");
+        }
+    }
+
     Ok(())
+}
+
+fn restore_startup_session_state_with(model: &mut Model, path: &Path) -> Option<String> {
+    model.restore_session_state_from_path(path)
+}
+
+fn persist_session_state_for_shutdown_with(model: &Model, path: &Path) -> Result<(), String> {
+    model.save_session_state(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gwt_tui::model::{ManagementTab, SessionLayout};
+
+    #[test]
+    fn restore_startup_session_state_with_applies_saved_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.toml");
+
+        let mut original = Model::new(PathBuf::from("/tmp/repo"));
+        original.session_layout = SessionLayout::Grid;
+        original.active_layer = ActiveLayer::Main;
+        original.management_tab = ManagementTab::Logs;
+        original
+            .save_session_state(&path)
+            .expect("save original session state");
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restore_startup_session_state_with(&mut restored, &path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.session_layout, SessionLayout::Grid);
+        assert_eq!(restored.active_layer, ActiveLayer::Main);
+        assert_eq!(restored.management_tab, ManagementTab::Logs);
+    }
+
+    #[test]
+    fn restore_startup_session_state_with_returns_warning_for_corrupted_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.toml");
+        std::fs::write(&path, "display_mode = [").expect("write corrupted state");
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restore_startup_session_state_with(&mut restored, &path);
+
+        assert!(warning.is_some());
+    }
+
+    #[test]
+    fn persist_session_state_for_shutdown_with_creates_state_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("session.toml");
+        let model = Model::new(PathBuf::from("/tmp/repo"));
+
+        persist_session_state_for_shutdown_with(&model, &path)
+            .expect("persist session state for shutdown");
+
+        assert!(path.exists());
+    }
 }

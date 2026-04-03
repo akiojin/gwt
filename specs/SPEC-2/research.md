@@ -3,7 +3,7 @@
 ## Scope Snapshot
 - Canonical scope: Tabs, split grid layout, management panel routing, and keyboard-driven workspace navigation.
 - Current status: `in-progress` / `Implementation`.
-- Task progress: `43/55` checked in `tasks.md`.
+- Task progress: `80/81` checked in `tasks.md`.
 - Notes: Most shell behavior exists, but the supporting docs had drifted from the current management-shell shape and have been refreshed.
 
 ## Decisions
@@ -11,8 +11,7 @@
 - Document the current management-shell inventory instead of preserving stale references to removed or orphaned screens.
 - Use `gwt-git` read paths from `load_initial_data()` for Git View so the screen reuses the same best-effort repository hydration path as other tabs.
 - Use the keybinding registry itself as the single source for help-overlay content so Ctrl+G shortcuts do not require separate manual sync.
-- Treat session persistence gaps as follow-up execution work, not documentation shortcuts.
+- Persist the shell snapshot through a TOML artifact under `~/.gwt/sessions/` and restore it before initial data hydration.
 
 ## Open Questions
-- Reconfirm the final management-tab inventory before closing the remaining layout and help-overlay tasks.
-- Decide whether additional shell persistence belongs in this SPEC or a narrower follow-up.
+- Decide whether `T077` should stay as a process checklist item now that the `simplify` skill is not exposed in the current session.
