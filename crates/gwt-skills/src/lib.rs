@@ -1,13 +1,20 @@
-//! gwt-skills: Skill registry and hooks management for gwt.
+//! gwt-skills: Embedded skill bundling, distribution, and hooks management for gwt.
 
+pub mod assets;
+pub mod distribute;
+pub mod git_exclude;
 pub mod hooks;
 pub mod registry;
+pub mod settings_local;
 
+pub use distribute::{distribute_to_worktree, DistributeReport};
+pub use git_exclude::update_git_exclude;
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
 };
-pub use registry::{register_builtins, BuiltinSkill, EmbeddedSkill, RegistryError, SkillRegistry};
+pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
+pub use settings_local::generate_settings_local;
 
 #[cfg(test)]
 mod tests {
@@ -463,93 +470,51 @@ mod tests {
         assert_eq!(cfg.user_hooks, initial.user_hooks);
     }
 
-    // ── Registry builtin tests ──
+    // ── Bundled assets tests ──
 
     #[test]
-    fn register_builtins_populates_registry() {
-        let mut reg = SkillRegistry::new();
-        register_builtins(&mut reg);
-        assert_eq!(reg.list().len(), BuiltinSkill::all().len());
-    }
-
-    #[test]
-    fn builtin_skill_names_are_unique() {
-        let names: Vec<&str> = BuiltinSkill::all().iter().map(|b| b.name()).collect();
-        let mut deduped = names.clone();
-        deduped.sort();
-        deduped.dedup();
-        assert_eq!(names.len(), deduped.len());
-    }
-
-    #[test]
-    fn builtin_to_embedded_has_correct_fields() {
-        let skill = BuiltinSkill::GwtPr.to_embedded();
-        assert_eq!(skill.name, "gwt-pr");
-        assert!(!skill.description.is_empty());
-        assert!(skill.enabled);
-        assert!(skill.script_path.to_str().unwrap().contains("gwt-pr"));
-    }
-
-    #[test]
-    fn register_builtins_skills_are_findable() {
-        let mut reg = SkillRegistry::new();
-        register_builtins(&mut reg);
-        let found = reg.list().iter().find(|s| s.name == "gwt-pr-check");
-        assert!(found.is_some());
-        assert!(found.unwrap().description.contains("PR"));
-    }
-
-    #[test]
-    fn gwt_spec_brainstorm_is_registered_and_assets_exist() {
-        let has_builtin = BuiltinSkill::all()
-            .iter()
-            .any(|builtin| builtin.name() == "gwt-spec-brainstorm");
-        assert!(has_builtin);
-
-        let skill_md = include_str!("../../../.claude/skills/gwt-spec-brainstorm/SKILL.md");
-        let command_md = include_str!("../../../.claude/commands/gwt-spec-brainstorm.md");
-        assert!(!skill_md.trim().is_empty());
-        assert!(!command_md.trim().is_empty());
-    }
-
-    #[test]
-    fn builtin_all_returns_expected_names() {
-        let mut actual: Vec<&str> = BuiltinSkill::all()
-            .iter()
-            .map(|builtin| builtin.name())
+    fn claude_skills_contains_expected_directories() {
+        use crate::assets::CLAUDE_SKILLS;
+        let dirs: Vec<&str> = CLAUDE_SKILLS
+            .dirs()
+            .map(|d| d.path().file_name().unwrap_or_default().to_str().unwrap_or(""))
             .collect();
-        actual.sort_unstable();
-
-        let mut expected = vec![
-            "gwt-issue-register",
-            "gwt-issue-resolve",
-            "gwt-pr",
-            "gwt-pr-check",
-            "gwt-pr-fix",
-            "gwt-spec-brainstorm",
-            "gwt-spec-implement",
-            "gwt-spec-ops",
-            "gwt-spec-register",
-        ];
-        expected.sort_unstable();
-
-        assert_eq!(actual, expected);
+        assert!(dirs.contains(&"gwt-pr"), "missing gwt-pr skill dir");
+        assert!(
+            dirs.contains(&"gwt-agent-discover"),
+            "missing gwt-agent-discover skill dir"
+        );
+        assert!(
+            dirs.contains(&"gwt-spec-brainstorm"),
+            "missing gwt-spec-brainstorm skill dir"
+        );
     }
 
     #[test]
-    fn register_builtins_can_be_overridden() {
-        let mut reg = SkillRegistry::new();
-        register_builtins(&mut reg);
-        // Override one
-        reg.register(EmbeddedSkill {
-            name: "gwt-pr".to_string(),
-            description: "custom override".to_string(),
-            script_path: PathBuf::from("custom.sh"),
-            enabled: false,
-        });
-        let pr = reg.list().iter().find(|s| s.name == "gwt-pr").unwrap();
-        assert_eq!(pr.description, "custom override");
-        assert!(!pr.enabled);
+    fn claude_commands_contains_expected_files() {
+        use crate::assets::CLAUDE_COMMANDS;
+        let files: Vec<&str> = CLAUDE_COMMANDS
+            .files()
+            .map(|f| f.path().file_name().unwrap_or_default().to_str().unwrap_or(""))
+            .collect();
+        assert!(files.contains(&"gwt-pr.md"), "missing gwt-pr.md command");
+        assert!(
+            files.contains(&"gwt-agent-discover.md"),
+            "missing gwt-agent-discover.md command"
+        );
+    }
+
+    #[test]
+    fn claude_hooks_contains_expected_scripts() {
+        use crate::assets::CLAUDE_HOOKS;
+        let files: Vec<&str> = CLAUDE_HOOKS
+            .files()
+            .map(|f| f.path().file_name().unwrap_or_default().to_str().unwrap_or(""))
+            .collect();
+        assert!(
+            files.contains(&"gwt-forward-hook.mjs"),
+            "missing gwt-forward-hook.mjs"
+        );
     }
 
     // ── helpers ──

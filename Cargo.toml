@@ -84,6 +84,9 @@ insta = { version = "1", features = ["yaml"] }
 # Benchmarks
 criterion = { version = "0.8", features = ["html_reports"] }
 
+# Embedded assets
+include_dir = "0.7"
+
 # Utilities
 directories = "6"
 chrono = { version = "0.4", features = ["serde"] }

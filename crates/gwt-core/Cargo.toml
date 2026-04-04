@@ -8,3 +8,6 @@ license.workspace = true
 thiserror = { workspace = true }
 dirs = "6"
 which = "8"
+
+[build-dependencies]
+serde_yaml = { workspace = true }
