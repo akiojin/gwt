@@ -7,7 +7,7 @@ argument-hint: "[spec-id]"
 
 # gwt SPEC Tasks
 
-Use this skill to turn the approved spec and plan artifacts into executable work items.
+Turn the approved spec and plan artifacts into executable work items grouped by phase and user story.
 
 - If `plan.md` is missing, use `gwt-spec-plan` first.
 - If clarification blockers remain in `spec.md`, use `gwt-spec-clarify` first.

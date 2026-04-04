@@ -7,7 +7,7 @@ argument-hint: "[spec-id]"
 
 # gwt SPEC Analyze
 
-Use this skill as the final gate before implementation starts.
+Run the final readiness gate before implementation starts, validating completeness and consistency across all SPEC artifacts.
 
 This skill is a **pre-implementation readiness gate only**. It does not certify that implementation is complete.
 

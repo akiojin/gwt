@@ -18,7 +18,7 @@ Run in terminal to find files related to a feature or concept:
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action search \
   --db-path "$GWT_PROJECT_ROOT/.gwt/index" \
-  --query "your search query" \
+  --query "<search terms>" \
   --n-results 10
 ```
 

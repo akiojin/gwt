@@ -2,6 +2,7 @@
 name: gwt-pr-check
 description: "This skill should be used when the user asks about PR status, says 'check PR status', 'is the PR merged?', 'PR state', 'PRの状態', 'PRどうなった?', or wants to know the current branch's pull request progress. It uses REST-first PR lookups including unmerged PR detection and post-merge new-commit detection."
 allowed-tools: Bash, Read, Glob, Grep
+argument-hint: "[PR number]"
 ---
 
 # GH PR Check

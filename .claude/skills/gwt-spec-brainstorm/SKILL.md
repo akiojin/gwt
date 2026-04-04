@@ -2,11 +2,12 @@
 name: gwt-spec-brainstorm
 description: "This skill should be used when the user starts with a rough idea, title-level request, or pre-SPEC brainstorming, says 'brainstorm this', 'この機能どう思う?', 'SPECにする前に相談', 'アイデアを整理して', 'should this be a new spec?', or asks whether an existing SPEC should be updated to cover a change. It interviews the user, searches existing Issues and SPECs first, then routes to the correct owner workflow."
 allowed-tools: Bash, Read, Glob, Grep
+argument-hint: "[rough idea or request]"
 ---
 
 # gwt SPEC Brainstorm
 
-Use this skill as the pre-SPEC intake entrypoint for rough requests.
+Interview the user on a rough idea, search existing Issues and SPECs, then route to the correct owner workflow.
 
 `gwt-spec-brainstorm` stays in pre-SPEC space.
 

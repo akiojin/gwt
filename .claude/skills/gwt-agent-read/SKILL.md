@@ -22,7 +22,7 @@ Read the scrollback output of a specific agent pane.
 ## Notes
 
 - Always discover panes first before reading.
-- Use this skill before sending follow-up instructions via `gwt-agent-send`.
+- Read pane output before sending follow-up instructions via `gwt-agent-send`.
 
 ## Environment
 

@@ -7,7 +7,7 @@ argument-hint: "[spec-id]"
 
 # gwt SPEC Clarify
 
-Use this skill to turn a draft `spec.md` artifact into a planning-ready specification.
+Turn a draft `spec.md` artifact into a planning-ready specification by resolving ambiguities and locking acceptance scenarios.
 
 `gwt-spec-clarify` is a focused clarification step inside the wider SPEC workflow.
 

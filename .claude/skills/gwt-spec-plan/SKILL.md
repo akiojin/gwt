@@ -7,7 +7,7 @@ argument-hint: "[spec-id]"
 
 # gwt SPEC Plan
 
-Use this skill to translate a clarified `spec.md` into implementation-ready planning artifacts.
+Translate a clarified `spec.md` into implementation-ready planning artifacts including plan.md, research.md, data-model.md, quickstart.md, and contracts.
 
 - If `spec.md` still has critical clarification gaps, use `gwt-spec-clarify` first.
 - If the target SPEC does not exist, use `gwt-spec-register` first.

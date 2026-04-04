@@ -7,7 +7,7 @@ argument-hint: "[spec-id]"
 
 # gwt SPEC Implement
 
-Use this skill after a SPEC has a stable `spec.md`, `plan.md`, `tasks.md`, and a `CLEAR` analysis report persisted in `analysis.md`.
+Execute test-first implementation tasks from `tasks.md` after a SPEC has a stable `spec.md`, `plan.md`, `tasks.md`, and a `CLEAR` analysis report persisted in `analysis.md`.
 
 - Primary caller: `gwt-spec-ops`
 - If the user only wants spec maintenance, stay in `gwt-spec-ops`

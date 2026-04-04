@@ -2,12 +2,12 @@
 name: gwt-issue-register
 description: "This skill should be used when the user wants to register new work, says 'register an issue', 'create a new issue', 'file a bug', 'add feature request', 'Issueを作って', 'バグを登録して', '機能要望を出して', or asks to track new work items. It searches existing Issues and SPECs first, reuses a clear existing owner when possible, otherwise creates a plain GitHub Issue or continues into the SPEC workflow."
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
+argument-hint: "[request description]"
 ---
 
 # gwt Issue Register
 
-Use this skill when the user wants to file, register, or draft new work from a bug report,
-feature request, enhancement idea, documentation task, or rough note.
+Register new work from a bug report, feature request, enhancement idea, documentation task, or rough note after searching for existing owners.
 
 `gwt-issue-register` is the main entrypoint for new work registration.
 
