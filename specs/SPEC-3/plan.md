@@ -213,6 +213,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving adjacent groups render without a
    spacer row between them.
 
+### Phase 21: QuickStart Footer Separator Compaction
+
+1. Replace the full-width separator before `Choose different settings...`
+   with a compact rule so the footer keeps its boundary without dominating the
+   popup width.
+2. Preserve the final `Choose different settings...` action and its
+   selection semantics while only lightening the separator chrome.
+3. Add focused RED/GREEN coverage proving the footer no longer renders a
+   full-width separator rule.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

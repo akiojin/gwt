@@ -60,6 +60,9 @@
 24. Verify consecutive Quick Start agent groups now render without a blank
    spacer row between them while the final separator before `Choose
    different settings...` still remains visible.
+25. Verify the separator before `Choose different settings...` is now compact
+   rather than a full-width rule, while the final action still reads as a
+   distinct footer choice.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -105,5 +108,7 @@
 - Quick Start agent groups now render back-to-back without spacer rows,
   making the grouped history denser while preserving the final separator and
   footer action.
+- The final `Choose different settings...` action now uses a compact
+  separator, so the footer remains distinct without a heavy full-width rule.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

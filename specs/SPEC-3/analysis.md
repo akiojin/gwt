@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `94/94` completed items.
+- Task traceability snapshot: `tasks.md` now records `97/97` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -51,6 +51,9 @@ Status: CLEAR
 - Notes: `QuickStart` agent groups no longer insert blank spacer rows between
   groups, so grouped headers render back-to-back while keeping the final
   separator before `Choose different settings...`.
+- Notes: The `QuickStart` footer now uses a compact separator before `Choose
+  different settings...` instead of a full-width rule, which lightens the
+  popup chrome while keeping the end-action boundary.
 
 ## Next
 - `gwt-spec-implement`

@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `94/94` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:27:09Z`
+- Task progress: `97/97` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:30:28Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -67,6 +67,9 @@
 - `QuickStart` agent groups now render back-to-back without blank spacer rows
   between them, preserving headers and the final `Choose different` separator
   while matching the denser old-TUI grouped layout.
+- The `QuickStart` footer now uses a compact separator before `Choose
+  different settings...` instead of a full-width rule, which keeps the final
+  action distinct without overwhelming the popup chrome.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

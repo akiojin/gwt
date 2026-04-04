@@ -234,6 +234,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-028**: `QuickStart` does not insert blank spacer rows between agent
   groups; the next agent header follows directly after the previous group's
   `Start new` action while preserving grouped headers and the final separator.
+- **FR-029**: The `QuickStart` footer uses a compact separator before
+  `Choose different settings...` instead of a full-width rule, preserving the
+  end-action boundary while matching the lighter old-TUI popup chrome.
 
 ## Non-Functional Requirements
 

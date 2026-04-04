@@ -162,3 +162,9 @@
 - [x] T086 [P] Write RED test: `QuickStart` places the next agent group directly below the previous group's action rows.
 - [x] T087 Remove blank spacer rows between Quick Start agent groups while preserving group headers and the final separator.
 - [x] T088 Verify focused group-density tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 21: QuickStart Footer Separator Compaction
+
+- [x] T089 [P] Write RED test: `QuickStart` uses a compact separator before `Choose different settings...` instead of a full-width rule.
+- [x] T090 Replace the full-width footer separator with a compact rule while preserving the final action row.
+- [x] T091 Verify focused footer-separator tests, broad workspace checks, and refresh SPEC-3 artifacts.
