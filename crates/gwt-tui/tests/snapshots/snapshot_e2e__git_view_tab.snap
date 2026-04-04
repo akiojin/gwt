@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- gwt | test-repo | Git:pane | 0b┌ ▶ Shell ─────────────────────────────────────┐
-┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
-│Files (0)                     ││                                              │
-│No changed files              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│Commits (0)                   ││                                              │
-│No commits loaded             ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-└──────────────────────────────┘└──────────────────────────────────────────────┘
+ gwt | test-repo | Git:pane | 0b/0w     ┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │ PRs │ Pro┐│Session: Shell (80x24)                │
+│Files (0)                             ││                                      │
+│No changed files                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│Commits (0)                           ││                                      │
+│No commits loaded                     ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
  ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:select  ←→:tab  C

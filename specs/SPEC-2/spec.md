@@ -125,7 +125,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-013a**: The bottom status line keeps the old-TUI always-on context model: session summary and branch/agent context stay visible even while focus changes.
 - **FR-013b**: Context-sensitive keybind hints remain visible in the status bar instead of replacing the status context entirely.
-- **FR-014**: Management panel width is adjustable or uses a sensible default proportion. The current default split is `40% management / 60% session` while the management panel is visible.
+- **FR-014**: Management panel width is adjustable or uses a sensible default proportion. The current default split is responsive: wide terminals (`>=120 cols`) use `40% management / 60% session`, while standard or narrower terminals fall back to `50% / 50%` so management chrome remains legible.
 - **FR-015**: Focus system: 3 focusable panes (TabContent, BranchDetail, Terminal) cycled with Tab/Shift+Tab. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.

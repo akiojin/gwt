@@ -2814,9 +2814,13 @@ fn active_session_content_area(model: &Model) -> Option<Rect> {
 }
 
 fn management_split(area: Rect) -> [Rect; 2] {
+    let management_percentage = if area.width >= 120 { 40 } else { 50 };
     let lr = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([
+            Constraint::Percentage(management_percentage),
+            Constraint::Percentage(100 - management_percentage),
+        ])
         .split(area);
     [lr[0], lr[1]]
 }
@@ -3541,24 +3545,31 @@ mod tests {
     }
 
     #[test]
-    fn management_split_uses_40_60_ratio() {
-        let area = Rect::new(0, 0, 100, 20);
-        let [management, session] = management_split(area);
+    fn management_split_uses_50_50_at_standard_width_and_40_60_at_wide_width() {
+        let standard = Rect::new(0, 0, 100, 20);
+        let [standard_management, standard_session] = management_split(standard);
+        assert_eq!(standard_management, Rect::new(0, 0, 50, 20));
+        assert_eq!(standard_session, Rect::new(50, 0, 50, 20));
 
-        assert_eq!(management, Rect::new(0, 0, 40, 20));
-        assert_eq!(session, Rect::new(40, 0, 60, 20));
+        let wide = Rect::new(0, 0, 120, 20);
+        let [wide_management, wide_session] = management_split(wide);
+        assert_eq!(wide_management, Rect::new(0, 0, 48, 20));
+        assert_eq!(wide_session, Rect::new(48, 0, 72, 20));
     }
 
     #[test]
-    fn active_session_content_area_uses_session_side_of_40_60_management_split() {
+    fn active_session_content_area_matches_responsive_management_split() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.active_focus = FocusPane::Terminal;
         model.terminal_size = (100, 24);
 
-        let area = active_session_content_area(&model).expect("active session content area");
+        let standard = active_session_content_area(&model).expect("active session content area");
+        assert_eq!(standard, Rect::new(51, 1, 48, 21));
 
-        assert_eq!(area, Rect::new(41, 1, 58, 21));
+        model.terminal_size = (120, 24);
+        let wide = active_session_content_area(&model).expect("active session content area");
+        assert_eq!(wide, Rect::new(49, 1, 70, 21));
     }
 
     #[test]

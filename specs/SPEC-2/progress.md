@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `187/187` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T09:08:13Z`
+- Task progress: `192/192` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T09:12:54Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -36,6 +36,7 @@
 - `Profiles` now follows that same contract in plain list mode: `Esc` returns to the terminal or dismisses a warn notification first, while create/edit/delete flows still keep `Esc=Cancel`.
 - The status-bar hints now expose that restored contract as well: Branches list and generic management lists both advertise `Esc:term` instead of hiding the return-to-terminal path.
 - Management focus cycling now matches the pane topology again: `Branches` still cycles through `BranchDetail`, while every other management tab stays on the two real surfaces (`Terminal` and `TabContent`).
+- The management/session split now responds to terminal width again: wide terminals keep the 40/60 old-TUI balance, while standard widths fall back to 50/50 so management chrome remains readable.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

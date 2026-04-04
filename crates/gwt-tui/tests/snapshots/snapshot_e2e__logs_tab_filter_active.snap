@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- gwt | test-repo | Log:pane | 0b┌ ▶ Shell ─────────────────────────────────────┐
-┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
-│ All │ Error │ Warn+ │ Info+ │││                                              │
-│ Enter: detail | r: refresh   ││                                              │
-│2026-04-03 02:43:22.996912 UTC││                                              │
-│2026-04-03 02:43:22.996912 UTC││                                              │
-│2026-04-03 02:43:22.996912 UTC││                                              │
-│2026-04-03 02:43:22.996912 UTC││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-└──────────────────────────────┘└──────────────────────────────────────────────┘
+ gwt | test-repo | Log:pane | 0b/0w     ┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │ PRs │ Pro┐│Session: Shell (80x24)                │
+│ All │ Error │ Warn+ │ Info+ │ Debug+ ││                                      │
+│ Enter: detail | r: refresh           ││                                      │
+│2026-04-03 02:43:22.996912 UTC [ERROR]││                                      │
+│2026-04-03 02:43:22.996912 UTC [WARN] ││                                      │
+│2026-04-03 02:43:22.996912 UTC [INFO] ││                                      │
+│2026-04-03 02:43:22.996912 UTC [DEBUG]││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
  ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:select  ←→:tab  C

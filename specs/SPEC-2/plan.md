@@ -253,6 +253,21 @@ management tabs actually have a second pane.
 
 28.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
+### Phase 29: Responsive Management Split (5 tasks)
+Restore a more usable old-TUI workspace balance across terminal sizes without reopening shared
+layout files outside `app.rs`.
+
+29.1: Responsive split contract (2 tasks)
+- Keep wide terminals (`>=120 cols`) on the `40/60` management/session split.
+- Fall back to `50/50` on standard and narrower widths so the management pane keeps enough room for tab chrome and context.
+
+29.2: Shared helper coverage (2 tasks)
+- Add focused coverage for the responsive split helper at standard and wide widths.
+- Add focused coverage proving `active_session_content_area()` follows the same helper at both widths.
+
+29.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 - Show the active management context in the same line so the header carries tab/focus meaning without widening the pane chrome.
 
 20.2: Focused render coverage (2 tasks)

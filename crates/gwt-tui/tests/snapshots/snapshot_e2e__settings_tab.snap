@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- gwt | test-repo | Set:pane | 0b┌ ▶ Shell ─────────────────────────────────────┐
-┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
-│ General │ Worktree │ Agent │ ││                                              │
-│No settings in this category  ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-└──────────────────────────────┘└──────────────────────────────────────────────┘
+ gwt | test-repo | Set:pane | 0b/0w     ┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │ PRs │ Pro┐│Session: Shell (80x24)                │
+│ General │ Worktree │ Agent │ Custom A││                                      │
+│No settings in this category          ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
  ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:select  ←→:tab  C

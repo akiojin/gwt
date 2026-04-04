@@ -319,3 +319,11 @@ screens to use.
 - [x] T207 [P] Write RED test: `Branches` still retains the old three-surface focus cycle and can enter `BranchDetail`.
 - [x] T208 Update `app.rs` management focus cycling so non-Branches tabs use a two-state `Terminal <-> TabContent` loop while Branches keeps the three-state loop.
 - [x] T209 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 29: Responsive Management Split
+
+- [x] T210 [P] Write RED test: `management_split()` uses `50/50` at standard width and `40/60` at wide width.
+- [x] T211 [P] Write RED test: `active_session_content_area()` matches the responsive management split at standard and wide widths.
+- [x] T212 Update `app.rs` management split helper so wide terminals (`>=120 cols`) keep `40/60` while narrower terminals fall back to `50/50`.
+- [x] T213 Refresh `SPEC-2` artifacts to describe the responsive split contract.
+- [x] T214 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

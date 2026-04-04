@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- gwt | test-repo | Set:term | 0b┌ ▶ Shell ─────────────────────────────────────┐
-┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
-│ General │ Worktree │ Agent │ ││                                              │
-│General Enter: edit | Space: t││                                              │
-│[T] Theme: dark               ││                                              │
-│[T] Language: en              ││                                              │
-│[B] Auto-save: true           ││                                              │
-│[T] Log level: info           ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-└──────────────────────────────┘└──────────────────────────────────────────────┘
+ gwt | test-repo | Set:term | 0b/0w     ┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │ PRs │ Pro┐│Session: Shell (80x24)                │
+│ General │ Worktree │ Agent │ Custom A││                                      │
+│General Enter: edit | Space: toggle bo││                                      │
+│[T] Theme: dark                       ││                                      │
+│[T] Language: en                      ││                                      │
+│[B] Auto-save: true                   ││                                      │
+│[T] Log level: info                   ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
  ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  Ctrl+G,g:management

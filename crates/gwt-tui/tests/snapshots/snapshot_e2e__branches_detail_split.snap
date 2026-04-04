@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- gwt | test-repo | Br:list | 4b/┌ ▶ Shell ─────────────────────────────────────┐
-┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
-│ View: All │ Sort: Default    ││                                              │
-│main ○ *                      ││                                              │
-│feature/api ○                 ││                                              │
-│feature/app-shell ○           ││                                              │
-│origin/release/1.0 ○          ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-└──────────────────────────────┘│                                              │
-┌ Overview │ SPECs │ Git │ Sess┐│                                              │
-│Overview                      ││                                              │
-│ Branch: main (HEAD)          ││                                              │
-│ Category: Main               ││                                              │
-│ Type: Local                  ││                                              │
-│                              ││                                              │
-│ Docker status                ││                                              │
-│ No containers found          ││                                              │
-│                              ││                                              │
-│                              ││                                              │
-└──────────────────────────────┘└──────────────────────────────────────────────┘
+ gwt | test-repo | Br:list | 4b/0w      ┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │ PRs │ Pro┐│Session: Shell (80x24)                │
+│ View: All │ Sort: Default            ││                                      │
+│main ○ *                              ││                                      │
+│feature/api ○                         ││                                      │
+│feature/app-shell ○                   ││                                      │
+│origin/release/1.0 ○                  ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘│                                      │
+┌ Overview │ SPECs │ Git │ Sessions  · ┐│                                      │
+│Overview                              ││                                      │
+│ Branch: main (HEAD)                  ││                                      │
+│ Category: Main                       ││                                      │
+│ Type: Local                          ││                                      │
+│                                      ││                                      │
+│ Docker status                        ││                                      │
+│ No containers found                  ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
  ▣ Shell  branch: main  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:move  ←→:tab  En
