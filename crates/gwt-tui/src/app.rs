@@ -635,7 +635,8 @@ fn load_specs(model: &mut Model) {
 }
 
 fn read_spec_body(repo_path: &Path, spec_id: &str) -> String {
-    std::fs::read_to_string(repo_path.join("specs").join(spec_id).join("spec.md")).unwrap_or_default()
+    std::fs::read_to_string(repo_path.join("specs").join(spec_id).join("spec.md"))
+        .unwrap_or_default()
 }
 
 fn spec_sort_key(spec_id: &str) -> (u32, &str) {
@@ -1110,7 +1111,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 return;
             }
 
-            if model.specs.search_active {
+            if model.specs.search_active && !model.specs.detail_view {
                 let msg = match key.code {
                     KeyCode::Esc => Some(SpecsMessage::SearchClear),
                     KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
@@ -1129,6 +1130,15 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     if !key.modifiers.contains(KeyModifiers::SHIFT) && !model.specs.detail_view =>
                 {
                     Some(SpecsMessage::ToggleDetail)
+                }
+                KeyCode::Char('e')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && model.specs.detail_view =>
+                {
+                    Some(SpecsMessage::StartSectionEdit)
+                }
+                KeyCode::Char('e') if model.specs.detail_view => Some(SpecsMessage::StartEdit),
+                KeyCode::Char('s') if model.specs.detail_view => {
+                    Some(SpecsMessage::StartStatusEdit)
                 }
                 KeyCode::Esc if model.specs.detail_view => Some(SpecsMessage::ToggleDetail),
                 KeyCode::Left if model.specs.detail_view => Some(SpecsMessage::PrevSection),
@@ -1153,10 +1163,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                         spec.title.clone(),
                         read_spec_body(&model.repo_path, &spec.id),
                     );
-                    update(
-                        model,
-                        Message::OpenWizardWithSpec(spec_context),
-                    );
+                    update(model, Message::OpenWizardWithSpec(spec_context));
                 }
             } else if key.code == KeyCode::Esc {
                 dismiss_warn_notification(model);
@@ -2504,7 +2511,9 @@ fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
-        ManagementTab::Specs => model.specs.search_active || model.specs.editing || model.specs.detail_editing,
+        ManagementTab::Specs => {
+            model.specs.search_active || model.specs.editing || model.specs.detail_editing
+        }
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -3996,12 +4005,98 @@ mod tests {
 
         route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
 
-        let wizard = model.wizard.as_ref().expect("wizard opened from spec detail");
+        let wizard = model
+            .wizard
+            .as_ref()
+            .expect("wizard opened from spec detail");
         let context = wizard.spec_context.as_ref().expect("spec context captured");
         assert_eq!(context.spec_id, "SPEC-5");
         assert_eq!(context.title, "Local SPEC Management");
         assert_eq!(context.spec_body, "# SPEC-5\n\nLocal SPEC detail body\n");
         assert_eq!(wizard.branch_name, "feature/spec-5-local-spec-management");
+    }
+
+    #[test]
+    fn route_key_to_management_specs_e_starts_phase_edit_from_detail() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-5".into(),
+            title: "Local SPEC Management".into(),
+            phase: "implementation".into(),
+            status: "in-progress".into(),
+        }];
+        model.specs.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        assert!(model.specs.editing);
+        assert_eq!(model.specs.edit_field, "implementation");
+    }
+
+    #[test]
+    fn route_key_to_management_specs_ctrl_e_starts_section_edit_from_detail() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.spec_root = Some(model.repo_path.clone());
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-5002".into(),
+            title: "Local SPEC Management".into(),
+            phase: "implementation".into(),
+            status: "in-progress".into(),
+        }];
+        model.specs.detail_view = true;
+        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5002")).expect("create spec dir");
+        std::fs::write(
+            model.repo_path.join("specs/SPEC-5002/spec.md"),
+            "# SPEC-5002\n\nSection edit body\n",
+        )
+        .expect("write spec body");
+
+        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::CONTROL));
+
+        assert!(model.specs.detail_editing);
+        assert!(model.specs.detail_edit_buffer.contains("Section edit body"));
+    }
+
+    #[test]
+    fn route_key_to_management_specs_s_starts_status_edit_from_detail() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-5".into(),
+            title: "Local SPEC Management".into(),
+            phase: "implementation".into(),
+            status: "in-progress".into(),
+        }];
+        model.specs.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        assert!(model.specs.editing);
+        assert_eq!(model.specs.edit_field, "in-progress");
+    }
+
+    #[test]
+    fn route_key_to_management_specs_search_to_detail_then_e_starts_phase_edit() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-5".into(),
+            title: "Local SPEC Management".into(),
+            phase: "implementation".into(),
+            status: "in-progress".into(),
+        }];
+        model.specs.search_active = true;
+        model.specs.search_query = "spec".into();
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        assert!(model.specs.detail_view);
+        assert!(!model.specs.search_active);
+        assert!(model.specs.editing);
+        assert_eq!(model.specs.edit_field, "implementation");
     }
 
     #[test]

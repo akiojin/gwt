@@ -32,6 +32,13 @@ pub struct SpecItem {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SpecEditTarget {
+    #[default]
+    Phase,
+    Status,
+}
+
 /// State for the specs screen.
 #[derive(Debug, Clone, Default)]
 pub struct SpecsState {
@@ -45,6 +52,8 @@ pub struct SpecsState {
     pub(crate) editing: bool,
     /// Buffer for the phase field being edited.
     pub(crate) edit_field: String,
+    /// Metadata field currently being edited.
+    edit_target: SpecEditTarget,
     /// Root directory used for spec file persistence.
     pub(crate) spec_root: Option<PathBuf>,
     /// Whether the detail section is being edited inline.
@@ -81,6 +90,13 @@ impl SpecsState {
     fn clamp_selected(&mut self) {
         let len = self.filtered_specs().len();
         super::clamp_index(&mut self.selected, len);
+    }
+}
+
+fn edit_target_label(target: SpecEditTarget) -> &'static str {
+    match target {
+        SpecEditTarget::Phase => "phase",
+        SpecEditTarget::Status => "status",
     }
 }
 
@@ -266,6 +282,8 @@ pub enum SpecsMessage {
     LaunchAgent,
     /// Start editing the phase of the selected spec.
     StartEdit,
+    /// Start editing the status of the selected spec.
+    StartStatusEdit,
     /// Save the current edit.
     SaveEdit,
     /// Cancel the current edit.
@@ -300,6 +318,7 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         SpecsMessage::ToggleDetail => {
             if !state.filtered_specs().is_empty() {
                 state.detail_view = !state.detail_view;
+                state.search_active = false;
                 if state.detail_view {
                     state.detail_section = 0;
                 }
@@ -355,6 +374,17 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
             if !state.editing {
                 if let Some(spec) = state.selected_spec() {
                     state.edit_field = spec.phase.clone();
+                    state.edit_target = SpecEditTarget::Phase;
+                    state.editing = true;
+                    state.save_error = None;
+                }
+            }
+        }
+        SpecsMessage::StartStatusEdit => {
+            if !state.editing {
+                if let Some(spec) = state.selected_spec() {
+                    state.edit_field = spec.status.clone();
+                    state.edit_target = SpecEditTarget::Status;
                     state.editing = true;
                     state.save_error = None;
                 }
@@ -364,26 +394,35 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
             if state.editing {
                 let selected_id = state.selected_spec().map(|spec| spec.id.clone());
                 if let Some(id) = selected_id {
+                    let field_name = match state.edit_target {
+                        SpecEditTarget::Phase => "phase",
+                        SpecEditTarget::Status => "status",
+                    };
                     if let Some(root) = spec_root_for_state(state) {
                         if let Err(err) =
-                            update_spec_metadata_field(root, &id, "phase", &state.edit_field)
+                            update_spec_metadata_field(root, &id, field_name, &state.edit_field)
                         {
                             state.save_error = Some(err);
                             return;
                         }
                     }
                     if let Some(s) = state.specs.iter_mut().find(|s| s.id == id) {
-                        s.phase = state.edit_field.clone();
+                        match state.edit_target {
+                            SpecEditTarget::Phase => s.phase = state.edit_field.clone(),
+                            SpecEditTarget::Status => s.status = state.edit_field.clone(),
+                        }
                     }
                 }
                 state.save_error = None;
                 state.editing = false;
                 state.edit_field.clear();
+                state.edit_target = SpecEditTarget::Phase;
             }
         }
         SpecsMessage::CancelEdit => {
             state.editing = false;
             state.edit_field.clear();
+            state.edit_target = SpecEditTarget::Phase;
             state.save_error = None;
         }
         SpecsMessage::EditInput(ch) => {
@@ -588,12 +627,12 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
     // Header section
     let header_text = if let Some(err) = &state.save_error {
         format!(
-            " {} - {}\n Phase: {} | Status: {}\n Save error: {}\n Press Enter to go back | Tab/Shift+Tab: sections",
+            " {} - {}\n Phase: {} | Status: {}\n Save error: {}\n Esc: back | ←→: sections | e: edit phase | s: edit status | Ctrl+e: edit file",
             spec.id, spec.title, spec.phase, spec.status, err
         )
     } else {
         format!(
-            " {} - {}\n Phase: {} | Status: {}\n Press Enter to go back | Tab/Shift+Tab: sections",
+            " {} - {}\n Phase: {} | Status: {}\n Esc: back | ←→: sections | e: edit phase | s: edit status | Ctrl+e: edit file",
             spec.id, spec.title, spec.phase, spec.status,
         )
     };
@@ -611,10 +650,16 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
             "{}\n_\nEnter: save | Esc: cancel | Backspace: delete",
             state.detail_edit_buffer
         )
+    } else if state.editing {
+        format!(
+            "Editing {}:\n{}_\nEnter: save | Esc: cancel | Backspace: delete",
+            edit_target_label(state.edit_target),
+            state.edit_field
+        )
     } else if let Some(root) = spec_root_for_state(state) {
         read_spec_markdown_file(root, &spec.id, section_name).unwrap_or_else(|_| {
             format!(
-                "Unable to load {} for {}\n\nPress 'e' to create or replace this file.",
+                "Unable to load {} for {}\n\nPress Ctrl+e to create or replace this file.",
                 section_name, spec.id
             )
         })
@@ -639,6 +684,17 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::fs;
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
 
     fn sample_specs() -> Vec<SpecItem> {
         vec![
@@ -989,6 +1045,30 @@ mod tests {
     }
 
     #[test]
+    fn render_detail_status_edit_shows_prompt_and_buffer() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.detail_view = true;
+        state.editing = true;
+        state.edit_target = SpecEditTarget::Status;
+        state.edit_field = "in-progress".to_string();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Editing status"));
+        assert!(text.contains("in-progress_"));
+        assert!(text.contains("Enter: save | Esc: cancel | Backspace: delete"));
+    }
+
+    #[test]
     fn search_clamps_selected_when_filtering() {
         let mut state = SpecsState::default();
         state.specs = sample_specs();
@@ -1219,6 +1299,32 @@ mod tests {
         update(&mut state, SpecsMessage::SaveEdit);
         assert!(!state.editing);
         assert_eq!(state.specs[0].phase, "done");
+    }
+
+    #[test]
+    fn save_edit_updates_status() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-102");
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-102".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartStatusEdit);
+        state.edit_field = "in-progress".to_string();
+        update(&mut state, SpecsMessage::SaveEdit);
+
+        let metadata =
+            fs::read_to_string(super::spec_metadata_path(dir.path(), "SPEC-102")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(parsed["status"], "in-progress");
+        assert_eq!(state.specs[0].status, "in-progress");
+        assert!(state.save_error.is_none());
     }
 
     #[test]
