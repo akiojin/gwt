@@ -1,5 +1,23 @@
 # Lessons Learned
 
+## 2026-04-04 — fix: footer mnemonic 変更は標準幅 snapshot で可視性を確認する
+
+### 事象
+
+Terminal footer の mnemonic を増やした際、220 桁の render test では通っていたが、実際の `80x24`
+snapshot では末尾が切れて `Ctrl+G,g` 以降が見えていなかった。
+
+### 原因
+
+- 文字列の存在確認だけを wide render に対して書き、標準幅の footer 可視性を RED で固定していなかった。
+- status context / repo path / hints の 1 行合成で、標準幅では hint が切れる前提を考慮していなかった。
+
+### 再発防止策
+
+1. footer / header / pane title など 1 行 chrome を変更するときは、最低でも `80x24` 相当の render test か snapshot を先に RED で追加する。
+2. wide-only の `contains(...)` テストで「見えている」を主張しない。
+3. status context と hint を同居させる変更では、compact notation か width-aware compaction を最初から比較対象に入れる。
+
 ## L001: 実装前ワークフロー（仕様策定 + TDD）の省略
 
 - **事象**: プランの実装指示を受けた際、CLAUDE.md の実装前ワークフロー（GitHub Issue gwt-spec 作成 → TDD RED 確認）を省略し、直接実装に着手した

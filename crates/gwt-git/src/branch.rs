@@ -255,19 +255,37 @@ mod tests {
     #[test]
     fn parse_divergence_zero() {
         let info = parse_divergence_output("0\t0\n").unwrap();
-        assert_eq!(info, DivergenceInfo { ahead: 0, behind: 0 });
+        assert_eq!(
+            info,
+            DivergenceInfo {
+                ahead: 0,
+                behind: 0
+            }
+        );
     }
 
     #[test]
     fn parse_divergence_ahead_behind() {
         let info = parse_divergence_output("3\t5\n").unwrap();
-        assert_eq!(info, DivergenceInfo { ahead: 3, behind: 5 });
+        assert_eq!(
+            info,
+            DivergenceInfo {
+                ahead: 3,
+                behind: 5
+            }
+        );
     }
 
     #[test]
     fn parse_divergence_no_trailing_newline() {
         let info = parse_divergence_output("1\t2").unwrap();
-        assert_eq!(info, DivergenceInfo { ahead: 1, behind: 2 });
+        assert_eq!(
+            info,
+            DivergenceInfo {
+                ahead: 1,
+                behind: 2
+            }
+        );
     }
 
     #[test]

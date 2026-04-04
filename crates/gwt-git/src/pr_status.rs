@@ -175,9 +175,15 @@ where
         }
     }
 
-    let rest = run_gh(repo_path, &["api", "repos/{owner}/{repo}/pulls?state=open&per_page=20"])?;
+    let rest = run_gh(
+        repo_path,
+        &["api", "repos/{owner}/{repo}/pulls?state=open&per_page=20"],
+    )?;
     if !rest.success {
-        return Err(GwtError::Git(format!("gh api pulls: {}", rest.stderr.trim())));
+        return Err(GwtError::Git(format!(
+            "gh api pulls: {}",
+            rest.stderr.trim()
+        )));
     }
     parse_rest_pr_list_json(&rest.stdout)
 }
@@ -628,7 +634,10 @@ mod tests {
 
         assert_eq!(
             calls,
-            vec!["pr list", "api repos/{owner}/{repo}/pulls?state=open&per_page=20"]
+            vec![
+                "pr list",
+                "api repos/{owner}/{repo}/pulls?state=open&per_page=20"
+            ]
         );
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].number, 21);
