@@ -13,6 +13,8 @@
 - Completion tracking now separates execution-task completion from pending
   reviewer acceptance.
 - Voice input now has a guarded hotkey path in the TUI, including the disabled-config no-op coverage.
+- Voice input now routes start/stop/transcribe through a shared runtime seam in
+  `gwt-tui`, and toggle/stop error paths are covered by focused unit tests.
 - File paste now shell-quotes paths before PTY injection so spaces and shell metacharacters survive copy/paste safely.
 - File paste now also parses `file://` and `file://localhost/` clipboard payloads, improving macOS-style file URL handling when the clipboard exposes file URLs as text.
 - AI branch suggestion parsing now enforces `3..=5` git-safe names before the wizard displays them.
@@ -22,7 +24,8 @@
   verification evidence for the currently implemented slices.
 
 ## Next
-- Finish or confirm the voice backend path and remaining recorder lifecycle gaps.
+- Replace the stub Qwen3-ASR backend with a real recorder implementation, then
+  close manual voice walkthrough evidence.
 - Close the remaining reviewer runs for the now-complete paste and branch-name flows.
 - Run repeatable reviewer walkthroughs for all three input-extension flows.
 - Keep the SPEC artifacts aligned as those remaining execution slices land.

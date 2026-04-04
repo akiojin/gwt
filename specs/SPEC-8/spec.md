@@ -3,9 +3,10 @@
 ## Background
 
 gwt-tui extends terminal input with voice transcription (Qwen3-ASR), file
-paste from clipboard, and AI-assisted branch naming. The voice backend still
-lacks its end-to-end recorder path, but the TUI hotkey, disabled-config
-guard, status indicator, and PTY injection path now exist. The AI branch
+paste from clipboard, and AI-assisted branch naming. The voice path now
+routes start/stop/transcribe through a shared TUI runtime seam, but the
+concrete Qwen3-ASR backend remains a stub that returns model-loading errors.
+The AI branch
 naming flow is live in the wizard, including explicit manual-entry fallback in
 the suggestion list and normalization to `3..=5` git-safe names. File paste
 now shell-quotes injected paths and parses `file://` clipboard payloads for
@@ -13,7 +14,7 @@ safer PTY input.
 
 ## User Stories
 
-### US-1: Dictate Commands via Voice Input (P1) -- NOT IMPLEMENTED
+### US-1: Dictate Commands via Voice Input (P1) -- PARTIALLY IMPLEMENTED
 
 As a developer, I want to dictate commands using voice input so that I can interact with the terminal hands-free.
 

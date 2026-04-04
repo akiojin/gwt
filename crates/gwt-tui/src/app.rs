@@ -13,7 +13,7 @@ use gwt_agent::{
     Session as AgentSession, SessionMode, VersionCache,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
-use gwt_config::{AISettings, Settings};
+use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
 use ratatui::{
@@ -318,10 +318,12 @@ pub fn update(model: &mut Model, msg: Message) {
             handle_confirm_message(model, msg);
         }
         Message::Voice(msg) => {
-            let voice_enabled = Settings::load()
-                .map(|settings| settings.voice.enabled)
-                .unwrap_or(false);
-            handle_voice_message(model, msg, voice_enabled);
+            let voice_config = Settings::load()
+                .map(|settings| settings.voice)
+                .unwrap_or_default();
+            let mut runtime = std::mem::take(&mut model.voice_runtime);
+            handle_voice_message_with_config_and_runtime(model, msg, &voice_config, &mut runtime);
+            model.voice_runtime = runtime;
         }
         Message::Initialization(msg) => {
             use screens::initialization::InitializationMessage;
@@ -1275,6 +1277,116 @@ fn handle_voice_message(model: &mut Model, msg: VoiceInputMessage, voice_enabled
     crate::input::voice::update(&mut model.voice, msg);
     if let Some(text) = transcription.filter(|text| !text.trim().is_empty()) {
         push_input_to_active_session(model, text.into_bytes());
+    }
+}
+
+trait VoiceRuntime {
+    fn configure(&mut self, config: &VoiceConfig);
+    fn start_recording(&mut self) -> Result<(), String>;
+    fn stop_and_transcribe(&mut self) -> Result<String, String>;
+    fn reset(&mut self);
+}
+
+impl VoiceRuntime for crate::model::VoiceRuntimeState {
+    fn configure(&mut self, config: &VoiceConfig) {
+        crate::model::VoiceRuntimeState::configure(self, config);
+    }
+
+    fn start_recording(&mut self) -> Result<(), String> {
+        crate::model::VoiceRuntimeState::start_recording(self)
+    }
+
+    fn stop_and_transcribe(&mut self) -> Result<String, String> {
+        crate::model::VoiceRuntimeState::stop_and_transcribe(self)
+    }
+
+    fn reset(&mut self) {
+        crate::model::VoiceRuntimeState::reset(self);
+    }
+}
+
+#[cfg(test)]
+fn handle_voice_message_with_runtime<R>(
+    model: &mut Model,
+    msg: VoiceInputMessage,
+    voice_enabled: bool,
+    runtime: &mut R,
+) where
+    R: VoiceRuntime,
+{
+    let voice_config = VoiceConfig {
+        enabled: voice_enabled,
+        ..VoiceConfig::default()
+    };
+    handle_voice_message_with_config_and_runtime(model, msg, &voice_config, runtime);
+}
+
+fn handle_voice_message_with_config_and_runtime<R>(
+    model: &mut Model,
+    msg: VoiceInputMessage,
+    voice_config: &VoiceConfig,
+    runtime: &mut R,
+) where
+    R: VoiceRuntime,
+{
+    runtime.configure(voice_config);
+
+    match msg {
+        VoiceInputMessage::StartRecording if !voice_config.enabled => {}
+        VoiceInputMessage::StartRecording
+            if model.voice.status == crate::input::voice::VoiceStatus::Recording =>
+        {
+            complete_voice_transcription(model, runtime);
+        }
+        VoiceInputMessage::StartRecording => match runtime.start_recording() {
+            Ok(()) => {
+                crate::input::voice::update(&mut model.voice, VoiceInputMessage::StartRecording)
+            }
+            Err(err) => {
+                runtime.reset();
+                crate::input::voice::update(
+                    &mut model.voice,
+                    VoiceInputMessage::TranscriptionError(err),
+                );
+            }
+        },
+        VoiceInputMessage::StopRecording => {
+            if model.voice.status == crate::input::voice::VoiceStatus::Recording {
+                complete_voice_transcription(model, runtime);
+            } else {
+                runtime.reset();
+                crate::input::voice::update(
+                    &mut model.voice,
+                    VoiceInputMessage::TranscriptionError("Not currently recording".into()),
+                );
+            }
+        }
+        other => handle_voice_message(model, other, voice_config.enabled),
+    }
+}
+
+fn complete_voice_transcription<R>(model: &mut Model, runtime: &mut R)
+where
+    R: VoiceRuntime,
+{
+    crate::input::voice::update(&mut model.voice, VoiceInputMessage::StopRecording);
+    match runtime.stop_and_transcribe() {
+        Ok(text) => {
+            crate::input::voice::update(
+                &mut model.voice,
+                VoiceInputMessage::TranscriptionResult(text.clone()),
+            );
+            if !text.trim().is_empty() {
+                push_input_to_active_session(model, text.into_bytes());
+            }
+        }
+        Err(err) => {
+            runtime.reset();
+            crate::input::voice::update(
+                &mut model.voice,
+                VoiceInputMessage::TranscriptionError(err),
+            );
+        }
     }
 }
 
@@ -2520,6 +2632,49 @@ mod tests {
         Model::new(PathBuf::from("/tmp/test"))
     }
 
+    #[derive(Debug)]
+    struct FakeVoiceRuntime {
+        start_result: Result<(), String>,
+        stop_result: Result<String, String>,
+    }
+
+    impl FakeVoiceRuntime {
+        fn success(transcript: &str) -> Self {
+            Self {
+                start_result: Ok(()),
+                stop_result: Ok(transcript.to_string()),
+            }
+        }
+
+        fn start_error(message: &str) -> Self {
+            Self {
+                start_result: Err(message.to_string()),
+                stop_result: Ok(String::new()),
+            }
+        }
+
+        fn stop_error(message: &str) -> Self {
+            Self {
+                start_result: Ok(()),
+                stop_result: Err(message.to_string()),
+            }
+        }
+    }
+
+    impl VoiceRuntime for FakeVoiceRuntime {
+        fn configure(&mut self, _config: &VoiceConfig) {}
+
+        fn start_recording(&mut self) -> Result<(), String> {
+            self.start_result.clone()
+        }
+
+        fn stop_and_transcribe(&mut self) -> Result<String, String> {
+            self.stop_result.clone()
+        }
+
+        fn reset(&mut self) {}
+    }
+
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
             code,
@@ -3056,7 +3211,6 @@ mod tests {
             screens::pr_dashboard::PrState::Merged
         );
     }
-
 
     #[test]
     fn update_error_queue() {
@@ -3888,6 +4042,86 @@ mod tests {
         assert_eq!(
             model.voice.status,
             crate::input::voice::VoiceStatus::Recording
+        );
+    }
+
+    #[test]
+    fn handle_voice_start_recording_with_runtime_error_sets_error_state() {
+        let mut model = test_model();
+
+        handle_voice_message_with_runtime(
+            &mut model,
+            VoiceInputMessage::StartRecording,
+            true,
+            &mut FakeVoiceRuntime::start_error("backend missing"),
+        );
+
+        assert_eq!(model.voice.status, crate::input::voice::VoiceStatus::Error);
+        assert_eq!(
+            model.voice.error_message.as_deref(),
+            Some("backend missing")
+        );
+    }
+
+    #[test]
+    fn handle_voice_start_recording_toggle_stops_and_injects_transcript() {
+        let mut model = test_model();
+        let mut runtime = FakeVoiceRuntime::success("git status");
+
+        handle_voice_message_with_runtime(
+            &mut model,
+            VoiceInputMessage::StartRecording,
+            true,
+            &mut runtime,
+        );
+        assert_eq!(
+            model.voice.status,
+            crate::input::voice::VoiceStatus::Recording
+        );
+
+        handle_voice_message_with_runtime(
+            &mut model,
+            VoiceInputMessage::StartRecording,
+            true,
+            &mut runtime,
+        );
+
+        assert_eq!(model.voice.status, crate::input::voice::VoiceStatus::Idle);
+        assert_eq!(model.voice.buffer, "git status");
+        let pending = model
+            .pending_pty_inputs
+            .pop_front()
+            .expect("pty input queued");
+        assert_eq!(pending.bytes, b"git status".to_vec());
+    }
+
+    #[test]
+    fn handle_voice_stop_recording_with_runtime_error_sets_error_state() {
+        let mut model = test_model();
+        let mut runtime = FakeVoiceRuntime::stop_error("transcription failed");
+
+        handle_voice_message_with_runtime(
+            &mut model,
+            VoiceInputMessage::StartRecording,
+            true,
+            &mut runtime,
+        );
+        assert_eq!(
+            model.voice.status,
+            crate::input::voice::VoiceStatus::Recording
+        );
+
+        handle_voice_message_with_runtime(
+            &mut model,
+            VoiceInputMessage::StopRecording,
+            true,
+            &mut runtime,
+        );
+
+        assert_eq!(model.voice.status, crate::input::voice::VoiceStatus::Error);
+        assert_eq!(
+            model.voice.error_message.as_deref(),
+            Some("transcription failed")
         );
     }
 

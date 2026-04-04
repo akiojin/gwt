@@ -27,6 +27,35 @@ pub trait VoiceBackend {
     }
 }
 
+impl<T> VoiceBackend for Box<T>
+where
+    T: VoiceBackend + ?Sized,
+{
+    fn start_recording(&mut self) -> Result<(), VoiceError> {
+        (**self).start_recording()
+    }
+
+    fn stop_recording(&mut self) -> Result<Vec<u8>, VoiceError> {
+        (**self).stop_recording()
+    }
+
+    fn transcribe(&self, audio: &[u8]) -> Result<String, VoiceError> {
+        (**self).transcribe(audio)
+    }
+
+    fn is_available(&self) -> bool {
+        (**self).is_available()
+    }
+
+    fn max_recording_seconds(&self) -> Option<u32> {
+        (**self).max_recording_seconds()
+    }
+
+    fn silence_timeout_seconds(&self) -> Option<u32> {
+        (**self).silence_timeout_seconds()
+    }
+}
+
 /// Errors produced by voice operations.
 #[derive(Debug, thiserror::Error)]
 pub enum VoiceError {

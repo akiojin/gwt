@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use gwt_config::VoiceConfig;
+use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
 use serde::{Deserialize, Serialize};
 
 use crate::input::voice::VoiceInputState;
@@ -25,6 +27,71 @@ use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
 use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
 use gwt_skills::{register_builtins, SkillRegistry};
+
+type BoxedVoiceBackend = Box<dyn VoiceBackend + Send>;
+
+fn build_voice_backend(config: &VoiceConfig) -> BoxedVoiceBackend {
+    if config.enabled && config.model_path.is_some() {
+        Box::new(Qwen3AsrRecorder::new())
+    } else {
+        Box::new(NoOpVoiceBackend::new())
+    }
+}
+
+/// Runtime voice session state shared across start/stop messages.
+#[derive(Default)]
+pub(crate) struct VoiceRuntimeState {
+    config: VoiceConfig,
+    session: Option<VoiceSession<BoxedVoiceBackend>>,
+}
+
+impl VoiceRuntimeState {
+    pub(crate) fn configure(&mut self, config: &VoiceConfig) {
+        if self.session.is_none() {
+            self.config = config.clone();
+        }
+    }
+
+    pub(crate) fn start_recording(&mut self) -> Result<(), String> {
+        if self.session.is_none() {
+            self.session = Some(VoiceSession::new(build_voice_backend(&self.config)));
+        }
+
+        let result = self
+            .session
+            .as_mut()
+            .expect("voice session initialized")
+            .start_recording()
+            .map_err(|err| err.to_string());
+
+        if result.is_err() {
+            self.session = None;
+        }
+
+        result
+    }
+
+    pub(crate) fn stop_and_transcribe(&mut self) -> Result<String, String> {
+        let Some(mut session) = self.session.take() else {
+            return Err("Not currently recording".to_string());
+        };
+
+        session.stop_and_transcribe().map_err(|err| err.to_string())
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.session = None;
+    }
+}
+
+impl std::fmt::Debug for VoiceRuntimeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoiceRuntimeState")
+            .field("config", &self.config)
+            .field("has_session", &self.session.is_some())
+            .finish()
+    }
+}
 
 /// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +398,8 @@ pub struct Model {
     pub(crate) pending_launch_config: Option<gwt_agent::LaunchConfig>,
     /// Voice input state.
     pub(crate) voice: VoiceInputState,
+    /// Runtime voice session used to bridge start/stop/transcribe.
+    pub(crate) voice_runtime: VoiceRuntimeState,
     /// Buffered PTY input generated from forwarded key events.
     pub(crate) pending_pty_inputs: VecDeque<PendingPtyInput>,
     /// Initialization screen state (present when ActiveLayer::Initialization).
@@ -385,6 +454,7 @@ impl Model {
             pending_session_conversion: None,
             pending_launch_config: None,
             voice: VoiceInputState::default(),
+            voice_runtime: VoiceRuntimeState::default(),
             pending_pty_inputs: VecDeque::new(),
             initialization: None,
         }

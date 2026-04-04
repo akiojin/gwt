@@ -78,6 +78,6 @@
 
 ### 3.3 Integration Verification
 
-- [x] **T-047**: Manual verification: voice input records, transcribes, and injects text into PTY. (obsolete: no real ASR backend yet; VoiceSession flow verified by unit tests)
+- [x] **T-047**: Manual verification: voice input records, transcribes, and injects text into PTY. (runtime/session wiring is now verified by unit tests in `gwt-tui`, but concrete Qwen3-ASR capture remains pending real backend availability)
 - [x] **T-048**: Manual verification: file paste extracts paths from clipboard and injects into PTY. (obsolete: covered by unit tests on ClipboardFilePaste and PTY injection)
 - [x] **T-049**: Manual verification: wizard displays branch name suggestions and allows selection. (obsolete: covered by unit tests on BranchNameSuggester and wizard rendering)
