@@ -322,6 +322,22 @@ return to the terminal when no tab-specific search/detail/edit flow owns the key
 25.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 26: Profiles Esc Uses Supplemental Fallback in List Mode (6 tasks)
+Close the remaining tab-specific hole in the management-pane escape contract by making `Profiles`
+use the generic supplemental fallback only when the tab is in plain list mode.
+
+26.1: Mode-aware escape contract (3 tasks)
+- In `Profiles` list mode, `Esc` returns focus to `Terminal` when no warn notification is pending.
+- In `Profiles` list mode, a visible warn notification still consumes `Esc` for dismissal first.
+- In `Profiles` create/edit/delete flows, `Esc` continues to cancel the current flow instead of changing focus.
+
+26.2: Focused routing coverage (2 tasks)
+- Add focused coverage for `Profiles` list-mode terminal-return behavior.
+- Add focused coverage for warn-dismiss priority and create-mode cancel priority.
+
+26.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

@@ -26,7 +26,8 @@
 23. Open an Issue detail and a PR detail, then press `Esc` in each case and confirm the detail pane closes back to the list while preserving the current selection.
 24. Open a log entry detail, press `Esc`, and confirm the detail pane closes back to the list while the selected log entry remains highlighted.
 25. Move focus into a management list/pane without an open detail or active search, press `Esc`, and confirm focus returns to the terminal pane while the visible tab and current row stay intact.
-26. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+26. Switch to `Profiles` in plain list mode, press `Esc`, and confirm focus returns to the terminal; then enter create mode and confirm `Esc` still cancels the form instead of changing focus.
+27. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -47,6 +48,7 @@
 - `Issues` and `PR Dashboard` detail panes now behave like temporary drill-downs instead of traps: `Esc` closes them back to the list without losing the current selection.
 - The `Logs` detail pane follows that same drill-down contract, so `Esc` returns to the log list instead of forcing another Enter or leaking into warn-dismiss behavior.
 - Management list/pane focus now has the matching supplemental escape hatch: once no detail/search/edit flow owns `Esc`, it returns focus to the terminal instead of trapping the user in the management surface.
+- `Profiles` no longer breaks that rule in plain list mode: `Esc` returns to the terminal there as well, while create/edit/delete still use `Esc` as a form cancel key.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

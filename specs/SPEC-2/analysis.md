@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `171/171` completed items after closing Phase 25 for management-pane `Esc` fallback parity.
+- Task traceability snapshot: `tasks.md` currently records `177/177` completed items after closing Phase 26 for `Profiles` list-mode escape parity.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -34,3 +34,4 @@ Status: CLEAR
 - Notes: Phase 23 brings `Issues` and `PR Dashboard` detail panes into parity with the documented `Esc` contract so they close back to the list instead of falling through to warn-dismiss behavior.
 - Notes: Phase 24 closes the remaining `Logs` detail gap so `Esc` now closes that drill-down as well, instead of behaving inconsistently with the other management detail views.
 - Notes: Phase 25 completes the management-pane side of that supplemental contract: once search/detail/edit flows are out of the way, plain `Esc` now returns focus to `Terminal`, while warn notifications still keep dismissal priority.
+- Notes: Phase 26 closes the one remaining tab-specific hole in that contract: `Profiles` list mode now uses the same supplemental `Esc` fallback, while create/edit/delete flows still keep `Esc=Cancel`.

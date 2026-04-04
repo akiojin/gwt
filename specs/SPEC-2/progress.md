@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `171/171` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T08:53:21Z`
+- Task progress: `177/177` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T08:58:10Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -33,6 +33,7 @@
 - `Issues` and `PR Dashboard` detail panes now honor the documented `Esc` contract as well: `Esc` closes the detail view and returns to the list without changing the selected row.
 - The `Logs` detail pane now matches that same contract: `Esc` closes the detail drill-down and returns to the list without disturbing the selected entry.
 - Management list/pane focus now has the matching supplemental escape hatch: unclaimed `Esc` returns focus to `Terminal`, while warn notifications still consume `Esc` for dismissal first.
+- `Profiles` now follows that same contract in plain list mode: `Esc` returns to the terminal or dismisses a warn notification first, while create/edit/delete flows still keep `Esc=Cancel`.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

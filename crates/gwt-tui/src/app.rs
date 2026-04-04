@@ -1407,7 +1407,9 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
                 KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
                 KeyCode::Char('d') => Some(ProfilesMessage::StartDelete),
-                KeyCode::Esc => Some(ProfilesMessage::Cancel),
+                KeyCode::Esc if model.profiles.mode != screens::profiles::ProfileMode::List => {
+                    Some(ProfilesMessage::Cancel)
+                }
                 _ => None,
             };
             if let Some(m) = msg {
@@ -6014,6 +6016,50 @@ mod tests {
 
         assert_eq!(model.active_focus, FocusPane::TabContent);
         assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_esc_without_warn_returns_terminal_focus_in_list_mode() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.profiles.mode, screens::profiles::ProfileMode::List);
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_esc_with_warn_still_dismisses_warning_in_list_mode() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(model.current_notification.is_none());
+        assert_eq!(model.profiles.mode, screens::profiles::ProfileMode::List);
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_esc_in_create_mode_still_cancels_form() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+        model.profiles.mode = screens::profiles::ProfileMode::Create;
+        model.profiles.input_name = "demo".into();
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert_eq!(model.profiles.mode, screens::profiles::ProfileMode::List);
+        assert!(model.profiles.input_name.is_empty());
     }
 
     #[test]

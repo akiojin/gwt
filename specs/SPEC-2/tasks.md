@@ -294,3 +294,12 @@ screens to use.
 - [x] T191 Update `app.rs` management fallback routing so unclaimed `Esc` uses the supplemental-surface contract (`warn dismiss` first, otherwise `Terminal` focus).
 - [x] T192 Refresh `SPEC-2` artifacts to describe management-pane `Esc` parity.
 - [x] T193 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 26: Profiles Esc Uses Supplemental Fallback in List Mode
+
+- [x] T194 [P] Write RED test: in `Profiles` list mode, `Esc` returns focus to `Terminal` when no warn notification is pending.
+- [x] T195 [P] Write RED test: in `Profiles` list mode, a visible warn notification still consumes `Esc` for dismissal first.
+- [x] T196 [P] Write RED test: in `Profiles` create mode, `Esc` still cancels the form instead of changing focus.
+- [x] T197 Update `app.rs` Profiles routing so `Esc` is mode-aware: list mode uses the supplemental fallback, while non-list modes keep `Cancel`.
+- [x] T198 Refresh `SPEC-2` artifacts to describe Profiles list-mode `Esc` parity.
+- [x] T199 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
