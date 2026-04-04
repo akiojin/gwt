@@ -38,6 +38,16 @@
 - [x] IMPL: Search results display with id, title, relevance score (obsolete: moved to Branch Detail; search handled by gwt-spec-search skill)
 - [x] IMPL: Keybinding (`/`) to activate search mode (obsolete: moved to Branch Detail; search handled by gwt-spec-search skill)
 
+### 1.4 Ranked Local Search Replacement
+
+- [x] TEST: Ranked search prefers artifact-body hits over metadata-only hits in the Specs tab
+- [x] TEST: `selected_spec()` resolves through search-result order so detail and launch flows keep working
+- [x] TEST: Search results render relevance score and snippet in the Specs list
+- [x] TEST: Search start is ignored while Specs detail is open
+- [x] IMPL: Replace metadata-only filtering with ranked local search across metadata plus artifact bodies
+- [x] IMPL: Render ranked search results with score and snippet in the Specs list
+- [x] IMPL: Ignore `/` search start while Specs detail is active
+
 ## Phase 2: Agent Launch from SPEC Detail
 
 ### 2.1 Context Builder [P]

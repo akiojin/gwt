@@ -24,6 +24,15 @@ const DETAIL_SECTIONS: [&str; 6] = [
     "research.md",
     "data-model.md",
 ];
+const SEARCH_ARTIFACTS: [&str; 7] = [
+    "spec.md",
+    "plan.md",
+    "tasks.md",
+    "analysis.md",
+    "research.md",
+    "data-model.md",
+    "quickstart.md",
+];
 
 const PHASE_OPTIONS: [&str; 4] = ["design", "planning", "implementation", "done"];
 const STATUS_OPTIONS: [&str; 5] = ["draft", "open", "in-progress", "blocked", "done"];
@@ -42,6 +51,13 @@ enum SpecEditTarget {
     #[default]
     Phase,
     Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpecSearchResult {
+    spec_id: String,
+    score: u32,
+    snippet: String,
 }
 
 /// State for the specs screen.
@@ -80,18 +96,41 @@ pub struct SpecsState {
 }
 
 impl SpecsState {
+    fn search_results(&self) -> Vec<SpecSearchResult> {
+        let query = self.search_query.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let tokens = tokenize_search_query(query);
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+
+        let root = spec_root_for_state(self);
+        let mut results = self
+            .specs
+            .iter()
+            .filter_map(|spec| build_search_result(root, spec, query, &tokens))
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.spec_id.cmp(&right.spec_id))
+        });
+        results
+    }
+
     /// Return specs filtered by the current search query.
     pub fn filtered_specs(&self) -> Vec<&SpecItem> {
-        let query_lower = self.search_query.to_lowercase();
-        self.specs
-            .iter()
-            .filter(|s| {
-                query_lower.is_empty()
-                    || s.id.to_lowercase().contains(&query_lower)
-                    || s.title.to_lowercase().contains(&query_lower)
-                    || s.phase.to_lowercase().contains(&query_lower)
-                    || s.status.to_lowercase().contains(&query_lower)
-            })
+        if self.search_query.trim().is_empty() {
+            return self.specs.iter().collect();
+        }
+
+        self.search_results()
+            .into_iter()
+            .filter_map(|result| self.specs.iter().find(|spec| spec.id == result.spec_id))
             .collect()
     }
 
@@ -103,9 +142,105 @@ impl SpecsState {
 
     /// Clamp selected index to filtered length.
     fn clamp_selected(&mut self) {
-        let len = self.filtered_specs().len();
+        let len = if self.search_query.trim().is_empty() {
+            self.specs.len()
+        } else {
+            self.search_results().len()
+        };
         super::clamp_index(&mut self.selected, len);
     }
+}
+
+fn tokenize_search_query(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+fn count_matches(haystack: &str, query: &str, tokens: &[String]) -> usize {
+    let lowered = haystack.to_lowercase();
+    let mut score = usize::from(lowered.contains(&query.to_lowercase()));
+    for token in tokens {
+        if lowered.contains(token) {
+            score += 1;
+        }
+    }
+    score
+}
+
+fn first_matching_line(content: &str, query: &str, tokens: &[String]) -> Option<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && count_matches(line, query, tokens) > 0)
+        .map(ToString::to_string)
+}
+
+fn truncate_search_snippet(snippet: &str, max_chars: usize) -> String {
+    let mut chars = snippet.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn build_search_result(
+    root: Option<&Path>,
+    spec: &SpecItem,
+    query: &str,
+    tokens: &[String],
+) -> Option<SpecSearchResult> {
+    let mut score = 0u32;
+    let mut snippet = None;
+
+    let metadata_sources = [
+        ("id", spec.id.as_str(), 120u32),
+        ("title", spec.title.as_str(), 100u32),
+        ("phase", spec.phase.as_str(), 40u32),
+        ("status", spec.status.as_str(), 40u32),
+    ];
+
+    for (label, value, weight) in metadata_sources {
+        let matches = count_matches(value, query, tokens);
+        if matches > 0 {
+            score += weight * matches as u32;
+            snippet.get_or_insert_with(|| format!("{label}: {value}"));
+        }
+    }
+
+    if let Some(root) = root {
+        for artifact in SEARCH_ARTIFACTS {
+            let Ok(content) = read_spec_markdown_file(root, &spec.id, artifact) else {
+                continue;
+            };
+            let matches = count_matches(&content, query, tokens);
+            if matches == 0 {
+                continue;
+            }
+            score += 90 * matches as u32;
+            if snippet.is_none() {
+                if let Some(line) = first_matching_line(&content, query, tokens) {
+                    snippet = Some(format!(
+                        "{artifact}: {}",
+                        truncate_search_snippet(&line, 72)
+                    ));
+                }
+            }
+        }
+    }
+
+    if score == 0 {
+        return None;
+    }
+
+    Some(SpecSearchResult {
+        spec_id: spec.id.clone(),
+        score,
+        snippet: snippet.unwrap_or_else(|| "metadata match".to_string()),
+    })
 }
 
 fn edit_target_label(target: SpecEditTarget) -> &'static str {
@@ -499,7 +634,9 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
             }
         }
         SpecsMessage::SearchStart => {
-            state.search_active = true;
+            if !state.detail_view {
+                state.search_active = true;
+            }
         }
         SpecsMessage::SearchInput(ch) => {
             if state.search_active {
@@ -796,6 +933,7 @@ fn render_header(state: &SpecsState, frame: &mut Frame, area: Rect) {
 /// Render the spec list.
 fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_specs();
+    let search_results = state.search_results();
 
     if filtered.is_empty() {
         super::render_empty_list(frame, area, !state.specs.is_empty(), "specs");
@@ -830,19 +968,49 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
                 Style::default().fg(Color::Magenta)
             };
 
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{:<10} ", spec.id),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(spec.title.clone(), style),
-                Span::styled(phase_display, phase_style),
-                Span::styled(
-                    format!(" ({})", spec.status),
-                    Style::default().fg(status_color),
-                ),
-            ]);
-            ListItem::new(line)
+            let title_line = if let Some(result) = search_results.get(idx) {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:<10} ", spec.id),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(spec.title.clone(), style),
+                    Span::styled(phase_display, phase_style),
+                    Span::styled(
+                        format!(" ({}) ", spec.status),
+                        Style::default().fg(status_color),
+                    ),
+                    Span::styled(
+                        format!("score {}", result.score),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:<10} ", spec.id),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(spec.title.clone(), style),
+                    Span::styled(phase_display, phase_style),
+                    Span::styled(
+                        format!(" ({})", spec.status),
+                        Style::default().fg(status_color),
+                    ),
+                ])
+            };
+
+            if let Some(result) = search_results.get(idx) {
+                ListItem::new(vec![
+                    title_line,
+                    Line::from(Span::styled(
+                        format!("  {}", result.snippet),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ])
+            } else {
+                ListItem::new(title_line)
+            }
         })
         .collect();
 
@@ -1141,6 +1309,29 @@ mod tests {
         .unwrap();
     }
 
+    fn write_search_fixture(
+        root: &std::path::Path,
+        spec_id: &str,
+        title: &str,
+        artifact: &str,
+        body: &str,
+    ) {
+        write_spec_fixture(root, spec_id);
+        let spec_dir = super::spec_dir(root, spec_id);
+        fs::write(
+            spec_dir.join("metadata.json"),
+            serde_json::json!({
+                "id": spec_id,
+                "title": title,
+                "phase": "draft",
+                "status": "open"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(spec_dir.join(artifact), body).unwrap();
+    }
+
     #[test]
     fn default_state() {
         let state = SpecsState::default();
@@ -1254,6 +1445,15 @@ mod tests {
     }
 
     #[test]
+    fn search_start_ignored_while_detail_view_is_open() {
+        let mut state = SpecsState::default();
+        state.detail_view = true;
+
+        update(&mut state, SpecsMessage::SearchStart);
+        assert!(!state.search_active);
+    }
+
+    #[test]
     fn search_input_appends() {
         let mut state = SpecsState::default();
         update(&mut state, SpecsMessage::SearchStart);
@@ -1355,12 +1555,94 @@ mod tests {
     }
 
     #[test]
+    fn filtered_specs_ranks_artifact_hits_above_metadata_only_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        write_search_fixture(
+            dir.path(),
+            "SPEC-201",
+            "General cleanup",
+            "analysis.md",
+            "## Findings\n\nVoice transcript cache misses block startup.\n",
+        );
+        write_search_fixture(
+            dir.path(),
+            "SPEC-202",
+            "Voice improvements",
+            "analysis.md",
+            "## Findings\n\nGeneral cleanup work.\n",
+        );
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![
+            SpecItem {
+                id: "SPEC-202".to_string(),
+                title: "Voice improvements".to_string(),
+                phase: "draft".to_string(),
+                status: "open".to_string(),
+            },
+            SpecItem {
+                id: "SPEC-201".to_string(),
+                title: "General cleanup".to_string(),
+                phase: "draft".to_string(),
+                status: "open".to_string(),
+            },
+        ];
+        state.search_query = "voice transcript".to_string();
+
+        let filtered = state.filtered_specs();
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].id, "SPEC-201");
+        assert_eq!(filtered[1].id, "SPEC-202");
+    }
+
+    #[test]
     fn selected_spec_returns_correct() {
         let mut state = SpecsState::default();
         state.specs = sample_specs();
         state.selected = 2;
         let spec = state.selected_spec().unwrap();
         assert_eq!(spec.id, "SPEC-3");
+    }
+
+    #[test]
+    fn selected_spec_uses_search_result_order() {
+        let dir = tempfile::tempdir().unwrap();
+        write_search_fixture(
+            dir.path(),
+            "SPEC-301",
+            "Unrelated title",
+            "analysis.md",
+            "## Findings\n\nSemantic ranking should prefer this transcript recovery spec.\n",
+        );
+        write_search_fixture(
+            dir.path(),
+            "SPEC-302",
+            "Transcript tweaks",
+            "analysis.md",
+            "## Findings\n\nMinor cleanup only.\n",
+        );
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![
+            SpecItem {
+                id: "SPEC-302".to_string(),
+                title: "Transcript tweaks".to_string(),
+                phase: "draft".to_string(),
+                status: "open".to_string(),
+            },
+            SpecItem {
+                id: "SPEC-301".to_string(),
+                title: "Unrelated title".to_string(),
+                phase: "draft".to_string(),
+                status: "open".to_string(),
+            },
+        ];
+        state.search_query = "transcript recovery".to_string();
+
+        let spec = state.selected_spec().unwrap();
+        assert_eq!(spec.id, "SPEC-301");
     }
 
     #[test]
@@ -1859,6 +2141,42 @@ mod tests {
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("• bullet item"));
         assert!(!text.contains("- bullet item"));
+    }
+
+    #[test]
+    fn render_search_results_shows_score_and_snippet() {
+        let dir = tempfile::tempdir().unwrap();
+        write_search_fixture(
+            dir.path(),
+            "SPEC-401",
+            "Search fixture",
+            "analysis.md",
+            "## Findings\n\nVoice transcript cache misses block startup.\n",
+        );
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-401".to_string(),
+            title: "Search fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.search_query = "voice transcript".to_string();
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("score "));
+        assert!(text.contains("analysis.md"));
+        assert!(text.contains("Voice transcript cache misses"));
     }
 
     // ---- LaunchAgent tests ----

@@ -2,24 +2,24 @@
 
 ## Phase 1: Semantic Search
 
-**Goal:** Enable semantic search over local SPEC files, including persisted readiness artifacts, using ChromaDB.
+**Goal:** Enable ranked free-text search over local SPEC files, including persisted readiness artifacts, directly inside the Specs tab.
 
 ### Approach
 
-- Implement `action_index_specs` to read all SPEC artifacts, including `analysis.md`, and index them in ChromaDB
-- Implement `action_search_specs` to query ChromaDB with free-text and return ranked results
-- Add search UI to the SPEC-management entry point (search input + results list)
+- Reuse the existing Specs search input and detail/list flow
+- Rank matches across `metadata.json` fields plus local artifact bodies
+- Show score + snippet inline in the Specs list without adding a background index
 
 ### Components
 
-1. **Indexing** — Scan `specs/SPEC-{id}/` directories, extract text from `spec.md`, `plan.md`, `tasks.md`, and `analysis.md`, upsert into ChromaDB collection
-2. **Search query** — Accept free-text, query ChromaDB, return top-N results with relevance score
-3. **Search UI** — Input field at top of SPECs tab, results replace list temporarily
+1. **Query tokenizer** — Split free-text input into case-insensitive tokens
+2. **Relevance scorer** — Rank matches across id/title/phase/status and local artifact files
+3. **Search UI** — Keep the existing search header, replace the list with ranked results showing score + snippet
 
 ### Key Decisions
 
-- ChromaDB is used for vector storage because it runs locally without external dependencies
-- Index is rebuilt on demand (not auto-updated) to avoid background overhead
+- The initial slice stays inside `screens/specs.rs` and does not add a new dependency or background worker
+- Relevance is good-enough local ranking, not embedding-based semantic similarity
 
 ## Phase 2: Agent Launch from SPEC Detail
 
@@ -62,6 +62,5 @@
 
 ## Dependencies
 
-- ChromaDB — required for semantic search (Phase 1)
 - Agent launch infrastructure — existing wizard pattern from Issue-based launch
 - Archived SPEC-1785 — reference for agent launch design

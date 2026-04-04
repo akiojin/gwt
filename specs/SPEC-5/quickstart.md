@@ -10,7 +10,7 @@
 7. On the `spec.md` detail tab, press `E` and confirm the raw `spec.md` file still opens as a full-file edit buffer.
 8. On a non-`spec.md` artifact tab, press `Ctrl+e` and confirm the raw artifact file still opens as a full-file edit buffer.
 9. Move between `analysis.md`, `plan.md`, and `tasks.md` in read-only detail and confirm headings/lists render with markdown styling instead of raw plaintext bullets.
-10. Track semantic search as the remaining execution step.
+10. Return to the Specs list, press `/`, enter a free-text query that exists only in an artifact body, and confirm ranked results show a relevance score plus snippet while `Enter` still opens the matched SPEC detail.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-tui management_tab_labels -- --nocapture`
@@ -44,6 +44,10 @@
 - `cargo test -p gwt-tui render_detail_analysis_md_uses_markdown_bullet_rendering -- --nocapture`
 - `cargo test -p gwt-tui render_detail_spec_md_section_uses_markdown_bullet_rendering -- --nocapture`
 - `cargo test -p gwt-tui render_lines_with_prelude_inserts_separator_before_markdown -- --nocapture`
+- `cargo test -p gwt-tui filtered_specs_ranks_artifact_hits_above_metadata_only_hits -- --nocapture`
+- `cargo test -p gwt-tui selected_spec_uses_search_result_order -- --nocapture`
+- `cargo test -p gwt-tui render_search_results_shows_score_and_snippet -- --nocapture`
+- `cargo test -p gwt-tui search_start_ignored_while_detail_view_is_open -- --nocapture`
 - `cargo test -p gwt-tui --lib`
 
 ## Expected Result
@@ -51,5 +55,6 @@
 - The reviewer sees that phase/status metadata edits now use a constrained selection menu, and that selected-section `spec.md` edits plus raw active-file edits are all reachable from Specs detail.
 - The reviewer sees that `spec.md` section edits are scoped to the selected `##` section, survive duplicate headings, ignore fenced-code pseudo-headings, and fail loudly instead of appending a duplicate section when the target section disappears.
 - The reviewer sees that read-only artifact detail renders headings and list bullets through the shared markdown widget instead of plain text.
-- Any remaining gap is logged against the still-partial SPEC requirements rather than against stale unchecked task counts.
+- The reviewer sees that free-text Specs search ranks local metadata and artifact-body hits, shows score + snippet, and keeps detail navigation intact.
+- Any remaining gap is logged against completion-gate review rather than stale execution gaps.
 - No step should be treated as complete unless the code path is actually reachable today.

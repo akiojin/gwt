@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `43/43` completed
+- Task traceability snapshot: `tasks.md` currently records `50/50` completed
   items.
 - Notes: The SPEC now reflects the restored live-shell Specs entry point and includes persisted `analysis.md` in the local artifact model.
 - Notes: The shell can now load local metadata, open detail, return with `Esc`, prefill the wizard from the selected SPEC, pass `spec.md` body into the wizard context, derive a title-based branch seed, and expose `analysis.md` as a detail tab.
@@ -28,10 +28,11 @@ Status: CLEAR
 - Notes: Read-only Specs detail now routes artifact content through the shared
   markdown renderer, so `analysis.md`, the other artifact tabs, and selected
   `spec.md` section bodies render headings and bullet lists consistently.
-- Notes: The remaining implementation gap called out in `spec.md` is semantic
-  search.
-  Completion-gate review remains future work after those gaps are either
-  implemented or explicitly de-scoped.
+- Notes: Specs search now ranks local metadata and artifact-body matches,
+  preserves detail/launch selection through search-result order, renders score
+  and snippet inline in the list, and ignores `/` while detail view is open.
+- Notes: Completion-gate review remains future work, but there is no remaining
+  code-side execution gap tracked in `spec.md`.
 
 ## Next
 - Run completion-gate review and reviewer evidence.
