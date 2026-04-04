@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. The management shell now exposes a live Specs tab again, and the shell can load local `metadata.json` entries, open detail, and launch the wizard with SPEC id/title/spec.md context plus a title-derived branch seed. The live shell now exposes phase edit (`e`), status edit (`s`), and raw active-file edit (`Ctrl+e`) from SPEC detail, but semantic search, markdown-rendered detail parity, and section-scoped markdown editing remain incomplete.
+gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. The management shell now exposes a live Specs tab again, and the shell can load local `metadata.json` entries, open detail, and launch the wizard with SPEC id/title/spec.md context plus a title-derived branch seed. The live shell now exposes phase edit (`e`), status edit (`s`), raw active-file edit (`Ctrl+e`) for non-`spec.md` artifacts, and section-scoped `spec.md` editing by selecting a `##` section with `Up/Down` before pressing `Ctrl+e`. Semantic search and markdown-rendered detail parity remain incomplete.
 
 ## User Stories
 
@@ -80,7 +80,7 @@ As a developer, I want to generate a new SPEC through a guided wizard so that I 
 | FR-005 | Shift+Enter on SPEC opens agent launch wizard with SPEC context | P1 | Implemented |
 | FR-006 | Agent launch auto-suggests branch name from SPEC title | P1 | Implemented |
 | FR-007 | SPEC edit: update phase/status in metadata.json | P1 | Partially Implemented |
-| FR-008 | SPEC edit: inline edit of spec.md sections | P1 | Partially Implemented |
+| FR-008 | SPEC edit: inline edit of spec.md sections | P1 | Implemented |
 | FR-009 | SpecKit Wizard: Clarify -> Specify -> Plan -> Tasks -> Done | P0 | Implemented |
 
 ## Non-Functional Requirements
@@ -95,6 +95,7 @@ As a developer, I want to generate a new SPEC through a guided wizard so that I 
 - Semantic search uses ChromaDB for vector embeddings; indexing is triggered by `action_index_specs` and searching by `action_search_specs`
 - Agent launch from SPEC detail follows the same wizard pattern as Issue-based agent launch (reference archived SPEC-1785 for details)
 - SPEC editing writes directly to the filesystem; no intermediate database
+- `spec.md` section editing targets the first-level body sections (`## ...`) and preserves nested `### ...` content within the selected section
 - `analysis.md` is a persisted local artifact and must stay aligned with the current readiness judgment
 
 ## Success Criteria
