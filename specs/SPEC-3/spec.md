@@ -199,8 +199,8 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-017**: `ModelSelect`, `ReasoningLevel`, `ExecutionMode`,
   `SkipPermissions`, and `VersionSelect` use old-TUI-style row formatting
   with descriptive text and version-list scroll indicators.
-- **FR-018**: `QuickStart` renders old-TUI-style grouped history rows with
-  a compact branch-name context line, colored per-agent headers, two
+- **FR-018**: `QuickStart` renders old-TUI-style history rows with
+  a compact branch-name context line, colored per-agent action rows, two
   selectable rows per entry (`Resume` / `Start new`), and a trailing
   `Choose different settings` action.
 - **FR-019**: `AgentSelect` renders old-TUI-style existing-branch context and
@@ -232,8 +232,8 @@ As a developer, I want to convert an existing session to a different agent type 
   compact branch-name context line instead of reserving an extra spacer row,
   so the popup matches the old-TUI information density.
 - **FR-028**: `QuickStart` does not insert blank spacer rows between agent
-  groups; the next agent header follows directly after the previous group's
-  `Start new` action while preserving grouped headers and the final action.
+  sections; the next agent-labeled action row follows directly after the
+  previous `Start new` action while preserving the final action.
 - **FR-029**: The final `Choose different settings` action follows the last
   grouped `Start new` row directly without an extra separator line, so the
   `QuickStart` popup keeps the denser old-TUI rhythm.
@@ -250,9 +250,9 @@ As a developer, I want to convert an existing session to a different agent type 
   Agent (Model)`) and the body omits the duplicated grouped header so the
   first action row starts directly below the compact branch-name context
   line.
-- **FR-034**: When `QuickStart` has multiple persisted entries, the grouped
-  headers render the agent label only while the compact model-only summary
-  remains reserved for the single-entry title variant.
+- **FR-034**: When `QuickStart` has multiple persisted entries, each action
+  row inlines the agent label while the compact model-only summary remains
+  reserved for the single-entry title variant.
 - **FR-035**: In multi-entry `QuickStart`, resume session ID snippets are
   shown only on the currently selected `Resume` row so unselected rows stay
   visually compact.

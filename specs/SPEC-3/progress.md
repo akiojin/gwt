@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `140/140` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:25:22Z`
+- Task progress: `143/143` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:36:35Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -78,8 +78,8 @@
 - Single-entry `QuickStart` popups now promote the lone agent/model summary
   into the popup title and start the action rows directly below
   the compact branch-name context line, while multi-entry history keeps the
-  grouped header rows.
-- Multi-entry `QuickStart` grouped headers now render agent labels only,
+  generic `Quick Start` title.
+- Multi-entry `QuickStart` now inlines agent labels into each action row,
   leaving the more detailed model/reasoning summary to the single-entry title
   variant and keeping grouped history visually denser.
 - Multi-entry `QuickStart` now shows the short resume-session ID hint only on
@@ -100,6 +100,9 @@
   changing grouped history ordering.
 - Single-entry `QuickStart` title promotion now keeps `Agent (Model)` only,
   dropping the rebuilt reasoning copy while preserving compact body actions.
+- Multi-entry `QuickStart` now inlines the agent label into each action row,
+  so grouped history no longer depends on standalone header rows while
+  keeping the compact `Resume` / `Start new` copy and selected resume hint.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

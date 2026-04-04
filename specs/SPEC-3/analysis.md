@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `134/134` completed items.
+- Task traceability snapshot: `tasks.md` now records `143/143` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -60,9 +60,9 @@ Status: CLEAR
 - Notes: Single-entry Quick Start now promotes its agent/model summary into
   the popup title and omits the duplicated grouped header row from the body,
   while multi-entry grouped history keeps the generic `Quick Start` title.
-- Notes: Multi-entry Quick Start grouped headers now render the agent label
-  only, which keeps the grouped list denser without affecting the
-  single-entry title summary contract.
+- Notes: Multi-entry Quick Start now inlines the agent label into each action
+  row, which keeps the grouped list denser without affecting the single-entry
+  title summary contract.
 - Notes: Multi-entry Quick Start now reserves the short resume-session ID
   hint for the selected `Resume` row, leaving unselected rows on the plain
   label to reduce visual noise.
@@ -83,6 +83,10 @@ Status: CLEAR
 - Notes: Single-entry `QuickStart` title promotion now keeps only `Agent
   (Model)` and no longer repeats the rebuilt reasoning copy, which tightens
   the popup chrome without changing body behavior.
+- Notes: Multi-entry `QuickStart` now inlines the agent label into each
+  action row, which removes the final standalone grouped-header chrome while
+  preserving compact `Resume` / `Start new` copy and the selected-row
+  resume-session hint.
 
 ## Next
 - `gwt-spec-implement`

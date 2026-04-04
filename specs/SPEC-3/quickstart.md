@@ -15,8 +15,9 @@
    `SkipPermissions` render descriptive old-TUI rows and `VersionSelect`
    shows scroll indicators when the list overflows.
 7. Launch from an existing branch that has persisted session history and
-   verify `Quick Start` shows the compact branch-name context line, grouped
-   agent headers, `Resume`, `Start new`, and `Choose different settings`.
+   verify `Quick Start` shows the compact branch-name context line,
+   agent-labeled action rows, `Resume`, `Start new`, and
+   `Choose different settings`.
 8. Launch from an existing branch without persisted session history and
    verify the wizard starts at `BranchAction` instead of showing a stub
    Quick Start placeholder.
@@ -73,8 +74,9 @@
    rows immediately below the compact branch-name context line without a
    duplicated grouped header row.
 30. Verify a branch with multiple persisted Quick Start entries now renders
-   grouped headers as agent labels only (`Codex`, `Claude Code`, etc.) while
-   keeping the generic `Quick Start` title.
+   action rows that inline the agent labels (`Codex Resume`,
+   `Claude Code Start new`, etc.) while keeping the generic `Quick Start`
+   title.
 31. Verify a branch with multiple persisted Quick Start entries now shows the
    short resume-session ID snippet only on the selected `Resume` row, while
    unselected resume rows keep the plain label.
@@ -141,9 +143,9 @@
 - Single-entry Quick Start popups now move the lone agent/model summary into
   the popup title so the body can start directly with the available actions
   under the compact branch-name context line.
-- Multi-entry Quick Start popups now keep grouped headers agent-only so the
-  grouped list remains denser and the extra model/reasoning detail does not
-  repeat across every group.
+- Multi-entry Quick Start popups now inline the agent label into each action
+  row so the grouped list remains denser and the extra model/reasoning detail
+  does not repeat across every group.
 - Multi-entry Quick Start resume rows now reserve the short session ID hint
   for the currently selected row, so the grouped history stays visually
   quieter when several tools can resume.
@@ -162,5 +164,8 @@
   unchanged.
 - Single-entry Quick Start title promotion now keeps `Agent (Model)` only,
   dropping the rebuilt reasoning copy while leaving body actions unchanged.
+- Multi-entry Quick Start now inlines agent labels into each action row
+  instead of rendering standalone grouped headers, keeping grouped history
+  dense while preserving compact `Resume` / `Start new` copy.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

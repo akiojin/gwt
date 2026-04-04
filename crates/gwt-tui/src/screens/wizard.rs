@@ -610,24 +610,19 @@ impl WizardState {
                 let single_entry = self.quick_start_entries.len() == 1;
                 for (entry_index, entry) in self.quick_start_entries.iter().enumerate() {
                     let resume_index = entry_index * 2;
-                    let resume_label = "Resume";
-                    let start_new_label = "Start new";
                     let show_resume_hint = single_entry || self.selected == resume_index;
-                    let resume = if let Some(session_id) = &entry.resume_session_id {
-                        if show_resume_hint {
-                            format!(
-                                "{} ({}...)",
-                                resume_label,
-                                &session_id[..session_id.len().min(8)]
-                            )
-                        } else {
-                            resume_label.to_string()
-                        }
-                    } else {
-                        resume_label.to_string()
-                    };
-                    options.push(resume);
-                    options.push(start_new_label.to_string());
+                    options.push(quick_start_action_label(
+                        entry,
+                        "Resume",
+                        show_resume_hint,
+                        !single_entry,
+                    ));
+                    options.push(quick_start_action_label(
+                        entry,
+                        "Start new",
+                        false,
+                        !single_entry,
+                    ));
                 }
                 if !self.quick_start_entries.is_empty() {
                     options.push("Choose different settings".to_string());
@@ -1444,8 +1439,24 @@ fn quick_start_title_summary(entry: &QuickStartEntry) -> String {
     )
 }
 
-fn quick_start_group_header(entry: &QuickStartEntry) -> String {
-    entry.tool_label.clone()
+fn quick_start_action_label(
+    entry: &QuickStartEntry,
+    action_label: &str,
+    show_resume_hint: bool,
+    include_agent_label: bool,
+) -> String {
+    let mut label = String::new();
+    if include_agent_label {
+        label.push_str(&entry.tool_label);
+        label.push(' ');
+    }
+    label.push_str(action_label);
+    if action_label == "Resume" && show_resume_hint {
+        if let Some(session_id) = &entry.resume_session_id {
+            label.push_str(&format!(" ({}...)", &session_id[..session_id.len().min(8)]));
+        }
+    }
+    label
 }
 
 fn popup_title(state: &WizardState) -> String {
@@ -1492,61 +1503,33 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let single_entry = state.quick_start_entries.len() == 1;
 
     for (entry_index, entry) in state.quick_start_entries.iter().enumerate() {
-        if !single_entry {
-            let header = quick_start_group_header(entry);
-            items.push(
-                ListItem::new(truncate_with_ellipsis(&header, list_area.width as usize))
-                    .style(Style::default().fg(quick_start_agent_color(&entry.agent_id))),
-            );
-        }
-
         let resume_index = entry_index * 2;
-        let resume_label = "Resume";
         let show_resume_hint = single_entry || state.selected == resume_index;
-        let resume_text = if let Some(session_id) = &entry.resume_session_id {
-            if show_resume_hint {
-                format!(
-                    "{}{} ({}...)",
-                    if state.selected == resume_index {
-                        "> "
-                    } else {
-                        "  "
-                    },
-                    resume_label,
-                    &session_id[..session_id.len().min(8)]
-                )
+        let resume_text = format!(
+            "{}{}",
+            if state.selected == resume_index {
+                "> "
             } else {
-                format!(
-                    "{}{}",
-                    if state.selected == resume_index {
-                        "> "
-                    } else {
-                        "  "
-                    },
-                    resume_label
-                )
-            }
-        } else {
-            format!(
-                "{}{}",
-                if state.selected == resume_index {
-                    "> "
-                } else {
-                    "  "
-                },
-                resume_label
-            )
-        };
+                "  "
+            },
+            quick_start_action_label(entry, "Resume", show_resume_hint, !single_entry)
+        );
         items.push(
             ListItem::new(truncate_with_ellipsis(
                 &resume_text,
                 list_area.width as usize,
             ))
-            .style(wizard_row_style(state.selected == resume_index)),
+            .style(if single_entry {
+                wizard_row_style(state.selected == resume_index)
+            } else {
+                wizard_row_style_with_fg(
+                    state.selected == resume_index,
+                    quick_start_agent_color(&entry.agent_id),
+                )
+            }),
         );
 
         let start_new_index = resume_index + 1;
-        let start_new_label = "Start new";
         let start_new_text = format!(
             "{}{}",
             if state.selected == start_new_index {
@@ -1554,14 +1537,21 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             } else {
                 "  "
             },
-            start_new_label
+            quick_start_action_label(entry, "Start new", false, !single_entry)
         );
         items.push(
             ListItem::new(truncate_with_ellipsis(
                 &start_new_text,
                 list_area.width as usize,
             ))
-            .style(wizard_row_style(state.selected == start_new_index)),
+            .style(if single_entry {
+                wizard_row_style(state.selected == start_new_index)
+            } else {
+                wizard_row_style_with_fg(
+                    state.selected == start_new_index,
+                    quick_start_agent_color(&entry.agent_id),
+                )
+            }),
         );
     }
 
@@ -2582,10 +2572,10 @@ mod tests {
         assert!(text.contains("Quick Start"));
         assert!(text.contains("feature/test"));
         assert!(!text.contains("Branch: feature/test"));
-        assert!(text.contains("Codex"));
-        assert!(text.contains("> Resume (sess-123...)"));
-        assert!(text.contains("  Start new"));
-        assert!(text.contains("Claude Code"));
+        assert!(text.contains("> Codex Resume (sess-123...)"));
+        assert!(text.contains("  Codex Start new"));
+        assert!(text.contains("  Claude Code Resume"));
+        assert!(text.contains("  Claude Code Start new"));
         assert!(text.contains("Choose different settings"));
     }
 
@@ -2628,7 +2618,7 @@ mod tests {
     }
 
     #[test]
-    fn render_quick_start_multi_entry_keeps_generic_title_and_group_headers() {
+    fn render_quick_start_multi_entry_keeps_generic_title_and_agent_labeled_rows() {
         let mut state = WizardState::default();
         state.step = WizardStep::QuickStart;
         state.has_quick_start = true;
@@ -2639,12 +2629,12 @@ mod tests {
 
         assert!(text.contains("Quick Start"));
         assert!(!text.contains("Quick Start —"));
-        assert!(text.contains("Codex"));
-        assert!(text.contains("Claude Code"));
+        assert!(text.contains("Codex Resume"));
+        assert!(text.contains("Claude Code Resume"));
     }
 
     #[test]
-    fn render_quick_start_multi_entry_group_headers_use_agent_name_only() {
+    fn render_quick_start_multi_entry_inlines_agent_labels_into_action_rows() {
         let mut state = WizardState::default();
         state.step = WizardStep::QuickStart;
         state.has_quick_start = true;
@@ -2653,10 +2643,10 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("Codex"));
-        assert!(text.contains("Claude Code"));
-        assert!(!text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
-        assert!(!text.contains("Claude Code (sonnet)"));
+        assert!(text.contains("> Codex Resume (sess-123...)"));
+        assert!(text.contains("  Codex Start new"));
+        assert!(text.contains("  Claude Code Resume"));
+        assert!(text.contains("  Claude Code Start new"));
     }
 
     #[test]
@@ -2689,9 +2679,9 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("> Resume (sess-123...)"));
-        assert!(!text.contains("  Resume (sess-abc...)"));
-        assert!(text.contains("  Resume"));
+        assert!(text.contains("> Codex Resume (sess-123...)"));
+        assert!(!text.contains("  Claude Code Resume (sess-abc...)"));
+        assert!(text.contains("  Claude Code Resume"));
     }
 
     #[test]
@@ -2704,8 +2694,10 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("> Resume (sess-123...)"));
-        assert!(text.contains("  Start new"));
+        assert!(text.contains("> Codex Resume (sess-123...)"));
+        assert!(text.contains("  Codex Start new"));
+        assert!(text.contains("  Claude Code Resume"));
+        assert!(text.contains("  Claude Code Start new"));
         assert!(!text.contains("Start new session"));
         assert!(!text.contains("Resume session (sess-123...)"));
     }
@@ -2720,7 +2712,7 @@ mod tests {
 
         let buf = render_buffer(&state, 100, 24);
         let (_, branch_y) = find_text_position(&buf, "feature/test").unwrap();
-        let (_, header_y) = find_text_position(&buf, "Codex").unwrap();
+        let (_, header_y) = find_text_position(&buf, "Codex Resume").unwrap();
 
         assert_eq!(
             header_y,
@@ -2753,13 +2745,13 @@ mod tests {
 
         let options = state.current_options();
 
-        assert_eq!(options[0], "Resume (sess-123...)");
-        assert_eq!(options[1], "Start new");
+        assert_eq!(options[0], "Codex Resume (sess-123...)");
+        assert_eq!(options[1], "Codex Start new");
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("Resume"));
-        assert!(text.contains("Start new"));
+        assert!(text.contains("Codex Resume"));
+        assert!(text.contains("Codex Start new"));
     }
 
     #[test]
@@ -2773,10 +2765,10 @@ mod tests {
 
         let options = state.current_options();
 
-        assert_eq!(options[0], "Resume (sess-123...)");
-        assert_eq!(options[1], "Start new");
-        assert_eq!(options[2], "Resume");
-        assert_eq!(options[3], "Start new");
+        assert_eq!(options[0], "Codex Resume (sess-123...)");
+        assert_eq!(options[1], "Codex Start new");
+        assert_eq!(options[2], "Claude Code Resume");
+        assert_eq!(options[3], "Claude Code Start new");
         assert_eq!(options[4], "Choose different settings");
     }
 

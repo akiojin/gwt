@@ -358,6 +358,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the single-entry title drops the
    reasoning copy while compact action rows remain unchanged.
 
+### Phase 36: Multi-Entry QuickStart Inline Agent Rows
+
+1. Remove standalone agent header rows from multi-entry `QuickStart` so each
+   visible action row carries its own agent label and color.
+2. Preserve single-entry title promotion, selection semantics, and the final
+   footer action while only collapsing multi-entry grouped chrome into
+   denser agent-labeled rows.
+3. Add focused RED/GREEN coverage proving render and `current_options()`
+   both use agent-labeled multi-entry rows.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

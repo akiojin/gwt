@@ -253,3 +253,9 @@
 - [x] T132 [P] Write RED test: single-entry `QuickStart` title uses `Agent (Model)` without the rebuilt reasoning copy.
 - [x] T133 Update `wizard.rs` so single-entry title promotion keeps only the model-level summary while body actions stay compact.
 - [x] T134 Verify focused title-compaction tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 36: Multi-Entry QuickStart Inline Agent Rows
+
+- [x] T135 [P] Write RED test: multi-entry `QuickStart` renders agent-labeled action rows without standalone header rows.
+- [x] T136 Update `wizard.rs` so multi-entry render and `current_options()` inline the agent label into each action row while preserving selection semantics.
+- [x] T137 Verify focused inline-agent-row tests, broad workspace checks, and refresh SPEC-3 artifacts.
