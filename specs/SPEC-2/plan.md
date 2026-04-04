@@ -277,6 +277,21 @@ requested management tab from Terminal does not yank focus out of the main works
 22.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 23: Esc-Back for Issues and PR Detail Views (5 tasks)
+Restore the old-TUI expectation that read-only detail panes inside management are temporary drill
+downs that close with `Esc` instead of trapping the user until another action key is used.
+
+23.1: Detail-close contract (2 tasks)
+- `Esc` closes `Issues` detail view and returns to the list without changing the selected row.
+- `Esc` closes `PR Dashboard` detail view and returns to the list without changing the selected row.
+
+23.2: Focused routing coverage (2 tasks)
+- Add focused coverage for `Issues` detail closing via `Esc`.
+- Add focused coverage for `PR Dashboard` detail closing via `Esc`.
+
+23.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

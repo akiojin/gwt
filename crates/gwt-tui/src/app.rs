@@ -1275,6 +1275,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::issues::update(&mut model.issues, m);
+            } else if key.code == KeyCode::Esc && model.issues.detail_view {
+                screens::issues::update(&mut model.issues, IssuesMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
                 dismiss_warn_notification(model);
             }
@@ -1385,6 +1387,11 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     model,
                     key,
                     fetch_pr_dashboard_detail_report,
+                );
+            } else if key.code == KeyCode::Esc && model.pr_dashboard.detail_view {
+                screens::pr_dashboard::update(
+                    &mut model.pr_dashboard,
+                    screens::pr_dashboard::PrDashboardMessage::ToggleDetail,
                 );
             } else if key.code == KeyCode::Esc {
                 dismiss_warn_notification(model);
@@ -4654,6 +4661,52 @@ mod tests {
     }
 
     #[test]
+    fn route_key_to_management_pr_dashboard_esc_closes_detail_view_and_preserves_selection() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::PrDashboard;
+        screens::pr_dashboard::update(
+            &mut model.pr_dashboard,
+            screens::pr_dashboard::PrDashboardMessage::SetPrs(vec![
+                screens::pr_dashboard::PrItem {
+                    number: 41,
+                    title: "First".into(),
+                    state: screens::pr_dashboard::PrState::Open,
+                    ci_status: "pending".into(),
+                    mergeable: true,
+                    review_status: "review_required".into(),
+                },
+                screens::pr_dashboard::PrItem {
+                    number: 42,
+                    title: "Second".into(),
+                    state: screens::pr_dashboard::PrState::Open,
+                    ci_status: "success".into(),
+                    mergeable: true,
+                    review_status: "approved".into(),
+                },
+            ]),
+        );
+        model.pr_dashboard.selected = 1;
+        model.pr_dashboard.detail_view = true;
+        model.pr_dashboard.detail_report = Some(screens::pr_dashboard::PrDetailReport {
+            summary: "loaded".into(),
+            ci_status: "passing".into(),
+            merge_status: "ready".into(),
+            review_status: "approved".into(),
+            checks: vec!["lint: success".into()],
+        });
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!model.pr_dashboard.detail_view);
+        assert_eq!(model.pr_dashboard.selected, 1);
+        assert_eq!(
+            model.pr_dashboard.selected_pr().map(|pr| pr.number),
+            Some(42)
+        );
+        assert!(model.pr_dashboard.detail_report.is_none());
+    }
+
+    #[test]
     fn update_error_queue() {
         let mut model = test_model();
         update(&mut model, Message::PushError("e1".into()));
@@ -5898,6 +5951,39 @@ mod tests {
         route_key_to_management(&mut model, key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert_eq!(model.issues.search_query, "b");
+    }
+
+    #[test]
+    fn route_key_to_management_issues_esc_closes_detail_view_and_preserves_selection() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Issues;
+        model.issues.issues = vec![
+            screens::issues::IssueItem {
+                number: 1,
+                title: "First".into(),
+                state: "open".into(),
+                labels: vec!["ux".into()],
+                body: "First body".into(),
+            },
+            screens::issues::IssueItem {
+                number: 2,
+                title: "Second".into(),
+                state: "open".into(),
+                labels: vec!["bug".into()],
+                body: "Second body".into(),
+            },
+        ];
+        model.issues.selected = 1;
+        model.issues.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!model.issues.detail_view);
+        assert_eq!(model.issues.selected, 1);
+        assert_eq!(
+            model.issues.selected_issue().map(|issue| issue.number),
+            Some(2)
+        );
     }
 
     #[test]

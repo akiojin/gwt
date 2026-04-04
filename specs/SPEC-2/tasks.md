@@ -270,3 +270,11 @@ screens to use.
 - [x] T176 Update `app.rs` tab-switch handling so global management-tab shortcuts follow the supplemental-panel focus contract.
 - [x] T177 Refresh `SPEC-2` artifacts to describe terminal-preserving tab switches.
 - [x] T178 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 23: Esc-Back for Issues and PR Detail Views
+
+- [x] T179 [P] Write RED test: `Esc` in `Issues` detail closes the detail view while preserving the selected row.
+- [x] T180 [P] Write RED test: `Esc` in `PR Dashboard` detail closes the detail view while preserving the selected row.
+- [x] T181 Update `app.rs` management routing so `Esc` closes Issues / PR detail views before falling back to warn-dismiss behavior.
+- [x] T182 Refresh `SPEC-2` artifacts to describe detail-close-on-Esc parity.
+- [x] T183 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
