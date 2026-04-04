@@ -86,3 +86,10 @@
 - [x] T043 [P] Write RED test: `VersionSelect` renders old-TUI-style `label - description` rows plus overflow indicators.
 - [x] T044 Implement specialized wizard row rendering for the affected steps without changing launch semantics.
 - [x] T045 Verify focused wizard render tests, workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 10: Quick Start History Restoration
+
+- [x] T046 [P] Write RED test: existing-branch wizard startup loads newest per-agent Quick Start history from persisted sessions for the current repository and branch.
+- [x] T047 [P] Write RED test: `QuickStart` renders old-TUI grouped rows (`Branch: ...`, colored agent headers, `Resume`, `Start new`, `Choose different settings...`) and uses `entries * 2 + 1` selectable options.
+- [x] T048 Implement persisted-session-backed Quick Start loading, old-TUI grouped rendering, and `Resume`/`Start new` selection semantics including resume-ID fallback to `Continue`.
+- [x] T049 Verify focused Quick Start tests, workspace checks, and refresh SPEC-3 artifacts.

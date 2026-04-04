@@ -14,12 +14,24 @@
 6. Verify `ModelSelect`, `ReasoningLevel`, `ExecutionMode`, and
    `SkipPermissions` render descriptive old-TUI rows and `VersionSelect`
    shows scroll indicators when the list overflows.
-7. Launch the session from `Skip Permissions` and confirm a new agent tab
+7. Launch from an existing branch that has persisted session history and
+   verify `Quick Start` shows `Branch: ...`, grouped agent headers,
+   `Resume`, `Start new`, and `Choose different settings...`.
+8. Launch from an existing branch without persisted session history and
+   verify the wizard starts at `BranchAction` instead of showing a stub
+   Quick Start placeholder.
+9. Choose `Resume` for an entry with a persisted resume session ID and
+   confirm the launch args restore resume mode. If no resume session ID
+   exists, confirm the path falls back to `Continue`.
+10. Choose `Start new with previous settings` and confirm the wizard keeps the
+   previous model/reasoning/version/permissions while resetting session
+   continuity.
+11. Launch the session from `Skip Permissions` and confirm a new agent tab
    appears with persisted session metadata while a default model label does
    not become a literal CLI override.
-8. Trigger session conversion and confirm the active session metadata changes
+12. Trigger session conversion and confirm the active session metadata changes
    while repository context is preserved.
-9. Check the existing focused tests and notifications to confirm the original
+13. Check the existing focused tests and notifications to confirm the original
    session remains intact on conversion failure.
 
 ## Repeatable Evidence
@@ -27,6 +39,7 @@
 - `cargo test -p gwt-agent version_cache -- --nocapture`
 - `cargo test -p gwt-tui wizard -- --nocapture`
 - `cargo test -p gwt-tui render_ -- --nocapture`
+- `cargo test -p gwt-tui quick_start -- --nocapture`
 - `cargo test -p gwt-tui prepare_wizard_startup_starts_spec_prefill_at_branch_type_select -- --nocapture`
 - `cargo test -p gwt-tui build_launch_config_from_wizard -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with -- --nocapture`
@@ -36,5 +49,7 @@
 - The reviewer sees the current implemented scope for agent management.
 - Version selection is visibly independent from model selection and matches
   the launch path without a trailing confirm screen.
+- Quick Start behaves like the old TUI for persisted branch history instead of
+  acting as a static placeholder.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

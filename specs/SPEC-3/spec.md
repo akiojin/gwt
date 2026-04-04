@@ -88,7 +88,9 @@ As a developer, I want to quickly re-launch a previous agent session configurati
 
 1. Given I have previously launched an agent on branch `feature/foo`, when I open Quick Start, then the previous configuration for that branch is listed.
 2. Given Quick Start history has multiple entries, when I select one, then the wizard pre-fills all fields from the selected history entry.
-3. Given Quick Start history is empty, when I open Quick Start, then I see a message indicating no history and can proceed to manual configuration.
+3. Given Quick Start history is empty, when I launch from an existing branch, then the wizard skips Quick Start and starts at `BranchAction`.
+4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own colored header, `Resume`, `Start new`, and a final `Choose different settings...` row in the old-TUI layout.
+5. Given the selected history entry has a persisted resume session ID, when I choose `Resume`, then launch configuration restores `Resume` mode with that session ID. When no resume session ID exists, the wizard falls back to `Continue`.
 
 ### US-4: Manage Custom Agents (P1) -- IMPLEMENTED
 
@@ -157,6 +159,7 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-006**: Version list cache fetches last 10 versions per agent from npm registry on startup.
 - **FR-007**: Cache stored in `~/.gwt/cache/agent-versions.json` with 24-hour TTL.
 - **FR-008**: Quick Start stores per-branch launch history in persistent storage.
+- **FR-008a**: Existing-branch wizard startup loads Quick Start history from persisted agent session metadata under `~/.gwt/sessions/`, filtered by repository path and branch name.
 - **FR-009**: Session resume via `agent_session_id` for agents that support session continuity.
 - **FR-010**: Codex hooks confirmation flow integrated into the wizard when Codex agent is selected.
 - **FR-011**: Agent detection timeout: individual agent detection must complete within 5 seconds.
@@ -179,6 +182,10 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-017**: `ModelSelect`, `ReasoningLevel`, `ExecutionMode`,
   `SkipPermissions`, and `VersionSelect` use old-TUI-style row formatting
   with descriptive text and version-list scroll indicators.
+- **FR-018**: `QuickStart` renders old-TUI-style grouped history rows with
+  `Branch: ...`, colored per-agent headers, two selectable rows per entry
+  (`Resume` / `Start new`), and a trailing `Choose different settings...`
+  action.
 
 ## Non-Functional Requirements
 

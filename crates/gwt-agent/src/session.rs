@@ -22,6 +22,10 @@ pub struct Session {
     pub status: AgentStatus,
     pub tool_version: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_level: Option<String>,
+    #[serde(default)]
+    pub skip_permissions: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -46,6 +50,8 @@ impl Session {
             status: AgentStatus::Unknown,
             tool_version: None,
             model: None,
+            reasoning_level: None,
+            skip_permissions: false,
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -114,6 +120,8 @@ mod tests {
         assert!(session.agent_session_id.is_none());
         assert!(session.tool_version.is_none());
         assert!(session.model.is_none());
+        assert!(session.reasoning_level.is_none());
+        assert!(!session.skip_permissions);
     }
 
     #[test]
@@ -155,6 +163,8 @@ mod tests {
         session.model = Some("gemini-2.5-pro".into());
         session.tool_version = Some("0.1.0".into());
         session.agent_session_id = Some("agent-abc".into());
+        session.reasoning_level = Some("high".into());
+        session.skip_permissions = true;
 
         session.save(dir.path()).unwrap();
 
@@ -168,6 +178,8 @@ mod tests {
         assert_eq!(loaded.model, Some("gemini-2.5-pro".into()));
         assert_eq!(loaded.tool_version, Some("0.1.0".into()));
         assert_eq!(loaded.agent_session_id, Some("agent-abc".into()));
+        assert_eq!(loaded.reasoning_level, Some("high".into()));
+        assert!(loaded.skip_permissions);
         assert_eq!(loaded.display_name, "Gemini CLI");
     }
 

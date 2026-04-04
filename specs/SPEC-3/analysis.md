@@ -11,8 +11,8 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `51/51` completed items,
-  including the old-TUI option-formatting slice.
+- Task traceability snapshot: `tasks.md` now records `55/55` completed items,
+  including the Quick Start restoration phase.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -22,9 +22,9 @@ Status: CLEAR
 - Notes: The wizard now restores old-TUI option-list formatting for
   `ModelSelect`, `ReasoningLevel`, `ExecutionMode`, `SkipPermissions`, and
   `VersionSelect`.
-- Notes: Quick Start history presentation remains a separate follow-up
-  because the current ratatui wizard still lacks the old-TUI history data
-  path.
+- Notes: Existing-branch launches now restore Quick Start history from
+  persisted sessions with the old-TUI grouped layout and `Resume` / `Start
+  new` semantics.
 
 ## Next
 - `gwt-spec-implement`

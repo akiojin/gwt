@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `51/51` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T02:06:13Z`
+- Task progress: `55/55` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T02:26:37Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -25,6 +25,14 @@
 - The option-list renderer now restores old-TUI row formatting for
   `ModelSelect`, `ReasoningLevel`, `ExecutionMode`, and `SkipPermissions`,
   and `VersionSelect` now shows descriptive rows plus overflow indicators.
+- Existing-branch launches now reconstruct Quick Start history from persisted
+  agent sessions, render the old-TUI grouped history layout, and restore
+  `Resume` / `Start new` semantics including the resume-ID fallback to
+  `Continue`.
+- Persisted agent session metadata now stores Quick Start restore fields
+  (`reasoning_level`, `skip_permissions`, resume session ID) so future
+  launches can replay the previous configuration instead of showing a static
+  placeholder.
 - Recent verification exists for SPEC-3 slices: `cargo fmt --all`, `cargo test -p gwt-tui`, `cargo test -p gwt-core -p gwt-tui`, `cargo clippy -p gwt-tui --all-targets --all-features -- -D warnings`, `cargo clippy --all-targets --all-features -- -D warnings`, `bunx markdownlint-cli specs/SPEC-3/tasks.md`, and `bunx commitlint --from HEAD~1 --to HEAD`.
 - Repeatable reviewer evidence is now captured in `quickstart.md` with detect,
   version-cache, wizard, launch-materialization, and session-conversion test
@@ -33,5 +41,3 @@
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining
   acceptance checklist items.
-- Keep Quick Start history presentation restoration separate until the data
-  path is wired into the ratatui wizard.

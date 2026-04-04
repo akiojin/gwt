@@ -1,6 +1,6 @@
 //! App — Update and View functions for the Elm Architecture.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gwt_agent::{
     AgentDetector, AgentId, AgentLaunchBuilder, DetectedAgent, LaunchConfig,
-    Session as AgentSession, VersionCache,
+    Session as AgentSession, SessionMode, VersionCache,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings};
@@ -887,7 +887,12 @@ fn check_branch_pending_actions(model: &mut Model) {
             let branch_name = branch.name.clone();
             open_wizard(model, None);
             if let Some(ref mut wizard) = model.wizard {
-                wizard.branch_name = branch_name;
+                configure_existing_branch_wizard_with_sessions(
+                    wizard,
+                    &model.repo_path,
+                    &gwt_sessions_dir(),
+                    &branch_name,
+                );
             }
         }
     }
@@ -1326,8 +1331,22 @@ fn build_launch_config_from_wizard(wizard: &screens::wizard::WizardState) -> Lau
     if wizard.skip_perms {
         builder = builder.permission_mode(gwt_agent::launch::PermissionMode::Auto);
     }
+    let session_mode = match wizard.mode.as_str() {
+        "continue" => SessionMode::Continue,
+        "resume" if wizard.resume_session_id.is_some() => SessionMode::Resume,
+        "resume" => SessionMode::Continue,
+        _ => SessionMode::Normal,
+    };
+    builder = builder.session_mode(session_mode);
+    if let Some(resume_session_id) = wizard.resume_session_id.as_deref() {
+        builder = builder.resume_session_id(resume_session_id);
+    }
 
-    builder.build()
+    let mut config = builder.build();
+    if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
+        config.reasoning_level = Some(wizard.reasoning.clone());
+    }
+    config
 }
 
 fn is_explicit_model_selection(model: &str) -> bool {
@@ -1365,7 +1384,10 @@ fn materialize_pending_launch_with(
         .model
         .clone()
         .filter(|model| is_explicit_model_selection(model));
+    session.reasoning_level = config.reasoning_level.clone();
     session.tool_version = config.tool_version.clone();
+    session.agent_session_id = config.resume_session_id.clone();
+    session.skip_permissions = config.skip_permissions;
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
 
@@ -1392,6 +1414,82 @@ fn materialize_pending_launch_with(
     );
 
     Ok(())
+}
+
+fn configure_existing_branch_wizard_with_sessions(
+    wizard: &mut screens::wizard::WizardState,
+    repo_path: &std::path::Path,
+    sessions_dir: &std::path::Path,
+    branch_name: &str,
+) {
+    wizard.is_new_branch = false;
+    wizard.branch_name = branch_name.to_string();
+    wizard.quick_start_entries = load_quick_start_entries(repo_path, sessions_dir, branch_name);
+    wizard.has_quick_start = !wizard.quick_start_entries.is_empty();
+    wizard.step = if wizard.has_quick_start {
+        screens::wizard::WizardStep::QuickStart
+    } else {
+        screens::wizard::WizardStep::BranchAction
+    };
+    wizard.selected = 0;
+}
+
+fn load_quick_start_entries(
+    repo_path: &std::path::Path,
+    sessions_dir: &std::path::Path,
+    branch_name: &str,
+) -> Vec<screens::wizard::QuickStartEntry> {
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+
+    let mut latest_by_agent: HashMap<String, AgentSession> = HashMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(session) = AgentSession::load(&path) else {
+            continue;
+        };
+        if session.branch != branch_name || session.worktree_path != repo_path {
+            continue;
+        }
+
+        let agent_key = session.agent_id.command().to_string();
+        let should_replace = latest_by_agent
+            .get(&agent_key)
+            .map(|current| {
+                session.updated_at > current.updated_at
+                    || (session.updated_at == current.updated_at
+                        && session.created_at > current.created_at)
+            })
+            .unwrap_or(true);
+        if should_replace {
+            latest_by_agent.insert(agent_key, session);
+        }
+    }
+
+    let mut sessions = latest_by_agent.into_values().collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| right.created_at.cmp(&left.created_at))
+    });
+
+    sessions
+        .into_iter()
+        .map(|session| screens::wizard::QuickStartEntry {
+            agent_id: session.agent_id.command().to_string(),
+            tool_label: session.display_name.clone(),
+            model: session.model.clone(),
+            reasoning: session.reasoning_level.clone(),
+            version: session.tool_version.clone(),
+            resume_session_id: session.agent_session_id.clone(),
+            skip_permissions: session.skip_permissions,
+        })
+        .collect()
 }
 
 fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecContext>) {
@@ -2413,6 +2511,31 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn persist_agent_session(
+        dir: &std::path::Path,
+        repo_path: &str,
+        branch: &str,
+        agent_id: AgentId,
+        updated_at: chrono::DateTime<Utc>,
+        model: Option<&str>,
+        reasoning_level: Option<&str>,
+        tool_version: Option<&str>,
+        resume_session_id: Option<&str>,
+        skip_permissions: bool,
+    ) {
+        let mut session = AgentSession::new(repo_path, branch, agent_id);
+        session.model = model.map(str::to_string);
+        session.reasoning_level = reasoning_level.map(str::to_string);
+        session.tool_version = tool_version.map(str::to_string);
+        session.agent_session_id = resume_session_id.map(str::to_string);
+        session.skip_permissions = skip_permissions;
+        session.updated_at = updated_at;
+        session.created_at = updated_at;
+        session.last_activity_at = updated_at;
+        session.save(dir).expect("persist session");
+    }
+
     fn docker_container(
         id: &str,
         name: &str,
@@ -2941,6 +3064,86 @@ mod tests {
     }
 
     #[test]
+    fn configure_existing_branch_wizard_with_sessions_loads_newest_entry_per_agent() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let cache = VersionCache::new();
+        let detected = vec![
+            detected_agent(AgentId::ClaudeCode, Some("1.0.55")),
+            detected_agent(AgentId::Codex, Some("0.5.1")),
+        ];
+        let repo_path = PathBuf::from("/tmp/repo");
+        let branch = "feature/test";
+        let now = Utc::now();
+
+        persist_agent_session(
+            dir.path(),
+            repo_path.to_str().unwrap(),
+            branch,
+            AgentId::Codex,
+            now - Duration::minutes(10),
+            Some("gpt-5.2-codex"),
+            Some("medium"),
+            Some("0.5.0"),
+            None,
+            false,
+        );
+        persist_agent_session(
+            dir.path(),
+            repo_path.to_str().unwrap(),
+            branch,
+            AgentId::Codex,
+            now - Duration::minutes(1),
+            Some("gpt-5.3-codex"),
+            Some("high"),
+            Some("latest"),
+            Some("sess-new"),
+            true,
+        );
+        persist_agent_session(
+            dir.path(),
+            repo_path.to_str().unwrap(),
+            branch,
+            AgentId::ClaudeCode,
+            now - Duration::minutes(5),
+            Some("sonnet"),
+            None,
+            Some("1.0.54"),
+            None,
+            false,
+        );
+        persist_agent_session(
+            dir.path(),
+            repo_path.to_str().unwrap(),
+            "feature/other",
+            AgentId::Gemini,
+            now - Duration::minutes(2),
+            Some("gemini-2.5-pro"),
+            None,
+            Some("latest"),
+            Some("sess-other"),
+            false,
+        );
+
+        let (mut wizard, _) = prepare_wizard_startup(None, detected, &cache);
+        configure_existing_branch_wizard_with_sessions(&mut wizard, &repo_path, dir.path(), branch);
+
+        assert_eq!(wizard.step, screens::wizard::WizardStep::QuickStart);
+        assert!(wizard.has_quick_start);
+        assert_eq!(wizard.branch_name, branch);
+        assert_eq!(wizard.quick_start_entries.len(), 2);
+        assert_eq!(wizard.quick_start_entries[0].agent_id, "codex");
+        assert_eq!(
+            wizard.quick_start_entries[0].model.as_deref(),
+            Some("gpt-5.3-codex")
+        );
+        assert_eq!(
+            wizard.quick_start_entries[0].resume_session_id.as_deref(),
+            Some("sess-new")
+        );
+        assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_omits_default_model_selection() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -2973,6 +3176,39 @@ mod tests {
         assert_eq!(config.branch.as_deref(), Some("feature/spec-42"));
         assert_eq!(config.model.as_deref(), Some("sonnet"));
         assert_eq!(config.tool_version.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_uses_resume_session_id_for_quick_start_resume() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            mode: "resume".to_string(),
+            resume_session_id: Some("sess-123".to_string()),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(config.args.contains(&"sess-123".to_string()));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_falls_back_to_continue_without_resume_session_id() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            mode: "resume".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.args.contains(&"--continue".to_string()));
+        assert!(!config.args.contains(&"--resume".to_string()));
     }
 
     #[test]
@@ -3015,6 +3251,37 @@ mod tests {
         assert_eq!(persisted.model.as_deref(), Some("sonnet"));
         assert_eq!(persisted.tool_version.as_deref(), Some("latest"));
         assert_eq!(persisted.display_name, "Claude Code");
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_persists_quick_start_restore_fields() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut model = test_model();
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.3-codex".to_string(),
+            reasoning: "high".to_string(),
+            version: "latest".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            mode: "resume".to_string(),
+            resume_session_id: Some("sess-abc".to_string()),
+            skip_perms: true,
+            ..Default::default()
+        };
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let entry = fs::read_dir(dir.path())
+            .expect("read sessions dir")
+            .next()
+            .expect("session entry")
+            .expect("dir entry")
+            .path();
+        let persisted = AgentSession::load(&entry).expect("load persisted session");
+        assert_eq!(persisted.reasoning_level.as_deref(), Some("high"));
+        assert!(persisted.skip_permissions);
+        assert_eq!(persisted.agent_session_id.as_deref(), Some("sess-abc"));
     }
 
     #[test]

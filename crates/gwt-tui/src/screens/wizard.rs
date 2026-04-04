@@ -57,7 +57,12 @@ impl WizardStep {
 /// - New branch/spec prefill: BranchType → Issue → AI → Branch Name → AgentSelect → ...
 fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
-        WizardStep::QuickStart => Some(WizardStep::BranchAction),
+        WizardStep::QuickStart => match state.selected_quick_start_action() {
+            QuickStartAction::ChooseDifferent => Some(WizardStep::BranchAction),
+            QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious => {
+                Some(WizardStep::SkipPermissions)
+            }
+        },
         WizardStep::BranchAction => {
             if state.selected == 1 {
                 Some(WizardStep::BranchTypeSelect)
@@ -126,7 +131,13 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
 fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
         WizardStep::QuickStart => None,
-        WizardStep::BranchAction => None,
+        WizardStep::BranchAction => {
+            if state.has_quick_start && !state.quick_start_entries.is_empty() {
+                Some(WizardStep::QuickStart)
+            } else {
+                None
+            }
+        }
         WizardStep::AgentSelect => {
             if state.is_new_branch {
                 Some(WizardStep::BranchNameInput)
@@ -239,6 +250,25 @@ impl AgentOption {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickStartAction {
+    ResumeWithPrevious,
+    StartNewWithPrevious,
+    ChooseDifferent,
+}
+
+/// Persisted launch metadata that can be replayed from Quick Start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickStartEntry {
+    pub agent_id: String,
+    pub tool_label: String,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+    pub version: Option<String>,
+    pub resume_session_id: Option<String>,
+    pub skip_permissions: bool,
+}
+
 /// SPEC context for prefilling the wizard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpecContext {
@@ -256,6 +286,7 @@ pub struct WizardState {
     pub detected_agents: Vec<AgentOption>,
     pub selected: usize,
     pub has_quick_start: bool,
+    pub quick_start_entries: Vec<QuickStartEntry>,
     pub is_new_branch: bool,
     pub base_branch_name: Option<String>,
     pub gh_cli_available: bool,
@@ -267,6 +298,7 @@ pub struct WizardState {
     pub version: String,
     pub version_options: Vec<VersionOption>,
     pub mode: String,
+    pub resume_session_id: Option<String>,
     pub branch_name: String,
     pub issue_id: String,
     pub skip_perms: bool,
@@ -289,6 +321,7 @@ impl Default for WizardState {
             detected_agents: Vec::new(),
             selected: 0,
             has_quick_start: false,
+            quick_start_entries: Vec::new(),
             is_new_branch: false,
             base_branch_name: None,
             gh_cli_available: true,
@@ -298,7 +331,8 @@ impl Default for WizardState {
             reasoning: "medium".to_string(),
             version: String::new(),
             version_options: Vec::new(),
-            mode: "autonomous".to_string(),
+            mode: "normal".to_string(),
+            resume_session_id: None,
             branch_name: String::new(),
             issue_id: String::new(),
             skip_perms: false,
@@ -316,10 +350,87 @@ impl WizardState {
     fn flow_start_step(&self) -> WizardStep {
         if self.is_new_branch {
             WizardStep::BranchTypeSelect
-        } else if self.has_quick_start {
+        } else if self.has_quick_start && !self.quick_start_entries.is_empty() {
             WizardStep::QuickStart
         } else {
             WizardStep::BranchAction
+        }
+    }
+
+    fn quick_start_option_count(&self) -> usize {
+        if self.quick_start_entries.is_empty() {
+            0
+        } else {
+            self.quick_start_entries.len() * 2 + 1
+        }
+    }
+
+    fn selected_quick_start_action(&self) -> QuickStartAction {
+        let choose_different_index = self.quick_start_entries.len() * 2;
+        if self.quick_start_entries.is_empty() || self.selected >= choose_different_index {
+            QuickStartAction::ChooseDifferent
+        } else if self.selected.is_multiple_of(2) {
+            QuickStartAction::ResumeWithPrevious
+        } else {
+            QuickStartAction::StartNewWithPrevious
+        }
+    }
+
+    fn selected_quick_start_entry(&self) -> Option<&QuickStartEntry> {
+        if self.quick_start_entries.is_empty() {
+            None
+        } else {
+            self.quick_start_entries.get(self.selected / 2)
+        }
+    }
+
+    fn apply_quick_start_selection(&mut self) {
+        let action = self.selected_quick_start_action();
+        let Some(entry) = self.selected_quick_start_entry().cloned() else {
+            self.mode = "normal".to_string();
+            self.resume_session_id = None;
+            return;
+        };
+
+        self.agent_id = entry.agent_id.clone();
+        if let Some(agent_index) = self
+            .detected_agents
+            .iter()
+            .position(|agent| agent.id == entry.agent_id)
+        {
+            self.selected = agent_index;
+            self.sync_selected_agent_options();
+        }
+
+        if let Some(model) = entry.model {
+            self.model = model;
+        }
+        if let Some(reasoning) = entry.reasoning {
+            self.reasoning = reasoning;
+        }
+        if let Some(version) = entry.version {
+            self.version = version;
+        }
+        self.skip_perms = entry.skip_permissions;
+
+        match action {
+            QuickStartAction::ResumeWithPrevious => {
+                if let Some(session_id) = entry.resume_session_id {
+                    self.mode = "resume".to_string();
+                    self.resume_session_id = Some(session_id);
+                } else {
+                    self.mode = "continue".to_string();
+                    self.resume_session_id = None;
+                }
+            }
+            QuickStartAction::StartNewWithPrevious => {
+                self.mode = "normal".to_string();
+                self.resume_session_id = None;
+            }
+            QuickStartAction::ChooseDifferent => {
+                self.mode = "normal".to_string();
+                self.resume_session_id = None;
+            }
         }
     }
 
@@ -427,7 +538,7 @@ impl WizardState {
     /// Number of selectable options for the current step.
     pub fn option_count(&self) -> usize {
         match self.step {
-            WizardStep::QuickStart => 3,   // resume / start new / choose different
+            WizardStep::QuickStart => self.quick_start_option_count(),
             WizardStep::BranchAction => 2, // existing branch / create new branch
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
@@ -455,11 +566,6 @@ impl WizardState {
     /// Static option labels for the current step.
     pub fn current_static_options(&self) -> Vec<&'static str> {
         match self.step {
-            WizardStep::QuickStart => vec![
-                "Resume previous",
-                "Start new with previous",
-                "Choose different",
-            ],
             WizardStep::BranchAction => vec!["Use selected branch", "Create new from selected"],
             WizardStep::ReasoningLevel => vec!["Low", "Medium", "High", "XHigh"],
             WizardStep::ExecutionMode => vec!["Normal", "Continue", "Resume", "Convert"],
@@ -472,6 +578,25 @@ impl WizardState {
     /// Options as string labels for the current step.
     pub fn current_options(&self) -> Vec<String> {
         match self.step {
+            WizardStep::QuickStart => {
+                let mut options = Vec::with_capacity(self.quick_start_option_count());
+                for entry in &self.quick_start_entries {
+                    let resume = if let Some(session_id) = &entry.resume_session_id {
+                        format!(
+                            "Resume with previous settings ({}...)",
+                            &session_id[..session_id.len().min(8)]
+                        )
+                    } else {
+                        "Resume with previous settings".to_string()
+                    };
+                    options.push(resume);
+                    options.push("Start new with previous settings".to_string());
+                }
+                if !self.quick_start_entries.is_empty() {
+                    options.push("Choose different settings...".to_string());
+                }
+                options
+            }
             WizardStep::AgentSelect => {
                 if self.detected_agents.is_empty() {
                     vec!["(no agents detected)".to_string()]
@@ -728,9 +853,11 @@ fn apply_selection(state: &mut WizardState) {
     let options = state.current_options();
     match state.step {
         WizardStep::QuickStart => {
-            if state.selected == 2 {
-                state.has_quick_start = false;
-                state.selected = 0;
+            if !matches!(
+                state.selected_quick_start_action(),
+                QuickStartAction::ChooseDifferent
+            ) {
+                state.apply_quick_start_selection();
             }
         }
         WizardStep::BranchAction => {
@@ -1244,6 +1371,162 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     }
 }
 
+fn quick_start_agent_color(agent_id: &str) -> Color {
+    match agent_id {
+        "claude" => Color::Yellow,
+        "codex" => Color::Cyan,
+        "gemini" => Color::Magenta,
+        "opencode" => Color::Green,
+        _ => Color::White,
+    }
+}
+
+fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(truncate_with_ellipsis(
+            &format!("Branch: {}", state.branch_name),
+            area.width as usize,
+        ))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    if area.height <= 2 {
+        return;
+    }
+
+    let list_area = Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+    let mut items = Vec::new();
+
+    for (entry_index, entry) in state.quick_start_entries.iter().enumerate() {
+        let header = if entry.agent_id == "codex" {
+            if let Some(reasoning) = &entry.reasoning {
+                format!(
+                    "{} ({}, Reasoning: {})",
+                    entry.tool_label,
+                    entry.model.as_deref().unwrap_or("default"),
+                    reasoning
+                )
+            } else {
+                format!(
+                    "{} ({})",
+                    entry.tool_label,
+                    entry.model.as_deref().unwrap_or("default")
+                )
+            }
+        } else {
+            format!(
+                "{} ({})",
+                entry.tool_label,
+                entry.model.as_deref().unwrap_or("default")
+            )
+        };
+        items.push(
+            ListItem::new(truncate_with_ellipsis(&header, list_area.width as usize))
+                .style(Style::default().fg(quick_start_agent_color(&entry.agent_id))),
+        );
+
+        let resume_index = entry_index * 2;
+        let resume_text = if let Some(session_id) = &entry.resume_session_id {
+            format!(
+                "{}Resume with previous settings ({}...)",
+                if state.selected == resume_index {
+                    "> "
+                } else {
+                    "  "
+                },
+                &session_id[..session_id.len().min(8)]
+            )
+        } else {
+            format!(
+                "{}Resume with previous settings",
+                if state.selected == resume_index {
+                    "> "
+                } else {
+                    "  "
+                }
+            )
+        };
+        items.push(
+            ListItem::new(truncate_with_ellipsis(
+                &resume_text,
+                list_area.width as usize,
+            ))
+            .style(if state.selected == resume_index {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            }),
+        );
+
+        let start_new_index = resume_index + 1;
+        let start_new_text = format!(
+            "{}Start new with previous settings",
+            if state.selected == start_new_index {
+                "> "
+            } else {
+                "  "
+            }
+        );
+        items.push(
+            ListItem::new(truncate_with_ellipsis(
+                &start_new_text,
+                list_area.width as usize,
+            ))
+            .style(if state.selected == start_new_index {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            }),
+        );
+
+        if entry_index + 1 < state.quick_start_entries.len() {
+            items.push(ListItem::new(""));
+        }
+    }
+
+    items.push(
+        ListItem::new("─".repeat(list_area.width as usize))
+            .style(Style::default().fg(Color::DarkGray)),
+    );
+
+    let choose_index = state.quick_start_entries.len() * 2;
+    let choose_text = format!(
+        "{}Choose different settings...",
+        if state.selected >= choose_index {
+            "> "
+        } else {
+            "  "
+        }
+    );
+    items.push(
+        ListItem::new(truncate_with_ellipsis(
+            &choose_text,
+            list_area.width as usize,
+        ))
+        .style(if state.selected >= choose_index {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else {
+            Style::default()
+        }),
+    );
+
+    frame.render_widget(List::new(items), list_area);
+}
+
 /// Render the wizard overlay.
 pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Centered modal — 60% width, 70% height
@@ -1310,6 +1593,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
 /// Render the content area for the current wizard step.
 fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
     match state.step {
+        WizardStep::QuickStart => render_quick_start_step(state, frame, area),
         WizardStep::BranchNameInput => {
             let block = Block::default().borders(Borders::ALL).title("Branch Name");
             let text = Paragraph::new(format!("{}_", state.branch_name))
@@ -1437,6 +1721,29 @@ mod tests {
                 installed_version: None,
                 versions: Vec::new(),
                 cache_outdated: false,
+            },
+        ]
+    }
+
+    fn sample_quick_start_entries() -> Vec<QuickStartEntry> {
+        vec![
+            QuickStartEntry {
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("latest".to_string()),
+                resume_session_id: Some("sess-12345678".to_string()),
+                skip_permissions: true,
+            },
+            QuickStartEntry {
+                agent_id: "claude".to_string(),
+                tool_label: "Claude Code".to_string(),
+                model: Some("sonnet".to_string()),
+                reasoning: None,
+                version: Some("1.0.54".to_string()),
+                resume_session_id: None,
+                skip_permissions: false,
             },
         ]
     }
@@ -1901,6 +2208,67 @@ mod tests {
     }
 
     #[test]
+    fn quick_start_option_count_tracks_entry_pairs_and_choose_different() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+
+        assert_eq!(state.option_count(), 5);
+    }
+
+    #[test]
+    fn select_on_quick_start_resume_prefills_previous_settings_and_jumps_to_skip_permissions() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.detected_agents = sample_agents();
+        state.branch_name = "feature/test".to_string();
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+        assert_eq!(state.agent_id, "codex");
+        assert_eq!(state.model, "gpt-5.3-codex");
+        assert_eq!(state.reasoning, "high");
+        assert_eq!(state.version, "latest");
+        assert_eq!(state.mode, "resume");
+        assert_eq!(state.resume_session_id.as_deref(), Some("sess-12345678"));
+        assert!(state.skip_perms);
+    }
+
+    #[test]
+    fn select_on_quick_start_without_resume_id_falls_back_to_continue() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.detected_agents = sample_agents();
+        state.selected = 2;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+        assert_eq!(state.agent_id, "claude");
+        assert_eq!(state.mode, "continue");
+        assert!(state.resume_session_id.is_none());
+        assert!(!state.skip_perms);
+    }
+
+    #[test]
+    fn back_from_branch_action_returns_to_quick_start_when_history_exists() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::BranchAction;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+
+        update(&mut state, WizardMessage::Back);
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+    }
+
+    #[test]
     fn render_overlay_does_not_panic() {
         let state = WizardState::default();
         let backend = TestBackend::new(80, 24);
@@ -1948,6 +2316,25 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_quick_start_shows_old_tui_grouped_history_layout() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Quick Start"));
+        assert!(text.contains("Branch: feature/test"));
+        assert!(text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
+        assert!(text.contains("> Resume with previous settings (sess-123...)"));
+        assert!(text.contains("  Start new with previous settings"));
+        assert!(text.contains("Claude Code (sonnet)"));
+        assert!(text.contains("Choose different settings..."));
     }
 
     #[test]

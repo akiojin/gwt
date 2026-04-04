@@ -89,6 +89,10 @@ pub struct LaunchConfig {
     pub color: AgentColor,
     pub model: Option<String>,
     pub tool_version: Option<String>,
+    pub reasoning_level: Option<String>,
+    pub session_mode: SessionMode,
+    pub resume_session_id: Option<String>,
+    pub skip_permissions: bool,
 }
 
 /// Permission mode for agent launch.
@@ -242,6 +246,18 @@ impl AgentLaunchBuilder {
         let agent_id = self.agent_id.clone();
         let display_name = self.agent_id.display_name().to_string();
         let color = self.agent_id.default_color();
+        let model = self.model.clone();
+        let tool_version = self
+            .version
+            .clone()
+            .filter(|version| version != "installed");
+        let reasoning_level = self.reasoning_level.clone();
+        let session_mode = self.session_mode;
+        let resume_session_id = self.resume_session_id.clone();
+        let skip_permissions = matches!(
+            self.permission_mode,
+            Some(PermissionMode::Auto | PermissionMode::BypassPermissions)
+        );
 
         LaunchConfig {
             agent_id,
@@ -252,8 +268,12 @@ impl AgentLaunchBuilder {
             branch: self.branch,
             display_name,
             color,
-            model: self.model,
-            tool_version: self.version.filter(|version| version != "installed"),
+            model,
+            tool_version,
+            reasoning_level,
+            session_mode,
+            resume_session_id,
+            skip_permissions,
         }
     }
 
@@ -599,11 +619,9 @@ mod tests {
         assert!(!runner.executable.is_empty());
         let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
         assert!(spec_arg.is_some(), "should have @package@latest arg");
-        assert!(
-            spec_arg
-                .unwrap()
-                .contains("@anthropic-ai/claude-code@latest")
-        );
+        assert!(spec_arg
+            .unwrap()
+            .contains("@anthropic-ai/claude-code@latest"));
     }
 
     #[test]

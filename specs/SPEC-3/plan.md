@@ -102,6 +102,21 @@ persisted agent session before activation.
 3. Keep launch/config backend semantics unchanged while adding focused render
    tests before updating any snapshots.
 
+### Phase 7: Quick Start History Restoration
+
+1. Reconstruct per-branch Quick Start history from persisted agent sessions
+   in `~/.gwt/sessions/`, grouping to the newest entry per agent for the
+   current repository and branch.
+2. Restore old-TUI `QuickStart` rendering with a branch summary row, colored
+   agent headers, paired `Resume` / `Start new` actions, and a trailing
+   `Choose different settings...` option.
+3. Restore Quick Start selection semantics so `Resume` reuses the persisted
+   resume session ID when available, otherwise falls back to `Continue`, and
+   `Start new` keeps the previous configuration while resetting session
+   continuity.
+4. Cover the slice with RED/GREEN tests for history loading, Quick Start
+   rendering, and launch-config restoration.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).
