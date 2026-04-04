@@ -16,3 +16,7 @@ pub static CLAUDE_COMMANDS: Dir<'static> =
 /// All hook scripts under `.claude/hooks/scripts/`.
 pub static CLAUDE_HOOKS: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../../.claude/hooks/scripts");
+
+/// Project instruction files distributed to worktree root.
+pub static AGENTS_MD: &str = include_str!("../../../AGENTS.md");
+pub static CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");

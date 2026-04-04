@@ -104,6 +104,8 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
   - `.claude/hooks/scripts/gwt-*.mjs` — Claude Code hooks
   - `.codex/skills/gwt-*/` — Codex skill definitions (same content as Claude)
   - `.agents/skills/gwt-*/` — Agent Skills standard directory (same content)
+  - `AGENTS.md` — Project instruction file (skill catalog, dev guidelines)
+  - `CLAUDE.md` — Claude Code entry point (`@AGENTS.md` reference)
 - **FR-013**: Distribution uses full overwrite: all gwt-managed files are replaced unconditionally on each agent launch.
 - **FR-014**: `.claude/settings.local.json` is generated on each agent launch. gwt-managed hooks are merged using `hooks.rs` merge logic, preserving user-defined hooks.
 - **FR-015**: `.git/info/exclude` is updated on each agent launch to exclude gwt-managed asset paths. Existing user entries are preserved; gwt-managed entries are delimited by `# gwt-managed-begin` / `# gwt-managed-end` markers.
