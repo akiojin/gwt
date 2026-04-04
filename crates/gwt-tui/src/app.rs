@@ -13,6 +13,7 @@ use gwt_agent::{
     Session as AgentSession, SessionMode, VersionCache,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
+use gwt_skills::{distribute_to_worktree, generate_settings_local, update_git_exclude};
 use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
@@ -2203,6 +2204,21 @@ fn materialize_pending_launch_with(
     model.sessions.push(tab);
     model.active_session = model.sessions.len().saturating_sub(1);
     model.active_layer = ActiveLayer::Main;
+
+    // Distribute embedded skills to the worktree (best-effort; never block launch).
+    let worktree = config
+        .working_dir
+        .as_deref()
+        .unwrap_or(&model.repo_path);
+    if let Err(e) = distribute_to_worktree(worktree) {
+        tracing::warn!("skill distribution failed: {e}");
+    }
+    if let Err(e) = update_git_exclude(worktree) {
+        tracing::warn!("git exclude update failed: {e}");
+    }
+    if let Err(e) = generate_settings_local(worktree, &[]) {
+        tracing::warn!("settings.local.json generation failed: {e}");
+    }
 
     apply_notification(
         model,

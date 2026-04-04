@@ -60,13 +60,13 @@
 
 ### 2b.1 Worktree Distribution
 
-- [P] [ ] **T-035**: Write test: `distribute_to_worktree()` creates `.claude/skills/gwt-pr/SKILL.md` in target path.
-- [P] [ ] **T-036**: Write test: `distribute_to_worktree()` creates `.codex/skills/gwt-pr/SKILL.md` in target path.
-- [P] [ ] **T-037**: Write test: `distribute_to_worktree()` creates `.agents/skills/gwt-pr/SKILL.md` in target path.
-- [P] [ ] **T-038**: Write test: `distribute_to_worktree()` creates `.claude/commands/gwt-pr.md` in target path.
-- [P] [ ] **T-039**: Write test: `distribute_to_worktree()` creates `.claude/hooks/scripts/gwt-forward-hook.mjs` in target path.
+- [P] [x] **T-035**: Write test: `distribute_to_worktree()` creates `.claude/skills/gwt-pr/SKILL.md` in target path.
+- [P] [x] **T-036**: Write test: `distribute_to_worktree()` creates `.codex/skills/gwt-pr/SKILL.md` in target path.
+- [P] [x] **T-037**: Write test: `distribute_to_worktree()` creates `.agents/skills/gwt-pr/SKILL.md` in target path.
+- [P] [x] **T-038**: Write test: `distribute_to_worktree()` creates `.claude/commands/gwt-pr.md` in target path.
+- [P] [x] **T-039**: Write test: `distribute_to_worktree()` creates `.claude/hooks/scripts/gwt-forward-hook.mjs` in target path.
 - [x] **T-040**: Implement `distribute_to_worktree()` in `crates/gwt-skills/src/distribute.rs`.
-- [ ] **T-041**: Verify T-035 through T-039 pass (GREEN).
+- [x] **T-041**: Verify T-035 through T-039 pass (GREEN).
 
 ### 2b.2 Git Exclude Management
 
@@ -78,17 +78,17 @@
 
 ### 2b.3 settings.local.json Generation
 
-- [ ] **T-047**: Write test: `generate_settings_local()` creates `.claude/settings.local.json` with gwt-managed hooks.
-- [ ] **T-048**: Write test: `generate_settings_local()` preserves existing user hooks via merge.
-- [ ] **T-049**: Write test: `generate_settings_local()` handles missing file (creates new).
+- [x] **T-047**: Write test: `generate_settings_local()` creates `.claude/settings.local.json` with gwt-managed hooks.
+- [x] **T-048**: Write test: `generate_settings_local()` preserves existing user hooks via merge.
+- [x] **T-049**: Write test: `generate_settings_local()` handles missing file (creates new).
 - [x] **T-050**: Implement `generate_settings_local()` in `crates/gwt-skills/src/settings_local.rs`.
-- [ ] **T-051**: Verify T-047 through T-049 pass (GREEN).
+- [x] **T-051**: Verify T-047 through T-049 pass (GREEN).
 
 ### 2b.4 Agent Launch Integration
 
-- [ ] **T-052**: Wire `distribute_to_worktree()` into agent launch flow in `crates/gwt-tui/src/app.rs`.
-- [ ] **T-053**: Wire `update_git_exclude()` into agent launch flow.
-- [ ] **T-054**: Wire `generate_settings_local()` into agent launch flow.
+- [x] **T-052**: Wire `distribute_to_worktree()` into agent launch flow in `crates/gwt-tui/src/app.rs`.
+- [x] **T-053**: Wire `update_git_exclude()` into agent launch flow.
+- [x] **T-054**: Wire `generate_settings_local()` into agent launch flow.
 - [ ] **T-055**: Integration test: full agent launch distributes all assets and generates settings.
 
 ## Phase 2c: Embedded Skills — Quality Improvement
