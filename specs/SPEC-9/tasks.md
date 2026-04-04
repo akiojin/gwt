@@ -100,16 +100,16 @@
 
 ### 2c.2 Progressive Disclosure (complex skills)
 
-- [P] [ ] **T-058**: Extract detailed logic from gwt-pr-fix SKILL.md into `references/` subdirectory.
-- [P] [ ] **T-059**: Extract detailed logic from gwt-spec-ops SKILL.md into `references/` subdirectory.
-- [P] [ ] **T-060**: Extract detailed logic from gwt-spec-implement SKILL.md into `references/` subdirectory.
-- [P] [ ] **T-061**: Extract detailed logic from gwt-pr SKILL.md into `references/` subdirectory.
-- [P] [ ] **T-062**: Extract detailed logic from gwt-issue-resolve SKILL.md into `references/` subdirectory.
-- [P] [ ] **T-063**: Review remaining skills for progressive disclosure opportunities.
+- [P] [x] **T-058**: Extract detailed logic from gwt-pr-fix SKILL.md into `references/` subdirectory.
+- [P] [x] **T-059**: Extract detailed logic from gwt-spec-ops SKILL.md into `references/` subdirectory.
+- [P] [x] **T-060**: Extract detailed logic from gwt-spec-implement SKILL.md into `references/` subdirectory.
+- [P] [x] **T-061**: Extract detailed logic from gwt-pr SKILL.md into `references/` subdirectory.
+- [P] [x] **T-062**: Extract detailed logic from gwt-issue-resolve SKILL.md into `references/` subdirectory.
+- [P] [x] **T-063**: Review remaining skills for progressive disclosure opportunities. Also extracted: gwt-pr-check (418→87), gwt-spec-register (227→146).
 
 ### 2c.3 Body Content Rewrite
 
-- [P] [ ] **T-064**: Rewrite all SKILL.md body content in imperative/infinitive form per Anthropic guidelines.
+- [P] [x] **T-064**: Rewrite all SKILL.md body content in imperative/infinitive form per Anthropic guidelines.
 - [x] **T-065**: Verify all SKILL.md files are under 500 lines.
 - [x] **T-066**: Verify all YAML frontmatter passes `serde_yaml` validation (build test).
 
