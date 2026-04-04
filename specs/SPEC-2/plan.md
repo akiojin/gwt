@@ -235,6 +235,8 @@ same local mnemonics after moving focus off the list.
 ### Phase 20: Compact Management Header Context (5 tasks)
 Restore a more old-TUI-like management chrome by making the top header concise and contextual
 instead of spending most of the narrow pane on a full repository path.
+This was an intermediate restoration step and is superseded by Phase 30, which removes the
+standalone banner entirely in favor of pane-title chrome.
 
 20.1: Compact context contract (2 tasks)
 - Render the repository basename instead of the full repository path in the management header.
@@ -276,6 +278,21 @@ layout files outside `app.rs`.
 
 29.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
+### Phase 30: Remove Redundant Management Banner (5 tasks)
+Finish the old-TUI management chrome restoration by removing the standalone `gwt | ...` banner
+row and relying on the existing pane titles for context.
+
+30.1: Banner-removal contract (2 tasks)
+- The management render no longer emits a standalone banner row above the panes.
+- The top visible row of the management surface now belongs to pane-title chrome instead.
+
+30.2: Layout simplification (2 tasks)
+- Remove the extra header split from `app.rs` management rendering.
+- Keep Branches and non-Branches panes using the full management area so list/detail density increases by one row.
+
+30.3: Verification (1 task)
+- Re-run focused and broad workspace verification, refresh snapshots if needed, and sync SPEC-2 artifacts.
 
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not

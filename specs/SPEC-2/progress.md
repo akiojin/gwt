@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `192/192` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T09:16:26Z`
+- Task progress: `198/198` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T09:24:24Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -27,7 +27,6 @@
 - Branch Detail direct shell/delete affordances are now worktree-aware: branches without a worktree no longer advertise or trigger `Shift+Enter` shell launch or `Ctrl+C` delete confirmation.
 - The workspace shell now uses a more old-TUI-like `40/60` default split while management is visible, so terminal sessions keep more horizontal space than the management pane.
 - Branch Detail now keeps the old-TUI local mnemonics alive after focus leaves the list: `m=view`, `v=Git View`, `f=search`, and `?` / `h=help` all work directly from the detail pane.
-- The management header now stays compact inside the 40% pane by showing the repository basename plus active tab/focus context instead of the full repository path.
 - Ctrl+G,g now treats the management panel as a supplemental surface again: showing it keeps terminal focus, and hiding it always normalizes focus back to Terminal so Main layer hints never leak stale management focus.
 - Global management-tab shortcuts now follow the same supplemental contract: opening Branches/Issues/Settings/etc. from Terminal surfaces the requested tab without stealing focus, while management-local tab switches still land on the list pane.
 - `Issues` and `PR Dashboard` detail panes now honor the documented `Esc` contract as well: `Esc` closes the detail view and returns to the list without changing the selected row.
@@ -37,6 +36,7 @@
 - The status-bar hints now expose that restored contract as well: Branches list and generic management lists both advertise `Esc:term` instead of hiding the return-to-terminal path.
 - Management focus cycling now matches the pane topology again: `Branches` still cycles through `BranchDetail`, while every other management tab stays on the two real surfaces (`Terminal` and `TabContent`).
 - The management/session split now responds to terminal width again: wide terminals keep the 40/60 old-TUI balance, while standard widths fall back to 50/50 so management chrome remains readable.
+- The redundant standalone management banner is gone; pane titles now carry the management context so the left-side list/detail surfaces reclaim one full row of content.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

@@ -2990,70 +2990,13 @@ fn management_tab_title(model: &Model) -> Line<'static> {
     screens::build_tab_title(&labels, active_idx)
 }
 
-/// Render a 1-line header at the top of the management panel.
-fn render_management_header(model: &Model, frame: &mut Frame, area: Rect) {
-    let p =
-        Paragraph::new(management_header_text(model)).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(p, area);
-}
-
-fn management_header_text(model: &Model) -> String {
-    let repo = model
-        .repo_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| model.repo_path.display().to_string());
-    let branch_count = model.branches.branches.len();
-    let wt_count = model
-        .branches
-        .branches
-        .iter()
-        .filter(|b| b.worktree_path.is_some())
-        .count();
-    format!(
-        " gwt | {repo} | {} | {branch_count}b/{wt_count}w",
-        management_focus_context(model)
-    )
-}
-
-fn management_focus_context(model: &Model) -> String {
-    let tab = match model.management_tab {
-        ManagementTab::Branches => "Br",
-        ManagementTab::Specs => "Spec",
-        ManagementTab::Issues => "Iss",
-        ManagementTab::PrDashboard => "PR",
-        ManagementTab::Profiles => "Prof",
-        ManagementTab::GitView => "Git",
-        ManagementTab::Versions => "Ver",
-        ManagementTab::Settings => "Set",
-        ManagementTab::Logs => "Log",
-    };
-    let focus = match model.active_focus {
-        FocusPane::TabContent if model.management_tab == ManagementTab::Branches => "list",
-        FocusPane::TabContent => "pane",
-        FocusPane::BranchDetail => "detail",
-        FocusPane::Terminal => "term",
-    };
-    format!("{tab}:{focus}")
-}
-
 /// Render the management panes (left side — 2 stacked for Branches, 1 for others).
 fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
-
-    render_management_header(model, frame, outer[0]);
-    let content_area = outer[1];
-
     if model.management_tab == ManagementTab::Branches {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(content_area);
+            .split(area);
 
         // Top pane: management tab names in title, branch list content
         let list_focused = model.active_focus == FocusPane::TabContent;
@@ -3079,8 +3022,8 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
         // Single pane for all other tabs
         let focused = model.active_focus == FocusPane::TabContent;
         let block = pane_block(management_tab_title(model), focused);
-        let inner = block.inner(content_area);
-        frame.render_widget(block, content_area);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
         render_management_tab_content(model, frame, inner);
     }
 }
@@ -3619,49 +3562,75 @@ mod tests {
     }
 
     #[test]
-    fn management_header_text_uses_repo_basename_instead_of_full_path() {
+    fn render_model_text_management_omits_standalone_header_banner() {
         let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
         model.repo_path = PathBuf::from("/tmp/demo/project-repo");
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/banner".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-banner")),
+        }];
 
-        let header = management_header_text(&model);
+        let rendered = render_model_text(&model, 120, 16);
 
         assert!(
-            header.contains("project-repo"),
-            "header should use the repository basename"
-        );
-        assert!(
-            !header.contains("/tmp/demo/project-repo"),
-            "header should stay compact and avoid the full repository path"
+            !rendered.contains(" gwt | "),
+            "management should rely on pane titles instead of a standalone header banner"
         );
     }
 
     #[test]
-    fn management_header_text_reflects_active_tab_and_focus_context() {
+    fn render_model_text_management_top_row_uses_pane_title_chrome() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Branches;
-        model.active_focus = FocusPane::BranchDetail;
-        model.repo_path = PathBuf::from("/tmp/demo/project-repo");
-        model.branches.branches = vec![
-            screens::branches::BranchItem {
-                name: "main".to_string(),
-                is_head: true,
-                is_local: true,
-                category: screens::branches::BranchCategory::Main,
-                worktree_path: Some(PathBuf::from("/tmp/demo/project-repo")),
-            },
-            screens::branches::BranchItem {
-                name: "feature/header".to_string(),
-                is_head: false,
-                is_local: true,
-                category: screens::branches::BranchCategory::Feature,
-                worktree_path: None,
-            },
-        ];
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/top-row".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-top-row")),
+        }];
 
-        let header = management_header_text(&model);
+        let rendered = render_model_text(&model, 120, 16);
+        let first_line = rendered.lines().next().unwrap_or_default();
 
-        assert_eq!(header, " gwt | project-repo | Br:detail | 2b/1w");
+        assert!(
+            first_line.contains("Branches"),
+            "top row should start with pane title chrome once the standalone header is removed"
+        );
+    }
+
+    #[test]
+    fn render_model_text_non_branches_management_top_row_uses_pane_title_chrome() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 120, 16);
+        let mut lines = rendered.lines();
+        let first_line = lines.next().unwrap_or_default();
+        let second_line = lines.next().unwrap_or_default();
+
+        assert!(
+            !rendered.contains(" gwt | "),
+            "non-Branches tabs should also omit the standalone management banner"
+        );
+        assert!(
+            first_line.contains("Branches"),
+            "non-Branches top row should still be pane-title chrome"
+        );
+        assert!(
+            second_line.contains("General"),
+            "non-Branches content should start immediately below the pane title chrome"
+        );
     }
 
     #[test]

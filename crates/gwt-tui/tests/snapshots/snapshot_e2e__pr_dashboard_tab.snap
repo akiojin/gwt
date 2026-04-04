@@ -2,10 +2,10 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- gwt | test-repo | PR:pane | 0b/0w      ┌ ▶ Shell ─────────────────────────────┐
-┌ Branches │ Specs │ Issues │ PRs │ Pro┐│Session: Shell (80x24)                │
-│PR Dashboard                          ││                                      │
+┌ Branches │ Specs │ Issues │ PRs │ Pro┐┌ ▶ Shell ─────────────────────────────┐
+│PR Dashboard                          ││Session: Shell (80x24)                │
 │No pull requests loaded               ││                                      │
+│                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │

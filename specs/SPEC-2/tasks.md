@@ -249,10 +249,13 @@ screens to use.
 
 ## Phase 20: Compact Management Header Context
 
+This phase was an intermediate step and is superseded by Phase 30, which removes the standalone
+banner in favor of pane-title chrome.
+
 - [x] T164 [P] Write RED test: the management header renders the repository basename instead of the full path.
 - [x] T165 [P] Write RED test: the management header includes compact active-context text for the active tab/focus.
 - [x] T166 Update `app.rs` management header rendering to use compact basename/context text that fits the 40% pane more gracefully.
-- [x] T167 Refresh `SPEC-2` artifacts to describe the compact management-header contract.
+- [x] T167 Refresh `SPEC-2` artifacts to describe the intermediate compact management-header contract.
 - [x] T168 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
 
 ## Phase 21: Focus-Preserving Layer Toggle
@@ -327,3 +330,11 @@ screens to use.
 - [x] T212 Update `app.rs` management split helper so wide terminals (`>=120 cols`) keep `40/60` while narrower terminals fall back to `50/50`.
 - [x] T213 Refresh `SPEC-2` artifacts to describe the responsive split contract.
 - [x] T214 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 30: Remove Redundant Management Banner
+
+- [x] T215 [P] Write RED test: management render omits the standalone `gwt | ...` banner row.
+- [x] T216 [P] Write RED test: the top management row belongs to pane-title chrome once the banner is removed.
+- [x] T217 Update `app.rs` management rendering to remove the banner split and let panes consume the full management area.
+- [x] T218 Refresh `SPEC-2` artifacts to describe pane-title-only management chrome.
+- [x] T219 Verify focused tests, workspace checks, snapshot refresh, and SPEC-2 artifact sync.

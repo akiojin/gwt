@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `192/192` completed items after closing Phase 29 for the responsive management split.
+- Task traceability snapshot: `tasks.md` currently records `198/198` completed items after closing Phase 30 for the redundant-banner removal.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -28,7 +28,6 @@ Status: CLEAR
 - Notes: Phase 17 aligned Branch Detail affordances with actual reachability; shell/delete direct actions are now offered only for selected branches that have a worktree.
 - Notes: Phase 18 restored a more sensible old-TUI-like workspace balance by moving the visible management/session split from `50/50` to `40/60` through a shared layout helper.
 - Notes: Phase 19 restored the old-TUI Branches local mnemonic set inside Branch Detail as well, so `m`, `v`, `f`, and help remain available after focus moves off the list.
-- Notes: Phase 20 restored a compact, contextual management header that fits the narrower pane better by using the repository basename plus tab/focus context instead of the full path.
 - Notes: Phase 21 restores the old-TUI supplemental-panel contract for `Ctrl+G,g`; showing the management panel no longer steals terminal focus, and hiding it resets focus to Terminal so Main-layer hints stay accurate.
 - Notes: Phase 22 brings the global tab shortcuts (`Ctrl+G,b/i/s/...`) in line with that supplemental-panel contract so tab opening no longer steals terminal focus from the main workstream, while management-local tab switches still normalize to `TabContent`.
 - Notes: Phase 23 brings `Issues` and `PR Dashboard` detail panes into parity with the documented `Esc` contract so they close back to the list instead of falling through to warn-dismiss behavior.
@@ -39,3 +38,5 @@ Status: CLEAR
 - Notes: Phase 28 closes the remaining focus-topology drift inside management: `Tab` / `BackTab` now keep non-Branches tabs on the two real surfaces (`Terminal` and `TabContent`), while Branches retains the old three-surface cycle that includes `BranchDetail`.
 - Notes: Phase 29 closes the remaining fixed-width layout drift by making the management split responsive again: `>=120 cols` keeps `40/60`, while narrower widths fall back to `50/50` through the same shared helper used for render-time layout and active-session geometry.
 - Notes: The canonical spec/plan artifacts now state that the three-surface focus loop is Branches-only, eliminating the earlier contradiction with the Phase 28 implementation.
+- Notes: Phase 30 removes the standalone management banner entirely; pane titles now carry the management context so the management pane reclaims the top row for actual list/detail content.
+- Notes: Phase 20 remains in the artifact set only as an intermediate restoration step; Phase 30 supersedes it as the final management-chrome contract.
