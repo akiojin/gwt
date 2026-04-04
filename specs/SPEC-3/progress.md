@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `131/131` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:06:49Z`
+- Task progress: `134/134` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:13:50Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -70,9 +70,9 @@
 - The final `Choose different settings` action now follows the last grouped
   `Start new` row directly without an extra separator line, completing the
   denser old-TUI footer rhythm.
-- `QuickStart` grouped action rows now use the shorter old-TUI labels
-  `Resume session` and `Start new session`, while still showing a resume
-  session ID snippet when one exists.
+- `QuickStart` action rows now use the shorter old-TUI labels `Resume` and
+  `Start new`, while still showing a resume session ID snippet when one
+  exists.
 - The final action label now matches the old-TUI copy `Choose different
   settings` without an ellipsis.
 - Single-entry `QuickStart` popups now promote the lone agent/model summary
@@ -82,18 +82,16 @@
   leaving the more detailed model/reasoning summary to the single-entry title
   variant and keeping grouped history visually denser.
 - Multi-entry `QuickStart` now shows the short resume-session ID hint only on
-  the selected `Resume session` row, which reduces noise on unselected rows
-  without changing resume semantics.
+  the selected `Resume` row, which reduces noise on unselected rows without
+  changing resume semantics.
 - Multi-entry `QuickStart` grouped action rows now use the denser old-TUI
-  copy `Resume` / `Start new`, while single-entry Quick Start keeps the
-  longer session-oriented wording.
+  copy `Resume` / `Start new`.
 - The final `QuickStart` action now stays label-only (`Choose different
   settings`) on both wide and narrow popups, removing the rebuilt inline
   description text.
 - `QuickStart` now keeps its state-derived option labels aligned with the
-  rendered grouped rows, so multi-entry history uses compact `Resume` /
-  `Start new` copy consistently while single-entry history keeps the longer
-  session-oriented wording.
+  rendered grouped rows, so both multi-entry and single-entry history now use
+  compact `Resume` / `Start new` copy consistently.
 - The wizard popup now uses the border title as its only step-context chrome,
   removing the redundant `Step N/M` row so content starts one line higher.
 

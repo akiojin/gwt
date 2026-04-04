@@ -62,13 +62,12 @@
    the grouped history as the final footer action.
 25. Verify `Choose different settings` now appears directly below the last
    grouped `Start new` row without an extra separator line.
-26. Verify wide popups now render `Choose different settings - Open full
-   setup` while narrow popups fall back to the label-only row.
+26. Verify the final Quick Start action now uses the label-only
+   `Choose different settings` copy on wide and narrow popups.
 27. Verify the final action label no longer uses an ellipsis and now matches
    the old-TUI copy `Choose different settings`.
-28. Verify grouped Quick Start actions now read `Resume session` / `Start new
-   session`, while resume-capable entries still show the short session ID
-   snippet.
+28. Verify grouped Quick Start actions now read `Resume` / `Start new`,
+   while resume-capable entries still show the short session ID snippet.
 29. Verify a branch with exactly one persisted Quick Start entry now shows
    `Quick Start — <Agent/Model>` in the popup title and starts the action
    rows immediately below `Branch: ...` without a duplicated grouped header
@@ -77,18 +76,17 @@
    grouped headers as agent labels only (`Codex`, `Claude Code`, etc.) while
    keeping the generic `Quick Start` title.
 31. Verify a branch with multiple persisted Quick Start entries now shows the
-   short resume-session ID snippet only on the selected `Resume session` row,
-   while unselected resume rows keep the plain label.
+   short resume-session ID snippet only on the selected `Resume` row, while
+   unselected resume rows keep the plain label.
 32. Verify a branch with multiple persisted Quick Start entries now renders
    grouped action rows as `Resume` / `Start new`, while a single-entry Quick
-   Start still uses the longer `Resume session` / `Start new session` copy.
+   Start also uses the compact `Resume` / `Start new` copy.
 33. Verify the final Quick Start action now stays `Choose different settings`
    on both wide and narrow popups, without the rebuilt `Open full setup`
    description text.
 34. Verify a branch with multiple persisted Quick Start entries keeps the
    compact `Resume` / `Start new` labels while moving selection, and a
-   single-entry Quick Start still uses `Resume session` /
-   `Start new session`.
+   single-entry Quick Start keeps the same compact action copy.
 35. Verify the wizard popup no longer shows a separate `Step N/M` row above
    the chrome and still keeps the step title in the border.
 
@@ -138,8 +136,8 @@
 - The final `Choose different settings` action now follows the last grouped
   row directly instead of being separated by its own divider.
 - The grouped Quick Start actions now use the shorter old-TUI labels
-  `Resume session` and `Start new session` while keeping the short
-  resume-session hint where available.
+  `Resume` and `Start new` while keeping the short resume-session hint where
+  available.
 - Single-entry Quick Start popups now move the lone agent/model summary into
   the popup title so the body can start directly with the available actions
   under `Branch: ...`.
@@ -150,13 +148,13 @@
   for the currently selected row, so the grouped history stays visually
   quieter when several tools can resume.
 - Multi-entry Quick Start action rows now use the denser old-TUI copy
-  `Resume` / `Start new`, while single-entry Quick Start keeps the longer
-  session-oriented wording.
+  `Resume` / `Start new`, and single-entry Quick Start now matches the same
+  compact action copy.
 - The final Quick Start action now stays label-only on both wide and narrow
   popups, so the footer no longer uses the rebuilt inline description text.
 - Quick Start state-derived option labels now match the rendered grouped rows,
-  so multi-entry history stays on compact `Resume` / `Start new` copy while
-  single-entry history keeps the longer session-oriented wording.
+  so both multi-entry and single-entry history stay on compact `Resume` /
+  `Start new` copy.
 - The popup no longer shows a separate `Step N/M` row above the chrome, so
   the border title remains the only step-context chrome.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.

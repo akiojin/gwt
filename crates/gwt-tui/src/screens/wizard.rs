@@ -610,16 +610,8 @@ impl WizardState {
                 let single_entry = self.quick_start_entries.len() == 1;
                 for (entry_index, entry) in self.quick_start_entries.iter().enumerate() {
                     let resume_index = entry_index * 2;
-                    let resume_label = if single_entry {
-                        "Resume session"
-                    } else {
-                        "Resume"
-                    };
-                    let start_new_label = if single_entry {
-                        "Start new session"
-                    } else {
-                        "Start new"
-                    };
+                    let resume_label = "Resume";
+                    let start_new_label = "Start new";
                     let show_resume_hint = single_entry || self.selected == resume_index;
                     let resume = if let Some(session_id) = &entry.resume_session_id {
                         if show_resume_hint {
@@ -1526,11 +1518,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         }
 
         let resume_index = entry_index * 2;
-        let resume_label = if single_entry {
-            "Resume session"
-        } else {
-            "Resume"
-        };
+        let resume_label = "Resume";
         let show_resume_hint = single_entry || state.selected == resume_index;
         let resume_text = if let Some(session_id) = &entry.resume_session_id {
             if show_resume_hint {
@@ -1575,11 +1563,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         );
 
         let start_new_index = resume_index + 1;
-        let start_new_label = if single_entry {
-            "Start new session"
-        } else {
-            "Start new"
-        };
+        let start_new_label = "Start new";
         let start_new_text = format!(
             "{}{}",
             if state.selected == start_new_index {
@@ -2649,7 +2633,7 @@ mod tests {
 
         let buf = render_buffer(&state, 100, 24);
         let (_, branch_y) = find_text_position(&buf, "Branch: feature/test").unwrap();
-        let (_, resume_y) = find_text_position(&buf, "Resume session").unwrap();
+        let (_, resume_y) = find_text_position(&buf, "Resume").unwrap();
 
         assert_eq!(
             resume_y,
@@ -2798,7 +2782,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_current_options_keep_long_labels_for_single_entry_history() {
+    fn quick_start_current_options_use_compact_labels_for_single_entry_history() {
         let mut state = WizardState::default();
         state.step = WizardStep::QuickStart;
         state.has_quick_start = true;
@@ -2807,9 +2791,25 @@ mod tests {
 
         let options = state.current_options();
 
-        assert_eq!(options[0], "Resume session (sess-123...)");
-        assert_eq!(options[1], "Start new session");
+        assert_eq!(options[0], "Resume (sess-123...)");
+        assert_eq!(options[1], "Start new");
         assert_eq!(options[2], "Choose different settings");
+    }
+
+    #[test]
+    fn render_quick_start_single_entry_uses_compact_action_labels() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("> Resume (sess-123...)"));
+        assert!(text.contains("  Start new"));
+        assert!(!text.contains("Resume session"));
+        assert!(!text.contains("Start new session"));
     }
 
     #[test]
@@ -2844,7 +2844,7 @@ mod tests {
         state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
 
         let buf = render_buffer(&state, 100, 24);
-        let (_, start_new_y) = find_text_position(&buf, "Start new session").unwrap();
+        let (_, start_new_y) = find_text_position(&buf, "Start new").unwrap();
         let (_, choose_y) = find_text_position(&buf, "Choose different settings").unwrap();
 
         assert_eq!(

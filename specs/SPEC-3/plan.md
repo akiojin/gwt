@@ -325,6 +325,17 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the separate progress row is gone
    while the popup title and branch-context content still render correctly.
 
+### Phase 33: Single-Entry QuickStart Action Copy Compaction
+
+1. Keep the single-entry popup title summary intact, but compact the body
+   action rows to the same `Resume` / `Start new` wording already used by
+   multi-entry history.
+2. Preserve the selected-row resume-session hint and the final `Choose
+   different settings` row while removing the remaining session-oriented body
+   copy from the single-entry branch.
+3. Add focused RED/GREEN coverage proving single-entry render and
+   `current_options()` stay aligned on the compact copy.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

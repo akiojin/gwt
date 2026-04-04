@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `131/131` completed items.
+- Task traceability snapshot: `tasks.md` now records `134/134` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -54,8 +54,7 @@ Status: CLEAR
 - Notes: The final `Choose different settings` action now follows the last
   grouped `Start new` row directly without an extra separator line.
 - Notes: `QuickStart` action rows now use the shorter old-TUI labels
-  `Resume session` and `Start new session` while preserving resume-session ID
-  snippets.
+  `Resume` and `Start new` while preserving resume-session ID snippets.
 - Notes: The final Quick Start action label now matches the old-TUI copy
   `Choose different settings` without an ellipsis.
 - Notes: Single-entry Quick Start now promotes its agent/model summary into
@@ -65,17 +64,16 @@ Status: CLEAR
   only, which keeps the grouped list denser without affecting the
   single-entry title summary contract.
 - Notes: Multi-entry Quick Start now reserves the short resume-session ID
-  hint for the selected `Resume session` row, leaving unselected rows on the
-  plain label to reduce visual noise.
+  hint for the selected `Resume` row, leaving unselected rows on the plain
+  label to reduce visual noise.
 - Notes: Multi-entry Quick Start grouped action rows now use the denser
-  old-TUI copy `Resume` / `Start new`, while single-entry rows keep the
-  explicit session wording.
+  old-TUI copy `Resume` / `Start new`.
 - Notes: The final Quick Start action now stays label-only on both wide and
   narrow popups, which removes the rebuilt inline description text from the
   footer row.
 - Notes: Quick Start state-derived option labels now mirror the rendered
-  grouped rows, eliminating the previous mismatch where multi-entry
-  `current_options()` kept the longer session-oriented copy.
+  grouped rows, eliminating the previous mismatch where single-entry or
+  multi-entry `current_options()` drifted from the rendered compact copy.
 - Notes: The wizard popup now uses the border title as its only step-context
   chrome, removing the separate `Step N/M` row and reclaiming that line for
   content.

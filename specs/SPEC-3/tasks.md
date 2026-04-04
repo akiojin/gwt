@@ -235,3 +235,9 @@
 - [x] T123 [P] Write RED test: the wizard popup omits the separate `Step N/M` row while keeping popup chrome and branch-context content visible.
 - [x] T124 Remove the redundant progress row from `wizard.rs` so the popup title remains the only step-context chrome and content regains the reclaimed line.
 - [x] T125 Verify focused wizard-layout tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 33: Single-Entry QuickStart Action Copy Compaction
+
+- [x] T126 [P] Write RED test: single-entry `QuickStart` render and `current_options()` use compact `Resume` / `Start new` labels while keeping the resume-session hint.
+- [x] T127 Update `wizard.rs` so single-entry `QuickStart` matches the compact body-action copy already used by multi-entry history.
+- [x] T128 Verify focused single-entry copy tests, broad workspace checks, and refresh SPEC-3 artifacts.

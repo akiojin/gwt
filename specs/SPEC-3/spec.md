@@ -241,11 +241,10 @@ As a developer, I want to convert an existing session to a different agent type 
   progress row above the chrome; the popup border title is the only
   step-context chrome so the content area keeps the reclaimed row.
 - **FR-031**: `QuickStart` action rows use the shorter old-TUI labels
-  `Resume session` and `Start new session`, while still showing the resume
-  session ID snippet when one exists.
+  `Resume` and `Start new`, while still showing the resume session ID
+  snippet when one exists.
 - **FR-032**: The final Quick Start action label matches the old-TUI copy
-  `Choose different settings` without an ellipsis, while preserving the wide
-  description row and narrow fallback behavior.
+  `Choose different settings` without an ellipsis.
 - **FR-033**: When `QuickStart` has exactly one persisted entry, the popup
   title promotes that entry's agent/model summary (`Quick Start — ...`) and
   the body omits the duplicated grouped header so the first action row starts
@@ -254,18 +253,19 @@ As a developer, I want to convert an existing session to a different agent type 
   headers render the agent label only while the detailed model/reasoning
   summary remains reserved for the single-entry title variant.
 - **FR-035**: In multi-entry `QuickStart`, resume session ID snippets are
-  shown only on the currently selected `Resume session` row so unselected
-  rows stay visually compact.
+  shown only on the currently selected `Resume` row so unselected rows stay
+  visually compact.
 - **FR-036**: In multi-entry `QuickStart`, grouped action rows use the more
-  compact old-TUI copy `Resume` / `Start new`, while single-entry Quick
-  Start keeps the longer `Resume session` / `Start new session` wording.
+  compact old-TUI copy `Resume` / `Start new`, and single-entry Quick
+  Start now matches that compact copy because the popup title already carries
+  the agent/model context.
 - **FR-037**: The final `QuickStart` action uses the label-only copy
   `Choose different settings` on both wide and narrow popups, without an
   inline description row.
 - **FR-038**: `QuickStart` state-derived option labels stay aligned with the
   rendered grouped rows, so multi-entry history uses compact `Resume` /
-  `Start new` labels in both the visual render and `current_options()`,
-  while single-entry history keeps the longer session-oriented wording.
+  `Start new` labels in both the visual render and `current_options()`, and
+  single-entry history now uses the same compact action wording.
 
 ## Non-Functional Requirements
 
