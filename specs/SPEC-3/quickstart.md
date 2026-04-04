@@ -57,6 +57,9 @@
 23. Verify `QuickStart` now starts the first grouped history entry directly
    below the `Branch: ...` context line instead of leaving an extra blank row
    before the grouped list.
+24. Verify consecutive Quick Start agent groups now render without a blank
+   spacer row between them while the final separator before `Choose
+   different settings...` still remains visible.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -99,5 +102,8 @@
   into one line.
 - Quick Start now matches that denser popup rhythm as well, with grouped
   history rows starting immediately below the branch context line.
+- Quick Start agent groups now render back-to-back without spacer rows,
+  making the grouped history denser while preserving the final separator and
+  footer action.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

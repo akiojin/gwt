@@ -1529,10 +1529,6 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             ))
             .style(wizard_row_style(state.selected == start_new_index)),
         );
-
-        if entry_index + 1 < state.quick_start_entries.len() {
-            items.push(ListItem::new(""));
-        }
     }
 
     items.push(
@@ -2574,6 +2570,26 @@ mod tests {
             header_y,
             branch_y + 1,
             "the first quick-start group should start immediately below the branch context"
+        );
+    }
+
+    #[test]
+    fn render_quick_start_places_next_group_directly_below_previous_entry_block() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let buf = render_buffer(&state, 100, 24);
+        let (_, start_new_y) =
+            find_text_position(&buf, "Start new with previous settings").unwrap();
+        let (_, next_header_y) = find_text_position(&buf, "Claude Code (sonnet)").unwrap();
+
+        assert_eq!(
+            next_header_y,
+            start_new_y + 1,
+            "the next quick-start group should start immediately below the previous group's actions"
         );
     }
 

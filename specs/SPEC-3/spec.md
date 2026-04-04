@@ -231,6 +231,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-027**: `QuickStart` starts its grouped history immediately below the
   `Branch: ...` context line instead of reserving an extra spacer row, so the
   popup matches the old-TUI information density.
+- **FR-028**: `QuickStart` does not insert blank spacer rows between agent
+  groups; the next agent header follows directly after the previous group's
+  `Start new` action while preserving grouped headers and the final separator.
 
 ## Non-Functional Requirements
 

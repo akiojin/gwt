@@ -156,3 +156,9 @@
 - [x] T083 [P] Write RED test: `QuickStart` places the first grouped history entry directly below the branch context line.
 - [x] T084 Tighten `QuickStart` vertical spacing so the grouped history starts immediately under `Branch: ...` while preserving grouped rows and separators.
 - [x] T085 Verify focused QuickStart density tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 20: QuickStart Group Density Restoration
+
+- [x] T086 [P] Write RED test: `QuickStart` places the next agent group directly below the previous group's action rows.
+- [x] T087 Remove blank spacer rows between Quick Start agent groups while preserving group headers and the final separator.
+- [x] T088 Verify focused group-density tests, broad workspace checks, and refresh SPEC-3 artifacts.

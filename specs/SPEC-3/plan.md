@@ -203,6 +203,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the first group begins immediately
    below the branch context line.
 
+### Phase 20: QuickStart Group Density Restoration
+
+1. Remove the blank spacer rows between Quick Start agent groups so the next
+   group header follows directly after the previous `Start new` action.
+2. Preserve selection-index semantics, colored agent headers, and the final
+   separator before `Choose different settings...` while tightening only the
+   inter-group spacing.
+3. Add focused RED/GREEN coverage proving adjacent groups render without a
+   spacer row between them.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

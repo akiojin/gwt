@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `91/91` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:23:47Z`
+- Task progress: `94/94` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:27:09Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -64,6 +64,9 @@
 - `QuickStart` now begins its grouped history immediately below the
   `Branch: ...` context line instead of reserving an extra spacer row, which
   restores the old-TUI popup density.
+- `QuickStart` agent groups now render back-to-back without blank spacer rows
+  between them, preserving headers and the final `Choose different` separator
+  while matching the denser old-TUI grouped layout.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining
