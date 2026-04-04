@@ -52,12 +52,7 @@ pub fn update(model: &mut Model, msg: Message) {
             };
         }
         Message::SwitchManagementTab(tab) => {
-            model.management_tab = tab;
-            model.active_layer = ActiveLayer::Management;
-            model.active_focus = FocusPane::TabContent;
-            if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
-                model.settings.load_category_fields();
-            }
+            switch_management_tab(model, tab);
         }
         Message::NextSession => {
             if !model.sessions.is_empty() {
@@ -497,6 +492,76 @@ pub fn load_initial_data(model: &mut Model) {
             screens::git_view::GitViewMessage::SetCommits(commits),
         );
     }
+
+    load_pr_dashboard(model);
+}
+
+fn switch_management_tab(model: &mut Model, tab: ManagementTab) {
+    switch_management_tab_with(model, tab, gwt_git::fetch_pr_list);
+}
+
+fn switch_management_tab_with<F>(model: &mut Model, tab: ManagementTab, fetch_prs: F)
+where
+    F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+{
+    model.management_tab = tab;
+    model.active_layer = ActiveLayer::Management;
+    model.active_focus = FocusPane::TabContent;
+    if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
+        model.settings.load_category_fields();
+    }
+    if tab == ManagementTab::PrDashboard {
+        load_pr_dashboard_with(model, fetch_prs);
+    }
+}
+
+fn load_pr_dashboard(model: &mut Model) {
+    load_pr_dashboard_with(model, gwt_git::fetch_pr_list);
+}
+
+fn refresh_pr_dashboard(model: &mut Model) {
+    refresh_pr_dashboard_with(model, gwt_git::fetch_pr_list);
+}
+
+fn refresh_pr_dashboard_with<F>(model: &mut Model, fetch_prs: F)
+where
+    F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+{
+    load_pr_dashboard_with(model, fetch_prs);
+}
+
+fn load_pr_dashboard_with<F>(model: &mut Model, fetch_prs: F)
+where
+    F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+{
+    let Ok(prs) = fetch_prs(&model.repo_path) else {
+        return;
+    };
+    let items = prs.into_iter().map(map_pr_item).collect();
+    screens::pr_dashboard::update(
+        &mut model.pr_dashboard,
+        screens::pr_dashboard::PrDashboardMessage::SetPrs(items),
+    );
+}
+
+fn map_pr_item(pr: gwt_git::PrStatus) -> screens::pr_dashboard::PrItem {
+    let state = match pr.state {
+        gwt_git::pr_status::PrState::Open => screens::pr_dashboard::PrState::Open,
+        gwt_git::pr_status::PrState::Closed => screens::pr_dashboard::PrState::Closed,
+        gwt_git::pr_status::PrState::Merged => screens::pr_dashboard::PrState::Merged,
+    };
+    let ci_status = pr.ci_status.to_ascii_lowercase();
+    let review_status = pr.review_status.to_ascii_lowercase();
+    let mergeable = matches!(pr.mergeable.as_str(), "MERGEABLE" | "mergeable");
+
+    screens::pr_dashboard::PrItem {
+        number: pr.number as u32,
+        title: pr.title,
+        state,
+        ci_status,
+        mergeable,
+        review_status,
+    }
 }
 
 /// Route a key event to the initialization screen.
@@ -856,7 +921,11 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
+                let should_refresh = matches!(m, PrDashboardMessage::Refresh);
                 screens::pr_dashboard::update(&mut model.pr_dashboard, m);
+                if should_refresh {
+                    refresh_pr_dashboard(model);
+                }
             } else if key.code == KeyCode::Esc {
                 dismiss_warn_notification(model);
             }
@@ -2438,6 +2507,7 @@ mod tests {
         KeyEvent, KeyEventKind, KeyEventState, MouseButton, MouseEvent, MouseEventKind,
     };
     use gwt_agent::{version_cache::VersionEntry, AgentId, DetectedAgent, VersionCache};
+    use gwt_git::pr_status::PrState as GitPrState;
     use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
     use ratatui::{buffer::Buffer, Terminal};
@@ -2916,6 +2986,77 @@ mod tests {
             "empty repo should not produce commit entries"
         );
     }
+
+    #[test]
+    fn switch_management_tab_pr_dashboard_loads_prs_on_focus() {
+        let mut model = test_model();
+
+        switch_management_tab_with(&mut model, ManagementTab::PrDashboard, |_repo_path| {
+            Ok(vec![gwt_git::PrStatus {
+                number: 42,
+                title: "Wire PR dashboard".into(),
+                state: GitPrState::Open,
+                url: "https://example.com/pr/42".into(),
+                ci_status: "SUCCESS".into(),
+                mergeable: "MERGEABLE".into(),
+                review_status: "APPROVED".into(),
+            }])
+        });
+
+        assert_eq!(model.management_tab, ManagementTab::PrDashboard);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert_eq!(model.pr_dashboard.prs.len(), 1);
+        assert_eq!(model.pr_dashboard.prs[0].number, 42);
+        assert_eq!(model.pr_dashboard.prs[0].title, "Wire PR dashboard");
+        assert_eq!(model.pr_dashboard.prs[0].ci_status, "success");
+        assert_eq!(model.pr_dashboard.prs[0].review_status, "approved");
+        assert!(model.pr_dashboard.prs[0].mergeable);
+    }
+
+    #[test]
+    fn refresh_pr_dashboard_with_reloads_prs() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::PrDashboard;
+
+        load_pr_dashboard_with(&mut model, |_repo_path| {
+            Ok(vec![gwt_git::PrStatus {
+                number: 7,
+                title: "Initial".into(),
+                state: GitPrState::Open,
+                url: "https://example.com/pr/7".into(),
+                ci_status: "PENDING".into(),
+                mergeable: "UNKNOWN".into(),
+                review_status: "REVIEW_REQUIRED".into(),
+            }])
+        });
+        assert_eq!(model.pr_dashboard.prs.len(), 1);
+        assert_eq!(model.pr_dashboard.prs[0].number, 7);
+
+        refresh_pr_dashboard_with(&mut model, |_repo_path| {
+            Ok(vec![gwt_git::PrStatus {
+                number: 8,
+                title: "Updated".into(),
+                state: GitPrState::Merged,
+                url: "https://example.com/pr/8".into(),
+                ci_status: "FAILURE".into(),
+                mergeable: "CONFLICTING".into(),
+                review_status: "CHANGES_REQUESTED".into(),
+            }])
+        });
+
+        assert_eq!(model.pr_dashboard.prs.len(), 1);
+        assert_eq!(model.pr_dashboard.prs[0].number, 8);
+        assert_eq!(model.pr_dashboard.prs[0].title, "Updated");
+        assert_eq!(model.pr_dashboard.prs[0].ci_status, "failure");
+        assert_eq!(model.pr_dashboard.prs[0].review_status, "changes_requested");
+        assert!(!model.pr_dashboard.prs[0].mergeable);
+        assert_eq!(
+            model.pr_dashboard.prs[0].state,
+            screens::pr_dashboard::PrState::Merged
+        );
+    }
+
 
     #[test]
     fn update_error_queue() {

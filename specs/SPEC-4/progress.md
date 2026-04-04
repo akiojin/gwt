@@ -12,6 +12,9 @@
   truncation, commit loading, and management-tab refresh behavior.
 - PR dashboard now has focused verification for parser coverage, screen
   rendering, and snapshot coverage for the list/detail flow.
+- PR dashboard now loads live PR list data when the tab gains focus and when
+  `r` refresh is triggered, so the screen is no longer a static renderer over
+  test-only state.
 - The remaining gap is completion-gate review and the explicitly partial
   GitHub fields called out in `spec.md`, not unchecked execution tasks.
 
