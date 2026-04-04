@@ -262,6 +262,10 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-037**: The final `QuickStart` action uses the label-only copy
   `Choose different settings` on both wide and narrow popups, without an
   inline description row.
+- **FR-038**: `QuickStart` state-derived option labels stay aligned with the
+  rendered grouped rows, so multi-entry history uses compact `Resume` /
+  `Start new` labels in both the visual render and `current_options()`,
+  while single-entry history keeps the longer session-oriented wording.
 
 ## Non-Functional Requirements
 

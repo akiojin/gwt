@@ -85,6 +85,10 @@
 33. Verify the final Quick Start action now stays `Choose different settings`
    on both wide and narrow popups, without the rebuilt `Open full setup`
    description text.
+34. Verify a branch with multiple persisted Quick Start entries keeps the
+   compact `Resume` / `Start new` labels while moving selection, and a
+   single-entry Quick Start still uses `Resume session` /
+   `Start new session`.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -151,5 +155,8 @@
   session-oriented wording.
 - The final Quick Start action now stays label-only on both wide and narrow
   popups, so the footer no longer uses the rebuilt inline description text.
+- Quick Start state-derived option labels now match the rendered grouped rows,
+  so multi-entry history stays on compact `Resume` / `Start new` copy while
+  single-entry history keeps the longer session-oriented wording.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

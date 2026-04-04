@@ -607,17 +607,35 @@ impl WizardState {
         match self.step {
             WizardStep::QuickStart => {
                 let mut options = Vec::with_capacity(self.quick_start_option_count());
-                for entry in &self.quick_start_entries {
-                    let resume = if let Some(session_id) = &entry.resume_session_id {
-                        format!(
-                            "Resume session ({}...)",
-                            &session_id[..session_id.len().min(8)]
-                        )
+                let single_entry = self.quick_start_entries.len() == 1;
+                for (entry_index, entry) in self.quick_start_entries.iter().enumerate() {
+                    let resume_index = entry_index * 2;
+                    let resume_label = if single_entry {
+                        "Resume session"
                     } else {
-                        "Resume session".to_string()
+                        "Resume"
+                    };
+                    let start_new_label = if single_entry {
+                        "Start new session"
+                    } else {
+                        "Start new"
+                    };
+                    let show_resume_hint = single_entry || self.selected == resume_index;
+                    let resume = if let Some(session_id) = &entry.resume_session_id {
+                        if show_resume_hint {
+                            format!(
+                                "{} ({}...)",
+                                resume_label,
+                                &session_id[..session_id.len().min(8)]
+                            )
+                        } else {
+                            resume_label.to_string()
+                        }
+                    } else {
+                        resume_label.to_string()
                     };
                     options.push(resume);
-                    options.push("Start new session".to_string());
+                    options.push(start_new_label.to_string());
                 }
                 if !self.quick_start_entries.is_empty() {
                     options.push("Choose different settings".to_string());
@@ -2745,13 +2763,46 @@ mod tests {
 
         let options = state.current_options();
 
-        assert_eq!(options[0], "Resume session (sess-123...)");
-        assert_eq!(options[1], "Start new session");
+        assert_eq!(options[0], "Resume (sess-123...)");
+        assert_eq!(options[1], "Start new");
 
         let text = render_text(&state, 100, 24);
 
         assert!(text.contains("Resume"));
         assert!(text.contains("Start new"));
+    }
+
+    #[test]
+    fn quick_start_current_options_use_compact_labels_for_multi_entry_history() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+        state.selected = 0;
+
+        let options = state.current_options();
+
+        assert_eq!(options[0], "Resume (sess-123...)");
+        assert_eq!(options[1], "Start new");
+        assert_eq!(options[2], "Resume");
+        assert_eq!(options[3], "Start new");
+        assert_eq!(options[4], "Choose different settings");
+    }
+
+    #[test]
+    fn quick_start_current_options_keep_long_labels_for_single_entry_history() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
+
+        let options = state.current_options();
+
+        assert_eq!(options[0], "Resume session (sess-123...)");
+        assert_eq!(options[1], "Start new session");
+        assert_eq!(options[2], "Choose different settings");
     }
 
     #[test]

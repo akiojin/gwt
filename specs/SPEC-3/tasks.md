@@ -223,3 +223,9 @@
 - [x] T117 [P] Write RED test: the final Quick Start action uses label-only `Choose different settings` even on wide popups.
 - [x] T118 Update `wizard.rs` so `Choose different settings` stays label-only across wide and narrow render paths.
 - [x] T119 Verify focused footer-copy tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 31: QuickStart Option Copy Alignment
+
+- [x] T120 [P] Write RED test: multi-entry `QuickStart` `current_options()` uses compact `Resume` / `Start new` labels and selected-row resume hints.
+- [x] T121 Update `wizard.rs` so multi-entry `current_options()` mirrors the rendered compact grouped-row copy while single-entry Quick Start keeps the longer labels.
+- [x] T122 Verify focused option-copy-alignment tests, broad workspace checks, and refresh SPEC-3 artifacts.

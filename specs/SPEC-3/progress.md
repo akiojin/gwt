@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `125/125` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T13:24:24Z`
+- Task progress: `128/128` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T13:29:15Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -93,6 +93,10 @@
 - The final `QuickStart` action now stays label-only (`Choose different
   settings`) on both wide and narrow popups, removing the rebuilt inline
   description text.
+- `QuickStart` now keeps its state-derived option labels aligned with the
+  rendered grouped rows, so multi-entry history uses compact `Resume` /
+  `Start new` copy consistently while single-entry history keeps the longer
+  session-oriented wording.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

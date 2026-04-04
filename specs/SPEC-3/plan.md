@@ -303,6 +303,17 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving wide and narrow render paths both
    keep the label-only final action.
 
+### Phase 31: QuickStart Option Copy Alignment
+
+1. Keep single-entry Quick Start wording intact, but align multi-entry
+   `current_options()` labels with the rendered compact grouped rows
+   (`Resume` / `Start new` plus the selected-row resume hint).
+2. Preserve selection-index semantics and launch behavior while removing the
+   state/render copy mismatch for grouped Quick Start history.
+3. Add focused RED/GREEN coverage proving multi-entry `current_options()`
+   uses the compact labels while single-entry history keeps the longer
+   `Resume session` / `Start new session` wording.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say
