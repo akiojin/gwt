@@ -93,3 +93,10 @@
 - [x] T047 [P] Write RED test: `QuickStart` renders old-TUI grouped rows (`Branch: ...`, colored agent headers, `Resume`, `Start new`, `Choose different settings...`) and uses `entries * 2 + 1` selectable options.
 - [x] T048 Implement persisted-session-backed Quick Start loading, old-TUI grouped rendering, and `Resume`/`Start new` selection semantics including resume-ID fallback to `Continue`.
 - [x] T049 Verify focused Quick Start tests, workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 11: Old-TUI AgentSelect and Popup Chrome
+
+- [x] T050 [P] Write RED test: popup chrome shows the current step title in the border plus a right-aligned `[ESC]` hint.
+- [x] T051 [P] Write RED test: existing-branch `AgentSelect` renders `Branch: ...` above name-only agent rows.
+- [x] T052 Implement old-TUI popup chrome and specialized `AgentSelect` rendering without changing step transitions or launch semantics.
+- [x] T053 Verify focused wizard render tests, workspace checks, and refresh SPEC-3 artifacts.

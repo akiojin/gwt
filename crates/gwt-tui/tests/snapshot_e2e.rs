@@ -825,7 +825,10 @@ fn e2e_enter_on_branch_opens_wizard() {
     // Verify the wizard has the branch name pre-filled
     let output = render_to_string(&model, 80, 24);
     assert!(
-        output.contains("Wizard") || output.contains("Agent") || output.contains("Quick"),
+        output.contains("Branch Action")
+            || output.contains("Quick Start")
+            || output.contains("Select Coding Agent")
+            || output.contains("[ESC]"),
         "Wizard overlay should be visible after Enter"
     );
 }

@@ -34,7 +34,7 @@ impl WizardStep {
         match self {
             Self::QuickStart => "Quick Start",
             Self::BranchAction => "Branch Action",
-            Self::AgentSelect => "Select Agent",
+            Self::AgentSelect => "Select Coding Agent",
             Self::ModelSelect => "Select Model",
             Self::ReasoningLevel => "Reasoning Level",
             Self::VersionSelect => "Select Version",
@@ -1381,6 +1381,17 @@ fn quick_start_agent_color(agent_id: &str) -> Color {
     }
 }
 
+fn agent_row_color(agent_id: &str) -> Color {
+    match agent_id {
+        "claude" => Color::Yellow,
+        "codex" => Color::Cyan,
+        "gemini" => Color::Magenta,
+        "opencode" => Color::Green,
+        "gh" => Color::Blue,
+        _ => Color::White,
+    }
+}
+
 fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1527,6 +1538,60 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     frame.render_widget(List::new(items), list_area);
 }
 
+fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let start_y = if !state.is_new_branch {
+        frame.render_widget(
+            Paragraph::new(truncate_with_ellipsis(
+                &format!("Branch: {}", state.branch_name),
+                area.width as usize,
+            ))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+        2
+    } else {
+        0
+    };
+
+    let items = if state.detected_agents.is_empty() {
+        vec![ListItem::new(truncate_with_ellipsis(
+            "(no agents detected)",
+            area.width as usize,
+        ))]
+    } else {
+        state
+            .detected_agents
+            .iter()
+            .enumerate()
+            .map(|(idx, agent)| {
+                let marker = if idx == state.selected { "> " } else { "  " };
+                let style = if idx == state.selected {
+                    Style::default().bg(Color::Cyan).fg(Color::Black)
+                } else {
+                    Style::default().fg(agent_row_color(&agent.id))
+                };
+                let text = truncate_with_ellipsis(
+                    &format!("{marker}{}", agent.display_label()),
+                    area.width as usize,
+                );
+                ListItem::new(text).style(style)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let list_area = Rect::new(
+        area.x,
+        area.y + start_y,
+        area.width,
+        area.height.saturating_sub(start_y),
+    );
+    frame.render_widget(List::new(items), list_area);
+}
+
 /// Render the wizard overlay.
 pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Centered modal — 60% width, 70% height
@@ -1541,7 +1606,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Progress indicator
-            Constraint::Length(3), // Step title
+            Constraint::Length(3), // Popup chrome
             Constraint::Min(0),    // Content
             Constraint::Length(1), // Hints
         ])
@@ -1554,17 +1619,17 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     let progress = Paragraph::new(progress_text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(progress, chunks[0]);
 
-    // Step title
+    // Popup chrome
     let title_block = Block::default()
         .borders(Borders::ALL)
-        .title("Agent Launch Wizard")
-        .border_style(Style::default().fg(Color::Cyan));
-    let title_text = Paragraph::new(state.step.title()).block(title_block).style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
-    frame.render_widget(title_text, chunks[1]);
+        .border_style(Style::default().fg(Color::Cyan))
+        .title_top(Line::from(state.step.title()).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_top(Line::from(" [ESC] ").right_aligned());
+    frame.render_widget(title_block, chunks[1]);
 
     // Content — either a list of options or a text input
     render_step_content(state, frame, chunks[2]);
@@ -1594,6 +1659,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
 fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
     match state.step {
         WizardStep::QuickStart => render_quick_start_step(state, frame, area),
+        WizardStep::AgentSelect => render_agent_select_step(state, frame, area),
         WizardStep::BranchNameInput => {
             let block = Block::default().borders(Borders::ALL).title("Branch Name");
             let text = Paragraph::new(format!("{}_", state.branch_name))
@@ -1759,7 +1825,7 @@ mod tests {
         out
     }
 
-    fn render_text(state: &WizardState, width: u16, height: u16) -> String {
+    fn render_buffer(state: &WizardState, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -1768,8 +1834,24 @@ mod tests {
                 render(state, f, area);
             })
             .unwrap();
-        let buf = terminal.backend().buffer().clone();
+        terminal.backend().buffer().clone()
+    }
+
+    fn render_text(state: &WizardState, width: u16, height: u16) -> String {
+        let buf = render_buffer(state, width, height);
         buffer_text(&buf)
+    }
+
+    fn find_text_position(buf: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buf.area.height {
+            let line = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>();
+            if let Some(start) = line.find(needle) {
+                return Some((start as u16, y));
+            }
+        }
+        None
     }
 
     #[test]
@@ -2288,6 +2370,19 @@ mod tests {
     }
 
     #[test]
+    fn render_popup_chrome_shows_step_title_and_esc_hint() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AgentSelect;
+        state.detected_agents = sample_agents();
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Select Coding Agent"));
+        assert!(text.contains("[ESC]"));
+        assert!(!text.contains("Agent Launch Wizard"));
+    }
+
+    #[test]
     fn render_branch_input_does_not_panic() {
         let mut state = WizardState::default();
         state.step = WizardStep::BranchNameInput;
@@ -2335,6 +2430,56 @@ mod tests {
         assert!(text.contains("  Start new with previous settings"));
         assert!(text.contains("Claude Code (sonnet)"));
         assert!(text.contains("Choose different settings..."));
+    }
+
+    #[test]
+    fn render_agent_select_for_existing_branch_shows_branch_and_name_only_rows() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AgentSelect;
+        state.is_new_branch = false;
+        state.branch_name = "feature/test".to_string();
+        state.detected_agents = sample_agents();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Branch: feature/test"));
+        assert!(text.contains("> Claude Code"));
+        assert!(text.contains("  Codex CLI"));
+        assert!(text.contains("  Aider"));
+        assert!(!text.contains("Installed"));
+    }
+
+    #[test]
+    fn render_agent_select_without_agents_shows_empty_state_message() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AgentSelect;
+        state.is_new_branch = false;
+        state.branch_name = "feature/test".to_string();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Branch: feature/test"));
+        assert!(text.contains("(no agents detected)"));
+    }
+
+    #[test]
+    fn render_agent_select_uses_old_tui_selection_and_agent_colors() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AgentSelect;
+        state.is_new_branch = false;
+        state.branch_name = "feature/test".to_string();
+        state.detected_agents = sample_agents();
+        state.selected = 1;
+
+        let buf = render_buffer(&state, 100, 24);
+        let (codex_x, codex_y) = find_text_position(&buf, "Codex CLI").expect("codex row");
+        let (claude_x, claude_y) = find_text_position(&buf, "Claude Code").expect("claude row");
+        let selected_style = buf[(codex_x, codex_y)].style();
+        let unselected_style = buf[(claude_x, claude_y)].style();
+
+        assert_eq!(selected_style.bg, Some(Color::Cyan));
+        assert_eq!(selected_style.fg, Some(Color::Black));
+        assert_eq!(unselected_style.fg, Some(Color::Yellow));
     }
 
     #[test]

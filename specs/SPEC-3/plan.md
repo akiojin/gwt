@@ -117,6 +117,17 @@ persisted agent session before activation.
 4. Cover the slice with RED/GREEN tests for history loading, Quick Start
    rendering, and launch-config restoration.
 
+### Phase 8: Old-TUI AgentSelect and Popup Chrome
+
+1. Restore old-TUI popup chrome by moving the current step title into the
+   border, adding a right-aligned `[ESC]` hint, and keeping the content area
+   centered without extra inner chrome.
+2. Restore `AgentSelect` rendering so existing-branch launches show
+   `Branch: ...` above the list and the agent rows render as name-only
+   entries with the old-TUI selected-row highlight.
+3. Add focused RED/GREEN coverage for popup chrome text and AgentSelect
+   rendering before changing any other wizard steps.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

@@ -33,12 +33,20 @@
    while repository context is preserved.
 13. Check the existing focused tests and notifications to confirm the original
    session remains intact on conversion failure.
+14. Verify the wizard popup border uses the current step title and shows a
+   right-aligned `[ESC]` hint.
+15. Verify `AgentSelect` from an existing branch shows `Branch: ...` above a
+   name-only agent list with the old-TUI cyan selection highlight.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
 - `cargo test -p gwt-agent version_cache -- --nocapture`
 - `cargo test -p gwt-tui wizard -- --nocapture`
 - `cargo test -p gwt-tui render_ -- --nocapture`
+- `cargo test -p gwt-tui render_agent_select -- --nocapture`
+- `cargo test -p gwt-tui render_popup_chrome_shows_step_title_and_esc_hint -- --nocapture`
+- `cargo test -p gwt-tui render_agent_select_for_existing_branch_shows_branch_and_name_only_rows -- --nocapture`
+- `cargo test -p gwt-tui render_agent_select_uses_old_tui_selection_and_agent_colors -- --nocapture`
 - `cargo test -p gwt-tui quick_start -- --nocapture`
 - `cargo test -p gwt-tui prepare_wizard_startup_starts_spec_prefill_at_branch_type_select -- --nocapture`
 - `cargo test -p gwt-tui build_launch_config_from_wizard -- --nocapture`
@@ -51,5 +59,7 @@
   the launch path without a trailing confirm screen.
 - Quick Start behaves like the old TUI for persisted branch history instead of
   acting as a static placeholder.
+- AgentSelect and popup chrome now match the old-TUI visual contract for the
+  restored branch-first flow.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

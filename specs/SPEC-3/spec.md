@@ -70,6 +70,23 @@ permissions are easier to scan at a glance.
    scroll, then the popup shows `^ more above ^` / `v more below v`
    indicators.
 
+### US-9: Restore Old-TUI AgentSelect and Popup Chrome (P1) -- IMPLEMENTED
+
+As a developer, I want the AgentSelect step and popup chrome to match the
+old-TUI layout so that the wizard feels visually consistent with the branch-
+first flow that was already restored.
+
+**Acceptance Scenarios**
+
+1. Given I enter `AgentSelect` from an existing branch, when the popup
+   renders, then the content shows `Branch: ...` above the agent list.
+2. Given `AgentSelect` renders, when the list is shown, then rows use agent
+   names only instead of status-heavy labels, with the selected row using the
+   old-TUI cyan highlight.
+3. Given the popup renders any wizard step, when the chrome is drawn, then
+   the border title uses the current step name and shows a right-aligned
+   `[ESC]` close hint like the old TUI.
+
 ### US-2: Detect Installed Agents (P0) -- IMPLEMENTED
 
 As a developer, I want gwt to automatically detect which coding agents are installed so that I only see available options.
@@ -186,6 +203,9 @@ As a developer, I want to convert an existing session to a different agent type 
   `Branch: ...`, colored per-agent headers, two selectable rows per entry
   (`Resume` / `Start new`), and a trailing `Choose different settings...`
   action.
+- **FR-019**: `AgentSelect` renders old-TUI-style existing-branch context and
+  name-only agent rows, while the popup chrome shows the current step title
+  in the border and a right-aligned `[ESC]` hint.
 
 ## Non-Functional Requirements
 
