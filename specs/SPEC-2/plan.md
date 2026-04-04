@@ -247,6 +247,21 @@ instead of spending most of the narrow pane on a full repository path.
 20.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
+Make the management panel behave like a supplemental surface again so toggling it on/off does not
+leave the workspace in a stale management-focus state.
+
+21.1: Focus contract (2 tasks)
+- Showing the management panel with `Ctrl+G,g` keeps terminal focus instead of stealing focus into the left pane.
+- Hiding the management panel always normalizes focus back to Terminal so Main layer status hints stay correct.
+
+21.2: Focused routing coverage (2 tasks)
+- Add focused coverage for showing the management panel from Main while preserving terminal focus.
+- Add focused coverage for hiding the management panel from TabContent/BranchDetail and normalizing focus to Terminal.
+
+21.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

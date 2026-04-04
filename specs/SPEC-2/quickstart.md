@@ -21,7 +21,8 @@
 18. Toggle the management panel on a wide terminal and confirm the left pane is visibly narrower than the session pane, with the default layout matching a `40/60` split instead of `50/50`.
 19. While focus stays in Branch Detail, press `m` to change Branches view mode, `v` to jump to Git View, and `f` to return to the list with search active; confirm `?` or `h` still opens the help overlay from the detail pane.
 20. Verify the management header stays compact: it should show the repository basename plus active tab/focus context instead of printing the full repository path across the narrow pane.
-21. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+21. From a terminal-focused management session, press `Ctrl+G,g` to hide the panel and confirm the main layer keeps terminal-oriented hints; press `Ctrl+G,g` again and confirm the management panel reappears without stealing terminal focus.
+22. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -37,6 +38,7 @@
 - The visible workspace balance favors the terminal pane again: the management panel uses a sensible default width instead of splitting the screen evenly.
 - Branch Detail preserves the old-TUI local mnemonic muscle memory instead of forcing a focus hop back to the list before `m`, `v`, `f`, or help works.
 - The management header now stays readable inside the narrower pane because it uses compact repository/context text instead of a full path dump.
+- Toggling the management panel now behaves like a supplemental old-TUI surface instead of leaving stale management focus behind when returning to the main terminal layer.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

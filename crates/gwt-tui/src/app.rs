@@ -45,11 +45,17 @@ pub fn update(model: &mut Model, msg: Message) {
             model.quit = true;
         }
         Message::ToggleLayer => {
-            model.active_layer = match model.active_layer {
-                ActiveLayer::Initialization => ActiveLayer::Initialization, // blocked
-                ActiveLayer::Main => ActiveLayer::Management,
-                ActiveLayer::Management => ActiveLayer::Main,
-            };
+            match model.active_layer {
+                ActiveLayer::Initialization => {} // blocked
+                ActiveLayer::Main => {
+                    model.active_layer = ActiveLayer::Management;
+                    model.active_focus = FocusPane::Terminal;
+                }
+                ActiveLayer::Management => {
+                    model.active_layer = ActiveLayer::Main;
+                    model.active_focus = FocusPane::Terminal;
+                }
+            }
         }
         Message::SwitchManagementTab(tab) => {
             switch_management_tab(model, tab);
@@ -3789,6 +3795,42 @@ mod tests {
 
         update(&mut model, Message::ToggleLayer);
         assert_eq!(model.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn update_toggle_layer_shows_management_without_stealing_terminal_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        update(&mut model, Message::ToggleLayer);
+
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn update_toggle_layer_hides_management_and_normalizes_tab_focus_to_terminal() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        update(&mut model, Message::ToggleLayer);
+
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn update_toggle_layer_hides_management_and_normalizes_detail_focus_to_terminal() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::BranchDetail;
+
+        update(&mut model, Message::ToggleLayer);
+
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
     }
 
     #[test]

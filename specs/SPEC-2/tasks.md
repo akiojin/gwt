@@ -254,3 +254,11 @@ screens to use.
 - [x] T166 Update `app.rs` management header rendering to use compact basename/context text that fits the 40% pane more gracefully.
 - [x] T167 Refresh `SPEC-2` artifacts to describe the compact management-header contract.
 - [x] T168 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 21: Focus-Preserving Layer Toggle
+
+- [x] T169 [P] Write RED test: toggling from Main to Management keeps `FocusPane::Terminal`.
+- [x] T170 [P] Write RED test: toggling from Management to Main normalizes focus back to `FocusPane::Terminal` even if the user was in `TabContent` or `BranchDetail`.
+- [x] T171 Update `app.rs` layer-toggle handling so the management panel behaves like a supplemental surface instead of stealing/sticking management focus.
+- [x] T172 Refresh `SPEC-2` artifacts to describe the focus-preserving layer-toggle contract.
+- [x] T173 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

@@ -95,6 +95,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
+- **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-006**: 8 management tabs: Branches, Issues, PRs, Profiles, Git View, Versions, Settings, Logs. (SPECs tab removed — SPECs are shown in Branch Detail view.)
 - **FR-006a**: Branch Detail view: Branches tab is split vertically — top 50% branch list, bottom 50% detail of selected branch (always visible). Cursor movement in the list updates the detail. Sections:
   - **Overview**: Branch name, head status, worktree path, linked Issues, PR status

@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `146/146` completed items after closing Phase 20 for compact management-header context.
+- Task traceability snapshot: `tasks.md` currently records `151/151` completed items after closing Phase 21 for focus-preserving layer toggle.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -29,3 +29,4 @@ Status: CLEAR
 - Notes: Phase 18 restored a more sensible old-TUI-like workspace balance by moving the visible management/session split from `50/50` to `40/60` through a shared layout helper.
 - Notes: Phase 19 restored the old-TUI Branches local mnemonic set inside Branch Detail as well, so `m`, `v`, `f`, and help remain available after focus moves off the list.
 - Notes: Phase 20 restored a compact, contextual management header that fits the narrower pane better by using the repository basename plus tab/focus context instead of the full path.
+- Notes: Phase 21 restores the old-TUI supplemental-panel contract for `Ctrl+G,g`; showing the management panel no longer steals terminal focus, and hiding it resets focus to Terminal so Main-layer hints stay accurate.
