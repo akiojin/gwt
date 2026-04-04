@@ -1,6 +1,7 @@
 ---
 name: gwt-pr-check
-description: "Check GitHub PR status with the gh CLI using REST-first PR lookups, including unmerged PR detection and post-merge new-commit detection for the current branch. Use when user says 'check PR status', 'is the PR merged?', 'PR state', or asks about the current branch's pull request progress."
+description: "This skill should be used when the user asks about PR status, says 'check PR status', 'is the PR merged?', 'PR state', 'PRの状態', 'PRどうなった?', or wants to know the current branch's pull request progress. It uses REST-first PR lookups including unmerged PR detection and post-merge new-commit detection."
+allowed-tools: Bash, Read, Glob, Grep
 ---
 
 # GH PR Check

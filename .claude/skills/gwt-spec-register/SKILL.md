@@ -1,6 +1,7 @@
 ---
 name: gwt-spec-register
-description: "Create a new local SPEC directory when no existing canonical SPEC fits. Create specs/SPEC-{id}/ with metadata.json + spec.md, then continue into SPEC orchestration unless the user explicitly asks for register-only behavior. Use when user says 'create a new spec', 'register a spec', 'new SPEC for this feature', or asks to start a spec from scratch."
+description: "This skill should be used when the user wants to create a brand-new SPEC, says 'create a new spec', 'register a spec', 'new SPEC for this feature', '新しいSPECを作って', 'SPECを登録して', or asks to start a spec from scratch. It creates specs/SPEC-{id}/ with metadata.json + spec.md, then continues into SPEC orchestration unless register-only behavior is requested."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # gwt SPEC Register

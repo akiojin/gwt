@@ -1,6 +1,8 @@
 ---
 name: gwt-project-search
-description: "Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. Use when user says 'search project files', 'find related files', 'which files handle X', or asks to locate source files related to a feature, bug, or concept."
+description: "This skill should be used when the user wants to find source files related to a feature, bug, or concept, says 'search project files', 'find related files', 'which files handle X', 'この機能のファイルはどこ?', 'ファイルを探して', or asks to locate source code by semantic meaning. It performs semantic search over project source files using vector embeddings."
+allowed-tools: Bash, Read, Glob, Grep
+argument-hint: "[search query]"
 ---
 
 # Project Structure Index

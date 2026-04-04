@@ -1,6 +1,8 @@
 ---
 name: gwt-issue-resolve
-description: "Resolve an existing GitHub Issue end-to-end. Analyze the issue, decide whether it should be fixed directly, merged into an existing SPEC, or promoted to a new SPEC, and continue toward resolution. Use gwt-issue-register for brand-new work registration. Use when user says 'resolve this issue', 'fix issue #N', 'progress this issue', or brings a GitHub Issue URL to be worked on."
+description: "This skill should be used when the user brings a GitHub Issue to be worked on, says 'resolve this issue', 'fix issue #N', 'progress this issue', 'このIssueを解決して', 'Issue #Nを直して', or provides a GitHub Issue URL. It analyzes the issue, decides whether to fix directly, merge into an existing SPEC, or promote to a new SPEC, and continues toward resolution end-to-end."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
+argument-hint: "[issue-number or URL]"
 metadata:
   short-description: Resolve GitHub Issues through direct fixes or spec workflows
 ---

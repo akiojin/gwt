@@ -1,6 +1,8 @@
 ---
 name: gwt-agent-send
-description: "Send key input to a specific agent pane or broadcast to all panes. Use when user says 'send to pane', 'dispatch to agent', 'broadcast instructions', or when dispatching tasks to agents."
+description: "This skill should be used when the user wants to send instructions to an agent pane, says 'send to pane', 'dispatch to agent', 'broadcast instructions', 'エージェントに送って', 'ペインに指示', or when dispatching tasks to agents. It sends key input to a specific agent pane or broadcasts to all active panes."
+allowed-tools: Bash, Read
+argument-hint: "[pane-id] [input text]"
 ---
 
 # gwt Agent Send

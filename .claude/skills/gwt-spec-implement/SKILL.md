@@ -1,6 +1,8 @@
 ---
 name: gwt-spec-implement
-description: "Implement an existing SPEC end-to-end from tasks.md. Execute test-first tasks, update progress artifacts, and keep PR work moving until the SPEC is done. Use when user says 'implement this spec', 'start implementation', 'execute the tasks', or when a spec has passed the analysis gate and is ready for coding."
+description: "This skill should be used when the user wants to implement a SPEC, says 'implement this spec', 'start implementation', 'execute the tasks', '実装して', 'タスクを実行して', 'SPECを実装して', or when a spec has passed the analysis gate and is ready for coding. It executes test-first tasks from tasks.md, updates progress artifacts, and keeps PR work moving until the SPEC is done."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
+argument-hint: "[spec-id]"
 ---
 
 # gwt SPEC Implement

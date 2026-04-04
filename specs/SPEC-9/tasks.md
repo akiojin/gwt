@@ -95,8 +95,8 @@
 
 ### 2c.1 Description Rewrite (all 21 skills)
 
-- [P] [ ] **T-056**: Rewrite all SKILL.md descriptions to third-person voice with trigger phrases (Anthropic guidelines).
-- [P] [ ] **T-057**: Add `allowed-tools`, `argument-hint` and applicable frontmatter fields to all SKILL.md files.
+- [P] [x] **T-056**: Rewrite all SKILL.md descriptions to third-person voice with trigger phrases (Anthropic guidelines).
+- [P] [x] **T-057**: Add `allowed-tools`, `argument-hint` and applicable frontmatter fields to all SKILL.md files.
 
 ### 2c.2 Progressive Disclosure (complex skills)
 
@@ -110,8 +110,8 @@
 ### 2c.3 Body Content Rewrite
 
 - [P] [ ] **T-064**: Rewrite all SKILL.md body content in imperative/infinitive form per Anthropic guidelines.
-- [ ] **T-065**: Verify all SKILL.md files are under 500 lines.
-- [ ] **T-066**: Verify all YAML frontmatter passes `serde_yaml` validation (build test).
+- [x] **T-065**: Verify all SKILL.md files are under 500 lines.
+- [x] **T-066**: Verify all YAML frontmatter passes `serde_yaml` validation (build test).
 
 ## Phase 3: Hooks Merge Completion (carried over from SPEC-1786)
 

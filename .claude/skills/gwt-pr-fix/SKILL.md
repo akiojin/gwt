@@ -1,6 +1,7 @@
 ---
 name: gwt-pr-fix
-description: "Inspect GitHub PR for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads. Autonomously fix high-confidence blockers, reply to ALL reviewer comments, then resolve threads. Use when user says 'fix CI', 'fix the PR', 'CI is failing', 'resolve PR blockers', or after creating/pushing a PR when CI failures or merge blockers are detected."
+description: "This skill should be used when the user says 'fix CI', 'fix the PR', 'CI is failing', 'CIを直して', 'PRを直して', 'resolve PR blockers', 'マージできない', or after creating/pushing a PR when CI failures or merge blockers are detected. It inspects GitHub PRs for CI failures, merge conflicts, update-branch requirements, reviewer comments, change requests, and unresolved review threads, then autonomously fixes high-confidence blockers and replies to ALL reviewer comments."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 metadata:
   short-description: Fix failing GitHub PRs comprehensively
 ---

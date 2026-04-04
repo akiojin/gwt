@@ -1,6 +1,8 @@
 ---
 name: gwt-agent-lifecycle
-description: "Stop an agent pane when escalation is needed or the agent is stuck. Use when user says 'stop the agent', 'close pane', 'escalation needed', or when managing pane lifecycle."
+description: "This skill should be used when the user wants to stop or close an agent pane, says 'stop the agent', 'close pane', 'escalation needed', 'エージェントを止めて', 'ペインを閉じて', or when managing pane lifecycle due to stuck or unresponsive agents."
+allowed-tools: Bash, Read
+argument-hint: "[pane-id]"
 ---
 
 # gwt Agent Lifecycle

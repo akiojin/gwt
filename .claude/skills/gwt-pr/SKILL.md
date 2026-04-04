@@ -1,6 +1,8 @@
 ---
 name: gwt-pr
-description: "Create or update GitHub Pull Requests with the gh CLI, preferring REST-first `gh api` flows for PR list/create/update/view while deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches)."
+description: "This skill should be used when the user asks to open, create, edit, or update a GitHub Pull Request, says 'open a PR', 'create a PR', 'gh pr', 'PRを作って', 'PRを開いて', or needs to generate a PR body or template. It prefers REST-first gh api flows for PR list/create/update/view and decides whether to create a new PR or only push based on existing PR merge status. Defaults: base=develop, head=current branch."
+allowed-tools: Bash, Read, Glob, Grep
+argument-hint: "[optional context or PR number]"
 ---
 
 # GH PR

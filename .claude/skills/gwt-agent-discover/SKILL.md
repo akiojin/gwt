@@ -1,6 +1,7 @@
 ---
 name: gwt-agent-discover
-description: "List active agent panes with their IDs, agent types, branches, and statuses. Use when user says 'list panes', 'what agents are running?', 'show active agents', or when discovering available panes before dispatch."
+description: "This skill should be used when the user wants to see active agent panes, says 'list panes', 'what agents are running?', 'show active agents', 'エージェント一覧', 'ペインを確認', or when discovering available panes before dispatch. It lists active agent panes with their IDs, agent types, branches, and statuses."
+allowed-tools: Bash, Read
 ---
 
 # gwt Agent Discover

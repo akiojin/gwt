@@ -1,6 +1,7 @@
 ---
 name: gwt-spec-to-issue-migration
-description: "Migrate GitHub Issue-based specs to local SPEC directories. Supports reverse migration from gwt-spec Issues to local specs/SPEC-{id}/ directories using the bundled migration script. Use when user says 'migrate specs', 'convert issues to local specs', 'move specs from issues', or asks to transform Issue-based specs into local SPEC directories."
+description: "This skill should be used when the user wants to migrate Issue-based specs to local directories, says 'migrate specs', 'convert issues to local specs', 'move specs from issues', 'SPECをローカルに移行', or asks to transform Issue-based specs into local SPEC directories. It supports reverse migration from gwt-spec Issues to local specs/SPEC-{id}/ directories using the bundled migration script."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # gwt Spec Migration (Issue to Local)

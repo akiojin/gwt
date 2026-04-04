@@ -1,6 +1,8 @@
 ---
 name: gwt-spec-analyze
-description: "Analyze a SPEC artifact set for completeness and consistency across spec.md, plan.md, tasks.md, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers. Use when user says 'analyze this spec', 'check spec completeness', 'run the analysis gate', or before starting implementation on a spec."
+description: "This skill should be used when the user wants to validate a SPEC before implementation, says 'analyze this spec', 'check spec completeness', 'run the analysis gate', 'SPECを分析して', 'SPECの整合性チェック', or before starting implementation on a spec. It analyzes completeness and consistency across spec.md, plan.md, tasks.md, detects missing traceability, unresolved clarifications, and constitution gaps, and distinguishes auto-fixable gaps from true decision blockers."
+allowed-tools: Bash, Read, Glob, Grep
+argument-hint: "[spec-id]"
 ---
 
 # gwt SPEC Analyze

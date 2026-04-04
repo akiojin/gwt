@@ -1,6 +1,8 @@
 ---
 name: gwt-agent-read
-description: "Read the scrollback tail of an agent pane to check progress and status. Use when user says 'check pane output', 'read agent output', 'what is the agent doing?', or when monitoring agent progress."
+description: "This skill should be used when the user wants to check an agent's output or progress, says 'check pane output', 'read agent output', 'what is the agent doing?', 'エージェントの状態', 'ペインの出力を見て', or when monitoring agent progress. It reads the scrollback tail of a specific agent pane."
+allowed-tools: Bash, Read
+argument-hint: "[pane-id]"
 ---
 
 # gwt Agent Read

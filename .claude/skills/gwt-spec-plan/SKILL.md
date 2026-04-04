@@ -1,6 +1,8 @@
 ---
 name: gwt-spec-plan
-description: "Generate plan.md, research.md, data-model.md, quickstart.md, and contracts/* planning artifacts for an existing SPEC, including a constitution check against memory/constitution.md. Use directly or through gwt-spec-ops. Use when user says 'plan this spec', 'generate a plan', 'create planning artifacts', or when a clarified spec.md needs implementation planning."
+description: "This skill should be used when the user wants to generate planning artifacts for a SPEC, says 'plan this spec', 'generate a plan', 'create planning artifacts', '計画を作って', 'SPECのプランを生成して', or when a clarified spec.md needs implementation planning. It generates plan.md, research.md, data-model.md, quickstart.md, and contracts/* including a constitution check."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
+argument-hint: "[spec-id]"
 ---
 
 # gwt SPEC Plan

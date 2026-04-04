@@ -1,6 +1,8 @@
 ---
 name: gwt-spec-tasks
-description: "Generate tasks.md for an existing SPEC from spec.md and plan.md, grouped by phase and user story with exact file paths, [P] parallel markers, and test-first ordering. Use directly or through gwt-spec-ops. Use when user says 'generate tasks', 'create tasks.md', 'break down the plan into tasks', or when plan.md is ready for task decomposition."
+description: "This skill should be used when the user wants to generate tasks from a SPEC plan, says 'generate tasks', 'create tasks.md', 'break down the plan into tasks', 'タスクを生成して', 'タスク分解して', or when plan.md is ready for task decomposition. It generates tasks.md grouped by phase and user story with exact file paths, [P] parallel markers, and test-first ordering."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
+argument-hint: "[spec-id]"
 ---
 
 # gwt SPEC Tasks

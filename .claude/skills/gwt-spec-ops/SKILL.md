@@ -1,6 +1,8 @@
 ---
 name: gwt-spec-ops
-description: "Local SPEC directory orchestration. Use an existing or newly created SPEC directory to stabilize spec.md, plan.md, tasks.md, analysis gates, and then continue into implementation without stopping at normal handoff boundaries. Use when user says 'run spec workflow', 'orchestrate this spec', 'stabilize the spec', or asks to drive a spec end-to-end from clarification through implementation."
+description: "This skill should be used when the user wants to drive a SPEC end-to-end, says 'run spec workflow', 'orchestrate this spec', 'stabilize the spec', 'SPECを進めて', 'SPEC-Nを実装まで持っていって', or asks to manage spec.md, plan.md, tasks.md, and analysis gates through implementation. It orchestrates the full SPEC lifecycle from clarification through implementation without stopping at normal handoff boundaries."
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
+argument-hint: "[spec-id]"
 ---
 
 # gwt SPEC Ops
