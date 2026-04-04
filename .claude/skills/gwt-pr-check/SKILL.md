@@ -16,194 +16,33 @@ This skill is **check-only**:
 - Do not push
 - Do not create/edit PRs
 
-## Decision rules (must follow)
+## Quick reference
 
-1. Resolve repository, `head` branch, and `base` branch.
-   - `head`: current branch (`git rev-parse --abbrev-ref HEAD`)
-   - `base`: default `develop` unless user specifies
-2. Optionally collect local working tree state:
-   - `git status --porcelain`
-   - Report as context only; do not mutate files.
-3. Fetch latest remote refs before comparing:
-   - `git fetch origin`
-4. List PRs for head branch:
-   - Resolve repo slug: `gh repo view --json nameWithOwner -q .nameWithOwner`
-   - Resolve owner from `<owner>/<repo>`
-   - Primary lookup path:
-     - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
-5. Classify:
-   - No PR found -> `NO_PR` + recommended action `CREATE_PR`
-   - Any OPEN PR where `mergedAt == null`
-     -> `UNMERGED_PR_EXISTS` + recommended action `PUSH_ONLY`
-   - Only CLOSED and unmerged PRs exist
-     -> `CLOSED_UNMERGED_ONLY` + recommended action `CREATE_PR`
-   - Otherwise, when at least one PR is merged -> perform post-merge commit check
-6. Post-merge commit check (critical when all PRs are merged):
-   - Select latest merged PR by `mergedAt`
-   - Get merge commit SHA from `mergeCommit.oid`
-   - Verify merge commit ancestry before counting:
-     - `git merge-base --is-ancestor <merge_commit> HEAD`
-   - If merge commit is ancestor of `HEAD`, count commits after merge:
-     - `git rev-list --count <merge_commit>..HEAD`
-   - If count > 0, verify `git diff --quiet origin/<base>...HEAD --` before recommending `CREATE_PR`
-   - If count > 0 and the base compare is empty -> `ALL_MERGED_NO_PR_DIFF` + `NO_ACTION`
-   - If count > 0 and the base compare has a diff -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR`
-   - If count == 0 -> `ALL_MERGED_NO_PR_DIFF` + `NO_ACTION`
-7. Fallback when merge commit SHA is missing or not an ancestor of `HEAD`:
-   - First compare against branch upstream (preferred):
-     - `git rev-list --count origin/<head>..HEAD`
-   - Count > 0 -> verify `git diff --quiet origin/<base>...HEAD --` before recommending `CREATE_PR`
-   - If upstream count is `0`, still compare against base:
-     - `git rev-list --count origin/<base>..HEAD`
-   - Base count > 0 and the base compare still has a diff -> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR` (fallback)
-   - Base count > 0 and the base compare is empty -> `ALL_MERGED_NO_PR_DIFF` + `NO_ACTION`
-   - Base count == 0 -> `ALL_MERGED_NO_PR_DIFF` + `NO_ACTION`
-   - If both comparisons fail -> `CHECK_FAILED` + `MANUAL_CHECK`
-
-## Output contract
-
-Return a human-readable summary by default.
-
-Do not return raw JSON as the default output.
-If JSON is explicitly requested by the user, append it after the human summary.
-
-Recommended status values:
-
-- `NO_PR`
-- `UNMERGED_PR_EXISTS`
-- `CLOSED_UNMERGED_ONLY`
-- `ALL_MERGED_WITH_NEW_COMMITS`
-- `ALL_MERGED_NO_PR_DIFF`
-- `CHECK_FAILED`
-
-Recommended action values:
-
-- `CREATE_PR`
-- `PUSH_ONLY`
-- `NO_ACTION`
-- `MANUAL_CHECK`
-
-### Language rule
-
-- Follow the user's input language for all headings and messages.
-- If the language is ambiguous, use English.
-
-### Default output template
-
-Output 1-3 lines using a signal prefix + action keyword on line 1.
-
-| Prefix | Action | Meaning |
-| --- | --- | --- |
-| `>>` | `CREATE PR` | Create a new PR |
-| `>` | `PUSH ONLY` | Push to existing PR |
-| `--` | `NO ACTION` | Nothing to do |
-| `!!` | `MANUAL CHECK` | Manual check required |
-
-Per-status format:
-
-- **NO_PR**:
-  `>> CREATE PR — No PR exists for <head> -> <base>.`
-- **UNMERGED_PR_EXISTS** (2 lines):
-  `> PUSH ONLY — Unmerged PR open for <head>.`
-
-- **CLOSED_UNMERGED_ONLY** (2 lines):
-
-  ```text
-  >> CREATE PR — No open PR exists for <head> -> <base>; only closed unmerged PRs were found.
-     Last closed PR: #<number> <url>
-  ```
-
-- **UNMERGED_PR_EXISTS** (2 lines):
-
-  ```text
-  > PUSH ONLY — Unmerged PR open for `<head>`.
-     PR: #<number> <url>
-  ```
-
-- **ALL_MERGED_WITH_NEW_COMMITS** (2 lines):
-
-  ```text
-  >> CREATE PR — <N> new commit(s) after last merge (#<pr_number>).
-     head: <head> -> base: <base>
-  ```
-
-- **ALL_MERGED_NO_PR_DIFF**:
-  `-- NO ACTION — All PRs merged, no PR-worthy diff on <head>.`
-- **CHECK_FAILED** (2 lines):
-
-  ```text
-  !! MANUAL CHECK — Could not determine PR status.
-     Reason: <reason>
-     head: <head> -> base: <base>
-  ```
-
-Append the following line **only** when the worktree is dirty:
-
-```text
-   (!) Worktree has uncommitted changes.
-```
-
-### Status-to-action mapping (must use)
-
-| Status | Prefix | Action | Template |
+| Status | Prefix | Action | Meaning |
 | --- | --- | --- | --- |
 | `NO_PR` | `>>` | `CREATE PR` | No PR exists |
 | `UNMERGED_PR_EXISTS` | `>` | `PUSH ONLY` | Unmerged PR open |
-| `CLOSED_UNMERGED_ONLY` | `>>` | `CREATE PR` | Only closed unmerged PRs exist |
-| `ALL_MERGED_WITH_NEW_COMMITS` | `>>` | `CREATE PR` | N new commit(s) |
-| `ALL_MERGED_NO_PR_DIFF` | `--` | `NO ACTION` | All PRs merged |
+| `CLOSED_UNMERGED_ONLY` | `>>` | `CREATE PR` | Only closed unmerged PRs |
+| `ALL_MERGED_WITH_NEW_COMMITS` | `>>` | `CREATE PR` | New commit(s) after merge |
+| `ALL_MERGED_NO_PR_DIFF` | `--` | `NO ACTION` | All PRs merged, no diff |
 | `CHECK_FAILED` | `!!` | `MANUAL CHECK` | Could not determine |
 
-### Example outputs
+## Decision rules
 
-**NO_PR:**
+See [references/decision-rules.md](references/decision-rules.md) for the full classification algorithm including:
 
-```text
->> CREATE PR — No PR exists for `feature/my-branch` -> `develop`.
-```
+- Branch resolution and REST API lookup
+- PR state classification (NO_PR, UNMERGED, CLOSED, MERGED)
+- Post-merge commit check with merge commit ancestry verification
+- Fallback logic when merge commit SHA is unavailable
 
-**UNMERGED_PR_EXISTS:**
+## Output contract
 
-```text
-> PUSH ONLY — Unmerged PR open for `feature/my-branch`.
-   PR: #456 https://github.com/org/repo/pull/456
-```
+See [references/output-format.md](references/output-format.md) for the full output specification including:
 
-**CLOSED_UNMERGED_ONLY:**
-
-```text
->> CREATE PR — No open PR exists for `feature/my-branch` -> `develop`; only closed unmerged PRs were found.
-   Last closed PR: #455 https://github.com/org/repo/pull/455
-```
-
-**ALL_MERGED_WITH_NEW_COMMITS:**
-
-```text
->> CREATE PR — 3 new commit(s) after last merge (#123).
-   head: feature/my-branch -> base: develop
-```
-
-**ALL_MERGED_NO_PR_DIFF:**
-
-```text
--- NO ACTION — All PRs merged, no PR-worthy diff on `feature/my-branch`.
-```
-
-**CHECK_FAILED:**
-
-```text
-!! MANUAL CHECK — Could not determine PR status.
-   Reason: Could not resolve merge commit and fallback comparison failed
-   head: feature/my-branch -> base: develop
-```
-
-**With dirty worktree (appended to any status):**
-
-```text
->> CREATE PR — 3 new commit(s) after last merge (#123).
-   head: feature/my-branch -> base: develop
-   (!) Worktree has uncommitted changes.
-```
+- Status and action value enumerations
+- Per-status output templates with examples
+- Language rules and dirty-worktree indicator
 
 ## Workflow (recommended)
 
@@ -217,7 +56,7 @@ Append the following line **only** when the worktree is dirty:
    - `git status --porcelain`
    - `git fetch origin`
 4. Prefer the REST pull-request list endpoint over `gh pr list` when checking branch PR state.
-5. List PRs for head branch and classify using rules above.
+5. List PRs for head branch and classify using decision rules.
 6. Treat only `state == open && merged_at == null` as an active blocking PR.
 7. When at least one PR is merged and no active blocking PR exists, validate merge commit ancestry before counting commits.
 8. If any post-merge count is greater than `0`, verify `git diff --quiet origin/<base>...HEAD --` before recommending `CREATE_PR`.
@@ -238,179 +77,9 @@ python3 ".claude/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "." --ba
 python3 ".claude/skills/gwt-pr-check/scripts/check_pr_status.py" --repo "." --json
 ```
 
-## Command snippet (bash)
+## Command snippet
 
-```bash
-head="${HEAD_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
-base="${BASE_BRANCH:-develop}"
-
-dirty=0
-if [ -n "$(git status --porcelain)" ]; then
-  dirty=1
-fi
-
-git fetch origin
-
-repo_slug="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
-owner="${repo_slug%%/*}"
-pr_json="$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")"
-pr_count="$(echo "$pr_json" | jq 'length')"
-open_unmerged_count="$(echo "$pr_json" | jq 'map(select(.state == "open" and .merged_at == null)) | length')"
-merged_count="$(echo "$pr_json" | jq 'map(select(.merged_at != null)) | length')"
-closed_unmerged_pr="$(
-  echo "$pr_json" \
-    | jq -r 'map(select(.state == "closed" and .merged_at == null)) | sort_by(.updated_at) | last | .number // empty'
-)"
-closed_unmerged_pr_url="$(
-  echo "$pr_json" \
-    | jq -r 'map(select(.state == "closed" and .merged_at == null)) | sort_by(.updated_at) | last | .html_url // empty'
-)"
-
-if [ "$pr_count" -eq 0 ]; then
-  status="NO_PR"
-  action="CREATE_PR"
-  reason="No PR found for head branch"
-elif [ "$open_unmerged_count" -gt 0 ]; then
-  status="UNMERGED_PR_EXISTS"
-  action="PUSH_ONLY"
-  reason="At least one OPEN PR for the head branch is not merged"
-elif [ "$merged_count" -eq 0 ]; then
-  status="CLOSED_UNMERGED_ONLY"
-  action="CREATE_PR"
-  reason="Only closed, unmerged PRs exist for the head branch"
-else
-  merge_commit="$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')"
-  merge_commit_ancestor=0
-  if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ] && \
-     git merge-base --is-ancestor "$merge_commit" HEAD 2>/dev/null; then
-    merge_commit_ancestor=1
-    new_commits="$(
-      git rev-list --count "$merge_commit"..HEAD 2>/dev/null || echo ""
-    )"
-  else
-    new_commits=""
-  fi
-
-  if [ -n "$new_commits" ]; then
-    if [ "$new_commits" -gt 0 ]; then
-      git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
-      compare_rc=$?
-      if [ "$compare_rc" -eq 1 ]; then
-        status="ALL_MERGED_WITH_NEW_COMMITS"
-        action="CREATE_PR"
-        reason="$new_commits commits found after last merge with a diff against origin/$base"
-      elif [ "$compare_rc" -eq 0 ]; then
-        status="ALL_MERGED_NO_PR_DIFF"
-        action="NO_ACTION"
-        reason="No PR-worthy diff remains against origin/$base"
-      else
-        status="CHECK_FAILED"
-        action="MANUAL_CHECK"
-        reason="Could not compare HEAD against origin/$base"
-      fi
-    else
-      status="ALL_MERGED_NO_PR_DIFF"
-      action="NO_ACTION"
-      reason="No commits found after last merge"
-    fi
-  else
-    upstream_commits="$(
-      git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo ""
-    )"
-    fallback_commits="$(
-      git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo ""
-    )"
-
-    if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
-      git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
-      compare_rc=$?
-      if [ "$compare_rc" -eq 1 ]; then
-        status="ALL_MERGED_WITH_NEW_COMMITS"
-        action="CREATE_PR"
-        reason="Fallback check found commits ahead of origin/$head with a diff against origin/$base"
-      elif [ "$compare_rc" -eq 0 ]; then
-        status="ALL_MERGED_NO_PR_DIFF"
-        action="NO_ACTION"
-        reason="No PR-worthy diff remains against origin/$base"
-      else
-        status="CHECK_FAILED"
-        action="MANUAL_CHECK"
-        reason="Could not compare HEAD against origin/$base"
-      fi
-    elif [ -n "$fallback_commits" ]; then
-      if [ "$fallback_commits" -gt 0 ]; then
-        git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
-        compare_rc=$?
-        if [ "$compare_rc" -eq 1 ]; then
-          status="ALL_MERGED_WITH_NEW_COMMITS"
-          action="CREATE_PR"
-          reason="Fallback check found commits ahead of origin/$base with a diff"
-        elif [ "$compare_rc" -eq 0 ]; then
-          status="ALL_MERGED_NO_PR_DIFF"
-          action="NO_ACTION"
-          reason="No PR-worthy diff remains against origin/$base"
-        else
-          status="CHECK_FAILED"
-          action="MANUAL_CHECK"
-          reason="Could not compare HEAD against origin/$base"
-        fi
-      else
-        status="ALL_MERGED_NO_PR_DIFF"
-        action="NO_ACTION"
-        reason="Fallback check found no commits ahead of origin/$head or origin/$base"
-      fi
-    else
-      status="CHECK_FAILED"
-      action="MANUAL_CHECK"
-      reason="Could not resolve merge commit and fallback comparison failed"
-    fi
-  fi
-fi
-
-latest_merged_pr="$(
-  echo "$pr_json" \
-    | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .number // empty'
-)"
-unmerged_pr="$(
-  echo "$pr_json" \
-    | jq -r 'map(select(.state == "open" and .merged_at == null)) | sort_by(.updated_at) | last | .number // empty'
-)"
-unmerged_pr_url="$(
-  echo "$pr_json" \
-    | jq -r 'map(select(.state == "open" and .merged_at == null)) | sort_by(.updated_at) | last | .html_url // empty'
-)"
-
-case "$status" in
-  NO_PR)
-    echo ">> CREATE PR — No PR exists for \`$head\` -> \`$base\`."
-    ;;
-  UNMERGED_PR_EXISTS)
-    echo "> PUSH ONLY — Unmerged PR open for \`$head\`."
-    echo "   PR: #$unmerged_pr $unmerged_pr_url"
-    ;;
-  CLOSED_UNMERGED_ONLY)
-    echo ">> CREATE PR — No open PR exists for \`$head\` -> \`$base\`; only closed unmerged PRs were found."
-    echo "   Last closed PR: #$closed_unmerged_pr $closed_unmerged_pr_url"
-    ;;
-  ALL_MERGED_WITH_NEW_COMMITS)
-    n="${new_commits:-$upstream_commits}"
-    echo ">> CREATE PR — $n new commit(s) after last merge (#$latest_merged_pr)."
-    echo "   head: $head -> base: $base"
-    ;;
-  ALL_MERGED_NO_PR_DIFF)
-    echo "-- NO ACTION — All PRs merged, no PR-worthy diff on \`$head\`."
-    ;;
-  *)
-    echo "!! MANUAL CHECK — Could not determine PR status."
-    echo "   Reason: $reason"
-    echo "   head: $head -> base: $base"
-    ;;
-esac
-
-if [ "$dirty" -eq 1 ]; then
-  echo "   (!) Worktree has uncommitted changes."
-fi
-```
+See [references/command-snippet.md](references/command-snippet.md) for the full bash implementation.
 
 ## Related skill
 
