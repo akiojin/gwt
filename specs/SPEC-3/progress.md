@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `116/116` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T13:12:02Z`
+- Task progress: `119/119` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T13:15:09Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -84,6 +84,9 @@
 - Multi-entry `QuickStart` grouped headers now render agent labels only,
   leaving the more detailed model/reasoning summary to the single-entry title
   variant and keeping grouped history visually denser.
+- Multi-entry `QuickStart` now shows the short resume-session ID hint only on
+  the selected `Resume session` row, which reduces noise on unselected rows
+  without changing resume semantics.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

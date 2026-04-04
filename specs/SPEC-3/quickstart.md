@@ -76,6 +76,9 @@
 30. Verify a branch with multiple persisted Quick Start entries now renders
    grouped headers as agent labels only (`Codex`, `Claude Code`, etc.) while
    keeping the generic `Quick Start` title.
+31. Verify a branch with multiple persisted Quick Start entries now shows the
+   short resume-session ID snippet only on the selected `Resume session` row,
+   while unselected resume rows keep the plain label.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -134,5 +137,8 @@
 - Multi-entry Quick Start popups now keep grouped headers agent-only so the
   grouped list remains denser and the extra model/reasoning detail does not
   repeat across every group.
+- Multi-entry Quick Start resume rows now reserve the short session ID hint
+  for the currently selected row, so the grouped history stays visually
+  quieter when several tools can resume.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

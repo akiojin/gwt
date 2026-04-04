@@ -273,6 +273,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving multi-entry headers no longer show
    model/reasoning details while single-entry title promotion still works.
 
+### Phase 28: QuickStart Selected Resume Hint
+
+1. Keep single-entry `Resume session (sess-123...)` behavior intact, but in
+   multi-entry history show the resume-session ID snippet only on the
+   selected `Resume session` row.
+2. Preserve grouped ordering, labels, and selection semantics while reducing
+   visual noise on unselected resume rows.
+3. Add focused RED/GREEN coverage proving selected rows keep the short hint
+   and unselected rows fall back to the plain `Resume session` label.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

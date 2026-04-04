@@ -1508,16 +1508,28 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         }
 
         let resume_index = entry_index * 2;
+        let show_resume_hint = single_entry || state.selected == resume_index;
         let resume_text = if let Some(session_id) = &entry.resume_session_id {
-            format!(
-                "{}Resume session ({}...)",
-                if state.selected == resume_index {
-                    "> "
-                } else {
-                    "  "
-                },
-                &session_id[..session_id.len().min(8)]
-            )
+            if show_resume_hint {
+                format!(
+                    "{}Resume session ({}...)",
+                    if state.selected == resume_index {
+                        "> "
+                    } else {
+                        "  "
+                    },
+                    &session_id[..session_id.len().min(8)]
+                )
+            } else {
+                format!(
+                    "{}Resume session",
+                    if state.selected == resume_index {
+                        "> "
+                    } else {
+                        "  "
+                    }
+                )
+            }
         } else {
             format!(
                 "{}Resume session",
@@ -2647,6 +2659,41 @@ mod tests {
         assert!(text.contains("Claude Code"));
         assert!(!text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
         assert!(!text.contains("Claude Code (sonnet)"));
+    }
+
+    #[test]
+    fn render_quick_start_multi_entry_shows_resume_hint_only_for_selected_row() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = vec![
+            QuickStartEntry {
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("latest".to_string()),
+                resume_session_id: Some("sess-12345678".to_string()),
+                skip_permissions: true,
+            },
+            QuickStartEntry {
+                agent_id: "claude".to_string(),
+                tool_label: "Claude Code".to_string(),
+                model: Some("sonnet".to_string()),
+                reasoning: None,
+                version: Some("1.0.54".to_string()),
+                resume_session_id: Some("sess-abcdefgh".to_string()),
+                skip_permissions: false,
+            },
+        ];
+        state.selected = 0;
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("> Resume session (sess-123...)"));
+        assert!(!text.contains("  Resume session (sess-abc...)"));
+        assert!(text.contains("  Resume session"));
     }
 
     #[test]

@@ -253,6 +253,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-034**: When `QuickStart` has multiple persisted entries, the grouped
   headers render the agent label only while the detailed model/reasoning
   summary remains reserved for the single-entry title variant.
+- **FR-035**: In multi-entry `QuickStart`, resume session ID snippets are
+  shown only on the currently selected `Resume session` row so unselected
+  rows stay visually compact.
 
 ## Non-Functional Requirements
 
