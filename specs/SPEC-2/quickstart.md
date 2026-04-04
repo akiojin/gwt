@@ -12,7 +12,8 @@
 9. Toggle split/grid, switch the active management tab, quit, and restart `gwt-tui`; confirm the layout and visible panel state restore from the saved session file.
 10. Move into the `Sessions` detail section and confirm active sessions on the selected branch render as a typed list with an active-session marker instead of a count-only placeholder.
 11. While still in `Sessions`, use `Up/Down` to change the selected row, press `Enter`, and confirm the chosen session becomes active and terminal focus is restored.
-12. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+12. Return to the terminal pane and verify the bottom status bar shows the current session summary, branch context, and session type / agent type while still exposing the current keybind hints.
+13. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -20,6 +21,7 @@
 - Branches behaves as the primary daily-entry tab again: returning there resets list focus, rows are flatter, the legacy primary actions are reachable without opening another view first, and the local mnemonics match the old-TUI muscle memory.
 - Branch Detail `Sessions` shows which shell/agent tabs are active on the selected branch instead of only reporting a numeric count.
 - Branch Detail `Sessions` also acts as a handoff surface: the user can choose a running session and jump directly into it.
+- The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.
 - No implementation task remains unchecked in `tasks.md`.

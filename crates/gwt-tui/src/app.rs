@@ -3012,41 +3012,28 @@ fn build_session_title(model: &Model) -> Line<'static> {
 
 /// Render context-sensitive keybind hints at the bottom of the screen.
 ///
-/// When a notification is active, it is shown alongside the hints.
+/// The status bar keeps session context visible and appends the relevant hints.
 fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
-    // Show notification if active, otherwise show keybind hints
-    if let Some(ref notification) = model.current_notification {
-        let severity_style = match notification.severity {
-            gwt_notification::Severity::Info => Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-            gwt_notification::Severity::Warn => Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-            _ => Style::default().fg(Color::DarkGray),
-        };
-        let summary = format!(
-            " {} {}: {} ",
-            notification.severity, notification.source, notification.message
-        );
-        let line = Paragraph::new(Span::styled(summary, severity_style));
-        frame.render_widget(line, area);
-    } else {
-        let hints = match model.active_focus {
-            FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-                "\u{2191}\u{2193}:move  \u{2190}\u{2192}:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  ?:help"
-            }
-            FocusPane::TabContent => {
-                "\u{2191}\u{2193}:select  \u{2190}\u{2192}:tab  Ctrl+\u{2190}\u{2192}:sub-tab  Enter:action  Tab:focus  ?:help"
-            }
-            FocusPane::BranchDetail => {
-                "\u{2190}\u{2192}:section  Enter:action  Tab:focus  Esc:back"
-            }
-            FocusPane::Terminal => "Ctrl+G,g:management  Tab:focus  Ctrl+C\u{00d7}2:quit",
-        };
-        let line = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(line, area);
-    }
+    let hints = match model.active_focus {
+        FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
+            "\u{2191}\u{2193}:move  \u{2190}\u{2192}:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  ?:help"
+        }
+        FocusPane::TabContent => {
+            "\u{2191}\u{2193}:select  \u{2190}\u{2192}:tab  Ctrl+\u{2190}\u{2192}:sub-tab  Enter:action  Tab:focus  ?:help"
+        }
+        FocusPane::BranchDetail => {
+            "\u{2190}\u{2192}:section  Enter:action  Tab:focus  Esc:back"
+        }
+        FocusPane::Terminal => "Ctrl+G,g:management  Tab:focus  Ctrl+C\u{00d7}2:quit",
+    };
+
+    crate::widgets::status_bar::render_with_notification_and_hints(
+        model,
+        model.current_notification.as_ref(),
+        Some(hints),
+        frame,
+        area,
+    );
 }
 
 /// Render all overlay widgets on top of the main layout.
@@ -3360,6 +3347,25 @@ mod tests {
 
         let rendered = render_model_text(&model, 80, 24);
         assert!(rendered.contains("https://example.com"));
+    }
+
+    #[test]
+    fn render_model_text_status_bar_keeps_branch_context_and_branch_hints() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.sessions[0] = crate::model::SessionTab {
+            id: "shell-0".to_string(),
+            name: "Shell: feature/status-bar".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+        };
+
+        let rendered = render_model_text(&model, 160, 24);
+        assert!(rendered.contains("branch: feature/status-bar"));
+        assert!(rendered.contains("type: Shell"));
+        assert!(rendered.contains("Enter:wizard"));
     }
 
     #[test]

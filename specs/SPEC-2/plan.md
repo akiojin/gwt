@@ -109,6 +109,21 @@ from the selected branch directly into one of its running sessions without leavi
 11.3: Regression and verification (1 task)
 - Add focused routing/render coverage and re-run workspace verification.
 
+### Phase 12: Status Bar Restoration (5 tasks)
+Restore the old-TUI footer model so the bottom line carries workspace context again instead of
+acting as a keybind-hints-only strip.
+
+12.1: Footer context contract (2 tasks)
+- Render current session summary, current branch context, and session type / agent type in the bottom status bar.
+- Preserve context-sensitive keybind hints and notification visibility within the same single-line footer surface.
+
+12.2: Wiring and regression coverage (2 tasks)
+- Route the main view footer through the shared status-bar widget again instead of the bespoke hints-only renderer.
+- Add focused render coverage for shell sessions, agent sessions, and Branches focus hints so the footer contract stays stable.
+
+12.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

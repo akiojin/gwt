@@ -115,6 +115,8 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-011**: Session metadata persisted to `~/.gwt/sessions/` in TOML format.
 - **FR-012**: Restore session layout on gwt restart (best-effort: working directories, display mode, active tab).
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
+- **FR-013a**: The bottom status line keeps the old-TUI always-on context model: session summary and branch/agent context stay visible even while focus changes.
+- **FR-013b**: Context-sensitive keybind hints remain visible in the status bar instead of replacing the status context entirely.
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion.
 - **FR-015**: Focus system: 3 focusable panes (TabContent, BranchDetail, Terminal) cycled with Tab/Shift+Tab. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.

@@ -1,5 +1,6 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 399
 expression: output
 ---
 ┌ ▶ Shell ─────────────────────────────────────────────────────────────────────┐
@@ -25,4 +26,4 @@ expression: output
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m
+ ▣ Shell  branch: n/a  type: Shell  [Main]  /tmp/test-repo  ↑↓:move  ←→:tab  Ent

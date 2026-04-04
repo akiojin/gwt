@@ -182,3 +182,11 @@ screens to use.
 - [x] T121 [P] Write RED test: `Enter` inside the `Sessions` detail section activates the selected session and focuses the terminal pane.
 - [x] T122 Add lightweight session-row selection state and routing in `app.rs` / `branches.rs`.
 - [x] T123 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 12: Status Bar Restoration
+
+- [x] T124 [P] Write RED test: shell sessions render branch context and `type: Shell` in the status bar.
+- [x] T125 [P] Write RED test: agent sessions render agent type and selected-branch context in the status bar.
+- [x] T126 [P] Write RED test: Branches focus still shows the branch-first keybind hints when the footer is rendered through the status-bar widget.
+- [x] T127 Restore the bottom status bar in `app.rs` / `widgets/status_bar.rs` so it carries session context, branch/agent metadata, notifications, and hints together.
+- [x] T128 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
