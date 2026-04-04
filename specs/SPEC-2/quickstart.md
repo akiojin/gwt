@@ -14,7 +14,8 @@
 11. While still in `Sessions`, use `Up/Down` to change the selected row, press `Enter`, and confirm the chosen session becomes active and terminal focus is restored.
 12. Return to Branch Detail `Overview` and confirm `Shift+Enter` opens a shell for the selected branch and `Ctrl+C` opens the delete-worktree confirmation without first moving focus back to the list.
 13. Verify the bottom status bar now changes its Branch Detail hints by section: `Overview` advertises direct branch actions and Docker controls, while `Sessions` advertises `↑/↓` row selection plus `Enter:focus`.
-14. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+14. Confirm the Branch Detail pane title keeps the selected branch name visible next to the section tabs, and that clearing the branch selection falls back to `No branch selected`.
+15. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -23,6 +24,7 @@
 - Branch Detail `Sessions` shows which shell/agent tabs are active on the selected branch instead of only reporting a numeric count.
 - Branch Detail `Sessions` also acts as a handoff surface: the user can choose a running session and jump directly into it.
 - Branch Detail remains actionable even after focus leaves the list: direct shell launch and delete confirmation stay available from the detail pane itself.
+- Branch Detail chrome keeps the selected branch name visible in the bottom-pane title instead of forcing the user to look back to the top list for context.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

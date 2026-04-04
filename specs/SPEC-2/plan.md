@@ -142,6 +142,21 @@ actionable even after focus leaves the top list.
 13.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 14: Branch Detail Title Context (5 tasks)
+Restore the old-TUI branch context in the bottom pane chrome so the selected branch remains
+visible even when the user is reading another detail section.
+
+14.1: Title context contract (2 tasks)
+- Keep the selected branch name visible in the Branch Detail pane title alongside the section tabs.
+- Limit the change to `app.rs` so existing section renderers and shared screen utilities stay untouched.
+
+14.2: Focused rendering coverage (2 tasks)
+- Add focused render coverage for the selected-branch title contract and the no-selection fallback.
+- Preserve the existing section-tab highlighting behavior while adding the branch context suffix.
+
+14.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

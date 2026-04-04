@@ -198,3 +198,11 @@ screens to use.
 - [x] T131 [P] Write RED test: Branch Detail footer hints become section-sensitive (`Sessions` shows focus-session semantics, Overview shows direct branch actions).
 - [x] T132 Update `app.rs` Branch Detail routing and footer hints to restore old-TUI direct actions without regressing the `Sessions` section handoff.
 - [x] T133 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 14: Branch Detail Title Context
+
+- [x] T134 [P] Write RED test: Branch Detail pane title includes the selected branch name while preserving section-tab highlighting.
+- [x] T135 [P] Write RED test: Branch Detail pane title falls back gracefully when no branch is selected.
+- [x] T136 Update `app.rs` Branch Detail pane chrome to append selected branch context to the title without touching shared tab-title utilities.
+- [x] T137 Refresh `SPEC-2` artifacts to describe the restored title-context contract.
+- [x] T138 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

@@ -2938,8 +2938,7 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
 
         // Bottom pane: detail section names in title, detail content
         let detail_focused = model.active_focus == FocusPane::BranchDetail;
-        let detail_labels: Vec<&str> = screens::branches::detail_section_labels().to_vec();
-        let detail_title = screens::build_tab_title(&detail_labels, model.branches.detail_section);
+        let detail_title = branch_detail_title(model);
         let detail_block = pane_block(detail_title, detail_focused);
         let detail_inner = detail_block.inner(chunks[1]);
         frame.render_widget(detail_block, chunks[1]);
@@ -2958,6 +2957,27 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
         frame.render_widget(block, content_area);
         render_management_tab_content(model, frame, inner);
     }
+}
+
+fn branch_detail_title(model: &Model) -> Line<'static> {
+    let detail_labels: Vec<&str> = screens::branches::detail_section_labels().to_vec();
+    let mut title = screens::build_tab_title(&detail_labels, model.branches.detail_section);
+    title.spans.push(Span::styled(
+        " · ",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let branch_label = model
+        .branches
+        .selected_branch()
+        .map(|branch| branch.name.clone())
+        .unwrap_or_else(|| "No branch selected".to_string());
+    title.spans.push(Span::styled(
+        branch_label,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    title
 }
 
 /// Render the content of the active management tab (non-Branches).
@@ -3399,6 +3419,50 @@ mod tests {
         assert!(rendered.contains("branch: feature/status-bar"));
         assert!(rendered.contains("type: Shell"));
         assert!(rendered.contains("Enter:wizard"));
+    }
+
+    #[test]
+    fn render_model_text_branch_detail_title_includes_selected_branch_name() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/title-context".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-title-context")),
+        }];
+
+        let rendered = render_model_text(&model, 160, 24);
+        let title_line = rendered
+            .lines()
+            .find(|line| line.contains("Overview") && line.contains("Sessions"))
+            .expect("detail title line");
+        assert!(
+            title_line.contains("feature/title-context"),
+            "detail title should keep the selected branch name visible"
+        );
+    }
+
+    #[test]
+    fn render_model_text_branch_detail_title_falls_back_without_selection() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches.clear();
+
+        let rendered = render_model_text(&model, 160, 24);
+        let title_line = rendered
+            .lines()
+            .find(|line| line.contains("Overview") && line.contains("Sessions"))
+            .expect("detail title line");
+        assert!(
+            title_line.contains("No branch selected"),
+            "detail title should fall back when no branch is selected"
+        );
     }
 
     #[test]

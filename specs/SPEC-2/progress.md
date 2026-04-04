@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `111/111` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T07:47:32Z`
+- Task progress: `116/116` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T07:51:40Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -21,6 +21,7 @@
 - Branch Detail `Sessions` now supports row selection and `Enter` handoff into the selected running session, so the branch detail pane can act as a real branch-first launcher again.
 - The bottom footer now behaves like an old-TUI status bar again: current session context, branch context, agent type, notifications, and focus-specific hints share the same surface.
 - Branch Detail now also restores old-TUI direct branch actions after focus leaves the list: `Shift+Enter` opens a shell, `Ctrl+C` opens delete confirmation, and footer hints explain the active section's semantics.
+- Branch Detail bottom-pane chrome now keeps the selected branch name visible next to the section tabs, so context survives after focus moves off the branch list.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.
