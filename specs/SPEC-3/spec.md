@@ -219,6 +219,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-023**: AI suggestion loading and error states render `Context: ...` as
   the same standalone cyan line used by the suggestion-list state rather than
   embedding the context string inside the body copy.
+- **FR-024**: AI suggestion loading and error states keep their body copy
+  compact and do not duplicate the manual-input guidance that is already
+  present in the footer hint row.
 
 ## Non-Functional Requirements
 

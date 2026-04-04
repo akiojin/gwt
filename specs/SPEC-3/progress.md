@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `76/76` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:31:48Z`
+- Task progress: `80/80` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T12:08:00Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -53,6 +53,9 @@
 - AI suggestion loading and error states now render that `Context: ...` line
   as a standalone cyan row above the body copy instead of embedding it inline
   inside the paragraph text.
+- AI suggestion loading and error body copy now stays compact and leaves
+  manual-input guidance to the footer hint row instead of repeating it in the
+  popup body.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

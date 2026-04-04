@@ -1783,21 +1783,15 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
             '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
         ];
         let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
-        let text = Paragraph::new(format!(
-            " {} Generating branch name suggestions...\n\n Type Enter to use a manual branch name if needed.",
-            ch
-        ))
+        let text = Paragraph::new(format!(" {} Generating branch name suggestions...", ch))
             .style(Style::default().fg(Color::Yellow));
         frame.render_widget(text, body_area);
         return;
     }
 
     if let Some(ref err) = state.ai_suggest.error {
-        let text = Paragraph::new(format!(
-            " Error: {}\n\n Press Enter or Esc to enter branch name manually.",
-            err
-        ))
-        .style(Style::default().fg(Color::Red));
+        let text =
+            Paragraph::new(format!(" Error: {}", err)).style(Style::default().fg(Color::Red));
         frame.render_widget(text, body_area);
         return;
     }
@@ -3052,6 +3046,19 @@ mod tests {
     }
 
     #[test]
+    fn ai_suggest_loading_uses_compact_body_copy_without_manual_guidance() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        state.spec_context = Some(SpecContext::new("SPEC-42", "My Feature", ""));
+        state.ai_suggest.loading = true;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Generating branch name suggestions"));
+        assert!(!text.contains("Type Enter to use a manual branch name if needed."));
+    }
+
+    #[test]
     fn ai_suggest_render_error_no_panic() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
@@ -3086,6 +3093,19 @@ mod tests {
             "error copy should render below the context line"
         );
         assert!(text.matches('┌').count() == 1);
+    }
+
+    #[test]
+    fn ai_suggest_error_uses_compact_body_copy_without_manual_guidance() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        state.spec_context = Some(SpecContext::new("SPEC-42", "My Feature", ""));
+        state.ai_suggest.error = Some("Connection timeout".to_string());
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Error: Connection timeout"));
+        assert!(!text.contains("Press Enter or Esc to enter branch name manually."));
     }
 
     #[test]

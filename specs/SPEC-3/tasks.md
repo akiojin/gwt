@@ -129,3 +129,10 @@
 - [x] T068 [P] Write RED test: AI suggestion error state renders `Context: ...` as a standalone line above the error copy.
 - [x] T069 Update `render_ai_suggest()` so loading and error states use the same context-first layout as the suggestion-list state.
 - [x] T070 Verify focused AI suggestion layout tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 16: AI Suggestion Body Copy Compaction
+
+- [x] T071 [P] Write RED test: AI suggestion loading body copy omits duplicate manual-input guidance.
+- [x] T072 [P] Write RED test: AI suggestion error body copy omits duplicate manual-input guidance.
+- [x] T073 Compact AI suggestion loading/error body copy to a single status line while keeping footer hints as the sole manual-guidance surface.
+- [x] T074 Verify focused AI suggestion compaction tests, broad workspace checks, and refresh SPEC-3 artifacts.

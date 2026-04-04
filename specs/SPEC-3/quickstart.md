@@ -46,6 +46,9 @@
    visible above the suggestions and `Manual input`.
 19. Verify AI suggestion loading and error states render `Context: ...` as a
    standalone row above the body copy, matching the candidate-list layout.
+20. Verify AI suggestion loading and error body copy stays compact and does
+   not repeat manual-input guidance that already appears in the footer hint
+   row.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -79,5 +82,7 @@
 - The AI suggestion loading and error states now render that context as the
   same standalone row used by the candidate list instead of embedding it in
   the paragraph copy.
+- The AI suggestion loading and error body copy now stays compact, and the
+  footer hint row remains the single source of manual-input guidance.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

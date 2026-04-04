@@ -165,6 +165,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage for loading and error states to prevent the
    context line from regressing back into inline paragraph copy.
 
+### Phase 16: AI Suggestion Body Copy Compaction
+
+1. Remove duplicate manual-input guidance from AI suggestion loading and error
+   body copy now that the footer hint row already carries that instruction.
+2. Keep loading/error body text to a single concise line beneath
+   `Context: ...` so those states stay visually compact like the old TUI.
+3. Add focused RED/GREEN coverage that proves the removed guidance does not
+   reappear inside the body content.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).
