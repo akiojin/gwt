@@ -39,6 +39,9 @@
    name-only agent list with the old-TUI cyan selection highlight.
 16. Verify `BranchNameInput` and `IssueSelect` render inline prompt labels
    inside the popup body and do not add nested titled boxes.
+17. Verify list-oriented steps such as `BranchAction`, `ModelSelect`,
+   `VersionSelect`, and AI suggestion loading/error use the popup chrome as
+   the only box while keeping their row formatting and copy visible.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -65,5 +68,7 @@
   restored branch-first flow.
 - Branch and issue input steps now follow that same contract with inline
   prompt labels instead of nested titled boxes.
+- List-oriented wizard steps now follow the same contract, so popup chrome is
+  the only boxed surface even during model/version selection and AI loading.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

@@ -1235,14 +1235,11 @@ fn format_fixed_width_line(
     )
 }
 
-fn render_bordered_list(frame: &mut Frame, area: Rect, items: Vec<ListItem>) {
-    let block = Block::default().borders(Borders::ALL);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+fn render_list_content(frame: &mut Frame, area: Rect, items: Vec<ListItem>) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
-    frame.render_widget(List::new(items), inner);
+    frame.render_widget(List::new(items), area);
 }
 
 fn version_option_description(option: &VersionOption) -> &'static str {
@@ -1254,7 +1251,7 @@ fn version_option_description(option: &VersionOption) -> &'static str {
 }
 
 fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let available_width = area.width.saturating_sub(2) as usize;
+    let available_width = area.width as usize;
     let display_options = model_display_options(state.effective_agent_id());
     let fallback_options = state.current_model_options();
     let items = if display_options.is_empty() {
@@ -1287,11 +1284,11 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             })
             .collect()
     };
-    render_bordered_list(frame, area, items);
+    render_list_content(frame, area, items);
 }
 
 fn render_reasoning_level_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let available_width = area.width.saturating_sub(2) as usize;
+    let available_width = area.width as usize;
     let items = REASONING_DISPLAY_OPTIONS
         .iter()
         .enumerate()
@@ -1301,11 +1298,11 @@ fn render_reasoning_level_step(state: &WizardState, frame: &mut Frame, area: Rec
             ListItem::new(text).style(super::list_item_style(idx == state.selected))
         })
         .collect();
-    render_bordered_list(frame, area, items);
+    render_list_content(frame, area, items);
 }
 
 fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let available_width = area.width.saturating_sub(2) as usize;
+    let available_width = area.width as usize;
     let items = EXECUTION_MODE_DISPLAY_OPTIONS
         .iter()
         .enumerate()
@@ -1315,11 +1312,11 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
             ListItem::new(text).style(super::list_item_style(idx == state.selected))
         })
         .collect();
-    render_bordered_list(frame, area, items);
+    render_list_content(frame, area, items);
 }
 
 fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let available_width = area.width.saturating_sub(2) as usize;
+    let available_width = area.width as usize;
     let items = SKIP_PERMISSION_DISPLAY_OPTIONS
         .iter()
         .enumerate()
@@ -1329,19 +1326,16 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
             ListItem::new(text).style(super::list_item_style(idx == state.selected))
         })
         .collect();
-    render_bordered_list(frame, area, items);
+    render_list_content(frame, area, items);
 }
 
 fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let block = Block::default().borders(Borders::ALL);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 || state.version_options.is_empty() {
+    if area.width == 0 || area.height == 0 || state.version_options.is_empty() {
         return;
     }
 
     let total = state.version_options.len();
-    let max_rows = inner.height as usize;
+    let max_rows = area.height as usize;
     let (start, list_rows) = if total > max_rows {
         let visible_rows = max_rows.saturating_sub(2).max(1);
         let mut start = state.selected.saturating_sub(visible_rows / 2);
@@ -1355,13 +1349,13 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let end = (start + list_rows).min(total);
     let has_more_above = start > 0;
     let has_more_below = end < total;
-    let available_width = inner.width as usize;
+    let available_width = area.width as usize;
 
-    let mut y = inner.y;
+    let mut y = area.y;
     if has_more_above {
         frame.render_widget(
             Paragraph::new("  ^ more above ^").style(Style::default().fg(Color::DarkGray)),
-            Rect::new(inner.x, y, inner.width, 1),
+            Rect::new(area.x, y, area.width, 1),
         );
         y += 1;
     }
@@ -1383,18 +1377,18 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         })
         .collect::<Vec<_>>();
 
-    let list_height = inner
+    let list_height = area
         .height
         .saturating_sub(has_more_above as u16 + has_more_below as u16);
     frame.render_widget(
         List::new(items),
-        Rect::new(inner.x, y, inner.width, list_height),
+        Rect::new(area.x, y, area.width, list_height),
     );
 
     if has_more_below {
         frame.render_widget(
             Paragraph::new("  v more below v").style(Style::default().fg(Color::DarkGray)),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
     }
 }
@@ -1751,9 +1745,7 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default().borders(Borders::ALL);
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    render_list_content(frame, area, items);
 }
 
 /// Render the AI branch suggestion step.
@@ -1761,11 +1753,10 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
 /// reuses the default option-list renderer via the fallthrough in
 /// `render_step_content`.
 fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let title = state
+    let context_summary = state
         .spec_context_summary()
-        .map(|summary| format!("AI Branch Suggestions - {}", summary))
-        .unwrap_or_else(|| "AI Branch Suggestions".to_string());
-    let block = Block::default().borders(Borders::ALL).title(title);
+        .map(|summary| format!("Context: {summary}\n\n"))
+        .unwrap_or_default();
 
     if state.ai_suggest.loading {
         let spinner_chars = [
@@ -1773,10 +1764,9 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
         ];
         let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
         let text = Paragraph::new(format!(
-            " {} Generating branch name suggestions...\n\n Type Enter to use a manual branch name if needed.",
-            ch
+            "{} {} Generating branch name suggestions...\n\n Type Enter to use a manual branch name if needed.",
+            context_summary, ch
         ))
-            .block(block)
             .style(Style::default().fg(Color::Yellow));
         frame.render_widget(text, area);
         return;
@@ -1784,10 +1774,9 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     if let Some(ref err) = state.ai_suggest.error {
         let text = Paragraph::new(format!(
-            " Error: {}\n\n Press Enter or Esc to enter branch name manually.",
-            err
+            "{} Error: {}\n\n Press Enter or Esc to enter branch name manually.",
+            context_summary, err
         ))
-        .block(block)
         .style(Style::default().fg(Color::Red));
         frame.render_widget(text, area);
         return;
@@ -2559,6 +2548,17 @@ mod tests {
     }
 
     #[test]
+    fn render_branch_action_reuses_popup_chrome_without_inner_box() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::BranchAction;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Use selected branch"));
+        assert!(text.matches('┌').count() == 1);
+    }
+
+    #[test]
     fn render_model_step_shows_old_tui_label_and_description_layout() {
         let mut state = WizardState::default();
         state.step = WizardStep::ModelSelect;
@@ -2574,6 +2574,19 @@ mod tests {
         assert!(text.contains("  Sonnet 4.5 - Best for everyday tasks"));
         assert!(text.contains("  Haiku 4.5 - Fastest for quick answers"));
         assert!(text.contains("Up/Down: select | Enter: next | Esc: back"));
+    }
+
+    #[test]
+    fn render_model_step_reuses_popup_chrome_without_inner_box() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ModelSelect;
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+
+        let text = render_text(&state, 160, 24);
+
+        assert!(text.contains("Default (recommended) - Opus 4.6"));
+        assert!(text.matches('┌').count() == 1);
     }
 
     #[test]
@@ -2669,13 +2682,34 @@ mod tests {
             },
         ];
 
-        let text = render_text(&state, 70, 20);
+        let text = render_text(&state, 70, 16);
 
         assert!(text.contains("Select Version"));
         assert!(text.contains("^ more above ^"));
         assert!(text.contains("v more below v"));
         assert!(text.contains("latest - Always use the latest version"));
         assert!(text.contains("> 1.0.2 - Use cached version"));
+    }
+
+    #[test]
+    fn render_version_step_reuses_popup_chrome_without_inner_box() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::VersionSelect;
+        state.version_options = vec![
+            VersionOption {
+                label: "Installed (v1.0.0)".to_string(),
+                value: "installed".to_string(),
+            },
+            VersionOption {
+                label: "latest".to_string(),
+                value: "latest".to_string(),
+            },
+        ];
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Installed (v1.0.0) - Use installed version"));
+        assert!(text.matches('┌').count() == 1);
     }
 
     #[test]
@@ -2942,6 +2976,18 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn ai_suggest_loading_reuses_popup_chrome_without_inner_box() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        state.ai_suggest.loading = true;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Generating branch name suggestions"));
+        assert!(text.matches('┌').count() == 1);
     }
 
     #[test]

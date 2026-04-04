@@ -209,6 +209,10 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-020**: `BranchNameInput` and `IssueSelect` render as old-TUI inline
   prompts inside the popup body, reusing the popup chrome instead of adding
   nested titled input boxes.
+- **FR-021**: Generic option-list steps, `VersionSelect`, and AI suggestion
+  loading/error states reuse the popup chrome as the only boxed surface,
+  keeping old-TUI rows and scroll indicators without nested inner borders or
+  duplicate titles.
 
 ## Non-Functional Requirements
 

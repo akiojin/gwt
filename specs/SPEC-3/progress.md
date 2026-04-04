@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `64/64` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T10:50:45Z`
+- Task progress: `69/69` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:08:20Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -44,6 +44,9 @@
 - `BranchNameInput` and `IssueSelect` now match that old-TUI popup contract
   as well, rendering inline cyan prompt labels with yellow input values
   instead of nested titled boxes inside the popup body.
+- Generic list steps, `VersionSelect`, and AI suggestion loading/error now
+  reuse the popup chrome as the wizard's only boxed surface instead of
+  layering redundant inner borders or titles inside the content area.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

@@ -137,6 +137,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the input steps no longer render
    nested titled blocks inside the popup body.
 
+### Phase 13: Old-TUI Single-Surface Popup Content
+
+1. Remove the remaining nested content borders from generic option-list steps
+   and specialized list renderers so popup chrome remains the only boxed
+   surface throughout the wizard.
+2. Keep old-TUI row formatting, `VersionSelect` overflow indicators, and AI
+   suggestion loading/error copy while dropping the duplicate inner titles.
+3. Add focused RED/GREEN coverage for generic lists, model/version steps, and
+   AI suggestion loading state to prevent the double-box regression.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

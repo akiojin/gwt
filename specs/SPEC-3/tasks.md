@@ -108,3 +108,11 @@
 - [x] T056 Update `wizard.rs` input-step rendering so branch and issue input reuse the popup chrome and show inline prompt/value rows.
 - [x] T057 Verify focused wizard input tests and the wizard suite pass GREEN.
 - [x] T058 Refresh SPEC-3 artifacts and verification evidence for the inline-prompt parity slice.
+
+## Phase 13: Old-TUI Single-Surface Popup Content
+
+- [x] T059 [P] Write RED test: generic option-list steps reuse the popup chrome without rendering a nested inner box.
+- [x] T060 [P] Write RED test: `ModelSelect`, `VersionSelect`, and AI suggestion loading reuse the popup chrome without nested inner boxes.
+- [x] T061 Remove nested content borders from wizard option-list renderers while keeping old-TUI row formatting and version overflow indicators.
+- [x] T062 Keep AI suggestion loading/error copy visible after removing duplicate inner titles and borders.
+- [x] T063 Verify focused popup-content tests, broad workspace checks, and refresh SPEC-3 artifacts.
