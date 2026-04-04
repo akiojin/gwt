@@ -106,7 +106,7 @@ As a developer, I want to quickly re-launch a previous agent session configurati
 1. Given I have previously launched an agent on branch `feature/foo`, when I open Quick Start, then the previous configuration for that branch is listed.
 2. Given Quick Start history has multiple entries, when I select one, then the wizard pre-fills all fields from the selected history entry.
 3. Given Quick Start history is empty, when I launch from an existing branch, then the wizard skips Quick Start and starts at `BranchAction`.
-4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own colored header, `Resume`, `Start new`, and a final `Choose different settings` row in the old-TUI layout.
+4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own compact action rows, `Resume`, `Start new`, and a final `Choose different` row in the old-TUI layout.
 5. Given the selected history entry has a persisted resume session ID, when I choose `Resume`, then launch configuration restores `Resume` mode with that session ID. When no resume session ID exists, the wizard falls back to `Continue`.
 
 ### US-4: Manage Custom Agents (P1) -- IMPLEMENTED
@@ -202,7 +202,7 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-018**: `QuickStart` renders old-TUI-style history rows with
   a compact branch-name context line, colored per-agent action rows, two
   selectable rows per entry (`Resume` / `Start new`), and a trailing
-  `Choose different settings` action.
+  `Choose different` action.
 - **FR-019**: `AgentSelect` renders old-TUI-style existing-branch context and
   name-only agent rows, while the popup chrome shows the current step title
   in the border and a right-aligned `[ESC]` hint.
@@ -234,7 +234,7 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-028**: `QuickStart` does not insert blank spacer rows between agent
   sections; the next agent-labeled action row follows directly after the
   previous `Start new` action while preserving the final action.
-- **FR-029**: The final `Choose different settings` action follows the last
+- **FR-029**: The final `Choose different` action follows the last
   grouped `Start new` row directly without an extra separator line, so the
   `QuickStart` popup keeps the denser old-TUI rhythm.
 - **FR-030**: The wizard popup does not render a separate `Step N/M`
@@ -244,7 +244,7 @@ As a developer, I want to convert an existing session to a different agent type 
   `Resume` and `Start new`, while still showing the resume session ID
   snippet when one exists.
 - **FR-032**: The final Quick Start action label matches the old-TUI copy
-  `Choose different settings` without an ellipsis.
+  `Choose different` without an ellipsis.
 - **FR-033**: When `QuickStart` has exactly one persisted entry, the popup
   title promotes that entry's compact agent/model summary (`Quick Start —
   Agent (Model)`, or just `Agent` when no model was persisted) and the body
@@ -261,7 +261,7 @@ As a developer, I want to convert an existing session to a different agent type 
   Start now matches that compact copy because the popup title already carries
   the agent/model context.
 - **FR-037**: The final `QuickStart` action uses the label-only copy
-  `Choose different settings` on both wide and narrow popups, without an
+  `Choose different` on both wide and narrow popups, without an
   inline description row.
 - **FR-038**: `QuickStart` state-derived option labels stay aligned with the
   rendered grouped rows, so multi-entry history uses compact `Resume` /

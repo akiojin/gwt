@@ -17,7 +17,7 @@
 7. Launch from an existing branch that has persisted session history and
    verify `Quick Start` shows the compact branch-name context line,
    agent-labeled action rows, `Resume`, `Start new`, and
-   `Choose different settings`.
+   `Choose different`.
 8. Launch from an existing branch without persisted session history and
    verify the wizard starts at `BranchAction` instead of showing a stub
    Quick Start placeholder.
@@ -58,14 +58,14 @@
    below the compact branch-name context line instead of leaving an extra
    blank row before the grouped list.
 24. Verify consecutive Quick Start agent groups now render without a blank
-   spacer row between them while `Choose different settings` still follows
+   spacer row between them while `Choose different` still follows
    the grouped history as the final footer action.
-25. Verify `Choose different settings` now appears directly below the last
+25. Verify `Choose different` now appears directly below the last
    grouped `Start new` row without an extra separator line.
 26. Verify the final Quick Start action now uses the label-only
-   `Choose different settings` copy on wide and narrow popups.
+   `Choose different` copy on wide and narrow popups.
 27. Verify the final action label no longer uses an ellipsis and now matches
-   the old-TUI copy `Choose different settings`.
+   the old-TUI copy `Choose different`.
 28. Verify grouped Quick Start actions now read `Resume` / `Start new`,
    while resume-capable entries still show the short session ID snippet.
 29. Verify a branch with exactly one persisted Quick Start entry now shows
@@ -82,7 +82,7 @@
 32. Verify a branch with multiple persisted Quick Start entries now renders
    grouped action rows as `Resume` / `Start new`, while a single-entry Quick
    Start also uses the compact `Resume` / `Start new` copy.
-33. Verify the final Quick Start action now stays `Choose different settings`
+33. Verify the final Quick Start action now stays `Choose different`
    on both wide and narrow popups, without the rebuilt `Open full setup`
    description text.
 34. Verify a branch with multiple persisted Quick Start entries keeps the
@@ -137,7 +137,7 @@
   history rows starting immediately below the branch context line.
 - Quick Start agent groups now render back-to-back without spacer rows,
   making the grouped history denser while preserving the final footer action.
-- The final `Choose different settings` action now follows the last grouped
+- The final `Choose different` action now follows the last grouped
   row directly instead of being separated by its own divider.
 - The grouped Quick Start actions now use the shorter old-TUI labels
   `Resume` and `Start new` while keeping the short resume-session hint where
@@ -172,5 +172,8 @@
 - Single-entry Quick Start now falls back to the bare agent label when no
   model was persisted, instead of showing a synthetic `default` model in the
   popup title.
+- The final Quick Start action now uses the compact old-TUI copy
+  `Choose different`, and `current_options()` now returns the same shorter
+  footer label.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

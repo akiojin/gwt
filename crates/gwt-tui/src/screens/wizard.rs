@@ -625,7 +625,7 @@ impl WizardState {
                     ));
                 }
                 if !self.quick_start_entries.is_empty() {
-                    options.push("Choose different settings".to_string());
+                    options.push("Choose different".to_string());
                 }
                 options
             }
@@ -1560,7 +1560,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     } else {
         "  "
     };
-    let choose_text = format!("{choose_marker}Choose different settings");
+    let choose_text = format!("{choose_marker}Choose different");
     items.push(
         ListItem::new(truncate_with_ellipsis(
             &choose_text,
@@ -2575,7 +2575,7 @@ mod tests {
         assert!(text.contains("  Codex Start new"));
         assert!(text.contains("  Claude Code Resume"));
         assert!(text.contains("  Claude Code Start new"));
-        assert!(text.contains("Choose different settings"));
+        assert!(text.contains("Choose different"));
     }
 
     #[test]
@@ -2790,7 +2790,7 @@ mod tests {
         assert_eq!(options[1], "Codex Start new");
         assert_eq!(options[2], "Claude Code Resume");
         assert_eq!(options[3], "Claude Code Start new");
-        assert_eq!(options[4], "Choose different settings");
+        assert_eq!(options[4], "Choose different");
     }
 
     #[test]
@@ -2805,7 +2805,7 @@ mod tests {
 
         assert_eq!(options[0], "Resume (sess-123...)");
         assert_eq!(options[1], "Start new");
-        assert_eq!(options[2], "Choose different settings");
+        assert_eq!(options[2], "Choose different");
     }
 
     #[test]
@@ -2857,7 +2857,7 @@ mod tests {
 
         let buf = render_buffer(&state, 100, 24);
         let (_, start_new_y) = find_text_position(&buf, "Start new").unwrap();
-        let (_, choose_y) = find_text_position(&buf, "Choose different settings").unwrap();
+        let (_, choose_y) = find_text_position(&buf, "Choose different").unwrap();
 
         assert_eq!(
             choose_y,
@@ -2877,7 +2877,7 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("> Choose different settings"));
+        assert!(text.contains("> Choose different"));
         assert!(!text.contains("Open full setup"));
     }
 
@@ -2892,7 +2892,7 @@ mod tests {
 
         let text = render_text(&state, 40, 24);
 
-        assert!(text.contains("> Choose different settings"));
+        assert!(text.contains("> Choose different"));
         assert!(!text.contains("Open full setup"));
     }
 

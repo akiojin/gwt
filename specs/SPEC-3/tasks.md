@@ -90,7 +90,7 @@
 ## Phase 10: Quick Start History Restoration
 
 - [x] T046 [P] Write RED test: existing-branch wizard startup loads newest per-agent Quick Start history from persisted sessions for the current repository and branch.
-- [x] T047 [P] Write RED test: `QuickStart` renders old-TUI grouped rows (`Branch: ...`, colored agent headers, `Resume`, `Start new`, `Choose different settings`) and uses `entries * 2 + 1` selectable options.
+- [x] T047 [P] Write RED test: `QuickStart` renders old-TUI grouped rows (`Branch: ...`, colored agent headers, `Resume`, `Start new`, `Choose different`) and uses `entries * 2 + 1` selectable options.
 - [x] T048 Implement persisted-session-backed Quick Start loading, old-TUI grouped rendering, and `Resume`/`Start new` selection semantics including resume-ID fallback to `Continue`.
 - [x] T049 Verify focused Quick Start tests, workspace checks, and refresh SPEC-3 artifacts.
 
@@ -165,20 +165,20 @@
 
 ## Phase 21: QuickStart Footer Separator Compaction
 
-- [x] T089 [P] Write RED test: `QuickStart` uses a compact separator before `Choose different settings` instead of a full-width rule.
+- [x] T089 [P] Write RED test: `QuickStart` uses a compact separator before `Choose different` instead of a full-width rule.
 - [x] T090 Replace the full-width footer separator with a compact rule while preserving the final action row.
 - [x] T091 Verify focused footer-separator tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
 ## Phase 22: QuickStart Footer Action Description
 
-- [x] T092 [P] Write RED test: `Choose different settings` shows a description on wide popups.
-- [x] T093 [P] Write RED test: `Choose different settings` falls back to the label-only row on narrow popups.
+- [x] T092 [P] Write RED test: `Choose different` shows a description on wide popups.
+- [x] T093 [P] Write RED test: `Choose different` falls back to the label-only row on narrow popups.
 - [x] T094 Render the final QuickStart action as a `label - description` row on wide widths while preserving narrow-width fallback.
 - [x] T095 Verify focused footer-action tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
 ## Phase 23: QuickStart Footer Separator Removal
 
-- [x] T096 [P] Write RED test: `Choose different settings` follows the last grouped `Start new` row without an extra separator line.
+- [x] T096 [P] Write RED test: `Choose different` follows the last grouped `Start new` row without an extra separator line.
 - [x] T097 Remove the remaining footer separator so the final action follows the last grouped row directly while preserving selection semantics.
 - [x] T098 Verify focused footer-density tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
@@ -190,7 +190,7 @@
 
 ## Phase 25: QuickStart Final Label Copy
 
-- [x] T102 [P] Write RED test: the final Quick Start action uses `Choose different settings` without an ellipsis in wide and narrow render paths.
+- [x] T102 [P] Write RED test: the final Quick Start action uses `Choose different` without an ellipsis in wide and narrow render paths.
 - [x] T103 Remove the rebuilt ellipsis from the final Quick Start action label while preserving the wide description row and narrow fallback.
 - [x] T104 Verify focused final-label tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
@@ -220,8 +220,8 @@
 
 ## Phase 30: QuickStart Footer Label-Only Copy
 
-- [x] T117 [P] Write RED test: the final Quick Start action uses label-only `Choose different settings` even on wide popups.
-- [x] T118 Update `wizard.rs` so `Choose different settings` stays label-only across wide and narrow render paths.
+- [x] T117 [P] Write RED test: the final Quick Start action uses label-only `Choose different` even on wide popups.
+- [x] T118 Update `wizard.rs` so `Choose different` stays label-only across wide and narrow render paths.
 - [x] T119 Verify focused footer-copy tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
 ## Phase 31: QuickStart Option Copy Alignment
@@ -265,3 +265,9 @@
 - [x] T138 [P] Write RED test: single-entry `QuickStart` title omits the synthesized `default` model placeholder when no model was persisted.
 - [x] T139 Update `wizard.rs` so single-entry title promotion falls back to the agent label alone when `model` is absent.
 - [x] T140 Verify focused title-summary tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 38: QuickStart Footer Label Compaction
+
+- [x] T141 [P] Write RED test: render and `current_options()` both use `Choose different` for the final Quick Start action.
+- [x] T142 Update `wizard.rs` so the final Quick Start action label is compacted to `Choose different` without changing selection semantics.
+- [x] T143 Verify focused footer-label tests, broad workspace checks, and refresh SPEC-3 artifacts.

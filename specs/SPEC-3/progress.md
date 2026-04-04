@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `146/146` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:43:00Z`
+- Task progress: `149/149` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:47:30Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -67,14 +67,14 @@
 - `QuickStart` agent groups now render back-to-back without blank spacer rows
   between them, preserving headers while matching the denser old-TUI grouped
   layout.
-- The final `Choose different settings` action now follows the last grouped
+- The final `Choose different` action now follows the last grouped
   `Start new` row directly without an extra separator line, completing the
   denser old-TUI footer rhythm.
 - `QuickStart` action rows now use the shorter old-TUI labels `Resume` and
   `Start new`, while still showing a resume session ID snippet when one
   exists.
-- The final action label now matches the old-TUI copy `Choose different
-  settings` without an ellipsis.
+- The final action label now matches the old-TUI copy `Choose different`
+  without an ellipsis.
 - Single-entry `QuickStart` popups now promote the lone agent/model summary
   into the popup title and start the action rows directly below
   the compact branch-name context line, while multi-entry history keeps the
@@ -87,8 +87,8 @@
   changing resume semantics.
 - Multi-entry `QuickStart` grouped action rows now use the denser old-TUI
   copy `Resume` / `Start new`.
-- The final `QuickStart` action now stays label-only (`Choose different
-  settings`) on both wide and narrow popups, removing the rebuilt inline
+- The final `QuickStart` action now stays label-only (`Choose different`) on
+  both wide and narrow popups, removing the rebuilt inline
   description text.
 - `QuickStart` now keeps its state-derived option labels aligned with the
   rendered grouped rows, so both multi-entry and single-entry history now use
@@ -106,6 +106,9 @@
 - Single-entry `QuickStart` title promotion now falls back to the bare agent
   label when no model was persisted, instead of synthesizing a `default`
   placeholder into the popup title.
+- The final `QuickStart` action label is now compacted from
+  `Choose different settings` to `Choose different`, while preserving the
+  same selection semantics and footer density.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining
