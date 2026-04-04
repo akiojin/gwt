@@ -91,6 +91,17 @@ persisted agent session before activation.
 4. Add focused RED/GREEN coverage for the new step transitions before
    touching popup rendering polish.
 
+### Phase 6: Old-TUI Wizard Option Formatting
+
+1. Restore old-TUI row formatting for `ModelSelect`, `ReasoningLevel`,
+   `ExecutionMode`, and `SkipPermissions` so rows show aligned labels plus
+   descriptions instead of plain labels only.
+2. Restore old-TUI `VersionSelect` rendering with `label - description`
+   formatting and `^ more above ^` / `v more below v` indicators when the
+   list overflows.
+3. Keep launch/config backend semantics unchanged while adding focused render
+   tests before updating any snapshots.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

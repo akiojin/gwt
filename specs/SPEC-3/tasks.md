@@ -79,3 +79,10 @@
 - [x] T039 [P] Write RED test: `Convert` execution mode routes through `ConvertAgentSelect` and `ConvertSessionSelect`.
 - [x] T040 Rewrite `WizardStep`, `next_step()`, and `prev_step()` to the old-TUI-aligned step machine while preserving version cache, AI suggestion, and session conversion state.
 - [x] T041 Verify focused wizard tests, workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 9: Old-TUI Wizard Option Formatting
+
+- [x] T042 [P] Write RED test: `ModelSelect`, `ReasoningLevel`, `ExecutionMode`, and `SkipPermissions` render old-TUI-style label + description rows.
+- [x] T043 [P] Write RED test: `VersionSelect` renders old-TUI-style `label - description` rows plus overflow indicators.
+- [x] T044 Implement specialized wizard row rendering for the affected steps without changing launch semantics.
+- [x] T045 Verify focused wizard render tests, workspace checks, and refresh SPEC-3 artifacts.

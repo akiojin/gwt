@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `47/47` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T01:54:13Z`
+- Task progress: `51/51` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T02:06:13Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -22,11 +22,16 @@
 - The current ratatui wizard now uses the old-TUI-aligned step machine:
   `BranchAction`, `ConvertAgentSelect`, and `ConvertSessionSelect` are
   restored, and `SkipPermissions` now completes directly without `Confirm`.
+- The option-list renderer now restores old-TUI row formatting for
+  `ModelSelect`, `ReasoningLevel`, `ExecutionMode`, and `SkipPermissions`,
+  and `VersionSelect` now shows descriptive rows plus overflow indicators.
 - Recent verification exists for SPEC-3 slices: `cargo fmt --all`, `cargo test -p gwt-tui`, `cargo test -p gwt-core -p gwt-tui`, `cargo clippy -p gwt-tui --all-targets --all-features -- -D warnings`, `cargo clippy --all-targets --all-features -- -D warnings`, `bunx markdownlint-cli specs/SPEC-3/tasks.md`, and `bunx commitlint --from HEAD~1 --to HEAD`.
 - Repeatable reviewer evidence is now captured in `quickstart.md` with detect,
   version-cache, wizard, launch-materialization, and session-conversion test
   commands.
 
 ## Next
-- Run the reviewer flow in `quickstart.md` and capture completion evidence.
-- Reconcile acceptance scenarios against the live branch before changing SPEC status.
+- Run the manual reviewer flow in `quickstart.md` and close the remaining
+  acceptance checklist items.
+- Keep Quick Start history presentation restoration separate until the data
+  path is wired into the ratatui wizard.

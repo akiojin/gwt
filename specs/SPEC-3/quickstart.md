@@ -11,18 +11,22 @@
 5. Verify existing-branch launches now start at `BranchAction`, and for
    Codex the flow includes `Model -> Reasoning -> Version -> Execution Mode
    -> Skip Permissions` without a trailing confirm screen.
-6. Launch the session from `Skip Permissions` and confirm a new agent tab
+6. Verify `ModelSelect`, `ReasoningLevel`, `ExecutionMode`, and
+   `SkipPermissions` render descriptive old-TUI rows and `VersionSelect`
+   shows scroll indicators when the list overflows.
+7. Launch the session from `Skip Permissions` and confirm a new agent tab
    appears with persisted session metadata while a default model label does
    not become a literal CLI override.
-7. Trigger session conversion and confirm the active session metadata changes
+8. Trigger session conversion and confirm the active session metadata changes
    while repository context is preserved.
-8. Check the existing focused tests and notifications to confirm the original
+9. Check the existing focused tests and notifications to confirm the original
    session remains intact on conversion failure.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
 - `cargo test -p gwt-agent version_cache -- --nocapture`
 - `cargo test -p gwt-tui wizard -- --nocapture`
+- `cargo test -p gwt-tui render_ -- --nocapture`
 - `cargo test -p gwt-tui prepare_wizard_startup_starts_spec_prefill_at_branch_type_select -- --nocapture`
 - `cargo test -p gwt-tui build_launch_config_from_wizard -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with -- --nocapture`

@@ -909,6 +909,341 @@ fn default_model_options(agent_id: &str) -> Vec<String> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ModelDisplayOption {
+    label: &'static str,
+    description: &'static str,
+}
+
+const CLAUDE_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 4] = [
+    ModelDisplayOption {
+        label: "Default (recommended)",
+        description: "Opus 4.6 - Most capable for complex work",
+    },
+    ModelDisplayOption {
+        label: "Opus 4.6",
+        description: "Most capable for complex work",
+    },
+    ModelDisplayOption {
+        label: "Sonnet 4.5",
+        description: "Best for everyday tasks",
+    },
+    ModelDisplayOption {
+        label: "Haiku 4.5",
+        description: "Fastest for quick answers",
+    },
+];
+
+const CODEX_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 6] = [
+    ModelDisplayOption {
+        label: "Default (Auto)",
+        description: "Use Codex default model",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.3-codex",
+        description: "Latest frontier agentic coding model.",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.2-codex",
+        description: "Codex flagship with extra-high reasoning support.",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.1-codex-max",
+        description: "Codex-optimized flagship for deep and fast reasoning.",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.2",
+        description: "Latest frontier model with improvements across knowledge and coding.",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.1-codex-mini",
+        description: "Optimized for codex. Cheaper, faster, but less capable.",
+    },
+];
+
+const GEMINI_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 6] = [
+    ModelDisplayOption {
+        label: "Default (Auto)",
+        description: "Use Gemini default model",
+    },
+    ModelDisplayOption {
+        label: "Pro (gemini-3-pro-preview)",
+        description: "Default Pro. Falls back to gemini-2.5-pro when preview is unavailable.",
+    },
+    ModelDisplayOption {
+        label: "Flash (gemini-3-flash-preview)",
+        description: "Next-generation high-speed model",
+    },
+    ModelDisplayOption {
+        label: "Pro (gemini-2.5-pro)",
+        description: "Stable Pro model for deep reasoning and creativity",
+    },
+    ModelDisplayOption {
+        label: "Flash (gemini-2.5-flash)",
+        description: "Balance of speed and reasoning",
+    },
+    ModelDisplayOption {
+        label: "Flash-Lite (gemini-2.5-flash-lite)",
+        description: "Fastest for simple tasks",
+    },
+];
+
+const REASONING_DISPLAY_OPTIONS: [(&str, &str); 4] = [
+    ("Low", "Faster, less thorough"),
+    ("Medium", "Balanced"),
+    ("High", "Slower, more thorough"),
+    ("XHigh", "Extended high reasoning"),
+];
+
+const EXECUTION_MODE_DISPLAY_OPTIONS: [(&str, &str); 4] = [
+    ("Normal", "Start a new session"),
+    ("Continue", "Continue from last session"),
+    ("Resume", "Resume a specific session"),
+    ("Convert", "Convert session from another agent"),
+];
+
+const SKIP_PERMISSION_DISPLAY_OPTIONS: [(&str, &str); 2] = [
+    ("Yes", "Skip permission prompts"),
+    ("No", "Show permission prompts"),
+];
+
+fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOption] {
+    match agent_id {
+        "claude" => &CLAUDE_MODEL_DISPLAY_OPTIONS,
+        "codex" => &CODEX_MODEL_DISPLAY_OPTIONS,
+        "gemini" => &GEMINI_MODEL_DISPLAY_OPTIONS,
+        _ => &[],
+    }
+}
+
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return "...".chars().take(max_width).collect();
+    }
+
+    let mut truncated = String::with_capacity(max_width);
+    for ch in text.chars().take(max_width - 3) {
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
+}
+
+fn format_label_description_line(
+    marker: &str,
+    label: &str,
+    description: &str,
+    available_width: usize,
+    label_width_cap: usize,
+) -> String {
+    if description.is_empty() {
+        return truncate_with_ellipsis(&format!("{marker}{label}"), available_width);
+    }
+
+    let separator = " - ";
+    let label_width = label.chars().count().min(label_width_cap);
+    let max_desc_width =
+        available_width.saturating_sub(marker.chars().count() + label_width + separator.len());
+
+    let rendered_desc = if max_desc_width == 0 {
+        String::new()
+    } else if description.chars().count() > max_desc_width {
+        truncate_with_ellipsis(description, max_desc_width)
+    } else {
+        description.to_string()
+    };
+
+    if rendered_desc.is_empty() {
+        truncate_with_ellipsis(&format!("{marker}{label}"), available_width)
+    } else {
+        truncate_with_ellipsis(
+            &format!("{marker}{label}{separator}{rendered_desc}"),
+            available_width,
+        )
+    }
+}
+
+fn format_fixed_width_line(
+    marker: &str,
+    label: &str,
+    description: &str,
+    label_width: usize,
+    available_width: usize,
+) -> String {
+    truncate_with_ellipsis(
+        &format!("{marker}{label:<label_width$} {description}"),
+        available_width,
+    )
+}
+
+fn render_bordered_list(frame: &mut Frame, area: Rect, items: Vec<ListItem>) {
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    frame.render_widget(List::new(items), inner);
+}
+
+fn version_option_description(option: &VersionOption) -> &'static str {
+    match option.value.as_str() {
+        "installed" => "Use installed version",
+        "latest" => "Always use the latest version",
+        _ => "Use cached version",
+    }
+}
+
+fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width.saturating_sub(2) as usize;
+    let display_options = model_display_options(state.effective_agent_id());
+    let fallback_options = state.current_model_options();
+    let items = if display_options.is_empty() {
+        fallback_options
+            .iter()
+            .enumerate()
+            .map(|(idx, label)| {
+                let marker = if idx == state.selected { "> " } else { "  " };
+                ListItem::new(truncate_with_ellipsis(
+                    &format!("{marker}{label}"),
+                    available_width,
+                ))
+                .style(super::list_item_style(idx == state.selected))
+            })
+            .collect()
+    } else {
+        display_options
+            .iter()
+            .enumerate()
+            .map(|(idx, option)| {
+                let marker = if idx == state.selected { "> " } else { "  " };
+                let text = format_label_description_line(
+                    marker,
+                    option.label,
+                    option.description,
+                    available_width,
+                    25,
+                );
+                ListItem::new(text).style(super::list_item_style(idx == state.selected))
+            })
+            .collect()
+    };
+    render_bordered_list(frame, area, items);
+}
+
+fn render_reasoning_level_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width.saturating_sub(2) as usize;
+    let items = REASONING_DISPLAY_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text = format_fixed_width_line(marker, label, description, 10, available_width);
+            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+        })
+        .collect();
+    render_bordered_list(frame, area, items);
+}
+
+fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width.saturating_sub(2) as usize;
+    let items = EXECUTION_MODE_DISPLAY_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text = format_fixed_width_line(marker, label, description, 12, available_width);
+            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+        })
+        .collect();
+    render_bordered_list(frame, area, items);
+}
+
+fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width.saturating_sub(2) as usize;
+    let items = SKIP_PERMISSION_DISPLAY_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text = format_fixed_width_line(marker, label, description, 6, available_width);
+            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+        })
+        .collect();
+    render_bordered_list(frame, area, items);
+}
+
+fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 || state.version_options.is_empty() {
+        return;
+    }
+
+    let total = state.version_options.len();
+    let max_rows = inner.height as usize;
+    let (start, list_rows) = if total > max_rows {
+        let visible_rows = max_rows.saturating_sub(2).max(1);
+        let mut start = state.selected.saturating_sub(visible_rows / 2);
+        if start + visible_rows > total {
+            start = total.saturating_sub(visible_rows);
+        }
+        (start, visible_rows)
+    } else {
+        (0, total)
+    };
+    let end = (start + list_rows).min(total);
+    let has_more_above = start > 0;
+    let has_more_below = end < total;
+    let available_width = inner.width as usize;
+
+    let mut y = inner.y;
+    if has_more_above {
+        frame.render_widget(
+            Paragraph::new("  ^ more above ^").style(Style::default().fg(Color::DarkGray)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 1;
+    }
+
+    let items = state.version_options[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, option)| {
+            let idx = start + offset;
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text = format_label_description_line(
+                marker,
+                &option.label,
+                version_option_description(option),
+                available_width,
+                20,
+            );
+            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+        })
+        .collect::<Vec<_>>();
+
+    let list_height = inner
+        .height
+        .saturating_sub(has_more_above as u16 + has_more_below as u16);
+    frame.render_widget(
+        List::new(items),
+        Rect::new(inner.x, y, inner.width, list_height),
+    );
+
+    if has_more_below {
+        frame.render_widget(
+            Paragraph::new("  v more below v").style(Style::default().fg(Color::DarkGray)),
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        );
+    }
+}
+
 /// Render the wizard overlay.
 pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Centered modal — 60% width, 70% height
@@ -994,6 +1329,11 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::AIBranchSuggest => {
             render_ai_suggest(state, frame, area);
         }
+        WizardStep::ModelSelect => render_model_step(state, frame, area),
+        WizardStep::ReasoningLevel => render_reasoning_level_step(state, frame, area),
+        WizardStep::VersionSelect => render_version_step(state, frame, area),
+        WizardStep::ExecutionMode => render_execution_mode_step(state, frame, area),
+        WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, area),
         _ => {
             render_option_list(state, frame, area);
         }
@@ -1110,6 +1450,19 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn render_text(state: &WizardState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        buffer_text(&buf)
     }
 
     #[test]
@@ -1595,6 +1948,126 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_model_step_shows_old_tui_label_and_description_layout() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ModelSelect;
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.selected = 1;
+
+        let text = render_text(&state, 160, 24);
+
+        assert!(text.contains("Select Model"));
+        assert!(text.contains("Default (recommended) - Opus 4.6 - Most capable for complex work"));
+        assert!(text.contains("> Opus 4.6 - Most capable for complex work"));
+        assert!(text.contains("  Sonnet 4.5 - Best for everyday tasks"));
+        assert!(text.contains("  Haiku 4.5 - Fastest for quick answers"));
+        assert!(text.contains("Up/Down: select | Enter: next | Esc: back"));
+    }
+
+    #[test]
+    fn render_reasoning_step_shows_fixed_width_old_tui_layout() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ReasoningLevel;
+        state.agent_id = "codex".to_string();
+        state.selected = 2;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Reasoning Level"));
+        assert!(text.contains("  Low        Faster, less thorough"));
+        assert!(text.contains("  Medium     Balanced"));
+        assert!(text.contains("> High       Slower, more thorough"));
+        assert!(text.contains("  XHigh      Extended high reasoning"));
+    }
+
+    #[test]
+    fn render_execution_mode_shows_old_tui_descriptions() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ExecutionMode;
+        state.selected = 2;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Execution Mode"));
+        assert!(text.contains("  Normal       Start a new session"));
+        assert!(text.contains("  Continue     Continue from last session"));
+        assert!(text.contains("> Resume       Resume a specific session"));
+        assert!(text.contains("  Convert      Convert session from another agent"));
+    }
+
+    #[test]
+    fn render_skip_permissions_step_shows_old_tui_descriptions() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::SkipPermissions;
+        state.selected = 1;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Skip Permissions"));
+        assert!(text.contains("  Yes    Skip permission prompts"));
+        assert!(text.contains("> No     Show permission prompts"));
+        assert!(text.contains("Up/Down: select | Enter: launch | Esc: back"));
+    }
+
+    #[test]
+    fn render_version_step_shows_descriptions_and_overflow_indicators() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::VersionSelect;
+        state.selected = 3;
+        state.version_options = vec![
+            VersionOption {
+                label: "Installed (v1.0.0)".to_string(),
+                value: "installed".to_string(),
+            },
+            VersionOption {
+                label: "latest".to_string(),
+                value: "latest".to_string(),
+            },
+            VersionOption {
+                label: "1.0.1".to_string(),
+                value: "1.0.1".to_string(),
+            },
+            VersionOption {
+                label: "1.0.2".to_string(),
+                value: "1.0.2".to_string(),
+            },
+            VersionOption {
+                label: "1.0.3".to_string(),
+                value: "1.0.3".to_string(),
+            },
+            VersionOption {
+                label: "1.0.4".to_string(),
+                value: "1.0.4".to_string(),
+            },
+            VersionOption {
+                label: "1.0.5".to_string(),
+                value: "1.0.5".to_string(),
+            },
+            VersionOption {
+                label: "1.0.6".to_string(),
+                value: "1.0.6".to_string(),
+            },
+            VersionOption {
+                label: "1.0.7".to_string(),
+                value: "1.0.7".to_string(),
+            },
+            VersionOption {
+                label: "1.0.8".to_string(),
+                value: "1.0.8".to_string(),
+            },
+        ];
+
+        let text = render_text(&state, 70, 20);
+
+        assert!(text.contains("Select Version"));
+        assert!(text.contains("^ more above ^"));
+        assert!(text.contains("v more below v"));
+        assert!(text.contains("latest - Always use the latest version"));
+        assert!(text.contains("> 1.0.2 - Use cached version"));
     }
 
     #[test]

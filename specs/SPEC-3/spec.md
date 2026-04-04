@@ -29,7 +29,7 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
    session is created with the configured parameters.
 5. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
 
-### US-7: Restore Old-TUI Wizard Step Machine (P0) -- IN PROGRESS
+### US-7: Restore Old-TUI Wizard Step Machine (P0) -- IMPLEMENTED
 
 As a developer, I want the new ratatui wizard to follow the old-TUI launch
 flow so that the daily launch UX matches existing muscle memory while
@@ -51,6 +51,24 @@ session conversion.
 5. Given I reach the last step, when I confirm the selection there, then the
    launch completes directly from the final step instead of a separate
    `Confirm` screen.
+
+### US-8: Restore Old-TUI Wizard Option Formatting (P1) -- IMPLEMENTED
+
+As a developer, I want the wizard option lists to match the old-TUI visual
+format so that model, reasoning, version, execution mode, and skip
+permissions are easier to scan at a glance.
+
+**Acceptance Scenarios**
+
+1. Given I am on `ModelSelect`, when the list renders, then each row shows a
+   concise label plus description in the old-TUI `label - description`
+   format.
+2. Given I am on `ReasoningLevel`, `ExecutionMode`, or `SkipPermissions`,
+   when the list renders, then each row uses the old-TUI fixed-width label
+   plus description layout.
+3. Given `VersionSelect` has more options than fit in the popup, when I
+   scroll, then the popup shows `^ more above ^` / `v more below v`
+   indicators.
 
 ### US-2: Detect Installed Agents (P0) -- IMPLEMENTED
 
@@ -158,6 +176,9 @@ As a developer, I want to convert an existing session to a different agent type 
   `ConvertAgentSelect`, `ConvertSessionSelect`, `SkipPermissions`,
   `BranchTypeSelect`, `IssueSelect`, `AIBranchSuggest`, and
   `BranchNameInput`.
+- **FR-017**: `ModelSelect`, `ReasoningLevel`, `ExecutionMode`,
+  `SkipPermissions`, and `VersionSelect` use old-TUI-style row formatting
+  with descriptive text and version-list scroll indicators.
 
 ## Non-Functional Requirements
 
