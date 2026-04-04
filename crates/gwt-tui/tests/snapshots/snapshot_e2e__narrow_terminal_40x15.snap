@@ -1,9 +1,10 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 495
 expression: output
 ---
  GWT v8.17.2 | /tmp/┌ ▶ Shell ─────────┐
-┌ Branches │ Issues┐│Session: Shell (80│
+┌ Branches │ Specs ┐│Session: Shell (80│
 │ View: All │ Sort:││                  │
 │No branches loaded││                  │
 │                  ││                  │

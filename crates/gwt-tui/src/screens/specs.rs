@@ -14,10 +14,11 @@ use ratatui::{
 };
 
 /// Detail sections available for a spec.
-const DETAIL_SECTIONS: [&str; 5] = [
+const DETAIL_SECTIONS: [&str; 6] = [
     "spec.md",
     "plan.md",
     "tasks.md",
+    "analysis.md",
     "research.md",
     "data-model.md",
 ];
@@ -686,6 +687,11 @@ mod tests {
         fs::write(spec_dir.join("plan.md"), "# plan.md\n\nplan body\n").unwrap();
         fs::write(spec_dir.join("tasks.md"), "# tasks.md\n\ntasks body\n").unwrap();
         fs::write(
+            spec_dir.join("analysis.md"),
+            "# analysis.md\n\nanalysis body\n",
+        )
+        .unwrap();
+        fs::write(
             spec_dir.join("research.md"),
             "# research.md\n\nresearch body\n",
         )
@@ -772,7 +778,7 @@ mod tests {
         assert_eq!(state.detail_section, 1);
 
         // Cycle through all sections
-        for _ in 0..4 {
+        for _ in 0..5 {
             update(&mut state, SpecsMessage::NextSection);
         }
         assert_eq!(state.detail_section, 0); // wraps
@@ -786,7 +792,7 @@ mod tests {
         assert_eq!(state.detail_section, 0);
 
         update(&mut state, SpecsMessage::PrevSection);
-        assert_eq!(state.detail_section, 4); // wraps to last
+        assert_eq!(state.detail_section, 5); // wraps to last
     }
 
     #[test]
@@ -971,7 +977,7 @@ mod tests {
         let mut state = SpecsState::default();
         state.specs = sample_specs();
         state.detail_view = true;
-        state.detail_section = 3; // research.md
+        state.detail_section = 4; // research.md
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -1000,10 +1006,33 @@ mod tests {
     }
 
     #[test]
-    fn detail_sections_constant_has_five_entries() {
-        assert_eq!(DETAIL_SECTIONS.len(), 5);
+    fn detail_sections_constant_includes_analysis_md() {
+        assert_eq!(DETAIL_SECTIONS.len(), 6);
         assert_eq!(DETAIL_SECTIONS[0], "spec.md");
-        assert_eq!(DETAIL_SECTIONS[4], "data-model.md");
+        assert_eq!(DETAIL_SECTIONS[3], "analysis.md");
+        assert_eq!(DETAIL_SECTIONS.last().copied(), Some("data-model.md"));
+    }
+
+    #[test]
+    fn start_section_edit_reads_analysis_markdown_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-102");
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-102".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.detail_view = true;
+        state.detail_section = 3; // analysis.md
+
+        update(&mut state, SpecsMessage::StartSectionEdit);
+
+        assert!(state.detail_editing);
+        assert!(state.detail_edit_buffer.contains("analysis body"));
     }
 
     #[test]

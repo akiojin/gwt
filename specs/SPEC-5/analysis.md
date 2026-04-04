@@ -13,10 +13,11 @@ Status: CLEAR
 - Task traceability snapshot: `tasks.md` currently records `43/43` completed
   items.
 - Notes: The SPEC now reflects the restored live-shell Specs entry point and includes persisted `analysis.md` in the local artifact model.
-- Notes: The shell can now load local metadata, open detail, return with `Esc`, and prefill the wizard from the selected SPEC.
-- Notes: All execution tasks are now checked; the remaining work is
-  reviewer-flow and end-to-end acceptance closure rather than missing
-  implementation steps.
+- Notes: The shell can now load local metadata, open detail, return with `Esc`, prefill the wizard from the selected SPEC, and expose `analysis.md` as a detail tab.
+- Notes: The remaining implementation gaps are still the ones called out in
+  `spec.md`: semantic search, markdown-rendered detail parity, and richer
+  metadata/content editing. Completion-gate review remains future work after
+  those gaps are either implemented or explicitly de-scoped.
 
 ## Next
 - Run completion-gate review and reviewer evidence.

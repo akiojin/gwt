@@ -2,7 +2,7 @@
 
 - [x] `tasks.md` remains the source of truth for execution order.
 - [x] Broad regression evidence exists on this branch (`cargo test -p gwt-core -p gwt-tui`, `cargo clippy --all-targets --all-features -- -D warnings`).
-- [x] Broad repo checks pass, but SPEC-5 still lacks focused verification for reachable UI behavior and persistent edits.
-- [ ] Each remaining unchecked task has a focused failing test or repeatable manual check defined.
-- [ ] The latest implementation slice has spec-focused verification evidence attached to it.
-- [ ] The reviewer flow in `quickstart.md` has been captured as repeatable completion evidence.
+- [x] Broad repo checks pass, and focused verification now exists for management-tab reachability, startup metadata loading, detail navigation, wizard launch prefill, and the restored `analysis.md` detail tab.
+- [x] Each remaining execution gap has a focused failing test or a repeatable manual check defined in `quickstart.md`.
+- [x] The latest implementation slice has spec-focused verification evidence attached to it.
+- [x] The reviewer flow in `quickstart.md` has been captured as repeatable completion evidence.
