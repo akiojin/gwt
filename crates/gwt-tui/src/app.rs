@@ -1159,7 +1159,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     screens::branches::load_branch_detail(&mut model.branches, &repo_path);
                 }
             } else if key.code == KeyCode::Esc {
-                dismiss_warn_notification(model);
+                fallback_management_escape(model);
             }
         }
         ManagementTab::Specs => {
@@ -1249,7 +1249,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     update(model, Message::OpenWizardWithSpec(spec_context));
                 }
             } else if key.code == KeyCode::Esc {
-                dismiss_warn_notification(model);
+                fallback_management_escape(model);
             }
         }
         ManagementTab::Issues => {
@@ -1278,7 +1278,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             } else if key.code == KeyCode::Esc && model.issues.detail_view {
                 screens::issues::update(&mut model.issues, IssuesMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
-                dismiss_warn_notification(model);
+                fallback_management_escape(model);
             }
         }
         ManagementTab::Settings => {
@@ -1293,7 +1293,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 if let Some(m) = msg {
                     screens::settings::update(&mut model.settings, m);
                 } else if key.code == KeyCode::Esc {
-                    dismiss_warn_notification(model);
+                    fallback_management_escape(model);
                 }
             } else {
                 let msg = match key.code {
@@ -1315,7 +1315,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 if let Some(m) = msg {
                     screens::settings::update(&mut model.settings, m);
                 } else if key.code == KeyCode::Esc {
-                    dismiss_warn_notification(model);
+                    fallback_management_escape(model);
                 }
             }
         }
@@ -1344,7 +1344,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             } else if key.code == KeyCode::Esc && model.logs.detail_view {
                 screens::logs::update(&mut model.logs, LogsMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
-                dismiss_warn_notification(model);
+                fallback_management_escape(model);
             }
         }
         ManagementTab::Versions => {
@@ -1360,7 +1360,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             if let Some(m) = msg {
                 screens::versions::update(&mut model.versions, m);
             } else if key.code == KeyCode::Esc {
-                dismiss_warn_notification(model);
+                fallback_management_escape(model);
             }
         }
         ManagementTab::GitView => {
@@ -1377,7 +1377,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             if let Some(m) = msg {
                 screens::git_view::update(&mut model.git_view, m);
             } else if key.code == KeyCode::Esc {
-                dismiss_warn_notification(model);
+                fallback_management_escape(model);
             }
         }
         ManagementTab::PrDashboard => {
@@ -1396,7 +1396,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     screens::pr_dashboard::PrDashboardMessage::ToggleDetail,
                 );
             } else if key.code == KeyCode::Esc {
-                dismiss_warn_notification(model);
+                fallback_management_escape(model);
             }
         }
         ManagementTab::Profiles => {
@@ -1412,6 +1412,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::profiles::update(&mut model.profiles, m);
+            } else if key.code == KeyCode::Esc {
+                fallback_management_escape(model);
             }
         }
     }
@@ -1656,6 +1658,20 @@ fn dismiss_warn_notification(model: &mut Model) {
         Some(Severity::Warn)
     ) {
         update(model, Message::DismissNotification);
+    }
+}
+
+fn fallback_management_escape(model: &mut Model) {
+    if matches!(
+        model
+            .current_notification
+            .as_ref()
+            .map(|notification| notification.severity),
+        Some(Severity::Warn)
+    ) {
+        update(model, Message::DismissNotification);
+    } else {
+        model.active_focus = FocusPane::Terminal;
     }
 }
 
@@ -5964,6 +5980,40 @@ mod tests {
 
         route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(model.logs.filter_level, screens::logs::FilterLevel::DebugUp);
+    }
+
+    #[test]
+    fn route_key_to_management_logs_esc_without_warn_returns_terminal_focus() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Logs;
+        model.active_focus = FocusPane::TabContent;
+        model.logs.entries = vec![
+            Notification::new(Severity::Info, "core", "first"),
+            Notification::new(Severity::Warn, "core", "second"),
+        ];
+        model.logs.selected = 1;
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.management_tab, ManagementTab::Logs);
+        assert_eq!(model.logs.selected, 1);
+    }
+
+    #[test]
+    fn route_key_to_management_logs_esc_with_warn_still_dismisses_warning() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Logs;
+        model.active_focus = FocusPane::TabContent;
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(model.current_notification.is_none());
     }
 
     #[test]

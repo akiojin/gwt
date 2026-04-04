@@ -98,6 +98,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-006**: 8 management tabs: Branches, Issues, PRs, Profiles, Git View, Versions, Settings, Logs. (SPECs tab removed — SPECs are shown in Branch Detail view.)
 - **FR-006e**: Global management-tab shortcuts (`Ctrl+G,b/i/s/...`) also behave like supplemental surfaces when invoked from Terminal: they open the requested tab without stealing terminal focus, while management-local tab switches still land on `TabContent`.
+- **FR-006f**: When the user has explicitly focused a management list/pane, `Esc` still behaves like a supplemental-surface escape hatch: if no search/detail/edit flow claims it and no warn notification is pending, focus returns to `Terminal`; warn dismissal keeps priority when a warn toast is present.
 - **FR-006a**: Branch Detail view: Branches tab is split vertically — top 50% branch list, bottom 50% detail of selected branch (always visible). Cursor movement in the list updates the detail. Sections:
   - **Overview**: Branch name, head status, worktree path, linked Issues, PR status
   - **SPECs**: SPEC list from the branch's worktree `specs/` directory (worktree-only)
@@ -185,7 +186,7 @@ Management tabs are displayed in the Block title of the management panel area. T
 |------------|--------|
 | `↑` / `↓` | Navigate list items |
 | `Enter` | Select / toggle detail view |
-| `Esc` | Cancel search / close detail |
+| `Esc` | Cancel search / close detail / return focus to terminal |
 | `/` | Start search (Branches, Issues) |
 | `r` | Refresh data |
 | `s` | Toggle sort mode (Branches only) |

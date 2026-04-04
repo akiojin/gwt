@@ -307,6 +307,21 @@ temporary drill-down instead of forcing the user to use Enter again to escape.
 24.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 25: Esc Returns from Management Pane to Terminal (5 tasks)
+Complete the supplemental-surface contract by making plain `Esc` in management list/pane focus
+return to the terminal when no tab-specific search/detail/edit flow owns the key.
+
+25.1: Escape fallback contract (2 tasks)
+- In management list/pane focus, `Esc` returns focus to `Terminal` when no warn notification is pending.
+- If a warn notification is visible, `Esc` still dismisses the warn notification instead of changing focus.
+
+25.2: Focused routing coverage (2 tasks)
+- Add focused coverage for terminal-return behavior from a management pane.
+- Add focused coverage that warn-dismiss still wins over terminal-return.
+
+25.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
