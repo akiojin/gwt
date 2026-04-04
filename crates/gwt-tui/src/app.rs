@@ -3171,7 +3171,7 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
         FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
             branches_list_hint_text(compact)
         }
-        FocusPane::TabContent => generic_management_hint_text(compact),
+        FocusPane::TabContent => management_hint_text(model, compact),
         FocusPane::BranchDetail => branch_detail_hint_text(model, compact),
         FocusPane::Terminal => terminal_hint_text(),
     };
@@ -3197,11 +3197,89 @@ fn branches_list_hint_text(compact: bool) -> String {
     }
 }
 
-fn generic_management_hint_text(compact: bool) -> String {
-    if compact {
-        "↑↓ sel  ←→ tab  C-←→ sub  ↵ act  Tab pane  Esc term  ?".to_string()
+fn management_hint_text(model: &Model, compact: bool) -> String {
+    match model.management_tab {
+        ManagementTab::Branches => branches_list_hint_text(compact),
+        ManagementTab::Issues => {
+            if model.issues.detail_view {
+                generic_management_hint_text(compact, false, "back")
+            } else {
+                generic_management_hint_text(compact, false, "term")
+            }
+        }
+        ManagementTab::Settings => {
+            if model.settings.editing {
+                settings_edit_hint_text(compact)
+            } else {
+                generic_management_hint_text(compact, true, "term")
+            }
+        }
+        ManagementTab::Logs => {
+            if model.logs.detail_view {
+                generic_management_hint_text(compact, true, "back")
+            } else {
+                generic_management_hint_text(compact, true, "term")
+            }
+        }
+        ManagementTab::PrDashboard => {
+            if model.pr_dashboard.detail_view {
+                generic_management_hint_text(compact, false, "back")
+            } else {
+                generic_management_hint_text(compact, false, "term")
+            }
+        }
+        ManagementTab::Profiles => {
+            if model.profiles.mode != screens::profiles::ProfileMode::List {
+                generic_management_hint_text(compact, false, "cancel")
+            } else {
+                generic_management_hint_text(compact, false, "term")
+            }
+        }
+        ManagementTab::Specs => {
+            if model.specs.detail_editing {
+                generic_management_hint_text(compact, false, "cancel")
+            } else if model.specs.detail_view {
+                generic_management_hint_text(compact, false, "back")
+            } else {
+                generic_management_hint_text(compact, false, "term")
+            }
+        }
+        ManagementTab::GitView | ManagementTab::Versions => {
+            generic_management_hint_text(compact, false, "term")
+        }
+    }
+}
+
+fn generic_management_hint_text(
+    compact: bool,
+    include_sub_tab: bool,
+    escape_action: &str,
+) -> String {
+    let compact_sub_tab = if include_sub_tab {
+        "  C-←→ sub"
     } else {
-        "↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  Esc:term  ?:help".to_string()
+        ""
+    };
+    let full_sub_tab = if include_sub_tab {
+        "  Ctrl+←→:sub-tab"
+    } else {
+        ""
+    };
+
+    if compact {
+        format!("↑↓ sel  ←→ tab{compact_sub_tab}  ↵ act  Tab pane  Esc {escape_action}  ?")
+    } else {
+        format!(
+            "↑↓:select  ←→:tab{full_sub_tab}  Enter:action  Tab:focus  Esc:{escape_action}  ?:help"
+        )
+    }
+}
+
+fn settings_edit_hint_text(compact: bool) -> String {
+    if compact {
+        "↵ save  ⌫ del  Esc cancel  ?".to_string()
+    } else {
+        "Enter:save  Backspace:delete  Esc:cancel  ?:help".to_string()
     }
 }
 
@@ -3659,6 +3737,58 @@ mod tests {
     }
 
     #[test]
+    fn render_model_text_issues_detail_hints_show_escape_back_not_terminal() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+        model.issues.detail_view = true;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Esc:back"));
+        assert!(!rendered.contains("Esc:term"));
+    }
+
+    #[test]
+    fn render_model_text_profiles_create_hints_show_escape_cancel_not_terminal() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+        model.profiles.mode = screens::profiles::ProfileMode::Create;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Esc:cancel"));
+        assert!(!rendered.contains("Esc:term"));
+    }
+
+    #[test]
+    fn render_model_text_settings_list_hints_include_sub_tab_controls() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Ctrl+←→:sub-tab"));
+    }
+
+    #[test]
+    fn render_model_text_git_view_hints_omit_sub_tab_controls() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::GitView;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(!rendered.contains("Ctrl+←→:sub-tab"));
+    }
+
+    #[test]
     fn render_model_text_management_omits_standalone_header_banner() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
@@ -3961,7 +4091,8 @@ mod tests {
 
         let rendered = render_model_text(&model, 80, 24);
 
-        assert!(rendered.contains("↑↓ sel  ←→ tab  C-←→ sub"));
+        assert!(rendered.contains("↑↓ sel  ←→ tab  ↵ act"));
+        assert!(!rendered.contains("C-←→ sub"));
         assert!(rendered.contains("Tab pane"));
         assert!(rendered.contains("Esc term"));
     }

@@ -370,6 +370,21 @@ the title to the active session only so the current workstream remains readable.
 35.3: Verification (1 task)
 - Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
 
+### Phase 36: Make Non-Branches Footer Hints Mode-Aware (5 tasks)
+Align the visible footer hints with the routing that already differs by management tab and mode so
+the status bar no longer overclaims sub-tab controls or the wrong `Esc` action.
+
+36.1: Visible contract (2 tasks)
+- Detail drill-downs such as Issues and PR Dashboard advertise `Esc:back` instead of `Esc:term`.
+- Form/edit states such as Profiles create/edit/delete advertise `Esc:cancel`, while only tabs that really support sub-tabs keep `Ctrl+←→:sub-tab`.
+
+36.2: Focused render coverage (2 tasks)
+- Add RED coverage that Issues detail and Profiles create mode advertise the correct `Esc` affordance.
+- Add RED coverage that Settings keeps `Ctrl+←→:sub-tab` while Git View omits it.
+
+36.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

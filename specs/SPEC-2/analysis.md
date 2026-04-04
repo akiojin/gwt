@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `223/223` completed items after closing Phase 35 for the narrow-session-title follow-up.
+- Task traceability snapshot: `tasks.md` currently records `228/228` completed items after closing Phase 36 for the mode-aware-footer follow-up.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -44,3 +44,4 @@ Status: CLEAR
 - Notes: Phase 33 extends that `width <= 80`, notification-free footer compaction to management and Branch Detail hints so the pane-local guidance also remains visible without truncation.
 - Notes: Phase 34 closes the next standard-width chrome gap by collapsing management pane titles to the active tab only whenever the full tab strip would truncate, while extra-wide panes keep the original strip.
 - Notes: Phase 35 mirrors that fit-based compaction on the session pane title, so standard-width multi-session workspaces now keep the active session readable instead of showing a truncated strip.
+- Notes: Phase 36 closes the remaining visible-footer gap on non-Branches tabs by making the hints match each tab's real routing and mode-specific `Esc` behavior instead of advertising a generic contract everywhere.

@@ -378,3 +378,11 @@ banner in favor of pane-title chrome.
 - [x] T242 [P] Write RED test: extra-wide session panes restore the complete session strip once it fits.
 - [x] T243 Update `app.rs` session title rendering to switch to active-session-only chrome whenever the full strip would truncate.
 - [x] T244 Refresh `SPEC-2` artifacts and verify focused tests and workspace checks.
+
+## Phase 36: Make Non-Branches Footer Hints Mode-Aware
+
+- [x] T245 [P] Write RED test: Issues detail footer hints show `Esc:back` instead of `Esc:term`.
+- [x] T246 [P] Write RED test: Profiles create-mode footer hints show `Esc:cancel` instead of `Esc:term`.
+- [x] T247 [P] Write RED test: Settings list keeps `Ctrl+←→:sub-tab` while Git View omits it.
+- [x] T248 Update `app.rs` footer hint rendering so non-Branches tabs advertise tab/mode-specific `Esc` and sub-tab affordances.
+- [x] T249 Refresh `SPEC-2` artifacts and verify focused tests and workspace checks.

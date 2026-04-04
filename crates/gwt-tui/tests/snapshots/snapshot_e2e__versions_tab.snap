@@ -25,4 +25,4 @@ expression: output
 │No tag selected                       ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ←→ tab  C-←→ sub  ↵ act  Tab pane  Esc term  ?
+ ▣ Sh  br:n/a  [G]  ↑↓ sel  ←→ tab  ↵ act  Tab pane  Esc term  ?
