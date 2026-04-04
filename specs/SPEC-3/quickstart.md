@@ -44,6 +44,8 @@
    the only box while keeping their row formatting and copy visible.
 18. Verify the AI suggestion candidate list also keeps `Context: ...`
    visible above the suggestions and `Manual input`.
+19. Verify AI suggestion loading and error states render `Context: ...` as a
+   standalone row above the body copy, matching the candidate-list layout.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -74,5 +76,8 @@
   the only boxed surface even during model/version selection and AI loading.
 - The AI suggestion step now keeps its `Context: ...` line visible in every
   state instead of dropping it when suggestions arrive.
+- The AI suggestion loading and error states now render that context as the
+  same standalone row used by the candidate list instead of embedding it in
+  the paragraph copy.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

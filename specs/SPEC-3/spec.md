@@ -216,6 +216,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-022**: The AI branch suggestion step shows `Context: ...` consistently
   in loading, error, and suggestion-list states while still reusing the popup
   chrome as the only boxed surface.
+- **FR-023**: AI suggestion loading and error states render `Context: ...` as
+  the same standalone cyan line used by the suggestion-list state rather than
+  embedding the context string inside the body copy.
 
 ## Non-Functional Requirements
 

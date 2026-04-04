@@ -156,6 +156,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the context survives in the
    suggestion-list state without reintroducing nested content chrome.
 
+### Phase 15: AI Suggestion State Layout Alignment
+
+1. Render `Context: ...` as a standalone line in AI suggestion loading and
+   error states so all three states share the same context-first layout.
+2. Keep popup chrome as the only boxed surface while the body copy shifts
+   downward under the context line.
+3. Add focused RED/GREEN coverage for loading and error states to prevent the
+   context line from regressing back into inline paragraph copy.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

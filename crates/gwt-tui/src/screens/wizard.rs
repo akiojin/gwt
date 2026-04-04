@@ -1753,35 +1753,6 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
 /// reuses the default option-list renderer via the fallthrough in
 /// `render_step_content`.
 fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let context_summary = state
-        .spec_context_summary()
-        .map(|summary| format!("Context: {summary}\n\n"))
-        .unwrap_or_default();
-
-    if state.ai_suggest.loading {
-        let spinner_chars = [
-            '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
-        ];
-        let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
-        let text = Paragraph::new(format!(
-            "{} {} Generating branch name suggestions...\n\n Type Enter to use a manual branch name if needed.",
-            context_summary, ch
-        ))
-            .style(Style::default().fg(Color::Yellow));
-        frame.render_widget(text, area);
-        return;
-    }
-
-    if let Some(ref err) = state.ai_suggest.error {
-        let text = Paragraph::new(format!(
-            "{} Error: {}\n\n Press Enter or Esc to enter branch name manually.",
-            context_summary, err
-        ))
-        .style(Style::default().fg(Color::Red));
-        frame.render_widget(text, area);
-        return;
-    }
-
     let start_y = if let Some(summary) = state.spec_context_summary() {
         frame.render_widget(
             Paragraph::new(truncate_with_ellipsis(
@@ -1799,6 +1770,37 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
     } else {
         0
     };
+
+    let body_area = Rect::new(
+        area.x,
+        area.y + start_y,
+        area.width,
+        area.height.saturating_sub(start_y),
+    );
+
+    if state.ai_suggest.loading {
+        let spinner_chars = [
+            '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
+        ];
+        let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
+        let text = Paragraph::new(format!(
+            " {} Generating branch name suggestions...\n\n Type Enter to use a manual branch name if needed.",
+            ch
+        ))
+            .style(Style::default().fg(Color::Yellow));
+        frame.render_widget(text, body_area);
+        return;
+    }
+
+    if let Some(ref err) = state.ai_suggest.error {
+        let text = Paragraph::new(format!(
+            " Error: {}\n\n Press Enter or Esc to enter branch name manually.",
+            err
+        ))
+        .style(Style::default().fg(Color::Red));
+        frame.render_widget(text, body_area);
+        return;
+    }
 
     let list_area = Rect::new(
         area.x,
@@ -3030,11 +3032,22 @@ mod tests {
     fn ai_suggest_loading_reuses_popup_chrome_without_inner_box() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
+        state.spec_context = Some(SpecContext::new("SPEC-42", "My Feature", ""));
         state.ai_suggest.loading = true;
 
-        let text = render_text(&state, 90, 24);
+        let buf = render_buffer(&state, 90, 24);
+        let text = buffer_text(&buf);
+        let (context_x, context_y) =
+            find_text_position(&buf, "Context: SPEC-42").expect("context line");
+        let (_, loading_y) =
+            find_text_position(&buf, "Generating branch name suggestions").expect("loading copy");
 
         assert!(text.contains("Generating branch name suggestions"));
+        assert_eq!(buf[(context_x, context_y)].style().fg, Some(Color::Cyan));
+        assert!(
+            loading_y > context_y,
+            "loading text should render below the context line"
+        );
         assert!(text.matches('┌').count() == 1);
     }
 
@@ -3051,6 +3064,28 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn ai_suggest_error_keeps_context_line_above_error_copy() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AIBranchSuggest;
+        state.spec_context = Some(SpecContext::new("SPEC-42", "My Feature", ""));
+        state.ai_suggest.error = Some("Connection timeout".to_string());
+
+        let buf = render_buffer(&state, 90, 24);
+        let text = buffer_text(&buf);
+        let (context_x, context_y) =
+            find_text_position(&buf, "Context: SPEC-42").expect("context line");
+        let (_, error_y) =
+            find_text_position(&buf, "Error: Connection timeout").expect("error copy");
+
+        assert_eq!(buf[(context_x, context_y)].style().fg, Some(Color::Cyan));
+        assert!(
+            error_y > context_y,
+            "error copy should render below the context line"
+        );
+        assert!(text.matches('┌').count() == 1);
     }
 
     #[test]

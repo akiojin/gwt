@@ -122,3 +122,10 @@
 - [x] T064 [P] Write RED test: AI suggestion candidate rendering keeps `Context: ...` visible while still using the popup chrome as the only box.
 - [x] T065 Update `render_ai_suggest()` so the context line stays visible in the suggestion-list state alongside candidates and `Manual input`.
 - [x] T066 Verify focused AI suggestion render tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 15: AI Suggestion State Layout Alignment
+
+- [x] T067 [P] Write RED test: AI suggestion loading state renders `Context: ...` as a standalone line above the loading copy.
+- [x] T068 [P] Write RED test: AI suggestion error state renders `Context: ...` as a standalone line above the error copy.
+- [x] T069 Update `render_ai_suggest()` so loading and error states use the same context-first layout as the suggestion-list state.
+- [x] T070 Verify focused AI suggestion layout tests, broad workspace checks, and refresh SPEC-3 artifacts.

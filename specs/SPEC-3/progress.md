@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `72/72` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:20:12Z`
+- Task progress: `76/76` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:31:48Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -50,6 +50,9 @@
 - The AI suggestion candidate list now keeps `Context: ...` visible after
   loading finishes, so all AI suggestion states share the same context-first
   old-TUI content contract.
+- AI suggestion loading and error states now render that `Context: ...` line
+  as a standalone cyan row above the body copy instead of embedding it inline
+  inside the paragraph text.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

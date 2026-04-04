@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `72/72` completed items.
+- Task traceability snapshot: `tasks.md` now records `76/76` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -34,6 +34,8 @@ Status: CLEAR
 - Notes: The AI suggestion candidate list now keeps `Context: ...` visible,
   so loading, error, and suggestion-list states share the same popup-content
   contract.
+- Notes: AI suggestion loading and error states now render `Context: ...` as
+  a standalone line above the body copy, matching the suggestion-list layout.
 
 ## Next
 - `gwt-spec-implement`
