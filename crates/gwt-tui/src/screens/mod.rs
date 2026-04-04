@@ -13,8 +13,8 @@ pub mod port_select;
 pub mod pr_dashboard;
 pub mod profiles;
 pub mod service_select;
-pub mod specs;
 pub mod settings;
+pub mod specs;
 pub mod versions;
 pub mod wizard;
 

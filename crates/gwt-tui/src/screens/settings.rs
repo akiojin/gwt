@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use gwt_config::{ConfigError, Settings, VoiceConfig};
-use gwt_skills::BuiltinSkill;
+use gwt_skills::assets::CLAUDE_SKILLS;
 
 /// Settings category tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -231,7 +231,7 @@ pub fn fields_for_category_with_settings(
                 field_type: FieldType::Bool,
             },
         ],
-        SettingsCategory::Skills => skill_fields(),
+        SettingsCategory::Skills => bundled_skill_fields(),
         SettingsCategory::Voice => {
             let voice = settings.map(|s| &s.voice);
             voice_fields(voice)
@@ -239,16 +239,14 @@ pub fn fields_for_category_with_settings(
     }
 }
 
-/// Build the embedded skill fields from the builtin registry.
-pub fn skill_fields() -> Vec<SettingField> {
-    BuiltinSkill::all()
-        .iter()
-        .map(|skill| SettingField {
-            label: skill.name().to_string(),
-            value: "true".to_string(),
-            field_type: FieldType::Bool,
-        })
-        .collect()
+/// Build a read-only display of bundled skill count.
+pub fn bundled_skill_fields() -> Vec<SettingField> {
+    let count = CLAUDE_SKILLS.dirs().count();
+    vec![SettingField {
+        label: "Bundled skills".to_string(),
+        value: count.to_string(),
+        field_type: FieldType::Text,
+    }]
 }
 
 /// Build the Voice settings fields from the persisted voice config.
@@ -988,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_category_renders_registered_skill_names() {
+    fn skills_category_renders_bundled_count() {
         let mut state = SettingsState::default();
         state.category = SettingsCategory::Skills;
         state.load_category_fields();
@@ -1004,24 +1002,19 @@ mod tests {
 
         let buf = terminal.backend().buffer().clone();
         let text = buffer_text(&buf);
-        assert!(text.contains("gwt-pr"));
-        assert!(text.contains("gwt-pr-check"));
+        assert!(text.contains("Bundled skills"));
         assert!(text.contains("Skills"));
     }
 
     #[test]
-    fn skills_toggle_bool_updates_enabled_state() {
+    fn skills_bundled_count_is_positive() {
         let mut state = SettingsState::default();
         state.category = SettingsCategory::Skills;
         state.load_category_fields();
-        assert_eq!(state.fields[0].label, "gwt-pr");
-        assert_eq!(state.fields[0].value, "true");
-
-        update(&mut state, SettingsMessage::ToggleBool);
-        assert_eq!(state.fields[0].value, "false");
-
-        update(&mut state, SettingsMessage::ToggleBool);
-        assert_eq!(state.fields[0].value, "true");
+        assert_eq!(state.fields.len(), 1);
+        assert_eq!(state.fields[0].label, "Bundled skills");
+        let count: usize = state.fields[0].value.parse().unwrap_or(0);
+        assert!(count > 0, "should have bundled skills");
     }
 
     #[test]

@@ -219,12 +219,6 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Settings(msg) => {
             screens::settings::update(&mut model.settings, msg);
-            if model.settings.category == screens::settings::SettingsCategory::Skills {
-                for field in &model.settings.fields {
-                    let enabled = field.value == "true";
-                    let _ = model.embedded_skills.set_enabled(&field.label, enabled);
-                }
-            }
         }
         Message::Logs(msg) => {
             screens::logs::update(&mut model.logs, msg);
@@ -3283,14 +3277,12 @@ fn logs_hint_text(model: &Model, compact: bool) -> String {
         if compact {
             "↑↓ mv  ↵ close  f next  d dbg  r rfsh  C-←→ flt  Esc back".to_string()
         } else {
-            "↑↓:move  Enter:close  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:back"
-                .to_string()
+            "↑↓:move  Enter:close  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:back".to_string()
         }
     } else if compact {
         "↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc term".to_string()
     } else {
-        "↑↓:select  Enter:detail  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:term"
-            .to_string()
+        "↑↓:select  Enter:detail  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:term".to_string()
     }
 }
 
@@ -7563,37 +7555,13 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_toggle_bool_syncs_embedded_skill_registry() {
+    fn update_settings_skills_shows_bundled_count() {
         let mut model = test_model();
         model.settings.category = screens::settings::SettingsCategory::Skills;
         model.settings.load_category_fields();
-        model.settings.selected = 0;
-
-        let skill_name = model.settings.fields[0].label.clone();
-        assert!(
-            model
-                .embedded_skills()
-                .list()
-                .iter()
-                .find(|skill| skill.name == skill_name)
-                .expect("skill exists")
-                .enabled
-        );
-
-        update(
-            &mut model,
-            Message::Settings(screens::settings::SettingsMessage::ToggleBool),
-        );
-
-        assert_eq!(model.settings.fields[0].value, "false");
-        assert!(
-            !model
-                .embedded_skills()
-                .list()
-                .iter()
-                .find(|skill| skill.name == skill_name)
-                .expect("skill exists")
-                .enabled
-        );
+        assert_eq!(model.settings.fields.len(), 1);
+        assert_eq!(model.settings.fields[0].label, "Bundled skills");
+        let count: usize = model.settings.fields[0].value.parse().unwrap_or(0);
+        assert!(count > 0, "should have bundled skills");
     }
 }

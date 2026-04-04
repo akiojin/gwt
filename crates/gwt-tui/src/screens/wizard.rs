@@ -701,7 +701,9 @@ impl WizardState {
 
     /// Suggested branch name derived from the current SPEC context, if any.
     pub fn spec_context_branch_seed(&self) -> Option<String> {
-        self.spec_context.as_ref().and_then(SpecContext::branch_seed)
+        self.spec_context
+            .as_ref()
+            .and_then(SpecContext::branch_seed)
     }
 }
 
@@ -1649,11 +1651,13 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     let title_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title_top(Line::from(state.step.title()).style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .title_top(
+            Line::from(state.step.title()).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
         .title_top(Line::from(" [ESC] ").right_aligned());
     frame.render_widget(title_block, chunks[1]);
 
