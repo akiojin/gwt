@@ -602,30 +602,36 @@ fn e2e_ctrl_g_q_quits() {
 }
 
 #[test]
-fn e2e_management_tab_switch_via_ctrl_g_s() {
+fn e2e_management_tab_switch_via_ctrl_g_s_preserves_terminal_focus() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
+    model.active_layer = ActiveLayer::Main;
+    model.active_focus = FocusPane::Terminal;
 
     send_key(&mut model, &mut kb, ctrl('g'));
     send_key(&mut model, &mut kb, press(KeyCode::Char('s')));
 
     assert_eq!(model.management_tab, ManagementTab::Settings);
     assert_eq!(model.active_layer, ActiveLayer::Management);
+    assert_eq!(model.active_focus, FocusPane::Terminal);
 }
 
 #[test]
-fn e2e_management_tab_switch_via_ctrl_g_i() {
+fn e2e_management_tab_switch_via_ctrl_g_i_preserves_terminal_focus() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
+    model.active_layer = ActiveLayer::Main;
+    model.active_focus = FocusPane::Terminal;
 
     send_key(&mut model, &mut kb, ctrl('g'));
     send_key(&mut model, &mut kb, press(KeyCode::Char('i')));
 
     assert_eq!(model.management_tab, ManagementTab::Issues);
+    assert_eq!(model.active_focus, FocusPane::Terminal);
 }
 
 #[test]
-fn e2e_ctrl_g_b_returns_to_branches_with_list_focus() {
+fn e2e_ctrl_g_b_opens_branches_without_stealing_terminal_focus() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     model.management_tab = ManagementTab::Issues;
@@ -635,7 +641,7 @@ fn e2e_ctrl_g_b_returns_to_branches_with_list_focus() {
     send_key(&mut model, &mut kb, press(KeyCode::Char('b')));
 
     assert_eq!(model.management_tab, ManagementTab::Branches);
-    assert_eq!(model.active_focus, FocusPane::TabContent);
+    assert_eq!(model.active_focus, FocusPane::Terminal);
 }
 
 #[test]

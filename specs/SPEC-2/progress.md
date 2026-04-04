@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `151/151` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T08:31:50Z`
+- Task progress: `156/156` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T08:54:00Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -29,6 +29,7 @@
 - Branch Detail now keeps the old-TUI local mnemonics alive after focus leaves the list: `m=view`, `v=Git View`, `f=search`, and `?` / `h=help` all work directly from the detail pane.
 - The management header now stays compact inside the 40% pane by showing the repository basename plus active tab/focus context instead of the full repository path.
 - Ctrl+G,g now treats the management panel as a supplemental surface again: showing it keeps terminal focus, and hiding it always normalizes focus back to Terminal so Main layer hints never leak stale management focus.
+- Global management-tab shortcuts now follow the same supplemental contract: opening Branches/Issues/Settings/etc. from Terminal surfaces the requested tab without stealing focus, while management-local tab switches still land on the list pane.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

@@ -262,3 +262,11 @@ screens to use.
 - [x] T171 Update `app.rs` layer-toggle handling so the management panel behaves like a supplemental surface instead of stealing/sticking management focus.
 - [x] T172 Refresh `SPEC-2` artifacts to describe the focus-preserving layer-toggle contract.
 - [x] T173 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 22: Focus-Preserving Global Tab Switches
+
+- [x] T174 [P] Write RED test: switching to a management tab from Terminal keeps `FocusPane::Terminal` while opening the requested tab.
+- [x] T175 [P] Write RED test: switching tabs from management `TabContent`/`BranchDetail` still lands on `FocusPane::TabContent`.
+- [x] T176 Update `app.rs` tab-switch handling so global management-tab shortcuts follow the supplemental-panel focus contract.
+- [x] T177 Refresh `SPEC-2` artifacts to describe terminal-preserving tab switches.
+- [x] T178 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

@@ -672,9 +672,15 @@ fn switch_management_tab_with<F, D>(
     F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
     D: FnOnce(&std::path::Path, u32) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport>,
 {
+    let preserve_terminal_focus =
+        model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal;
     model.management_tab = tab;
     model.active_layer = ActiveLayer::Management;
-    model.active_focus = FocusPane::TabContent;
+    model.active_focus = if preserve_terminal_focus {
+        FocusPane::Terminal
+    } else {
+        FocusPane::TabContent
+    };
     if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
         model.settings.load_category_fields();
     }
@@ -4101,8 +4107,10 @@ mod tests {
     }
 
     #[test]
-    fn switch_management_tab_pr_dashboard_loads_prs_on_focus() {
+    fn switch_management_tab_pr_dashboard_loads_prs_without_stealing_terminal_focus() {
         let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
 
         switch_management_tab_with(
             &mut model,
@@ -4123,13 +4131,49 @@ mod tests {
 
         assert_eq!(model.management_tab, ManagementTab::PrDashboard);
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
         assert_eq!(model.pr_dashboard.prs.len(), 1);
         assert_eq!(model.pr_dashboard.prs[0].number, 42);
         assert_eq!(model.pr_dashboard.prs[0].title, "Wire PR dashboard");
         assert_eq!(model.pr_dashboard.prs[0].ci_status, "success");
         assert_eq!(model.pr_dashboard.prs[0].review_status, "approved");
         assert!(model.pr_dashboard.prs[0].mergeable);
+    }
+
+    #[test]
+    fn switch_management_tab_from_tab_content_lands_on_tab_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::Settings,
+            |_repo_path| panic!("PR loader should not run for Settings"),
+            |_repo_path, _number| panic!("detail loader should not run for Settings"),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Settings);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn switch_management_tab_from_branch_detail_lands_on_tab_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::BranchDetail;
+
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::Issues,
+            |_repo_path| panic!("PR loader should not run for Issues"),
+            |_repo_path, _number| panic!("detail loader should not run for Issues"),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Issues);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
     }
 
     #[test]

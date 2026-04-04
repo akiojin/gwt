@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- gwt | test-repo | Set:pane | 0b┌ ▶ Shell ─────────────────────────────────────┐
+ gwt | test-repo | Set:term | 0b┌ ▶ Shell ─────────────────────────────────────┐
 ┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
 │ General │ Worktree │ Agent │ ││                                              │
 │General Enter: edit | Space: t││                                              │
@@ -25,4 +25,4 @@ expression: output
 │                              ││                                              │
 │                              ││                                              │
 └──────────────────────────────┘└──────────────────────────────────────────────┘
- ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:select  ←→:tab  C
+ ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  Ctrl+G,g:management

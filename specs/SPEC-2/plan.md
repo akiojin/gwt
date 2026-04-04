@@ -262,6 +262,21 @@ leave the workspace in a stale management-focus state.
 21.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 22: Focus-Preserving Global Tab Switches (5 tasks)
+Align the global management-tab shortcuts with the new supplemental-panel contract so opening a
+requested management tab from Terminal does not yank focus out of the main workstream.
+
+22.1: Focus contract (2 tasks)
+- Switching to a management tab from Terminal shows the requested tab while keeping terminal focus.
+- Switching tabs from within management list/detail focus still lands on `TabContent`.
+
+22.2: Focused routing coverage (2 tasks)
+- Add focused coverage for terminal-origin tab switching that preserves focus and still loads tab data.
+- Add focused coverage for management-origin tab switching that normalizes focus to `TabContent`.
+
+22.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
