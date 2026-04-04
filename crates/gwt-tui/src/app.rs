@@ -2981,13 +2981,32 @@ fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
 }
 
 /// Build the management tab title line for embedding in a pane border.
-fn management_tab_title(model: &Model) -> Line<'static> {
+fn management_tab_title(model: &Model, width: u16) -> Line<'static> {
+    if should_compact_management_tab_title(width) {
+        return Line::from(vec![Span::styled(
+            format!(" {} ", model.management_tab.label()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]);
+    }
+
     let labels: Vec<&str> = ManagementTab::ALL.iter().map(|t| t.label()).collect();
     let active_idx = ManagementTab::ALL
         .iter()
         .position(|t| *t == model.management_tab)
         .unwrap_or(0);
     screens::build_tab_title(&labels, active_idx)
+}
+
+fn should_compact_management_tab_title(width: u16) -> bool {
+    let available_title_width = width.saturating_sub(2) as usize;
+    let full_strip_width: usize = ManagementTab::ALL
+        .iter()
+        .map(|tab| tab.label().chars().count() + 2)
+        .sum::<usize>()
+        + ManagementTab::ALL.len().saturating_sub(1);
+    full_strip_width > available_title_width
 }
 
 /// Render the management panes (left side — 2 stacked for Branches, 1 for others).
@@ -3000,7 +3019,7 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
 
         // Top pane: management tab names in title, branch list content
         let list_focused = model.active_focus == FocusPane::TabContent;
-        let list_block = pane_block(management_tab_title(model), list_focused);
+        let list_block = pane_block(management_tab_title(model, chunks[0].width), list_focused);
         let list_inner = list_block.inner(chunks[0]);
         frame.render_widget(list_block, chunks[0]);
         screens::branches::render_list(&model.branches, frame, list_inner);
@@ -3021,7 +3040,7 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
     } else {
         // Single pane for all other tabs
         let focused = model.active_focus == FocusPane::TabContent;
-        let block = pane_block(management_tab_title(model), focused);
+        let block = pane_block(management_tab_title(model, area.width), focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         render_management_tab_content(model, frame, inner);
@@ -3667,13 +3686,79 @@ mod tests {
             "non-Branches tabs should also omit the standalone management banner"
         );
         assert!(
-            first_line.contains("Branches"),
-            "non-Branches top row should still be pane-title chrome"
+            first_line.contains("Settings"),
+            "non-Branches top row should keep the active pane title chrome visible"
         );
         assert!(
             second_line.contains("General"),
             "non-Branches content should start immediately below the pane title chrome"
         );
+    }
+
+    #[test]
+    fn render_model_text_standard_width_branches_title_collapses_to_active_tab() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 80, 24);
+        let first_line = rendered.lines().next().unwrap_or_default();
+
+        assert!(first_line.contains("Branches"));
+        assert!(
+            !first_line.contains("Specs"),
+            "standard-width management title should collapse to the active tab instead of a truncated tab strip"
+        );
+    }
+
+    #[test]
+    fn render_model_text_standard_width_non_branches_title_collapses_to_active_tab() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 80, 24);
+        let first_line = rendered.lines().next().unwrap_or_default();
+
+        assert!(first_line.contains("Issues"));
+        assert!(
+            !first_line.contains("Branches"),
+            "standard-width non-Branches title should also collapse to the active tab"
+        );
+    }
+
+    #[test]
+    fn render_model_text_medium_width_management_title_still_collapses_to_active_tab() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 120, 24);
+        let first_line = rendered.lines().next().unwrap_or_default();
+
+        assert!(first_line.contains("Issues"));
+        assert!(
+            !first_line.contains("Branches"),
+            "when the full tab strip does not fit, medium-width panes should still collapse to the active tab"
+        );
+    }
+
+    #[test]
+    fn render_model_text_extra_wide_management_title_keeps_tab_strip() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+        let first_line = rendered.lines().next().unwrap_or_default();
+
+        assert!(first_line.contains("Branches"));
+        assert!(first_line.contains("Specs"));
+        assert!(first_line.contains("Issues"));
     }
 
     #[test]

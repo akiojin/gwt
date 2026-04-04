@@ -362,3 +362,11 @@ banner in favor of pane-title chrome.
 - [x] T232 [P] Write RED test: standard-width generic management footer keeps its compact hints visible.
 - [x] T233 Update `app.rs` and `status_bar.rs` so narrow management footers use compact context and hint notation.
 - [x] T234 Refresh `SPEC-2` artifacts and verify focused tests, snapshot refresh, and workspace checks.
+
+## Phase 34: Compact Narrow Management Titles
+
+- [x] T235 [P] Write RED test: narrow Branches pane titles collapse to the active tab label instead of the truncated full strip.
+- [x] T236 [P] Write RED test: narrow non-Branches management pane titles collapse to the active tab label.
+- [x] T237 [P] Write RED test: medium-width non-Branches panes still collapse while extra-wide panes keep the full tab strip.
+- [x] T238 Update `app.rs` management title rendering to switch to active-tab-only chrome whenever the full tab strip would truncate.
+- [x] T239 Refresh `SPEC-2` artifacts and verify focused tests, snapshot refresh, and workspace checks.

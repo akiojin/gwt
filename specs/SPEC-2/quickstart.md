@@ -32,7 +32,8 @@
 29. Compare a wide terminal (`120x40`) and a standard terminal (`100x24`) and confirm the management pane uses `40/60` on the wider layout but falls back to `50/50` on the standard layout so the left-side chrome stays readable.
 30. In an `80x24` terminal with Terminal focus active and no notification occupying the footer, confirm the footer/status bar keeps the compact grouped hint fully visible: `Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2`.
 31. In an `80x24` terminal with no notification occupying the footer, move through Branches list, Branch Detail, and a generic management tab such as `Issues`, then confirm the footer/status bar keeps their compact pane-local hints visible instead of truncating them at the right edge.
-32. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+32. In an `80x24` terminal with the management pane visible, confirm the top-left pane title shows only the active management tab label instead of a truncated multi-tab strip; then widen to an extra-wide terminal such as `220x40` and confirm the full tab strip returns.
+33. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -59,6 +60,7 @@
 - The management/session width balance is now responsive instead of hard-coded: wide terminals keep the 40/60 emphasis on the session pane, while standard widths fall back to 50/50 to preserve management readability.
 - Terminal-focused footer hints now use a compact grouped form so the main workspace mnemonics, `Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
 - Management and Branch Detail footers now use compact wording at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of dropping the trailing affordances.
+- Management pane titles now compact whenever the full tab strip would truncate, showing only the active tab label until the pane is wide enough to restore the full strip.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

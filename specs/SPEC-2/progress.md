@@ -3,7 +3,7 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `213/213` checked in `tasks.md`
+- Task progress: `218/218` checked in `tasks.md`
 - Artifact refresh: `2026-04-04T09:44:28Z`
 
 ## Done
@@ -39,6 +39,7 @@
 - The redundant standalone management banner is gone; pane titles now carry the management context so the left-side list/detail surfaces reclaim one full row of content.
 - Terminal-focused footer hints now use compact grouped notation so `Ctrl+G:b/i/s g c []/1-9 z ?`, `Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
 - Management and Branch Detail footers now compact both context and hint text at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of truncating at the right edge.
+- Narrow management pane titles now collapse to the active tab label whenever the full tab strip would truncate, so standard-width terminals keep the current management surface legible instead of showing a cut-off strip.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

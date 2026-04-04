@@ -340,6 +340,21 @@ context.
 33.3: Verification (1 task)
 - Re-run focused tests, snapshot refresh, broad workspace verification, and SPEC-2 artifact sync.
 
+### Phase 34: Compact Narrow Management Titles (5 tasks)
+When the management pane is too narrow to fit the full tab strip in the pane title, collapse the
+title to the active management tab only so the current surface remains readable.
+
+34.1: Narrow-title contract (2 tasks)
+- Branches pane titles show only the active tab label whenever the full tab strip would truncate in the available title width.
+- Non-Branches management pane titles also show only the active tab label whenever the full tab strip would truncate, while wider panes keep the full strip.
+
+34.2: Focused render coverage (2 tasks)
+- Add RED coverage that narrow Branches pane titles collapse to the active tab only.
+- Add RED coverage that narrow and medium non-Branches management pane titles collapse to the active tab only while extra-wide panes keep the strip.
+
+34.3: Verification (1 task)
+- Re-run focused tests, snapshot refresh, broad workspace verification, and SPEC-2 artifact sync.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

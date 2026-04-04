@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Specs │ Issues │ PRs │ Pro┐┌ ▶ Shell ─────────────────────────────┐
+┌ Settings ────────────────────────────┐┌ ▶ Shell ─────────────────────────────┐
 │ General │ Worktree │ Agent │ Custom A││Session: Shell (80x24)                │
 │General Enter: edit | Space: toggle bo││                                      │
 │[T] Theme: dark                       ││                                      │
