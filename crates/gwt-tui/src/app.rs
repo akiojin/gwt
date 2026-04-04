@@ -3120,7 +3120,7 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
             "↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  Esc:term  ?:help".to_string()
         }
         FocusPane::BranchDetail => branch_detail_hint_text(model),
-        FocusPane::Terminal => "Ctrl+G,g:management  Tab:focus  Ctrl+C×2:quit".to_string(),
+        FocusPane::Terminal => terminal_hint_text(),
     };
 
     crate::widgets::status_bar::render_with_notification_and_hints(
@@ -3130,6 +3130,10 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
         frame,
         area,
     );
+}
+
+fn terminal_hint_text() -> String {
+    "Ctrl+G,b/i/s:views  Ctrl+G,g:panel  Ctrl+G,c:new  Ctrl+G,[]/1-9:tabs  Ctrl+G,z:layout  Ctrl+G,?:help  Ctrl+C×2:quit".to_string()
 }
 
 fn branch_detail_hint_text(model: &Model) -> String {
@@ -3631,6 +3635,31 @@ mod tests {
             second_line.contains("General"),
             "non-Branches content should start immediately below the pane title chrome"
         );
+    }
+
+    #[test]
+    fn render_model_text_terminal_hints_include_global_management_shortcuts() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Ctrl+G,b/i/s"));
+        assert!(rendered.contains("Ctrl+G,g:panel"));
+    }
+
+    #[test]
+    fn render_model_text_terminal_hints_include_session_shortcuts() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Ctrl+G,c:new"));
+        assert!(rendered.contains("Ctrl+G,[]/1-9:tabs"));
+        assert!(rendered.contains("Ctrl+G,z:layout"));
     }
 
     #[test]

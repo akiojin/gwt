@@ -294,6 +294,21 @@ row and relying on the existing pane titles for context.
 30.3: Verification (1 task)
 - Re-run focused and broad workspace verification, refresh snapshots if needed, and sync SPEC-2 artifacts.
 
+### Phase 31: Restore Terminal-Focused Footer Mnemonics (5 tasks)
+Bring the main workspace footer closer to old-TUI daily-driver behavior by advertising the global
+workspace shortcuts while Terminal focus remains active.
+
+31.1: Terminal-hint contract (2 tasks)
+- Terminal-focused footer hints advertise the global management shortcuts (`Ctrl+G,b/i/s`, `Ctrl+G,g`).
+- Terminal-focused footer hints advertise the session shortcuts (`Ctrl+G,c`, `Ctrl+G,[]/1-9`, `Ctrl+G,z`, `Ctrl+G,?`).
+
+31.2: Focused render coverage (2 tasks)
+- Add focused coverage for terminal hints exposing the global management shortcuts.
+- Add focused coverage for terminal hints exposing the session/layout/help shortcuts.
+
+31.3: Verification (1 task)
+- Re-run focused and broad workspace verification and sync SPEC-2 artifacts.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

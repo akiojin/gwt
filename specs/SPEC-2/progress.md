@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `198/198` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T09:24:24Z`
+- Task progress: `203/203` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T09:28:32Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -37,6 +37,7 @@
 - Management focus cycling now matches the pane topology again: `Branches` still cycles through `BranchDetail`, while every other management tab stays on the two real surfaces (`Terminal` and `TabContent`).
 - The management/session split now responds to terminal width again: wide terminals keep the 40/60 old-TUI balance, while standard widths fall back to 50/50 so management chrome remains readable.
 - The redundant standalone management banner is gone; pane titles now carry the management context so the left-side list/detail surfaces reclaim one full row of content.
+- Terminal-focused footer hints now advertise the global workspace mnemonics again instead of collapsing to management-only guidance while the terminal remains active.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

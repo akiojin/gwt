@@ -30,7 +30,8 @@
 27. While focused on Branches list and on another management list such as Git View, confirm the footer/status bar now advertises `Esc:term` so the restored return-to-terminal behavior is visible in the UI.
 28. On a non-Branches management tab such as `Issues` or `Logs`, use `Tab` / `BackTab` and confirm focus only cycles between the list pane and the terminal; it must never land on a nonexistent `BranchDetail` surface.
 29. Compare a wide terminal (`120x40`) and a standard terminal (`100x24`) and confirm the management pane uses `40/60` on the wider layout but falls back to `50/50` on the standard layout so the left-side chrome stays readable.
-30. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+30. With Terminal focus active, confirm the footer/status bar advertises the global workspace mnemonics again: `Ctrl+G,b/i/s`, `Ctrl+G,g`, `Ctrl+G,c`, `Ctrl+G,[]/1-9`, `Ctrl+G,z`, and `Ctrl+G,?`.
+31. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -55,6 +56,7 @@
 - The status-bar hints now tell the truth about that contract, advertising `Esc:term` on Branches list and generic management lists instead of implying that only `Tab` can exit those panes.
 - Management focus cycling now matches the visible pane topology: Branches keeps the old three-surface loop, while other management tabs stay on `Terminal` and `TabContent` only.
 - The management/session width balance is now responsive instead of hard-coded: wide terminals keep the 40/60 emphasis on the session pane, while standard widths fall back to 50/50 to preserve management readability.
+- Terminal-focused footer hints now expose the same global workspace mnemonics the user actually uses from the main workstream instead of showing a management-only subset.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

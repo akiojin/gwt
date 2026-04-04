@@ -338,3 +338,11 @@ banner in favor of pane-title chrome.
 - [x] T217 Update `app.rs` management rendering to remove the banner split and let panes consume the full management area.
 - [x] T218 Refresh `SPEC-2` artifacts to describe pane-title-only management chrome.
 - [x] T219 Verify focused tests, workspace checks, snapshot refresh, and SPEC-2 artifact sync.
+
+## Phase 31: Restore Terminal-Focused Footer Mnemonics
+
+- [x] T220 [P] Write RED test: terminal-focused footer hints include the global management shortcuts (`Ctrl+G,b/i/s`, `Ctrl+G,g`).
+- [x] T221 [P] Write RED test: terminal-focused footer hints include the session/layout/help shortcuts (`Ctrl+G,c`, `Ctrl+G,[]/1-9`, `Ctrl+G,z`, `Ctrl+G,?`).
+- [x] T222 Update `app.rs` terminal hint text so Terminal focus advertises the restored global workspace mnemonics.
+- [x] T223 Refresh `SPEC-2` artifacts to describe terminal-focused footer-hint parity.
+- [x] T224 Verify focused tests, workspace checks, and SPEC-2 artifact sync.
