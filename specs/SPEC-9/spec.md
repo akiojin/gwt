@@ -89,7 +89,7 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 
 - **FR-009**: All skill, command, and hook files under `.claude/skills/`, `.claude/commands/`, `.claude/hooks/scripts/` are embedded into the gwt binary at build time using `include_dir` crate. Embedded skill categories:
   - PR management: gwt-pr, gwt-pr-check, gwt-pr-fix
-  - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
+  - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-deepen, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
   - Issue management: gwt-issue-register, gwt-issue-resolve, gwt-issue-search
   - Agent pane management: gwt-agent-discover, gwt-agent-read, gwt-agent-send, gwt-agent-lifecycle
   - Utilities: gwt-project-search, gwt-spec-to-issue-migration
