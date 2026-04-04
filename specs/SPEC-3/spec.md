@@ -247,9 +247,9 @@ As a developer, I want to convert an existing session to a different agent type 
   `Choose different settings` without an ellipsis.
 - **FR-033**: When `QuickStart` has exactly one persisted entry, the popup
   title promotes that entry's compact agent/model summary (`Quick Start —
-  Agent (Model)`) and the body omits the duplicated grouped header so the
-  first action row starts directly below the compact branch-name context
-  line.
+  Agent (Model)`, or just `Agent` when no model was persisted) and the body
+  omits the duplicated grouped header so the first action row starts directly
+  below the compact branch-name context line.
 - **FR-034**: When `QuickStart` has multiple persisted entries, each action
   row inlines the agent label while the compact model-only summary remains
   reserved for the single-entry title variant.

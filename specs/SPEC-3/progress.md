@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `143/143` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:36:35Z`
+- Task progress: `146/146` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:43:00Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -103,6 +103,9 @@
 - Multi-entry `QuickStart` now inlines the agent label into each action row,
   so grouped history no longer depends on standalone header rows while
   keeping the compact `Resume` / `Start new` copy and selected resume hint.
+- Single-entry `QuickStart` title promotion now falls back to the bare agent
+  label when no model was persisted, instead of synthesizing a `default`
+  placeholder into the popup title.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

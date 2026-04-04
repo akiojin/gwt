@@ -24,9 +24,8 @@
 9. Choose `Resume` for an entry with a persisted resume session ID and
    confirm the launch args restore resume mode. If no resume session ID
    exists, confirm the path falls back to `Continue`.
-10. Choose `Start new with previous settings` and confirm the wizard keeps the
-   previous model/reasoning/version/permissions while resetting session
-   continuity.
+10. Choose `Start new` and confirm the wizard keeps the previous
+   model/reasoning/version/permissions while resetting session continuity.
 11. Launch the session from `Skip Permissions` and confirm a new agent tab
    appears with persisted session metadata while a default model label does
    not become a literal CLI override.
@@ -91,6 +90,9 @@
    single-entry Quick Start keeps the same compact action copy.
 35. Verify the wizard popup no longer shows a separate `Step N/M` row above
    the chrome and still keeps the step title in the border.
+36. Verify a single-entry Quick Start with no persisted model now promotes
+   only the agent label into the popup title (`Quick Start — Codex`) instead
+   of inventing a `default` model placeholder.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -167,5 +169,8 @@
 - Multi-entry Quick Start now inlines agent labels into each action row
   instead of rendering standalone grouped headers, keeping grouped history
   dense while preserving compact `Resume` / `Start new` copy.
+- Single-entry Quick Start now falls back to the bare agent label when no
+  model was persisted, instead of showing a synthetic `default` model in the
+  popup title.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

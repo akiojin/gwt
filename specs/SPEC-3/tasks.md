@@ -259,3 +259,9 @@
 - [x] T135 [P] Write RED test: multi-entry `QuickStart` renders agent-labeled action rows without standalone header rows.
 - [x] T136 Update `wizard.rs` so multi-entry render and `current_options()` inline the agent label into each action row while preserving selection semantics.
 - [x] T137 Verify focused inline-agent-row tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 37: Single-Entry QuickStart Title Placeholder Removal
+
+- [x] T138 [P] Write RED test: single-entry `QuickStart` title omits the synthesized `default` model placeholder when no model was persisted.
+- [x] T139 Update `wizard.rs` so single-entry title promotion falls back to the agent label alone when `model` is absent.
+- [x] T140 Verify focused title-summary tests, broad workspace checks, and refresh SPEC-3 artifacts.

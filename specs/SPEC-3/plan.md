@@ -368,6 +368,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving render and `current_options()`
    both use agent-labeled multi-entry rows.
 
+### Phase 37: Single-Entry QuickStart Title Placeholder Removal
+
+1. Keep single-entry title promotion intact, but stop synthesizing the
+   placeholder model copy `default` when the persisted session has no model.
+2. Preserve the compact `Resume` / `Start new` body rows and multi-entry
+   grouped behavior while only tightening the title summary text.
+3. Add focused RED/GREEN coverage proving the single-entry title falls back
+   to the agent label alone when no model was persisted.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

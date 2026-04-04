@@ -1432,11 +1432,10 @@ fn agent_row_color(agent_id: &str) -> Color {
 }
 
 fn quick_start_title_summary(entry: &QuickStartEntry) -> String {
-    format!(
-        "{} ({})",
-        entry.tool_label,
-        entry.model.as_deref().unwrap_or("default")
-    )
+    match entry.model.as_deref() {
+        Some(model) => format!("{} ({})", entry.tool_label, model),
+        None => entry.tool_label.clone(),
+    }
 }
 
 fn quick_start_action_label(
@@ -2596,6 +2595,28 @@ mod tests {
             1,
             "single-entry quick start should show the agent summary only in the popup title"
         );
+    }
+
+    #[test]
+    fn render_quick_start_single_entry_omits_default_placeholder_from_title() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = vec![QuickStartEntry {
+            agent_id: "codex".to_string(),
+            tool_label: "Codex".to_string(),
+            model: None,
+            reasoning: Some("high".to_string()),
+            version: Some("latest".to_string()),
+            resume_session_id: Some("sess-12345678".to_string()),
+            skip_permissions: true,
+        }];
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Quick Start — Codex"));
+        assert!(!text.contains("Quick Start — Codex (default)"));
     }
 
     #[test]

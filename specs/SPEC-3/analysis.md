@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `143/143` completed items.
+- Task traceability snapshot: `tasks.md` now records `146/146` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -87,6 +87,9 @@ Status: CLEAR
   action row, which removes the final standalone grouped-header chrome while
   preserving compact `Resume` / `Start new` copy and the selected-row
   resume-session hint.
+- Notes: Single-entry `QuickStart` title promotion now falls back to the bare
+  agent label when no model was persisted, so the popup no longer invents a
+  `default` model placeholder.
 
 ## Next
 - `gwt-spec-implement`
