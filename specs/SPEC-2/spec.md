@@ -92,6 +92,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 
 - **FR-001**: Tab mode shows single active session with session tabs in the Block title (active session yellow/bold, inactive gray, separated by │).
 - **FR-001a**: When the session pane is too narrow to fit the full session tab strip in the pane title, the title collapses to the active session only so the current workstream stays legible; extra-wide panes restore the full strip.
+- **FR-001b**: That compact session title still preserves multi-session context by showing the active session position as `n/N`, so standard-width workspaces do not lose track of how many sessions remain open when the strip collapses.
 - **FR-002**: Split mode shows an equal grid of all sessions (e.g., 2x2 for 4 sessions, 2x3 for 5-6).
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.

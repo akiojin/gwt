@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `243/243` completed items after closing Phase 39 for the branch-detail inner-chrome follow-up.
+- Task traceability snapshot: `tasks.md` currently records `248/248` completed items after closing Phase 40 for the compact session-title count follow-up.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -48,3 +48,4 @@ Status: CLEAR
 - Notes: Phase 37 closes the remaining Branch Detail `Esc` interference bug by consuming the local back action before warn-dismiss fallback can run, while leaving the second-escape dismissal path on the list surface intact.
 - Notes: Phase 38 removes the last generic `Enter:action` overclaims on non-Branches tabs, so Git View, Versions, Issues, and PR Dashboard now advertise only the real expand/detail/close/search/refresh affordances that their routing actually supports.
 - Notes: Phase 39 removes the last redundant nested chrome inside Branch Detail: once the pane border already names the active section and selected branch, the inner Overview / SPECs / Git / Sessions renderers now stay title-free and let the body content start immediately.
+- Notes: Phase 40 restores the last missing piece of compact session-title context by keeping the active `n/N` position visible alongside the active session label whenever the full strip collapses, while extra-wide panes continue to show the full strip.

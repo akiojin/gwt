@@ -3101,7 +3101,13 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
 fn build_session_title(model: &Model, width: u16) -> Line<'static> {
     if should_compact_session_title(model, width) {
         if let Some(active) = model.active_session_tab() {
-            let label = format!(" {} {} ", active.tab_type.icon(), active.name);
+            let position = model.active_session.saturating_add(1);
+            let total = model.sessions.len();
+            let label = format!(
+                " {position}/{total} {} {} ",
+                active.tab_type.icon(),
+                active.name
+            );
             return Line::from(vec![Span::styled(
                 label,
                 Style::default()
@@ -3277,12 +3283,14 @@ fn logs_hint_text(model: &Model, compact: bool) -> String {
         if compact {
             "↑↓ mv  ↵ close  f next  d dbg  r rfsh  C-←→ flt  Esc back".to_string()
         } else {
-            "↑↓:move  Enter:close  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:back".to_string()
+            "↑↓:move  Enter:close  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:back"
+                .to_string()
         }
     } else if compact {
         "↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc term".to_string()
     } else {
-        "↑↓:select  Enter:detail  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:term".to_string()
+        "↑↓:select  Enter:detail  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:term"
+            .to_string()
     }
 }
 
@@ -4053,6 +4061,10 @@ mod tests {
 
         assert!(first_line.contains("session-three"));
         assert!(
+            first_line.contains("3/4"),
+            "compact session title should keep the active index/count visible so multi-session context survives the collapse"
+        );
+        assert!(
             !first_line.contains("session-one"),
             "standard-width session title should collapse to the active session instead of truncating the strip"
         );
@@ -4075,6 +4087,10 @@ mod tests {
         let first_line = rendered.lines().next().unwrap_or_default();
 
         assert!(first_line.contains("session-two"));
+        assert!(
+            first_line.contains("2/4"),
+            "medium-width compact session title should also keep the active index/count visible"
+        );
         assert!(
             !first_line.contains("session-one"),
             "medium-width session pane should still collapse when the full strip would truncate"
@@ -4101,6 +4117,10 @@ mod tests {
         assert!(first_line.contains("session-two"));
         assert!(first_line.contains("session-three"));
         assert!(first_line.contains("session-four"));
+        assert!(
+            !first_line.contains("2/4"),
+            "extra-wide panes should keep the full strip rather than the compact index/count chrome"
+        );
     }
 
     #[test]

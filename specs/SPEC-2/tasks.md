@@ -410,3 +410,11 @@ banner in favor of pane-title chrome.
 - [x] T262 Update `branches.rs` detail renderers so Overview, SPECs, Git, and Sessions stay borderless/title-free inside the already-labelled pane.
 - [x] T263 Refresh branch-detail snapshots to the chrome-light contract.
 - [x] T264 Refresh `SPEC-2` artifacts and verify focused tests, snapshots, and workspace checks.
+
+## Phase 40: Preserve Session Count in Compact Session Titles
+
+- [x] T265 [P] Write RED test: standard-width compact session titles keep the active `n/N` position visible alongside the active session label.
+- [x] T266 [P] Write RED test: extra-wide session titles keep the full strip and omit the compact `n/N` badge.
+- [x] T267 Update `app.rs` compact session title rendering so collapsed titles preserve active index/count context.
+- [x] T268 Refresh `SPEC-2` artifacts to describe compact session-title count parity.
+- [x] T269 Verify focused tests, workspace checks, and artifact sync.

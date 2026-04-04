@@ -536,6 +536,21 @@ management-list hints to advertise `Esc` as a return-to-terminal action.
 27.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 40: Preserve Session Count in Compact Session Titles (5 tasks)
+Keep the standard-width session pane chrome old-TUI-friendly by retaining the active session's
+position/count even after the full strip collapses to a single active label.
+
+40.1: Compact title context contract (2 tasks)
+- Compact session titles show the active session as `n/N` plus the active session label whenever the full strip would truncate.
+- Extra-wide session panes continue to use the full session strip instead of the compact `n/N` chrome.
+
+40.2: Focused rendering coverage (2 tasks)
+- Add focused coverage for standard-width compact titles keeping the active index/count visible.
+- Add focused coverage that extra-wide titles still use the full strip and omit the compact `n/N` badge.
+
+40.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

@@ -1435,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn render_detail_overview_shows_branch_info() {
+    fn render_detail_overview_omits_redundant_inner_title() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
         state.detail_section = 0; // Overview
@@ -1448,18 +1448,27 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        // Check bottom half contains Overview content
-        let mut found_overview = false;
+        let mut found_branch_info = false;
+        let mut found_inner_title = false;
         for y in 0..buf.area.height {
             let line: String = (0..buf.area.width)
                 .map(|x| buf[(x, y)].symbol().to_string())
                 .collect();
+            if line.contains(" Branch: main") {
+                found_branch_info = true;
+            }
             if line.contains("Overview") {
-                found_overview = true;
-                break;
+                found_inner_title = true;
             }
         }
-        assert!(found_overview, "Detail panel should contain 'Overview'");
+        assert!(
+            found_branch_info,
+            "Detail panel should still contain branch overview body text"
+        );
+        assert!(
+            !found_inner_title,
+            "Detail panel body should not repeat the redundant inner 'Overview' title"
+        );
     }
 
     #[test]
