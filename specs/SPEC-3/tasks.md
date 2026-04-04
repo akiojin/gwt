@@ -150,3 +150,9 @@
 - [x] T080 [P] Write RED test: `IssueSelect` renders prompt and value on separate rows.
 - [x] T081 Update wizard input rendering to use a compact two-row layout while keeping popup chrome as the only box.
 - [x] T082 Verify focused input-layout tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 19: QuickStart Density Restoration
+
+- [x] T083 [P] Write RED test: `QuickStart` places the first grouped history entry directly below the branch context line.
+- [x] T084 Tighten `QuickStart` vertical spacing so the grouped history starts immediately under `Branch: ...` while preserving grouped rows and separators.
+- [x] T085 Verify focused QuickStart density tests, broad workspace checks, and refresh SPEC-3 artifacts.

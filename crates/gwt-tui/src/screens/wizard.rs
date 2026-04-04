@@ -1444,15 +1444,15 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    if area.height <= 2 {
+    if area.height <= 1 {
         return;
     }
 
     let list_area = Rect::new(
         area.x,
-        area.y + 2,
+        area.y + 1,
         area.width,
-        area.height.saturating_sub(2),
+        area.height.saturating_sub(1),
     );
     let mut items = Vec::new();
 
@@ -2555,6 +2555,26 @@ mod tests {
         assert!(text.contains("  Start new with previous settings"));
         assert!(text.contains("Claude Code (sonnet)"));
         assert!(text.contains("Choose different settings..."));
+    }
+
+    #[test]
+    fn render_quick_start_places_first_group_directly_below_branch_context() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let buf = render_buffer(&state, 100, 24);
+        let (_, branch_y) = find_text_position(&buf, "Branch: feature/test").unwrap();
+        let (_, header_y) =
+            find_text_position(&buf, "Codex (gpt-5.3-codex, Reasoning: high)").unwrap();
+
+        assert_eq!(
+            header_y,
+            branch_y + 1,
+            "the first quick-start group should start immediately below the branch context"
+        );
     }
 
     #[test]

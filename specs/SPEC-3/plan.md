@@ -193,6 +193,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving prompt and value render on separate
    rows for both input steps.
 
+### Phase 19: QuickStart Density Restoration
+
+1. Remove the extra spacer row between `Branch: ...` and the first grouped
+   Quick Start history entry so the popup matches old-TUI information density.
+2. Preserve grouped agent headers, `Resume` / `Start new`, separators, and
+   the trailing `Choose different settings...` action while tightening only
+   the vertical spacing above the list.
+3. Add focused RED/GREEN coverage proving the first group begins immediately
+   below the branch context line.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

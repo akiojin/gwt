@@ -228,6 +228,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-026**: `BranchNameInput` and `IssueSelect` render as compact two-row
   input steps with a cyan prompt line above a yellow value line, while still
   reusing the popup chrome as the only boxed surface.
+- **FR-027**: `QuickStart` starts its grouped history immediately below the
+  `Branch: ...` context line instead of reserving an extra spacer row, so the
+  popup matches the old-TUI information density.
 
 ## Non-Functional Requirements
 

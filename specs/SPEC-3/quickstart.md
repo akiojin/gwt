@@ -54,6 +54,9 @@
 22. Verify `BranchNameInput` and `IssueSelect` now render the prompt and the
    yellow input value on separate rows instead of sharing a single inline
    paragraph.
+23. Verify `QuickStart` now starts the first grouped history entry directly
+   below the `Branch: ...` context line instead of leaving an extra blank row
+   before the grouped list.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -94,5 +97,7 @@
 - Branch and issue input steps now match that same compact old-TUI rhythm by
   splitting the prompt and value across two rows instead of compressing both
   into one line.
+- Quick Start now matches that denser popup rhythm as well, with grouped
+  history rows starting immediately below the branch context line.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.
