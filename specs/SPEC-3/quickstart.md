@@ -37,6 +37,8 @@
    right-aligned `[ESC]` hint.
 15. Verify `AgentSelect` from an existing branch shows `Branch: ...` above a
    name-only agent list with the old-TUI cyan selection highlight.
+16. Verify `BranchNameInput` and `IssueSelect` render inline prompt labels
+   inside the popup body and do not add nested titled boxes.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -61,5 +63,7 @@
   acting as a static placeholder.
 - AgentSelect and popup chrome now match the old-TUI visual contract for the
   restored branch-first flow.
+- Branch and issue input steps now follow that same contract with inline
+  prompt labels instead of nested titled boxes.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

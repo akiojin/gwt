@@ -128,6 +128,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage for popup chrome text and AgentSelect
    rendering before changing any other wizard steps.
 
+### Phase 12: Old-TUI Inline Input Prompts
+
+1. Restore old-TUI inline prompt rendering for `BranchNameInput` and
+   `IssueSelect` so the popup chrome remains the only boxed title surface.
+2. Keep the typed value in yellow while rendering the prompt label in the
+   same cyan/BOLD tone used elsewhere in the restored wizard chrome.
+3. Add focused RED/GREEN coverage proving the input steps no longer render
+   nested titled blocks inside the popup body.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

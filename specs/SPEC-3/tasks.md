@@ -100,3 +100,11 @@
 - [x] T051 [P] Write RED test: existing-branch `AgentSelect` renders `Branch: ...` above name-only agent rows.
 - [x] T052 Implement old-TUI popup chrome and specialized `AgentSelect` rendering without changing step transitions or launch semantics.
 - [x] T053 Verify focused wizard render tests, workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 12: Old-TUI Inline Input Prompts
+
+- [x] T054 [P] Write RED test: `BranchNameInput` renders an inline `Branch Name:` prompt instead of a nested titled block.
+- [x] T055 [P] Write RED test: `IssueSelect` renders an inline `Issue ID (optional):` prompt instead of a nested titled block.
+- [x] T056 Update `wizard.rs` input-step rendering so branch and issue input reuse the popup chrome and show inline prompt/value rows.
+- [x] T057 Verify focused wizard input tests and the wizard suite pass GREEN.
+- [x] T058 Refresh SPEC-3 artifacts and verification evidence for the inline-prompt parity slice.

@@ -1691,19 +1691,33 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::QuickStart => render_quick_start_step(state, frame, area),
         WizardStep::AgentSelect => render_agent_select_step(state, frame, area),
         WizardStep::BranchNameInput => {
-            let block = Block::default().borders(Borders::ALL).title("Branch Name");
-            let text = Paragraph::new(format!("{}_", state.branch_name))
-                .block(block)
-                .style(Style::default().fg(Color::Yellow));
+            let text = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Branch Name: ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{}_", state.branch_name),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]));
             frame.render_widget(text, area);
         }
         WizardStep::IssueSelect => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title("Issue ID (optional)");
-            let text = Paragraph::new(format!("{}_", state.issue_id))
-                .block(block)
-                .style(Style::default().fg(Color::Yellow));
+            let text = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Issue ID (optional): ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{}_", state.issue_id),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]));
             frame.render_widget(text, area);
         }
         WizardStep::AIBranchSuggest => {
@@ -2425,6 +2439,38 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_branch_input_uses_old_tui_inline_prompt() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::BranchNameInput;
+        state.branch_name = "feature/test".to_string();
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Branch Name:"));
+        assert!(text.contains("feature/test_"));
+        assert!(
+            text.matches('┌').count() == 1,
+            "branch input should reuse the popup chrome instead of adding a second boxed title inside the content area"
+        );
+    }
+
+    #[test]
+    fn render_issue_input_uses_old_tui_inline_prompt() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::IssueSelect;
+        state.issue_id = "1234".to_string();
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Issue ID (optional):"));
+        assert!(text.contains("1234_"));
+        assert!(
+            text.matches('┌').count() == 1,
+            "issue input should use the same inline prompt style instead of adding another boxed title"
+        );
     }
 
     #[test]

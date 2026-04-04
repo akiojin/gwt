@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `59/59` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T02:36:34Z`
+- Task progress: `64/64` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T10:50:45Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -41,6 +41,9 @@
   right-aligned `[ESC]` hint, and existing-branch `AgentSelect` now shows
   `Branch: ...` above name-only agent rows with the old-TUI cyan selection
   highlight.
+- `BranchNameInput` and `IssueSelect` now match that old-TUI popup contract
+  as well, rendering inline cyan prompt labels with yellow input values
+  instead of nested titled boxes inside the popup body.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

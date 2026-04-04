@@ -206,6 +206,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-019**: `AgentSelect` renders old-TUI-style existing-branch context and
   name-only agent rows, while the popup chrome shows the current step title
   in the border and a right-aligned `[ESC]` hint.
+- **FR-020**: `BranchNameInput` and `IssueSelect` render as old-TUI inline
+  prompts inside the popup body, reusing the popup chrome instead of adding
+  nested titled input boxes.
 
 ## Non-Functional Requirements
 

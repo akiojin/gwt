@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `59/59` completed items.
+- Task traceability snapshot: `tasks.md` now records `64/64` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -26,6 +26,8 @@ Status: CLEAR
 - Notes: Popup chrome now renders the current step title in the border with a
   right-aligned `[ESC]` hint, and `AgentSelect` restores old-TUI
   existing-branch context plus name-only rows.
+- Notes: `BranchNameInput` and `IssueSelect` now render as inline old-TUI
+  prompts so the popup chrome remains the only boxed title surface.
 
 ## Next
 - `gwt-spec-implement`
