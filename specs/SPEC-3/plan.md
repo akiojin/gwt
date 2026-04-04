@@ -75,6 +75,22 @@ persisted agent session before activation.
 4. Add focused tests for branch-first transitions, spec-prefill startup, and
    the updated option labels.
 
+### Phase 5: Old-TUI Wizard Step Machine Restoration
+
+1. Replace the current shortcut-oriented step enum with the old-TUI-aligned
+   step machine: `QuickStart`, `BranchAction`, `AgentSelect`, `ModelSelect`,
+   `ReasoningLevel`, `VersionSelect`, `ExecutionMode`,
+   `ConvertAgentSelect`, `ConvertSessionSelect`, `SkipPermissions`,
+   `BranchTypeSelect`, `IssueSelect`, `AIBranchSuggest`, and
+   `BranchNameInput`.
+2. Rewrite `next_step()` and `prev_step()` to follow the old-TUI transition
+   table while preserving the current backend hooks for version cache, AI
+   branch suggestions, and session conversion.
+3. Remove the separate `Confirm` step so that the final selection step
+   completes directly.
+4. Add focused RED/GREEN coverage for the new step transitions before
+   touching popup rendering polish.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

@@ -11,49 +11,54 @@ use ratatui::{
 /// Which step of the wizard is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WizardStep {
-    #[default]
     QuickStart,
+    #[default]
+    BranchAction,
     AgentSelect,
     ModelSelect,
     ReasoningLevel,
     VersionSelect,
     ExecutionMode,
+    ConvertAgentSelect,
+    ConvertSessionSelect,
     BranchTypeSelect,
     BranchNameInput,
     AIBranchSuggest,
     IssueSelect,
     SkipPermissions,
-    Confirm,
 }
 
 impl WizardStep {
     /// Human-readable title for this step.
     pub fn title(self) -> &'static str {
         match self {
-            Self::QuickStart => "Branch Action",
+            Self::QuickStart => "Quick Start",
+            Self::BranchAction => "Branch Action",
             Self::AgentSelect => "Select Agent",
             Self::ModelSelect => "Select Model",
             Self::ReasoningLevel => "Reasoning Level",
             Self::VersionSelect => "Select Version",
             Self::ExecutionMode => "Execution Mode",
+            Self::ConvertAgentSelect => "Convert From Agent",
+            Self::ConvertSessionSelect => "Select Session",
             Self::BranchTypeSelect => "Branch Type",
             Self::BranchNameInput => "Branch Name",
             Self::AIBranchSuggest => "AI Branch Suggestion",
             Self::IssueSelect => "Link Issue",
             Self::SkipPermissions => "Skip Permissions",
-            Self::Confirm => "Confirm & Launch",
         }
     }
 }
 
 /// Determine the next step based on current step and wizard context.
 ///
-/// Restores the old branch-first flow while keeping the current confirm step:
-/// - Existing branch: QuickStart(Branch Action) → AgentSelect → ...
-/// - New branch: QuickStart(create) or spec prefill → BranchType → Issue → AI → Branch Name → AgentSelect → ...
+/// Restores the old branch-first flow:
+/// - Existing branch: BranchAction → AgentSelect → ...
+/// - New branch/spec prefill: BranchType → Issue → AI → Branch Name → AgentSelect → ...
 fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
-        WizardStep::QuickStart => {
+        WizardStep::QuickStart => Some(WizardStep::BranchAction),
+        WizardStep::BranchAction => {
             if state.selected == 1 {
                 Some(WizardStep::BranchTypeSelect)
             } else {
@@ -86,7 +91,15 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::VersionSelect => Some(WizardStep::ExecutionMode),
-        WizardStep::ExecutionMode => Some(WizardStep::SkipPermissions),
+        WizardStep::ExecutionMode => {
+            if state.mode == "convert" {
+                Some(WizardStep::ConvertAgentSelect)
+            } else {
+                Some(WizardStep::SkipPermissions)
+            }
+        }
+        WizardStep::ConvertAgentSelect => Some(WizardStep::ConvertSessionSelect),
+        WizardStep::ConvertSessionSelect => Some(WizardStep::SkipPermissions),
         WizardStep::BranchTypeSelect => {
             if state.gh_cli_available {
                 Some(WizardStep::IssueSelect)
@@ -105,8 +118,7 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::BranchNameInput)
             }
         }
-        WizardStep::SkipPermissions => Some(WizardStep::Confirm),
-        WizardStep::Confirm => None,
+        WizardStep::SkipPermissions => None,
     }
 }
 
@@ -114,11 +126,12 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
 fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
         WizardStep::QuickStart => None,
+        WizardStep::BranchAction => None,
         WizardStep::AgentSelect => {
             if state.is_new_branch {
                 Some(WizardStep::BranchNameInput)
             } else {
-                Some(WizardStep::QuickStart)
+                Some(WizardStep::BranchAction)
             }
         }
         WizardStep::ModelSelect => Some(WizardStep::AgentSelect),
@@ -143,9 +156,11 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::AgentSelect)
             }
         }
+        WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
+        WizardStep::ConvertSessionSelect => Some(WizardStep::ConvertAgentSelect),
         WizardStep::BranchTypeSelect => {
             if state.base_branch_name.is_some() {
-                Some(WizardStep::QuickStart)
+                Some(WizardStep::BranchAction)
             } else {
                 None
             }
@@ -167,8 +182,13 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::IssueSelect => Some(WizardStep::BranchTypeSelect),
-        WizardStep::SkipPermissions => Some(WizardStep::ExecutionMode),
-        WizardStep::Confirm => Some(WizardStep::SkipPermissions),
+        WizardStep::SkipPermissions => {
+            if state.mode == "convert" {
+                Some(WizardStep::ConvertSessionSelect)
+            } else {
+                Some(WizardStep::ExecutionMode)
+            }
+        }
     }
 }
 
@@ -235,6 +255,7 @@ pub struct WizardState {
     pub step: WizardStep,
     pub detected_agents: Vec<AgentOption>,
     pub selected: usize,
+    pub has_quick_start: bool,
     pub is_new_branch: bool,
     pub base_branch_name: Option<String>,
     pub gh_cli_available: bool,
@@ -249,6 +270,8 @@ pub struct WizardState {
     pub branch_name: String,
     pub issue_id: String,
     pub skip_perms: bool,
+    pub convert_source_agents: Vec<String>,
+    pub convert_sessions: Vec<String>,
     /// AI branch suggestion state.
     pub ai_suggest: AISuggestState,
     /// Whether the wizard has been completed (caller should read config).
@@ -265,6 +288,7 @@ impl Default for WizardState {
             step: WizardStep::default(),
             detected_agents: Vec::new(),
             selected: 0,
+            has_quick_start: false,
             is_new_branch: false,
             base_branch_name: None,
             gh_cli_available: true,
@@ -278,6 +302,8 @@ impl Default for WizardState {
             branch_name: String::new(),
             issue_id: String::new(),
             skip_perms: false,
+            convert_source_agents: Vec::new(),
+            convert_sessions: Vec::new(),
             ai_suggest: AISuggestState::default(),
             completed: false,
             cancelled: false,
@@ -290,8 +316,10 @@ impl WizardState {
     fn flow_start_step(&self) -> WizardStep {
         if self.is_new_branch {
             WizardStep::BranchTypeSelect
-        } else {
+        } else if self.has_quick_start {
             WizardStep::QuickStart
+        } else {
+            WizardStep::BranchAction
         }
     }
 
@@ -399,14 +427,17 @@ impl WizardState {
     /// Number of selectable options for the current step.
     pub fn option_count(&self) -> usize {
         match self.step {
-            WizardStep::QuickStart => 2, // existing branch / create new branch
+            WizardStep::QuickStart => 3,   // resume / start new / choose different
+            WizardStep::BranchAction => 2, // existing branch / create new branch
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
             WizardStep::ReasoningLevel => 4, // low, medium, high, xhigh
             WizardStep::VersionSelect => self.version_options.len().max(1),
             WizardStep::ExecutionMode => 4, // normal, continue, resume, convert
+            WizardStep::ConvertAgentSelect => self.convert_source_agents.len().max(1),
+            WizardStep::ConvertSessionSelect => self.convert_sessions.len().max(1),
             WizardStep::BranchTypeSelect => 4, // feature, bugfix, hotfix, release
-            WizardStep::BranchNameInput => 0, // text input, no list
+            WizardStep::BranchNameInput => 0,  // text input, no list
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     0
@@ -418,19 +449,22 @@ impl WizardState {
             }
             WizardStep::IssueSelect => 0,     // text input
             WizardStep::SkipPermissions => 2, // yes / no
-            WizardStep::Confirm => 2,         // launch / cancel
         }
     }
 
     /// Static option labels for the current step.
     pub fn current_static_options(&self) -> Vec<&'static str> {
         match self.step {
-            WizardStep::QuickStart => vec!["Use selected branch", "Create new from selected"],
+            WizardStep::QuickStart => vec![
+                "Resume previous",
+                "Start new with previous",
+                "Choose different",
+            ],
+            WizardStep::BranchAction => vec!["Use selected branch", "Create new from selected"],
             WizardStep::ReasoningLevel => vec!["Low", "Medium", "High", "XHigh"],
             WizardStep::ExecutionMode => vec!["Normal", "Continue", "Resume", "Convert"],
             WizardStep::BranchTypeSelect => vec!["feature/", "bugfix/", "hotfix/", "release/"],
             WizardStep::SkipPermissions => vec!["Yes", "No"],
-            WizardStep::Confirm => vec!["Launch", "Cancel"],
             _ => vec![],
         }
     }
@@ -457,6 +491,20 @@ impl WizardState {
                         .iter()
                         .map(|v| v.label.clone())
                         .collect()
+                }
+            }
+            WizardStep::ConvertAgentSelect => {
+                if self.convert_source_agents.is_empty() {
+                    vec!["(no source agents available)".to_string()]
+                } else {
+                    self.convert_source_agents.clone()
+                }
+            }
+            WizardStep::ConvertSessionSelect => {
+                if self.convert_sessions.is_empty() {
+                    vec!["(no sessions available)".to_string()]
+                } else {
+                    self.convert_sessions.clone()
                 }
             }
             WizardStep::AIBranchSuggest => {
@@ -680,6 +728,12 @@ fn apply_selection(state: &mut WizardState) {
     let options = state.current_options();
     match state.step {
         WizardStep::QuickStart => {
+            if state.selected == 2 {
+                state.has_quick_start = false;
+                state.selected = 0;
+            }
+        }
+        WizardStep::BranchAction => {
             if state.selected == 0 {
                 state.is_new_branch = false;
                 state.base_branch_name = None;
@@ -732,16 +786,13 @@ fn apply_selection(state: &mut WizardState) {
                 state.mode = opt.to_lowercase();
             }
         }
+        WizardStep::ConvertAgentSelect => {}
+        WizardStep::ConvertSessionSelect => {}
         WizardStep::AIBranchSuggest => {
             apply_selected_ai_suggestion(state);
         }
         WizardStep::SkipPermissions => {
             state.skip_perms = state.selected == 0;
-        }
-        WizardStep::Confirm => {
-            if state.selected == 1 {
-                state.cancelled = true;
-            }
         }
         _ => {}
     }
@@ -914,6 +965,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::AIBranchSuggest => {
             " Up/Down: select | Enter: accept | e: edit | Esc: manual input"
         }
+        WizardStep::SkipPermissions => " Up/Down: select | Enter: launch | Esc: back",
         _ => " Up/Down: select | Enter: next | Esc: back",
     };
     let hints = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
@@ -941,9 +993,6 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         }
         WizardStep::AIBranchSuggest => {
             render_ai_suggest(state, frame, area);
-        }
-        WizardStep::Confirm => {
-            render_confirm_summary(state, frame, area);
         }
         _ => {
             render_option_list(state, frame, area);
@@ -1015,45 +1064,6 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
     render_option_list(state, frame, area);
 }
 
-/// Render the confirmation summary before launch.
-fn render_confirm_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(area);
-
-    // Summary
-    let summary = format!(
-        " Agent:       {}\n Model:       {}\n Version:     {}\n Reasoning:   {}\n Mode:        {}\n Branch:      {}\n Issue:       {}\n Skip Perms:  {}",
-        if state.agent_id.is_empty() { "-" } else { &state.agent_id },
-        if state.model.is_empty() { "-" } else { &state.model },
-        if state.version.is_empty() { "-" } else { &state.version },
-        state.reasoning,
-        state.mode,
-        if state.branch_name.is_empty() { "-" } else { &state.branch_name },
-        if state.issue_id.is_empty() { "-" } else { &state.issue_id },
-        if state.skip_perms { "yes" } else { "no" },
-    );
-    let block = Block::default().borders(Borders::ALL).title("Summary");
-    let para = Paragraph::new(summary)
-        .block(block)
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(para, chunks[0]);
-
-    // Action buttons
-    let options = state.current_options();
-    let items: Vec<ListItem> = options
-        .iter()
-        .enumerate()
-        .map(|(idx, opt)| {
-            let style = super::list_item_style(idx == state.selected);
-            ListItem::new(Line::from(Span::styled(format!("  {opt}"), style)))
-        })
-        .collect();
-    let list = List::new(items);
-    frame.render_widget(list, chunks[1]);
-}
-
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
@@ -1105,7 +1115,7 @@ mod tests {
     #[test]
     fn default_state() {
         let state = WizardState::default();
-        assert_eq!(state.step, WizardStep::QuickStart);
+        assert_eq!(state.step, WizardStep::BranchAction);
         assert_eq!(state.selected, 0);
         assert!(state.detected_agents.is_empty());
         assert!(!state.completed);
@@ -1115,20 +1125,21 @@ mod tests {
     #[test]
     fn step_navigation_next() {
         let state = WizardState::default();
+        assert_eq!(state.flow_start_step(), WizardStep::BranchAction);
         assert_eq!(
-            next_step(WizardStep::QuickStart, &state),
+            next_step(WizardStep::BranchAction, &state),
             Some(WizardStep::AgentSelect)
         );
-        assert_eq!(next_step(WizardStep::Confirm, &state), None);
+        assert_eq!(next_step(WizardStep::SkipPermissions, &state), None);
     }
 
     #[test]
     fn step_navigation_prev() {
         let state = WizardState::default();
-        assert_eq!(prev_step(WizardStep::QuickStart, &state), None);
+        assert_eq!(prev_step(WizardStep::BranchAction, &state), None);
         assert_eq!(
             prev_step(WizardStep::AgentSelect, &state),
-            Some(WizardStep::QuickStart)
+            Some(WizardStep::BranchAction)
         );
     }
 
@@ -1188,11 +1199,31 @@ mod tests {
     #[test]
     fn select_on_quick_start_create_new_branch_enters_branch_type_select() {
         let mut state = WizardState::default();
+        state.step = WizardStep::BranchAction;
         state.selected = 1;
 
         update(&mut state, WizardMessage::Select);
 
         assert_eq!(state.step, WizardStep::BranchTypeSelect);
+    }
+
+    #[test]
+    fn execution_mode_convert_routes_through_conversion_steps() {
+        let mut state = WizardState::default();
+        state.mode = "convert".to_string();
+
+        assert_eq!(
+            next_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::ConvertAgentSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::ConvertAgentSelect, &state),
+            Some(WizardStep::ConvertSessionSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::ConvertSessionSelect, &state),
+            Some(WizardStep::SkipPermissions)
+        );
     }
 
     #[test]
@@ -1294,7 +1325,7 @@ mod tests {
     #[test]
     fn move_down_wraps() {
         let mut state = WizardState::default();
-        // QuickStart has 2 options
+        // BranchAction has 2 options
         assert_eq!(state.selected, 0);
         update(&mut state, WizardMessage::MoveDown);
         assert_eq!(state.selected, 1);
@@ -1312,7 +1343,7 @@ mod tests {
     #[test]
     fn select_advances_step() {
         let mut state = WizardState::default();
-        assert_eq!(state.step, WizardStep::QuickStart);
+        assert_eq!(state.step, WizardStep::BranchAction);
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.step, WizardStep::AgentSelect);
         assert_eq!(state.selected, 0); // reset
@@ -1379,7 +1410,7 @@ mod tests {
     #[test]
     fn input_ignored_on_list_steps() {
         let mut state = WizardState::default();
-        state.step = WizardStep::QuickStart;
+        state.step = WizardStep::BranchAction;
         update(&mut state, WizardMessage::InputChar('x'));
         assert!(state.branch_name.is_empty());
     }
@@ -1432,10 +1463,7 @@ mod tests {
             cache_outdated: false,
         }];
 
-        assert_eq!(
-            state.current_options(),
-            vec!["Claude Code".to_string()]
-        );
+        assert_eq!(state.current_options(), vec!["Claude Code".to_string()]);
     }
 
     #[test]
@@ -1489,21 +1517,13 @@ mod tests {
     }
 
     #[test]
-    fn select_on_confirm_completes() {
+    fn select_on_skip_permissions_completes_without_confirm() {
         let mut state = WizardState::default();
-        state.step = WizardStep::Confirm;
-        state.selected = 0; // "Launch"
+        state.step = WizardStep::SkipPermissions;
+        state.selected = 0; // "Yes"
         update(&mut state, WizardMessage::Select);
         assert!(state.completed);
-    }
-
-    #[test]
-    fn select_cancel_on_confirm() {
-        let mut state = WizardState::default();
-        state.step = WizardStep::Confirm;
-        state.selected = 1; // "Cancel"
-        update(&mut state, WizardMessage::Select);
-        assert!(state.cancelled);
+        assert_eq!(state.step, WizardStep::SkipPermissions);
     }
 
     #[test]
@@ -1562,9 +1582,9 @@ mod tests {
     }
 
     #[test]
-    fn render_confirm_step_does_not_panic() {
+    fn render_skip_permissions_step_does_not_panic() {
         let mut state = WizardState::default();
-        state.step = WizardStep::Confirm;
+        state.step = WizardStep::SkipPermissions;
         state.agent_id = "claude".to_string();
         state.model = "claude-sonnet-4".to_string();
         let backend = TestBackend::new(80, 24);
@@ -1581,17 +1601,19 @@ mod tests {
     fn step_titles_non_empty() {
         let all_steps = [
             WizardStep::QuickStart,
+            WizardStep::BranchAction,
             WizardStep::AgentSelect,
             WizardStep::ModelSelect,
             WizardStep::ReasoningLevel,
             WizardStep::VersionSelect,
             WizardStep::ExecutionMode,
+            WizardStep::ConvertAgentSelect,
+            WizardStep::ConvertSessionSelect,
             WizardStep::BranchTypeSelect,
             WizardStep::BranchNameInput,
             WizardStep::AIBranchSuggest,
             WizardStep::IssueSelect,
             WizardStep::SkipPermissions,
-            WizardStep::Confirm,
         ];
         for step in all_steps {
             assert!(!step.title().is_empty(), "{:?} has empty title", step);
@@ -1863,18 +1885,18 @@ mod tests {
         update(&mut state, WizardMessage::Select);
         assert_eq!(state.step, WizardStep::AgentSelect);
 
-        // Back should return to step 1 (QuickStart)
+        // Back should return to step 1 (BranchAction)
         update(&mut state, WizardMessage::Back);
-        assert_eq!(state.step, WizardStep::QuickStart);
+        assert_eq!(state.step, WizardStep::BranchAction);
         assert!(!state.cancelled);
     }
 
     #[test]
     fn cancel_from_step1_sets_cancelled() {
         let mut state = WizardState::default();
-        assert_eq!(state.step, WizardStep::QuickStart);
+        assert_eq!(state.step, WizardStep::BranchAction);
 
-        // Cancel on QuickStart
+        // Cancel on BranchAction
         update(&mut state, WizardMessage::Cancel);
         assert!(state.cancelled);
     }

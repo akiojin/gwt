@@ -3,14 +3,14 @@
 ## Background
 
 gwt detects and launches coding agents (Claude Code, Codex, Gemini,
-OpenCode, Copilot) with a dynamic wizard whose longest path is 12 steps.
-Agents are detected via PATH lookup combined with `--version` invocation.
-Custom agents are configurable via the Settings management tab. The launch
-wizard now follows a branch-first flow again: existing-branch launches start
-with a branch action step, while spec-prefilled launches start at branch type
-selection before issue/AI naming and agent configuration. This SPEC covers
-the complete agent management domain including detection, wizard flow, custom
-agents, version cache, and launch resolution.
+OpenCode, Copilot) with a dynamic wizard. Agents are detected via PATH
+lookup combined with `--version` invocation. Custom agents are configurable
+via the Settings management tab. The current ratatui wizard already restored
+the branch-first launch flow, version cache, and session conversion, but its
+step machine and popup UX still lag behind the old TUI (`v6.30.3`). This
+SPEC covers the complete agent management domain including detection, wizard
+flow, custom agents, version cache, launch resolution, and the remaining
+old-TUI wizard restoration work.
 
 ## User Stories
 
@@ -22,12 +22,35 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
 
 1. Given I initiate agent launch from an existing branch, when the wizard starts, then I first see the branch action step before agent selection.
 2. Given I initiate agent launch from SPEC context, when the wizard starts, then I begin at branch type selection with the SPEC branch seed prefilled.
-3. Given I proceed through the wizard, when I reach the Confirm step, then
-   all configured options (agent, model, version, reasoning level, mode,
-   branch, issue) are summarized.
+3. Given I proceed through the wizard, when I reach the final selection
+   step, then the launch completes directly without a trailing confirm
+   screen.
 4. Given I confirm the wizard, when the agent launches, then a new persisted
    session is created with the configured parameters.
 5. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
+
+### US-7: Restore Old-TUI Wizard Step Machine (P0) -- IN PROGRESS
+
+As a developer, I want the new ratatui wizard to follow the old-TUI launch
+flow so that the daily launch UX matches existing muscle memory while
+preserving new capabilities such as version cache, AI branch suggestion, and
+session conversion.
+
+**Acceptance Scenarios**
+
+1. Given I launch from an existing branch, when the wizard opens, then I see
+   `BranchAction` before any agent configuration step.
+2. Given I choose to create a new branch, when I continue, then the wizard
+   runs `BranchType -> Issue -> AI Suggest -> Branch Name -> Agent`.
+3. Given I select Codex, when I continue through the wizard, then the flow
+   includes `Model -> Reasoning -> Version -> Execution Mode -> Skip Permissions`
+   without requiring a trailing confirm screen.
+4. Given I choose session conversion, when I pick `Convert` from execution
+   mode, then the wizard routes through `ConvertAgentSelect` and
+   `ConvertSessionSelect` before `SkipPermissions`.
+5. Given I reach the last step, when I confirm the selection there, then the
+   launch completes directly from the final step instead of a separate
+   `Confirm` screen.
 
 ### US-2: Detect Installed Agents (P0) -- IMPLEMENTED
 
@@ -107,10 +130,10 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-001**: `AgentTrait::detect()` checks PATH for agent binary and invokes `--version` to confirm availability.
 - **FR-002**: `AgentLaunchBuilder` constructs launch configuration including model, fast_mode, reasoning_level, and environment variables.
 - **FR-003**: Wizard flow proceeds through dynamic steps chosen by branch
-  context and agent capabilities: existing-branch launches start at a branch
-  action step, new-branch launches run Branch Type -> Issue -> AI Branch
-  Suggestion -> Branch Name before Agent/Model/Reasoning/Version/Execution
-  Mode -> Skip Permissions -> Confirm.
+  context and agent capabilities: existing-branch launches start at
+  `BranchAction`, new-branch launches run `Branch Type -> Issue -> AI Branch
+  Suggestion -> Branch Name` before agent configuration, and the final step
+  completes directly without a trailing `Confirm` screen.
 - **FR-004**: Custom agent CRUD operations available in Settings > Custom Agents tab.
 - **FR-005**: `CustomCodingAgent` structure: id, display_name, agent_type (Command/Path/Bunx), command string.
 - **FR-006**: Version list cache fetches last 10 versions per agent from npm registry on startup.
@@ -129,6 +152,12 @@ As a developer, I want to convert an existing session to a different agent type 
   `installed` or empty version selection and `bunx`/`npx` package runners for
   `latest` or a specific cached semver version when the agent supports npm
   distribution.
+- **FR-016**: The ratatui wizard restores the old-TUI step machine with the
+  step set `QuickStart`, `BranchAction`, `AgentSelect`, `ModelSelect`,
+  `ReasoningLevel`, `VersionSelect`, `ExecutionMode`,
+  `ConvertAgentSelect`, `ConvertSessionSelect`, `SkipPermissions`,
+  `BranchTypeSelect`, `IssueSelect`, `AIBranchSuggest`, and
+  `BranchNameInput`.
 
 ## Non-Functional Requirements
 

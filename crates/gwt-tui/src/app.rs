@@ -1553,7 +1553,7 @@ fn prepare_wizard_startup(
         step: if starts_new_branch {
             screens::wizard::WizardStep::BranchTypeSelect
         } else {
-            screens::wizard::WizardStep::QuickStart
+            screens::wizard::WizardStep::BranchAction
         },
         is_new_branch: starts_new_branch,
         gh_cli_available: gwt_core::process::command_exists("gh"),

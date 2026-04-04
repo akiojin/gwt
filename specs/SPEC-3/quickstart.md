@@ -8,10 +8,12 @@
    VersionSelect step in the wizard.
 4. For an npm-backed agent, confirm the version list shows the installed
    runner, `latest`, and cached semver entries without duplication.
-5. Reach Confirm and verify the summary includes the chosen version while a
-   default model label does not become a literal CLI override.
-6. Launch the session and confirm a new agent tab appears with persisted
-   session metadata.
+5. Verify existing-branch launches now start at `BranchAction`, and for
+   Codex the flow includes `Model -> Reasoning -> Version -> Execution Mode
+   -> Skip Permissions` without a trailing confirm screen.
+6. Launch the session from `Skip Permissions` and confirm a new agent tab
+   appears with persisted session metadata while a default model label does
+   not become a literal CLI override.
 7. Trigger session conversion and confirm the active session metadata changes
    while repository context is preserved.
 8. Check the existing focused tests and notifications to confirm the original
@@ -29,6 +31,6 @@
 ## Expected Result
 - The reviewer sees the current implemented scope for agent management.
 - Version selection is visibly independent from model selection and matches
-  the launch summary.
+  the launch path without a trailing confirm screen.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.
