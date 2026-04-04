@@ -116,3 +116,9 @@
 - [x] T061 Remove nested content borders from wizard option-list renderers while keeping old-TUI row formatting and version overflow indicators.
 - [x] T062 Keep AI suggestion loading/error copy visible after removing duplicate inner titles and borders.
 - [x] T063 Verify focused popup-content tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 14: AI Suggestion Context Consistency
+
+- [x] T064 [P] Write RED test: AI suggestion candidate rendering keeps `Context: ...` visible while still using the popup chrome as the only box.
+- [x] T065 Update `render_ai_suggest()` so the context line stays visible in the suggestion-list state alongside candidates and `Manual input`.
+- [x] T066 Verify focused AI suggestion render tests, broad workspace checks, and refresh SPEC-3 artifacts.

@@ -42,6 +42,8 @@
 17. Verify list-oriented steps such as `BranchAction`, `ModelSelect`,
    `VersionSelect`, and AI suggestion loading/error use the popup chrome as
    the only box while keeping their row formatting and copy visible.
+18. Verify the AI suggestion candidate list also keeps `Context: ...`
+   visible above the suggestions and `Manual input`.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -70,5 +72,7 @@
   prompt labels instead of nested titled boxes.
 - List-oriented wizard steps now follow the same contract, so popup chrome is
   the only boxed surface even during model/version selection and AI loading.
+- The AI suggestion step now keeps its `Context: ...` line visible in every
+  state instead of dropping it when suggestions arrive.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

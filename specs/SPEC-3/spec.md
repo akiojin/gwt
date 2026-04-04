@@ -213,6 +213,9 @@ As a developer, I want to convert an existing session to a different agent type 
   loading/error states reuse the popup chrome as the only boxed surface,
   keeping old-TUI rows and scroll indicators without nested inner borders or
   duplicate titles.
+- **FR-022**: The AI branch suggestion step shows `Context: ...` consistently
+  in loading, error, and suggestion-list states while still reusing the popup
+  chrome as the only boxed surface.
 
 ## Non-Functional Requirements
 

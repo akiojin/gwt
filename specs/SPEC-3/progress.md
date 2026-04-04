@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `69/69` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:08:20Z`
+- Task progress: `72/72` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:20:12Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -47,6 +47,9 @@
 - Generic list steps, `VersionSelect`, and AI suggestion loading/error now
   reuse the popup chrome as the wizard's only boxed surface instead of
   layering redundant inner borders or titles inside the content area.
+- The AI suggestion candidate list now keeps `Context: ...` visible after
+  loading finishes, so all AI suggestion states share the same context-first
+  old-TUI content contract.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

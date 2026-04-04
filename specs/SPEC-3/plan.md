@@ -147,6 +147,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage for generic lists, model/version steps, and
    AI suggestion loading state to prevent the double-box regression.
 
+### Phase 14: AI Suggestion Context Consistency
+
+1. Keep `Context: ...` visible for the AI suggestion step even after the
+   loading state transitions into the candidate list.
+2. Reuse the popup chrome as the only box while rendering the context line,
+   candidate rows, and `Manual input` action in one content surface.
+3. Add focused RED/GREEN coverage proving the context survives in the
+   suggestion-list state without reintroducing nested content chrome.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

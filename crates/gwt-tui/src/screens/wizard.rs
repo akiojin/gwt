@@ -1782,9 +1782,51 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Delegate to the default option-list renderer (current_options()
-    // already returns the suggestion strings for this step).
-    render_option_list(state, frame, area);
+    let start_y = if let Some(summary) = state.spec_context_summary() {
+        frame.render_widget(
+            Paragraph::new(truncate_with_ellipsis(
+                &format!("Context: {}", summary),
+                area.width as usize,
+            ))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+        2
+    } else {
+        0
+    };
+
+    let list_area = Rect::new(
+        area.x,
+        area.y + start_y,
+        area.width,
+        area.height.saturating_sub(start_y),
+    );
+
+    if list_area.width == 0 || list_area.height == 0 {
+        return;
+    }
+
+    let options = state.current_options();
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(idx, opt)| {
+            let style = super::list_item_style(idx == state.selected);
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let line = Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(opt.clone(), style),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    render_list_content(frame, list_area, items);
 }
 
 #[cfg(test)]
@@ -2876,6 +2918,7 @@ mod tests {
     fn ai_suggest_render_includes_manual_input_and_candidates() {
         let mut state = WizardState::default();
         state.step = WizardStep::AIBranchSuggest;
+        state.spec_context = Some(SpecContext::new("SPEC-42", "My Feature", ""));
         state.ai_suggest.suggestions = vec![
             "feature/add-auth".to_string(),
             "feature/user-login".to_string(),
@@ -2893,10 +2936,15 @@ mod tests {
 
         let buf = terminal.backend().buffer().clone();
         let text = buffer_text(&buf);
+        assert!(text.contains("Context: SPEC-42"));
         assert!(text.contains("feature/add-auth"));
         assert!(text.contains("feature/user-login"));
         assert!(text.contains("feature/oauth-flow"));
         assert!(text.contains("Manual input"));
+        assert!(
+            text.matches('┌').count() == 1,
+            "AI suggestions should reuse the popup chrome instead of adding inner boxes"
+        );
     }
 
     #[test]
