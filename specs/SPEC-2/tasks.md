@@ -370,3 +370,11 @@ banner in favor of pane-title chrome.
 - [x] T237 [P] Write RED test: medium-width non-Branches panes still collapse while extra-wide panes keep the full tab strip.
 - [x] T238 Update `app.rs` management title rendering to switch to active-tab-only chrome whenever the full tab strip would truncate.
 - [x] T239 Refresh `SPEC-2` artifacts and verify focused tests, snapshot refresh, and workspace checks.
+
+## Phase 35: Compact Narrow Session Titles
+
+- [x] T240 [P] Write RED test: standard-width session pane titles collapse to the active session label instead of the truncated full strip.
+- [x] T241 [P] Write RED test: medium-width session panes still collapse while extra-wide panes keep the full session strip.
+- [x] T242 [P] Write RED test: extra-wide session panes restore the complete session strip once it fits.
+- [x] T243 Update `app.rs` session title rendering to switch to active-session-only chrome whenever the full strip would truncate.
+- [x] T244 Refresh `SPEC-2` artifacts and verify focused tests and workspace checks.

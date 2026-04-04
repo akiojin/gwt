@@ -355,6 +355,21 @@ title to the active management tab only so the current surface remains readable.
 34.3: Verification (1 task)
 - Re-run focused tests, snapshot refresh, broad workspace verification, and SPEC-2 artifact sync.
 
+### Phase 35: Compact Narrow Session Titles (5 tasks)
+When the session pane is too narrow to fit the full session tab strip in the pane title, collapse
+the title to the active session only so the current workstream remains readable.
+
+35.1: Narrow-title contract (2 tasks)
+- Session pane titles show only the active session label whenever the full tab strip would truncate in the available title width.
+- Extra-wide session panes keep the full session tab strip once every session label fits.
+
+35.2: Focused render coverage (2 tasks)
+- Add RED coverage that standard-width session panes collapse to the active session only.
+- Add RED coverage that medium-width session panes still collapse while extra-wide panes keep the strip.
+
+35.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

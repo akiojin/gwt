@@ -2831,7 +2831,7 @@ fn session_content_area(model: &Model, session_area: Rect) -> Option<Rect> {
             model.active_session_tab()?;
             Some(
                 pane_block(
-                    build_session_title(model),
+                    build_session_title(model, session_area.width),
                     model.active_focus == FocusPane::Terminal,
                 )
                 .inner(session_area),
@@ -3092,7 +3092,7 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
     match model.session_layout {
         SessionLayout::Tab => {
             if let Some(session) = model.active_session_tab() {
-                let title = build_session_title(model);
+                let title = build_session_title(model, area.width);
                 let block = pane_block(title, terminal_focused);
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
@@ -3106,7 +3106,19 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 /// Build session tab title line (same pattern as management tabs in Block title).
-fn build_session_title(model: &Model) -> Line<'static> {
+fn build_session_title(model: &Model, width: u16) -> Line<'static> {
+    if should_compact_session_title(model, width) {
+        if let Some(active) = model.active_session_tab() {
+            let label = format!(" {} {} ", active.tab_type.icon(), active.name);
+            return Line::from(vec![Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+        }
+    }
+
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, s) in model.sessions.iter().enumerate() {
         if i > 0 {
@@ -3125,6 +3137,29 @@ fn build_session_title(model: &Model) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+fn should_compact_session_title(model: &Model, width: u16) -> bool {
+    let available_title_width = width.saturating_sub(2) as usize;
+    if available_title_width == 0 {
+        return false;
+    }
+
+    let full_strip_width: usize = model
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| {
+            let label_width = format!(" {} {} ", session.tab_type.icon(), session.name).len();
+            if i == 0 {
+                label_width
+            } else {
+                label_width + "│".len()
+            }
+        })
+        .sum();
+
+    full_strip_width > available_title_width
 }
 
 /// Render context-sensitive keybind hints at the bottom of the screen.
@@ -3759,6 +3794,83 @@ mod tests {
         assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Specs"));
         assert!(first_line.contains("Issues"));
+    }
+
+    fn shell_tab(id: &str, name: &str) -> crate::model::SessionTab {
+        crate::model::SessionTab {
+            id: id.to_string(),
+            name: name.to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+        }
+    }
+
+    #[test]
+    fn render_model_text_standard_width_session_title_collapses_to_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+            shell_tab("shell-2", "Shell: feature/session-three"),
+            shell_tab("shell-3", "Shell: feature/session-four"),
+        ];
+        model.active_session = 2;
+
+        let rendered = render_model_text(&model, 80, 24);
+        let first_line = rendered.lines().next().unwrap_or_default();
+
+        assert!(first_line.contains("session-three"));
+        assert!(
+            !first_line.contains("session-one"),
+            "standard-width session title should collapse to the active session instead of truncating the strip"
+        );
+    }
+
+    #[test]
+    fn render_model_text_medium_width_session_title_still_collapses_when_strip_does_not_fit() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+            shell_tab("shell-2", "Shell: feature/session-three"),
+            shell_tab("shell-3", "Shell: feature/session-four"),
+        ];
+        model.active_session = 1;
+
+        let rendered = render_model_text(&model, 120, 24);
+        let first_line = rendered.lines().next().unwrap_or_default();
+
+        assert!(first_line.contains("session-two"));
+        assert!(
+            !first_line.contains("session-one"),
+            "medium-width session pane should still collapse when the full strip would truncate"
+        );
+    }
+
+    #[test]
+    fn render_model_text_extra_wide_session_title_keeps_full_strip() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+            shell_tab("shell-2", "Shell: feature/session-three"),
+            shell_tab("shell-3", "Shell: feature/session-four"),
+        ];
+        model.active_session = 1;
+
+        let rendered = render_model_text(&model, 220, 24);
+        let first_line = rendered.lines().next().unwrap_or_default();
+
+        assert!(first_line.contains("session-one"));
+        assert!(first_line.contains("session-two"));
+        assert!(first_line.contains("session-three"));
+        assert!(first_line.contains("session-four"));
     }
 
     #[test]
