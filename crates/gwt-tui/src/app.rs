@@ -2930,8 +2930,19 @@ fn management_tab_title(model: &Model) -> Line<'static> {
 
 /// Render a 1-line header at the top of the management panel.
 fn render_management_header(model: &Model, frame: &mut Frame, area: Rect) {
-    let version = env!("CARGO_PKG_VERSION");
-    let repo = model.repo_path.display();
+    let p =
+        Paragraph::new(management_header_text(model)).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(p, area);
+}
+
+fn management_header_text(model: &Model) -> String {
+    let repo = model
+        .repo_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| model.repo_path.display().to_string());
     let branch_count = model.branches.branches.len();
     let wt_count = model
         .branches
@@ -2939,12 +2950,31 @@ fn render_management_header(model: &Model, frame: &mut Frame, area: Rect) {
         .iter()
         .filter(|b| b.worktree_path.is_some())
         .count();
-    let text = format!(
-        " GWT v{} | {} | {} branches ({} worktrees)",
-        version, repo, branch_count, wt_count
-    );
-    let p = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(p, area);
+    format!(
+        " gwt | {repo} | {} | {branch_count}b/{wt_count}w",
+        management_focus_context(model)
+    )
+}
+
+fn management_focus_context(model: &Model) -> String {
+    let tab = match model.management_tab {
+        ManagementTab::Branches => "Br",
+        ManagementTab::Specs => "Spec",
+        ManagementTab::Issues => "Iss",
+        ManagementTab::PrDashboard => "PR",
+        ManagementTab::Profiles => "Prof",
+        ManagementTab::GitView => "Git",
+        ManagementTab::Versions => "Ver",
+        ManagementTab::Settings => "Set",
+        ManagementTab::Logs => "Log",
+    };
+    let focus = match model.active_focus {
+        FocusPane::TabContent if model.management_tab == ManagementTab::Branches => "list",
+        FocusPane::TabContent => "pane",
+        FocusPane::BranchDetail => "detail",
+        FocusPane::Terminal => "term",
+    };
+    format!("{tab}:{focus}")
 }
 
 /// Render the management panes (left side — 2 stacked for Branches, 1 for others).
@@ -3504,6 +3534,52 @@ mod tests {
         assert!(rendered.contains("branch: feature/status-bar"));
         assert!(rendered.contains("type: Shell"));
         assert!(rendered.contains("Enter:wizard"));
+    }
+
+    #[test]
+    fn management_header_text_uses_repo_basename_instead_of_full_path() {
+        let mut model = test_model();
+        model.repo_path = PathBuf::from("/tmp/demo/project-repo");
+
+        let header = management_header_text(&model);
+
+        assert!(
+            header.contains("project-repo"),
+            "header should use the repository basename"
+        );
+        assert!(
+            !header.contains("/tmp/demo/project-repo"),
+            "header should stay compact and avoid the full repository path"
+        );
+    }
+
+    #[test]
+    fn management_header_text_reflects_active_tab_and_focus_context() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.repo_path = PathBuf::from("/tmp/demo/project-repo");
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "main".to_string(),
+                is_head: true,
+                is_local: true,
+                category: screens::branches::BranchCategory::Main,
+                worktree_path: Some(PathBuf::from("/tmp/demo/project-repo")),
+            },
+            screens::branches::BranchItem {
+                name: "feature/header".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            },
+        ];
+
+        let header = management_header_text(&model);
+
+        assert_eq!(header, " gwt | project-repo | Br:detail | 2b/1w");
     }
 
     #[test]

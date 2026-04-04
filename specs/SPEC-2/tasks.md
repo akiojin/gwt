@@ -246,3 +246,11 @@ screens to use.
 - [x] T161 [P] Write RED test: Branch Detail footer hints advertise the restored local mnemonics.
 - [x] T162 Update `app.rs` Branch Detail routing and hint text to mirror `m=view`, `v=Git View`, `f=search`, and `?` / `h=help`.
 - [x] T163 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 20: Compact Management Header Context
+
+- [x] T164 [P] Write RED test: the management header renders the repository basename instead of the full path.
+- [x] T165 [P] Write RED test: the management header includes compact active-context text for the active tab/focus.
+- [x] T166 Update `app.rs` management header rendering to use compact basename/context text that fits the 40% pane more gracefully.
+- [x] T167 Refresh `SPEC-2` artifacts to describe the compact management-header contract.
+- [x] T168 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

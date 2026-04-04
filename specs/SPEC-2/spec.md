@@ -110,7 +110,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
   - Enter in the detail pane directly launches agent (no action modal).
   - PR creation and branch deletion are NOT included (use CLI).
 - **FR-006b**: Branch line display: name + worktree icon (U+25CF/U+25CB) + HEAD indicator. No category headers.
-- **FR-006c**: Header line: 1-line header at top of management panel.
+- **FR-006c**: Header line: 1-line header at top of management panel. The header stays compact enough for the 40% pane, uses the repository basename instead of the full path, and shows the active management context (tab/focus) plus branch/worktree counts.
 - **FR-006d**: Branch list: Enter=Wizard, Shift+Enter=Shell, Space=select, Ctrl+C=delete
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.

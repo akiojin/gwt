@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- GWT v8.17.2 | /tmp/test-repo | ┌ ▶ Shell ─────────────────────────────────────┐
+ gwt | test-repo | Prof:pane | 0┌ ▶ Shell ─────────────────────────────────────┐
 ┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
 │Profiles                      ││                                              │
 │No profiles. Press 'c' to crea││                                              │

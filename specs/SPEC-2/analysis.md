@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `141/141` completed items after closing Phase 19 for Branch Detail local mnemonics.
+- Task traceability snapshot: `tasks.md` currently records `146/146` completed items after closing Phase 20 for compact management-header context.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -28,3 +28,4 @@ Status: CLEAR
 - Notes: Phase 17 aligned Branch Detail affordances with actual reachability; shell/delete direct actions are now offered only for selected branches that have a worktree.
 - Notes: Phase 18 restored a more sensible old-TUI-like workspace balance by moving the visible management/session split from `50/50` to `40/60` through a shared layout helper.
 - Notes: Phase 19 restored the old-TUI Branches local mnemonic set inside Branch Detail as well, so `m`, `v`, `f`, and help remain available after focus moves off the list.
+- Notes: Phase 20 restored a compact, contextual management header that fits the narrower pane better by using the repository basename plus tab/focus context instead of the full path.

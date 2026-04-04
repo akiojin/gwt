@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
- GWT v8.17.2 | /tmp/test-repo | 0 branches (0 wo┌ ▶ Shell ─────────────────────────────────────────────────────────────┐
+ gwt | test-repo | Br:list | 0b/0w              ┌ ▶ Shell ─────────────────────────────────────────────────────────────┐
 ┌ Branches │ Specs │ Issues │ PRs │ Profiles │ ┐│Session: Shell (80x24)                                                │
 │ View: All │ Sort: Default                    ││                                                                      │
 │No branches loaded                            ││                                                                      │

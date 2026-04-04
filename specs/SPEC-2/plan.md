@@ -232,6 +232,21 @@ same local mnemonics after moving focus off the list.
 19.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 20: Compact Management Header Context (5 tasks)
+Restore a more old-TUI-like management chrome by making the top header concise and contextual
+instead of spending most of the narrow pane on a full repository path.
+
+20.1: Compact context contract (2 tasks)
+- Render the repository basename instead of the full repository path in the management header.
+- Show the active management context in the same line so the header carries tab/focus meaning without widening the pane chrome.
+
+20.2: Focused render coverage (2 tasks)
+- Add focused coverage for the compact repository/context header text.
+- Add focused coverage for the Branch Detail focus variant so the header changes as focus moves inside the management pane.
+
+20.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
