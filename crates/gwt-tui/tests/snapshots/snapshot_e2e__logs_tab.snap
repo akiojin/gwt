@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ←→ tab  C-←→ sub  ↵ act  Tab pane  Esc term  ?
+ ▣ Sh  br:n/a  [G]  ↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc term

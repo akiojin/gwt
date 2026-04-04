@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `233/233` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T10:15:32Z`
+- Task progress: `238/238` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T10:27:05Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -43,6 +43,7 @@
 - Narrow session pane titles now collapse to the active session label whenever the full session strip would truncate, so standard-width multi-session workspaces keep the current workstream legible instead of showing a cut-off strip.
 - Non-Branches management footer hints now mirror the actual routing contract: detail views advertise `Esc:back`, form/edit modes advertise `Esc:cancel`, and only Settings/Logs keep `Ctrl+←→:sub-tab`.
 - Branch Detail `Esc:back` is now consumed before warn-dismiss fallback runs, so a visible warn toast no longer hijacks the detail back action.
+- Non-Branches management footers are now action-aware as well: `Issues` list shows `Enter:detail` / `/:search` / `r:refresh`, `Git View` shows `Enter:expand`, `Versions` stays refresh-only, and `PR Dashboard` detail shows `Enter:close` / `r:refresh` / `Esc:back` instead of generic `Enter:action`.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

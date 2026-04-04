@@ -394,3 +394,11 @@ banner in favor of pane-title chrome.
 - [x] T252 [P] Write RED test: Branch Detail `Esc` with warn still preserves selected branch/detail/session context.
 - [x] T253 Update `app.rs` Branch Detail routing so the local `Esc:back` action is consumed before warn-dismiss fallback runs.
 - [x] T254 Refresh `SPEC-2` artifacts and verify focused tests and workspace checks.
+
+## Phase 38: Make Non-Branches Footer Hints Action-Aware
+
+- [x] T255 [P] Write RED test: Git View footer hints advertise `Enter:expand` and `r:refresh` instead of a generic enter action.
+- [x] T256 [P] Write RED test: Versions footer hints stay refresh-only and omit a generic enter action.
+- [x] T257 [P] Write RED test: Issues list footer hints advertise `Enter:detail`, `/:search`, and `r:refresh`.
+- [x] T258 [P] Write RED test: PR Dashboard detail footer hints advertise `Enter:close`, `r:refresh`, and `Esc:back`.
+- [x] T259 Update `app.rs` non-Branches management footer hints so each tab advertises only its real primary actions and refresh/search affordances, then refresh `SPEC-2` artifacts and verification evidence.

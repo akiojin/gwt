@@ -400,6 +400,21 @@ so the detail pane exits first and warn dismissal remains a later fallback from 
 37.3: Verification (1 task)
 - Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
 
+### Phase 38: Make Non-Branches Footer Hints Action-Aware (5 tasks)
+Replace the last generic `Enter:action` overclaims on non-Branches management tabs so footer hints
+match each tab's real primary action and refresh/search affordances.
+
+38.1: Action contract (2 tasks)
+- Git View, Versions, Issues, and PR Dashboard footers advertise their real list/detail actions instead of a shared generic action label.
+- Versions remains refresh-only, while drill-down detail surfaces such as PR Dashboard advertise `Enter:close` and `Esc:back`.
+
+38.2: Focused render coverage (2 tasks)
+- Add RED coverage that Git View and Versions expose the correct action/refresh hints without falling back to `Enter:action`.
+- Add RED coverage that Issues list and PR Dashboard detail expose `detail/search/close/refresh` hints that match real routing.
+
+38.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

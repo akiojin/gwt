@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ←→ tab  ↵ act  Tab pane  Esc term  ?
+ ▣ Sh  br:n/a  [G]  ↑↓ sel  ↵ tog  n new  e edit  d del  Tab pane  Esc term

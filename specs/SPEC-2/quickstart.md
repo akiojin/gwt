@@ -36,7 +36,8 @@
 33. In a multi-session workspace at `80x24`, confirm the session pane title shows only the active session label instead of a truncated session strip; then widen to an extra-wide terminal such as `220x40` and confirm the full session strip returns.
 34. Open `Issues` detail and confirm the footer says `Esc:back`; open `Profiles` create mode and confirm the footer says `Esc:cancel`; compare `Settings` and `Git View` list mode and confirm only `Settings` advertises `Ctrl+←→:sub-tab`.
 35. With a warn notification visible while focus is still in Branch Detail, press `Esc` and confirm focus returns to the Branches list while the warn notification stays visible; press `Esc` once more from the list and confirm the warn notification dismisses.
-36. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+36. Compare `Git View`, `Versions`, `Issues`, and `PR Dashboard` detail footers and confirm they no longer show a generic `Enter:action`: `Git View` should say `Enter:expand`, `Versions` should stay refresh-only, `Issues` list should say `Enter:detail` plus `/:search`, and `PR Dashboard` detail should say `Enter:close`.
+37. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.

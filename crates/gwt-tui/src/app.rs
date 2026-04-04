@@ -3198,41 +3198,17 @@ fn branches_list_hint_text(compact: bool) -> String {
 fn management_hint_text(model: &Model, compact: bool) -> String {
     match model.management_tab {
         ManagementTab::Branches => branches_list_hint_text(compact),
-        ManagementTab::Issues => {
-            if model.issues.detail_view {
-                generic_management_hint_text(compact, false, "back")
-            } else {
-                generic_management_hint_text(compact, false, "term")
-            }
-        }
+        ManagementTab::Issues => issues_hint_text(model, compact),
         ManagementTab::Settings => {
             if model.settings.editing {
                 settings_edit_hint_text(compact)
             } else {
-                generic_management_hint_text(compact, true, "term")
+                settings_list_hint_text(compact)
             }
         }
-        ManagementTab::Logs => {
-            if model.logs.detail_view {
-                generic_management_hint_text(compact, true, "back")
-            } else {
-                generic_management_hint_text(compact, true, "term")
-            }
-        }
-        ManagementTab::PrDashboard => {
-            if model.pr_dashboard.detail_view {
-                generic_management_hint_text(compact, false, "back")
-            } else {
-                generic_management_hint_text(compact, false, "term")
-            }
-        }
-        ManagementTab::Profiles => {
-            if model.profiles.mode != screens::profiles::ProfileMode::List {
-                generic_management_hint_text(compact, false, "cancel")
-            } else {
-                generic_management_hint_text(compact, false, "term")
-            }
-        }
+        ManagementTab::Logs => logs_hint_text(model, compact),
+        ManagementTab::PrDashboard => pr_dashboard_hint_text(model, compact),
+        ManagementTab::Profiles => profiles_hint_text(model, compact),
         ManagementTab::Specs => {
             if model.specs.detail_editing {
                 generic_management_hint_text(compact, false, "cancel")
@@ -3242,9 +3218,22 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
                 generic_management_hint_text(compact, false, "term")
             }
         }
-        ManagementTab::GitView | ManagementTab::Versions => {
-            generic_management_hint_text(compact, false, "term")
+        ManagementTab::GitView => git_view_hint_text(compact),
+        ManagementTab::Versions => versions_hint_text(compact),
+    }
+}
+
+fn issues_hint_text(model: &Model, compact: bool) -> String {
+    if model.issues.detail_view {
+        if compact {
+            "↑↓ mv  ↵ close  r rfsh  Tab pane  Esc back  ?".to_string()
+        } else {
+            "↑↓:move  Enter:close  r:refresh  Tab:focus  Esc:back  ?:help".to_string()
         }
+    } else if compact {
+        "↑↓ sel  ↵ dtl  / srch  r rfsh  Tab pane  Esc term  ?".to_string()
+    } else {
+        "↑↓:select  Enter:detail  /:search  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
     }
 }
 
@@ -3273,11 +3262,75 @@ fn generic_management_hint_text(
     }
 }
 
+fn settings_list_hint_text(compact: bool) -> String {
+    if compact {
+        "↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  Tab pane  Esc term  ?".to_string()
+    } else {
+        "↑↓:select  Enter:edit  Space:toggle  Ctrl+←→:sub-tab  Shift+S:save  Tab:focus  Esc:term  ?:help".to_string()
+    }
+}
+
 fn settings_edit_hint_text(compact: bool) -> String {
     if compact {
         "↵ save  ⌫ del  Esc cancel  ?".to_string()
     } else {
         "Enter:save  Backspace:delete  Esc:cancel  ?:help".to_string()
+    }
+}
+
+fn logs_hint_text(model: &Model, compact: bool) -> String {
+    if model.logs.detail_view {
+        if compact {
+            "↑↓ mv  ↵ close  f next  d dbg  r rfsh  C-←→ flt  Esc back".to_string()
+        } else {
+            "↑↓:move  Enter:close  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:back"
+                .to_string()
+        }
+    } else if compact {
+        "↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc term".to_string()
+    } else {
+        "↑↓:select  Enter:detail  f:next-filter  d:debug  r:refresh  Ctrl+←→:filter  Esc:term"
+            .to_string()
+    }
+}
+
+fn pr_dashboard_hint_text(model: &Model, compact: bool) -> String {
+    if model.pr_dashboard.detail_view {
+        if compact {
+            "↑↓ mv  ↵ close  r rfsh  Tab pane  Esc back  ?".to_string()
+        } else {
+            "↑↓:move  Enter:close  r:refresh  Tab:focus  Esc:back  ?:help".to_string()
+        }
+    } else if compact {
+        "↑↓ sel  ↵ dtl  r rfsh  Tab pane  Esc term  ?".to_string()
+    } else {
+        "↑↓:select  Enter:detail  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
+    }
+}
+
+fn profiles_hint_text(model: &Model, compact: bool) -> String {
+    if model.profiles.mode != screens::profiles::ProfileMode::List {
+        generic_management_hint_text(compact, false, "cancel")
+    } else if compact {
+        "↑↓ sel  ↵ tog  n new  e edit  d del  Tab pane  Esc term".to_string()
+    } else {
+        "↑↓:select  Enter:toggle  n:new  e:edit  d:delete  Tab:focus  Esc:term".to_string()
+    }
+}
+
+fn git_view_hint_text(compact: bool) -> String {
+    if compact {
+        "↑↓ mv  ↵ exp  r rfsh  Tab pane  Esc term  ?".to_string()
+    } else {
+        "↑↓:move  Enter:expand  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
+    }
+}
+
+fn versions_hint_text(compact: bool) -> String {
+    if compact {
+        "↑↓ mv  r rfsh  Tab pane  Esc term  ?".to_string()
+    } else {
+        "↑↓:move  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
     }
 }
 
@@ -3723,14 +3776,15 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_generic_management_hints_include_escape_to_terminal() {
+    fn render_model_text_git_view_hints_include_escape_to_terminal() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::GitView;
         model.active_focus = FocusPane::TabContent;
 
         let rendered = render_model_text(&model, 220, 24);
-        assert!(rendered.contains("Enter:action"));
+        assert!(rendered.contains("Enter:expand"));
+        assert!(rendered.contains("r:refresh"));
         assert!(rendered.contains("Esc:term"));
     }
 
@@ -3784,6 +3838,62 @@ mod tests {
         let rendered = render_model_text(&model, 220, 24);
 
         assert!(!rendered.contains("Ctrl+←→:sub-tab"));
+    }
+
+    #[test]
+    fn render_model_text_git_view_hints_show_expand_and_refresh_actions() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::GitView;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Enter:expand"));
+        assert!(rendered.contains("r:refresh"));
+        assert!(!rendered.contains("Enter:action"));
+    }
+
+    #[test]
+    fn render_model_text_versions_hints_show_refresh_without_enter_action() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Versions;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("r:refresh"));
+        assert!(!rendered.contains("Enter:action"));
+    }
+
+    #[test]
+    fn render_model_text_issues_list_hints_show_search_and_refresh_actions() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("/:search"));
+        assert!(rendered.contains("r:refresh"));
+        assert!(rendered.contains("Enter:detail"));
+    }
+
+    #[test]
+    fn render_model_text_pr_dashboard_detail_hints_show_close_and_refresh_actions() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::PrDashboard;
+        model.active_focus = FocusPane::TabContent;
+        model.pr_dashboard.detail_view = true;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Enter:close"));
+        assert!(rendered.contains("r:refresh"));
+        assert!(rendered.contains("Esc:back"));
     }
 
     #[test]
@@ -4081,7 +4191,7 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_generic_management_hints_remain_visible_at_standard_width() {
+    fn render_model_text_issues_list_hints_remain_visible_at_standard_width() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Issues;
@@ -4089,8 +4199,7 @@ mod tests {
 
         let rendered = render_model_text(&model, 80, 24);
 
-        assert!(rendered.contains("↑↓ sel  ←→ tab  ↵ act"));
-        assert!(!rendered.contains("C-←→ sub"));
+        assert!(rendered.contains("↑↓ sel  ↵ dtl  / srch  r rfsh"));
         assert!(rendered.contains("Tab pane"));
         assert!(rendered.contains("Esc term"));
     }
