@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `38/38` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T06:20:00Z`
+- Task progress: `40/40` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T07:05:00Z`
 
 ## Done
 - The missing planning support files for this SPEC are now present.
@@ -19,12 +19,11 @@
 - PR dashboard detail now loads a live per-PR report when detail view opens and
   refreshes that report together with the list, and now also re-loads detail
   when tab focus returns or selection changes while detail view stays open.
-- The remaining gap is completion-gate review plus the explicitly partial PR
-  dashboard presentation parity called out in `spec.md` (for example CI check
-  badges vs. plain text summaries), not unchecked execution tasks.
+- The remaining gap is completion-gate review plus the explicitly partial
+  GitHub transport note in `spec.md`, not unchecked execution tasks.
 
 ## Next
 - Run the reviewer flow and capture final evidence for the live GitHub data
   surfaces that are now wired.
-- Reconcile acceptance against the remaining PR dashboard presentation gaps
-  before any `Done` transition.
+- Reconcile acceptance against the remaining GraphQL/REST transport gap before
+  any `Done` transition.

@@ -3,7 +3,7 @@
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
@@ -217,33 +217,14 @@ fn render_detail(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
     };
 
     let detail_text = if let Some(report) = &state.detail_report {
-        let checks = if report.checks.is_empty() {
-            " (no checks)".to_string()
-        } else {
-            report
-                .checks
-                .iter()
-                .map(|check| format!("\n - {check}"))
-                .collect::<String>()
-        };
-        format!(
-            " #{} - {}\n\n State: {}\n CI: {}\n Merge: {}\n Review: {}\n Summary: {}\n Checks:{}\n\n Press Enter to go back",
-            pr.number,
-            pr.title,
-            pr.state.label(),
-            report.ci_status,
-            report.merge_status,
-            report.review_status,
-            report.summary,
-            checks,
-        )
+        render_detail_report(pr, report)
     } else {
         let merge_str = if pr.mergeable {
             "Yes"
         } else {
             "No (conflicts)"
         };
-        format!(
+        Text::from(format!(
             " #{} - {}\n\n State: {}\n CI: {}\n Mergeable: {}\n Review: {}\n\n Press Enter to go back",
             pr.number,
             pr.title,
@@ -251,7 +232,7 @@ fn render_detail(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
             pr.ci_status,
             merge_str,
             pr.review_status,
-        )
+        ))
     };
 
     let block = Block::default().title("PR Detail");
@@ -260,6 +241,59 @@ fn render_detail(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(paragraph, area);
+}
+
+fn render_detail_report(pr: &PrItem, report: &PrDetailReport) -> Text<'static> {
+    let mut lines = vec![
+        Line::from(format!(" #{} - {}", pr.number, pr.title)),
+        Line::default(),
+        Line::from(format!(" State: {}", pr.state.label())),
+        Line::from(format!(" CI: {}", report.ci_status)),
+        Line::from(format!(" Merge: {}", report.merge_status)),
+        Line::from(format!(" Review: {}", report.review_status)),
+        Line::from(format!(" Summary: {}", report.summary)),
+        Line::from(" Checks:"),
+    ];
+
+    if report.checks.is_empty() {
+        lines.push(Line::from("  (no checks)"));
+    } else {
+        lines.extend(
+            report
+                .checks
+                .iter()
+                .map(|check| render_check_badge_line(check)),
+        );
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(" Press Enter to go back"));
+    Text::from(lines)
+}
+
+fn render_check_badge_line(check: &str) -> Line<'static> {
+    let (name, status) = check
+        .split_once(':')
+        .map(|(name, status)| (name.trim().to_string(), status.trim().to_ascii_lowercase()))
+        .unwrap_or_else(|| (check.trim().to_string(), "unknown".to_string()));
+
+    let (badge, color) = match status.as_str() {
+        "success" | "passing" | "pass" | "ok" => ("[PASS]", Color::Green),
+        "failure" | "failing" | "fail" | "error" => ("[FAIL]", Color::Red),
+        "pending" | "queued" | "running" | "in_progress" => ("[PENDING]", Color::Yellow),
+        "skipped" | "neutral" => ("[SKIP]", Color::DarkGray),
+        _ => ("[INFO]", Color::Cyan),
+    };
+
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            badge.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(name, Style::default().fg(Color::White)),
+    ])
 }
 
 #[cfg(test)]
@@ -447,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn render_detail_shows_report_summary_and_checks() {
+    fn render_detail_shows_report_summary_and_badge_checks() {
         let mut state = PrDashboardState::default();
         state.prs = sample_prs();
         state.detail_view = true;
@@ -456,7 +490,11 @@ mod tests {
             ci_status: "passing".to_string(),
             merge_status: "ready".to_string(),
             review_status: "approved".to_string(),
-            checks: vec!["lint: success".to_string(), "test: success".to_string()],
+            checks: vec![
+                "lint: success".to_string(),
+                "test: failure".to_string(),
+                "build: pending".to_string(),
+            ],
         });
 
         let backend = TestBackend::new(80, 24);
@@ -476,8 +514,9 @@ mod tests {
             }
         }
         assert!(text.contains("CI passing, merge ready"));
-        assert!(text.contains("lint: success"));
-        assert!(text.contains("test: success"));
+        assert!(text.contains("[PASS] lint"));
+        assert!(text.contains("[FAIL] test"));
+        assert!(text.contains("[PENDING] build"));
     }
 
     #[test]

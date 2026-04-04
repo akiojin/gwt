@@ -17,8 +17,10 @@
    from live repo state.
 9. Confirm that branch linkage shows the right GitHub context for the
    checked-out branch.
-10. Log any still-partial PR dashboard presentation gaps as acceptance gaps
-    rather than unchecked execution tasks.
+10. Confirm the PR detail view renders CI checks as badge-style lines for the
+    selected PR report.
+11. Log any still-partial transport gaps as acceptance gaps rather than
+    unchecked execution tasks.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-git -- --nocapture`
@@ -32,6 +34,7 @@
 - `cargo test -p gwt-tui route_key_to_management_pr_dashboard_enter_loads_detail_report -- --nocapture`
 - `cargo test -p gwt-tui route_key_to_management_pr_dashboard_move_in_detail_view_reloads_selected_pr_detail -- --nocapture`
 - `cargo test -p gwt-tui refresh_pr_dashboard_with_in_detail_view_updates_detail_report -- --nocapture`
+- `cargo test -p gwt-tui render_detail_shows_report_summary_and_badge_checks -- --nocapture`
 
 ## Expected Result
 - The reviewer sees the current implemented scope for github integration.

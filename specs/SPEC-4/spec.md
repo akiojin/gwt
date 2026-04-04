@@ -48,7 +48,7 @@ As a developer, I want a Git View tab showing file status, diffs, and recent com
 - AC-4.5: Divergence status shows ahead/behind counts relative to remote
 - AC-4.6: If a PR exists for the branch, a PR link is shown
 
-### US-5 (P1): View PR Status, CI Checks, Merge State -- PARTIALLY IMPLEMENTED
+### US-5 (P1): View PR Status, CI Checks, Merge State -- IMPLEMENTED
 
 As a developer, I want a PR dashboard tab showing my PRs with CI status and merge readiness so that I can monitor PR progress.
 
@@ -77,8 +77,8 @@ As a developer, I want to launch an agent session from an Issue detail view so t
 | FR-002 | Issue detail with markdown rendering | P0 | Implemented |
 | FR-003 | Issue-branch linkage display | P0 | Implemented |
 | FR-004 | Git View tab in management panel: file status (S/U/?), file diffs (lazy, max 50 lines), last 5 commits, divergence, PR link | P1 | Implemented |
-| FR-005 | PR dashboard as independent management tab: PR list, CI check status, merge state, review status | P1 | Partially Implemented |
-| FR-006 | PR detail with CI check badges | P1 | Partially Implemented |
+| FR-005 | PR dashboard as independent management tab: PR list, CI check status, merge state, review status | P1 | Implemented |
+| FR-006 | PR detail with CI check badges | P1 | Implemented |
 | FR-007 | PR status from gwt-core::git::pr_status (PrStatus struct) | P1 | Implemented |
 | FR-008 | GraphQL primary, REST fallback for GitHub API | P1 | Partially Implemented |
 

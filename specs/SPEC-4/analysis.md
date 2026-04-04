@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `38/38` completed
+- Task traceability snapshot: `tasks.md` currently records `40/40` completed
   items.
 - Notes: Git View and PR dashboard execution tasks are checked, with focused
   tests now covering gwt-git parsing, git-view rendering, and PR dashboard
@@ -23,9 +23,10 @@ Status: CLEAR
 - Notes: PR dashboard detail now loads a live selected-PR report with CI,
   merge, review, and check-line summaries, and it now refreshes again when tab
   focus returns or selection changes while detail view remains open.
-- Notes: The remaining gap is reviewer-flow and acceptance closure plus the
-  explicitly partial PR dashboard presentation parity still called out in
-  `spec.md` (not unchecked execution wiring).
+- Notes: PR dashboard detail rendering now presents CI checks as badge-style
+  lines rather than plain summary-only text, so the remaining gap is reviewer
+  closure plus the explicitly partial GraphQL/REST transport note in
+  `spec.md`.
 
 ## Next
 - Run completion-gate review and reviewer evidence.

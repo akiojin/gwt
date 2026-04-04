@@ -58,9 +58,11 @@
 
 - [x] TEST: Snapshot test for PR dashboard layout (list + detail)
 - [x] TEST: Detail view reloads live data when tab focus returns or selection changes
+- [x] TEST: PR detail renders CI checks as badge-style labels
 - [x] IMPL: Create `screens/pr_dashboard.rs` with `PrDashboardScreen`
   - File: `crates/gwt-tui/src/screens/pr_dashboard.rs`
 - [x] IMPL: PR list widget with CI status icons
+- [x] IMPL: Render CI check rows as badge-style labels in detail view
 - [x] IMPL: PR detail pane with check badges and review status
 - [x] IMPL: Auto-refresh on tab focus, preserving live detail when already open
 
