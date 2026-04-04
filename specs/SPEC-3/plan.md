@@ -184,6 +184,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving both generic option lists and
    `ModelSelect` now use the cyan highlight contract.
 
+### Phase 18: Wizard Input Two-Row Layout
+
+1. Split `BranchNameInput` and `IssueSelect` into a cyan prompt row followed
+   by a yellow value row so the input steps match the old-TUI vertical rhythm.
+2. Keep popup chrome as the only boxed surface and avoid reintroducing titled
+   inner boxes or extra separators.
+3. Add focused RED/GREEN coverage proving prompt and value render on separate
+   rows for both input steps.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

@@ -143,3 +143,10 @@
 - [x] T076 [P] Write RED test: `ModelSelect` uses the same cyan selected-row highlight.
 - [x] T077 Add a wizard-local selected-row style helper and apply it across list-based wizard steps.
 - [x] T078 Verify focused highlight tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 18: Wizard Input Two-Row Layout
+
+- [x] T079 [P] Write RED test: `BranchNameInput` renders prompt and value on separate rows.
+- [x] T080 [P] Write RED test: `IssueSelect` renders prompt and value on separate rows.
+- [x] T081 Update wizard input rendering to use a compact two-row layout while keeping popup chrome as the only box.
+- [x] T082 Verify focused input-layout tests, broad workspace checks, and refresh SPEC-3 artifacts.

@@ -1682,34 +1682,10 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::QuickStart => render_quick_start_step(state, frame, area),
         WizardStep::AgentSelect => render_agent_select_step(state, frame, area),
         WizardStep::BranchNameInput => {
-            let text = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "Branch Name: ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{}_", state.branch_name),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]));
-            frame.render_widget(text, area);
+            render_input_step(state, frame, area, "Branch Name:", &state.branch_name);
         }
         WizardStep::IssueSelect => {
-            let text = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "Issue ID (optional): ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{}_", state.issue_id),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]));
-            frame.render_widget(text, area);
+            render_input_step(state, frame, area, "Issue ID (optional):", &state.issue_id);
         }
         WizardStep::AIBranchSuggest => {
             render_ai_suggest(state, frame, area);
@@ -1723,6 +1699,36 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
             render_option_list(state, frame, area);
         }
     }
+}
+
+fn render_input_step(
+    _state: &WizardState,
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(label).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    if area.height <= 1 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(format!("{value}_")).style(Style::default().fg(Color::Yellow)),
+        Rect::new(area.x, area.y + 1, area.width, 1),
+    );
 }
 
 /// Render a selectable option list for the current wizard step.
@@ -2471,15 +2477,22 @@ mod tests {
     }
 
     #[test]
-    fn render_branch_input_uses_old_tui_inline_prompt() {
+    fn render_branch_input_uses_old_tui_two_row_layout() {
         let mut state = WizardState::default();
         state.step = WizardStep::BranchNameInput;
         state.branch_name = "feature/test".to_string();
 
-        let text = render_text(&state, 90, 24);
+        let buf = render_buffer(&state, 90, 24);
+        let text = buffer_text(&buf);
+        let (_, prompt_y) = find_text_position(&buf, "Branch Name:").expect("prompt line");
+        let (_, value_y) = find_text_position(&buf, "feature/test_").expect("value line");
 
         assert!(text.contains("Branch Name:"));
         assert!(text.contains("feature/test_"));
+        assert!(
+            value_y > prompt_y,
+            "input value should render on a row below the prompt"
+        );
         assert!(
             text.matches('┌').count() == 1,
             "branch input should reuse the popup chrome instead of adding a second boxed title inside the content area"
@@ -2487,15 +2500,22 @@ mod tests {
     }
 
     #[test]
-    fn render_issue_input_uses_old_tui_inline_prompt() {
+    fn render_issue_input_uses_old_tui_two_row_layout() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
         state.issue_id = "1234".to_string();
 
-        let text = render_text(&state, 90, 24);
+        let buf = render_buffer(&state, 90, 24);
+        let text = buffer_text(&buf);
+        let (_, prompt_y) = find_text_position(&buf, "Issue ID (optional):").expect("prompt line");
+        let (_, value_y) = find_text_position(&buf, "1234_").expect("value line");
 
         assert!(text.contains("Issue ID (optional):"));
         assert!(text.contains("1234_"));
+        assert!(
+            value_y > prompt_y,
+            "input value should render on a row below the prompt"
+        );
         assert!(
             text.matches('┌').count() == 1,
             "issue input should use the same inline prompt style instead of adding another boxed title"

@@ -225,6 +225,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-025**: Wizard list-based steps share the same old-TUI cyan selected-row
   highlight across generic option lists, `ModelSelect`, `QuickStart`, and
   `AgentSelect`.
+- **FR-026**: `BranchNameInput` and `IssueSelect` render as compact two-row
+  input steps with a cyan prompt line above a yellow value line, while still
+  reusing the popup chrome as the only boxed surface.
 
 ## Non-Functional Requirements
 

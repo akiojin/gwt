@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `84/84` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T12:22:00Z`
+- Task progress: `88/88` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:19:59Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -58,6 +58,9 @@
   popup body.
 - Wizard list-based steps now share the same cyan selected-row highlight,
   so generic option lists and specialized steps no longer drift visually.
+- `BranchNameInput` and `IssueSelect` now use the old-TUI compact two-row
+  layout, with a cyan prompt line above the yellow input value while the
+  popup chrome remains the only boxed surface.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining
