@@ -120,6 +120,15 @@ pub struct DetailSpecItem {
     pub status: String,
 }
 
+/// A lightweight summary of an active session associated with the selected branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailSessionSummary {
+    pub kind: &'static str,
+    pub name: String,
+    pub detail: Option<String>,
+    pub active: bool,
+}
+
 /// Lifecycle action requested for a Docker container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockerLifecycleAction {
@@ -506,18 +515,18 @@ pub fn render_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
 ///
 /// Called by app.rs which provides the bordered pane. This renders borderless
 /// content into the inner area of the bottom detail pane.
-/// `session_count` is the number of active sessions matching this branch.
+/// `sessions` contains branch-scoped active session summaries for this branch.
 pub fn render_detail_content(
     state: &BranchesState,
     frame: &mut Frame,
     area: Rect,
-    session_count: usize,
+    sessions: &[DetailSessionSummary],
 ) {
     match state.detail_section {
         0 => render_detail_overview(state, frame, area),
         1 => render_detail_specs(state, frame, area),
         2 => render_detail_git_status(state, frame, area),
-        3 => render_detail_sessions(frame, area, session_count),
+        3 => render_detail_sessions(frame, area, sessions),
         _ => {}
     }
 }
@@ -538,7 +547,7 @@ pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, _focus: Bran
 
     render_header(state, frame, list_chunks[0]);
     render_branch_list(state, frame, list_chunks[1]);
-    render_detail_content(state, frame, main_chunks[1], 0);
+    render_detail_content(state, frame, main_chunks[1], &[]);
 }
 
 /// Render the header bar with view mode, sort mode, and search (plain bar, no borders).
@@ -818,20 +827,52 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
     frame.render_widget(paragraph, area);
 }
 
-/// Sessions section: shows count of active sessions on this branch.
-fn render_detail_sessions(frame: &mut Frame, area: Rect, session_count: usize) {
-    let content = if session_count == 0 {
-        " No active sessions".to_string()
+/// Sessions section: shows branch-scoped active session summaries.
+fn render_detail_sessions(frame: &mut Frame, area: Rect, sessions: &[DetailSessionSummary]) {
+    let block = Block::default().title(if sessions.is_empty() {
+        "Sessions".to_string()
     } else {
-        format!(" {} active session(s) on this branch", session_count)
-    };
-    let style = if session_count > 0 {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default().title("Sessions");
-    let paragraph = Paragraph::new(content).block(block).style(style);
+        format!("Sessions ({})", sessions.len())
+    });
+
+    if sessions.is_empty() {
+        let paragraph = Paragraph::new(" No active sessions")
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let mut lines = Vec::new();
+    for session in sessions {
+        let marker = if session.active { "●" } else { " " };
+        let kind_style = match session.kind {
+            "Agent" => Style::default().fg(Color::Cyan),
+            "Shell" => Style::default().fg(Color::Green),
+            _ => Style::default().fg(Color::White),
+        };
+        let name_style = if session.active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker} "), Style::default().fg(Color::Yellow)),
+            Span::styled(session.kind, kind_style),
+            Span::raw("  "),
+            Span::styled(&session.name, name_style),
+        ]));
+        if let Some(detail) = session.detail.as_ref() {
+            lines.push(Line::from(Span::styled(
+                format!("   {detail}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
@@ -1545,6 +1586,76 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Controls: Up/Down select  S start  R restart")),
             "Detail panel should show Docker control hints"
+        );
+    }
+
+    #[test]
+    fn render_detail_sessions_shows_typed_session_rows_and_active_marker() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 3;
+        let sessions = vec![
+            DetailSessionSummary {
+                kind: "Agent",
+                name: "Codex".to_string(),
+                detail: Some("gpt-5.3-codex · high".to_string()),
+                active: true,
+            },
+            DetailSessionSummary {
+                kind: "Shell",
+                name: "Shell: develop".to_string(),
+                detail: None,
+                active: false,
+            },
+        ];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &sessions);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("● Agent  Codex")),
+            "Sessions pane should show the active agent row"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Shell  Shell: develop")),
+            "Sessions pane should show branch shell rows"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("gpt-5.3-codex · high")),
+            "Sessions pane should show session detail metadata when available"
+        );
+    }
+
+    #[test]
+    fn render_detail_sessions_preserves_empty_state() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 3;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &[]);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("No active sessions")),
+            "Sessions pane should keep the empty-state fallback"
         );
     }
 

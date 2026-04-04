@@ -10,12 +10,14 @@
 7. While still on Branches, verify `m` cycles the local view mode, `v` jumps directly to Git View, `f` opens search input, and both `?` and `h` open the help overlay.
 8. Open Git View, confirm recent commits are listed for a non-empty repository, and press `r` to refresh after making a working-tree change.
 9. Toggle split/grid, switch the active management tab, quit, and restart `gwt-tui`; confirm the layout and visible panel state restore from the saved session file.
-10. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+10. Move into the `Sessions` detail section and confirm active sessions on the selected branch render as a typed list with an active-session marker instead of a count-only placeholder.
+11. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
 - The help overlay reflects the keybinding registry without orphaned or invented shortcuts.
 - Branches behaves as the primary daily-entry tab again: returning there resets list focus, rows are flatter, the legacy primary actions are reachable without opening another view first, and the local mnemonics match the old-TUI muscle memory.
+- Branch Detail `Sessions` shows which shell/agent tabs are active on the selected branch instead of only reporting a numeric count.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.
 - No implementation task remains unchecked in `tasks.md`.

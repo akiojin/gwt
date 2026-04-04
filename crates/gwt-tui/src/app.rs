@@ -1405,17 +1405,63 @@ fn check_branch_pending_actions(model: &mut Model) {
     }
 }
 
-/// Count active sessions whose name matches the selected branch.
-fn count_sessions_for_branch(model: &Model) -> usize {
+/// Build lightweight summaries of active sessions associated with the selected branch.
+fn branch_session_summaries(model: &Model) -> Vec<screens::branches::DetailSessionSummary> {
+    branch_session_summaries_with(model, &gwt_sessions_dir())
+}
+
+fn branch_session_summaries_with(
+    model: &Model,
+    sessions_dir: &Path,
+) -> Vec<screens::branches::DetailSessionSummary> {
     let Some(branch) = model.branches.selected_branch() else {
-        return 0;
+        return Vec::new();
     };
-    let branch_name = &branch.name;
+
+    let branch_name = branch.name.as_str();
+    let branch_worktree = branch.worktree_path.as_deref().unwrap_or(model.repo_path());
+    let branch_shell_name = format!("Shell: {branch_name}");
+
     model
         .sessions
         .iter()
-        .filter(|s| s.name.contains(branch_name))
-        .count()
+        .enumerate()
+        .filter_map(|(index, session)| match &session.tab_type {
+            SessionTabType::Shell if session.name == branch_shell_name => {
+                Some(screens::branches::DetailSessionSummary {
+                    kind: "Shell",
+                    name: session.name.clone(),
+                    detail: None,
+                    active: index == model.active_session,
+                })
+            }
+            SessionTabType::Agent { .. } => {
+                let path = sessions_dir.join(format!("{}.toml", session.id));
+                let persisted = AgentSession::load(&path).ok()?;
+                if persisted.branch != branch_name || persisted.worktree_path != branch_worktree {
+                    return None;
+                }
+
+                let detail = match (
+                    persisted.model.as_deref(),
+                    persisted.reasoning_level.as_deref(),
+                ) {
+                    (Some(model), Some(reasoning)) => Some(format!("{model} · {reasoning}")),
+                    (Some(model), None) => Some(model.to_string()),
+                    (None, Some(reasoning)) => Some(reasoning.to_string()),
+                    (None, None) => None,
+                };
+
+                Some(screens::branches::DetailSessionSummary {
+                    kind: "Agent",
+                    name: session.name.clone(),
+                    detail,
+                    active: index == model.active_session,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
@@ -2827,12 +2873,12 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
         let detail_block = pane_block(detail_title, detail_focused);
         let detail_inner = detail_block.inner(chunks[1]);
         frame.render_widget(detail_block, chunks[1]);
-        let branch_session_count = count_sessions_for_branch(model);
+        let branch_sessions = branch_session_summaries(model);
         screens::branches::render_detail_content(
             &model.branches,
             frame,
             detail_inner,
-            branch_session_count,
+            &branch_sessions,
         );
     } else {
         // Single pane for all other tabs
@@ -4424,6 +4470,100 @@ mod tests {
             Some("sess-new")
         );
         assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
+    }
+
+    #[test]
+    fn branch_session_summaries_with_filters_to_selected_branch_and_marks_active() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        let other_worktree = repo_path.join("wt-feature-other");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+        fs::create_dir_all(&other_worktree).expect("create other worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+        }];
+
+        let mut matching = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
+        matching.model = Some("gpt-5.3-codex".to_string());
+        matching.reasoning_level = Some("high".to_string());
+        matching.display_name = "Codex".to_string();
+        matching.save(dir.path()).expect("persist matching session");
+
+        let mut stale_branch =
+            AgentSession::new(&selected_worktree, "feature/other", AgentId::ClaudeCode);
+        stale_branch.display_name = "Claude Code".to_string();
+        stale_branch.save(dir.path()).expect("persist stale branch");
+
+        let mut stale_worktree =
+            AgentSession::new(&other_worktree, "feature/test", AgentId::Gemini);
+        stale_worktree.display_name = "Gemini CLI".to_string();
+        stale_worktree
+            .save(dir.path())
+            .expect("persist stale worktree");
+
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: matching.id.clone(),
+                name: "Codex".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "codex".to_string(),
+                    color: crate::model::AgentColor::Blue,
+                },
+                vt: crate::model::VtState::new(24, 80),
+            },
+            crate::model::SessionTab {
+                id: stale_branch.id.clone(),
+                name: "Claude Code".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "claude".to_string(),
+                    color: crate::model::AgentColor::Green,
+                },
+                vt: crate::model::VtState::new(24, 80),
+            },
+            crate::model::SessionTab {
+                id: stale_worktree.id.clone(),
+                name: "Gemini CLI".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "gemini".to_string(),
+                    color: crate::model::AgentColor::Cyan,
+                },
+                vt: crate::model::VtState::new(24, 80),
+            },
+            crate::model::SessionTab {
+                id: "shell-branch".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+            },
+        ];
+        model.active_session = 0;
+
+        let summaries = branch_session_summaries_with(&model, dir.path());
+
+        assert_eq!(
+            summaries,
+            vec![
+                screens::branches::DetailSessionSummary {
+                    kind: "Agent",
+                    name: "Codex".to_string(),
+                    detail: Some("gpt-5.3-codex · high".to_string()),
+                    active: true,
+                },
+                screens::branches::DetailSessionSummary {
+                    kind: "Shell",
+                    name: "Shell: feature/test".to_string(),
+                    detail: None,
+                    active: false,
+                },
+            ]
+        );
     }
 
     #[test]

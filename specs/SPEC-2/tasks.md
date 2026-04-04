@@ -166,3 +166,11 @@ screens to use.
 - [x] T111 Update `app.rs` Branches key routing to use old-TUI branch-local mnemonics without regressing search or overlay behavior.
 - [x] T112 Update branch-specific footer hints and snapshots so the restored mnemonics are discoverable.
 - [x] T113 Verify focused mnemonic tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 10: Branch Detail Sessions Restoration
+
+- [x] T114 [P] Write RED test: `Sessions` detail renders branch-scoped session summaries with session type and active marker.
+- [x] T115 [P] Write RED test: session summary extraction only returns sessions that belong to the selected branch and flags the active session.
+- [x] T116 Add a lightweight branch-session summary helper in `app.rs` without touching `model.rs`.
+- [x] T117 Replace the count-only `Sessions` detail placeholder in `branches.rs` with the typed session list while preserving the empty state.
+- [x] T118 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

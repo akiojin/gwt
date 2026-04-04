@@ -77,6 +77,23 @@ entry point without requiring Ctrl+G for every follow-up action.
 - Update branch-specific footer hints to advertise the restored mnemonic set.
 - Add focused regression coverage and re-run workspace verification.
 
+### Phase 10: Branch Detail Sessions Restoration (5 tasks)
+Restore the Branch Detail `Sessions` pane from a count-only placeholder to a branch-scoped
+session summary list so the Branches view can function as the primary workspace entry point.
+
+10.1: Session summary extraction (2 tasks)
+- Build a lightweight render-time session summary from the selected branch without adding
+  new persistent state.
+- Limit the scope to `app.rs` and `branches.rs` to avoid reopening unrelated dirty files.
+
+10.2: Sessions pane rendering (2 tasks)
+- Replace the count-only placeholder with a typed list that shows Shell/Agent, session name,
+  and an active-session marker for the current tab.
+- Preserve the existing empty-state fallback when no sessions match the selected branch.
+
+10.3: Regression and verification (1 task)
+- Add focused extraction/render coverage and re-run workspace verification.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
