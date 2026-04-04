@@ -13,6 +13,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::widgets;
+
 /// Detail sections available for a spec.
 const DETAIL_SECTIONS: [&str; 6] = [
     "spec.md",
@@ -914,8 +916,8 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         section_name.to_string()
     };
 
-    let content_text = if state.detail_editing {
-        match state.detail_edit_heading.as_deref() {
+    if state.detail_editing {
+        let content_text = match state.detail_edit_heading.as_deref() {
             Some(heading) => format!(
                 "Editing section: {}\n{}_\nEnter: save | Esc: cancel | Backspace: delete",
                 heading, state.detail_edit_buffer
@@ -924,8 +926,17 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
                 "{}\n_\nEnter: save | Esc: cancel | Backspace: delete",
                 state.detail_edit_buffer
             ),
-        }
-    } else if state.editing {
+        };
+        let content_block = Block::default().title(tab_title);
+        let content = Paragraph::new(content_text)
+            .block(content_block)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::White));
+        frame.render_widget(content, chunks[1]);
+        return;
+    }
+
+    if state.editing {
         let options = if state.edit_options.is_empty() {
             vec![state.edit_field.clone()]
         } else {
@@ -944,12 +955,50 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        format!(
+        let content_text = format!(
             "Select {}:\n↑↓: choose value | Enter: save | Esc: cancel\n\n{}",
             edit_target_label(state.edit_target),
             option_lines
-        )
-    } else if let Some(root) = spec_root_for_state(state) {
+        );
+        let content_block = Block::default().title(tab_title);
+        let content = Paragraph::new(content_text)
+            .block(content_block)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::White));
+        frame.render_widget(content, chunks[1]);
+        return;
+    }
+
+    if let Some(root) = spec_root_for_state(state) {
+        if let Ok(content) = read_spec_markdown_file(root, &spec.id, section_name) {
+            if section_name == "spec.md" {
+                if let Some(section) = selected_section {
+                    let body = extract_markdown_section(&content, section)
+                        .unwrap_or_else(|| "(empty section)".to_string());
+                    let prelude = format!(
+                        "Selected section: {}\n↑↓: choose section | Ctrl+e: edit selected section | E: edit file",
+                        section.title
+                    );
+                    widgets::markdown::render_with_prelude(
+                        &tab_title, &prelude, &body, frame, chunks[1],
+                    );
+                } else {
+                    widgets::markdown::render_with_prelude(
+                        &tab_title,
+                        "Ctrl+e or E edits the entire file until a top-level section exists.",
+                        &content,
+                        frame,
+                        chunks[1],
+                    );
+                }
+            } else {
+                widgets::markdown::render(&tab_title, &content, frame, chunks[1]);
+            }
+            return;
+        }
+    }
+
+    let content_text = if let Some(root) = spec_root_for_state(state) {
         read_spec_markdown_file(root, &spec.id, section_name)
             .map(|content| {
                 if section_name == "spec.md" {
@@ -1740,6 +1789,76 @@ mod tests {
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("Selected section: User Stories"));
         assert!(text.contains("↑↓: choose section"));
+    }
+
+    #[test]
+    fn render_detail_analysis_md_uses_markdown_bullet_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-106A");
+        fs::write(
+            super::spec_markdown_path(dir.path(), "SPEC-106A", "analysis.md"),
+            "## Findings\n\n- first issue\n",
+        )
+        .unwrap();
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-106A".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.detail_view = true;
+        state.detail_section = 3;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("• first issue"));
+        assert!(!text.contains("- first issue"));
+    }
+
+    #[test]
+    fn render_detail_spec_md_section_uses_markdown_bullet_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-106B");
+        fs::write(
+            super::spec_markdown_path(dir.path(), "SPEC-106B", "spec.md"),
+            "# SPEC fixture\n\n## User Stories\n\n### Story\n\n- bullet item\n",
+        )
+        .unwrap();
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-106B".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.detail_view = true;
+        state.detail_section = 0;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("• bullet item"));
+        assert!(!text.contains("- bullet item"));
     }
 
     // ---- LaunchAgent tests ----

@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. The management shell now exposes a live Specs tab again, and the shell can load local `metadata.json` entries, open detail, and launch the wizard with SPEC id/title/spec.md context plus a title-derived branch seed. The live shell now exposes phase edit (`e`) and status edit (`s`) as constrained selection menus in SPEC detail, keeps raw active-file edit available with `E`, and supports section-scoped `spec.md` editing by selecting a `##` section with `Up/Down` before pressing `Ctrl+e`. Semantic search and markdown-rendered detail parity remain incomplete.
+gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. The management shell now exposes a live Specs tab again, and the shell can load local `metadata.json` entries, open detail, and launch the wizard with SPEC id/title/spec.md context plus a title-derived branch seed. The live shell now exposes phase edit (`e`) and status edit (`s`) as constrained selection menus in SPEC detail, keeps raw active-file edit available with `E`, supports section-scoped `spec.md` editing by selecting a `##` section with `Up/Down` before pressing `Ctrl+e`, and now routes read-only artifact detail through the shared markdown renderer. Semantic search remains incomplete.
 
 ## User Stories
 
@@ -74,7 +74,7 @@ As a developer, I want to generate a new SPEC through a guided wizard so that I 
 | ID | Requirement | Priority | Status |
 |----|-------------|----------|--------|
 | FR-001 | SPEC list shows id, title, status, phase from metadata.json | P0 | Implemented |
-| FR-002 | Detail view renders markdown for all artifact types, including `analysis.md` | P0 | Partially Implemented |
+| FR-002 | Detail view renders markdown for all artifact types, including `analysis.md` | P0 | Implemented |
 | FR-003 | Semantic search via ChromaDB index (action_index_specs, action_search_specs) | P1 | Not Implemented |
 | FR-004 | Search results ranked by relevance score | P1 | Not Implemented |
 | FR-005 | Shift+Enter on SPEC opens agent launch wizard with SPEC context | P1 | Implemented |

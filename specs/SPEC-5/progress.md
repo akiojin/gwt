@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `43/43` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T04:43:45Z`
+- Artifact refresh: `2026-04-04T04:48:48Z`
 
 ## Done
 - The management shell now exposes a live Specs tab again.
@@ -14,14 +14,13 @@
 - Specs detail now exposes live edit keypaths for metadata and content edits: `e` starts phase selection, `s` starts status selection, `Ctrl+e` edits the selected `spec.md` section body, and `E` opens a raw file edit buffer.
 - Phase/status metadata editing now uses constrained selection menus in detail view, so `Up` / `Down` choose a valid metadata value and `Enter` persists it into `metadata.json`.
 - `spec.md` detail now supports section-scoped editing with stable targeting: `Up` / `Down` select parsed `##` sections, fenced-code pseudo-headings are ignored, duplicate section titles are disambiguated by section order, and save now fails instead of appending a duplicate section when the selected section disappears.
+- Read-only Specs detail now routes `spec.md` section bodies and the other artifact tabs through the shared markdown renderer, so headings and list bullets render consistently in-place.
 - Tasks marked obsolete in `tasks.md` are now explicitly tracked as replaced by
   the live shell flow, `gwt-spec-search`, or simplified metadata editing.
-- The execution task list is fully checked, but `spec.md` still intentionally
-  records remaining gaps around semantic search and markdown-rendered detail
-  parity.
+- The execution task list is fully checked, and the remaining implementation
+  gap tracked in `spec.md` is now semantic search only.
 
 ## Next
-- Decide whether to implement or explicitly de-scope semantic search and
-  markdown-rendered detail parity.
+- Decide whether to implement or explicitly de-scope semantic search.
 - Re-run the reviewer flow on the current branch after that scope decision and
   before any `Done` transition.

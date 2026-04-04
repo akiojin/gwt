@@ -25,8 +25,11 @@ Status: CLEAR
   with `Ctrl+e`; fenced-code pseudo-headings are ignored, duplicate titles are
   disambiguated by section order, and save now errors if the selected section
   no longer matches the file.
-- Notes: The remaining implementation gaps are still the ones called out in
-  `spec.md`: semantic search and markdown-rendered detail parity.
+- Notes: Read-only Specs detail now routes artifact content through the shared
+  markdown renderer, so `analysis.md`, the other artifact tabs, and selected
+  `spec.md` section bodies render headings and bullet lists consistently.
+- Notes: The remaining implementation gap called out in `spec.md` is semantic
+  search.
   Completion-gate review remains future work after those gaps are either
   implemented or explicitly de-scoped.
 

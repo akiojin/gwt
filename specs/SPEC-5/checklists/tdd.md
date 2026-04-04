@@ -7,6 +7,7 @@
 - [x] The live-shell metadata/content edit reachability now has focused coverage for `e` (phase selection), `s` (status selection), `Ctrl+e` (selected section edit), and `E` (raw file edit).
 - [x] The metadata selection-menu path now has focused coverage for `Up` / `Down` cycling, constrained rendering, and persisted save behavior.
 - [x] The `spec.md` section-scoped edit path now has focused coverage for heading selection, duplicate-heading disambiguation, nested-heading-safe replacement, fenced-code filtering, disappeared-section save errors, and section-selection hints.
+- [x] Read-only Specs detail now has focused coverage for markdown-rendered artifact tabs and markdown-rendered selected `spec.md` section bodies.
 - [x] Each remaining execution gap has a focused failing test or a repeatable manual check defined in `quickstart.md`.
 - [x] The latest implementation slice has spec-focused verification evidence attached to it.
 - [x] The reviewer flow in `quickstart.md` has been captured as repeatable completion evidence, and helper-level persistence tests are no longer presented as live-shell evidence.
