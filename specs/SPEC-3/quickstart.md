@@ -58,11 +58,10 @@
    below the `Branch: ...` context line instead of leaving an extra blank row
    before the grouped list.
 24. Verify consecutive Quick Start agent groups now render without a blank
-   spacer row between them while the final separator before `Choose
-   different settings...` still remains visible.
-25. Verify the separator before `Choose different settings...` is now compact
-   rather than a full-width rule, while the final action still reads as a
-   distinct footer choice.
+   spacer row between them while `Choose different settings...` still follows
+   the grouped history as the final footer action.
+25. Verify `Choose different settings...` now appears directly below the last
+   grouped `Start new` row without an extra separator line.
 26. Verify wide popups now render `Choose different settings... - Open full
    setup` while narrow popups fall back to the label-only row.
 
@@ -108,10 +107,9 @@
 - Quick Start now matches that denser popup rhythm as well, with grouped
   history rows starting immediately below the branch context line.
 - Quick Start agent groups now render back-to-back without spacer rows,
-  making the grouped history denser while preserving the final separator and
-  footer action.
-- The final `Choose different settings...` action now uses a compact
-  separator, so the footer remains distinct without a heavy full-width rule.
+  making the grouped history denser while preserving the final footer action.
+- The final `Choose different settings...` action now follows the last grouped
+  row directly instead of being separated by its own divider.
 - The final `Choose different settings...` row now explains itself on wide
   popups via `label - description` formatting and keeps the old label-only
   fallback on narrow widths.

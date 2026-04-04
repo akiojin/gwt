@@ -233,6 +233,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage for wide-width description rendering and
    narrow-width fallback behavior.
 
+### Phase 23: QuickStart Footer Separator Removal
+
+1. Remove the remaining footer separator so `Choose different settings...`
+   follows the last grouped `Start new` action directly in the old-TUI rhythm.
+2. Preserve the final action's selection semantics and wide/narrow rendering
+   contract while only tightening the vertical density of the grouped history.
+3. Add focused RED/GREEN coverage proving the final action now follows the last
+   grouped row without an extra separator line.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

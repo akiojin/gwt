@@ -233,10 +233,10 @@ As a developer, I want to convert an existing session to a different agent type 
   popup matches the old-TUI information density.
 - **FR-028**: `QuickStart` does not insert blank spacer rows between agent
   groups; the next agent header follows directly after the previous group's
-  `Start new` action while preserving grouped headers and the final separator.
-- **FR-029**: The `QuickStart` footer uses a compact separator before
-  `Choose different settings...` instead of a full-width rule, preserving the
-  end-action boundary while matching the lighter old-TUI popup chrome.
+  `Start new` action while preserving grouped headers and the final action.
+- **FR-029**: The final `Choose different settings...` action follows the last
+  grouped `Start new` row directly without an extra separator line, so the
+  `QuickStart` popup keeps the denser old-TUI rhythm.
 - **FR-030**: On wider popups, `Choose different settings...` renders as an
   old-TUI `label - description` row (`Open full setup`); on narrow widths it
   falls back to the label-only row so the final action stays readable.

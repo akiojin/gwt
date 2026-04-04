@@ -175,3 +175,9 @@
 - [x] T093 [P] Write RED test: `Choose different settings...` falls back to the label-only row on narrow popups.
 - [x] T094 Render the final QuickStart action as a `label - description` row on wide widths while preserving narrow-width fallback.
 - [x] T095 Verify focused footer-action tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 23: QuickStart Footer Separator Removal
+
+- [x] T096 [P] Write RED test: `Choose different settings...` follows the last grouped `Start new` row without an extra separator line.
+- [x] T097 Remove the remaining footer separator so the final action follows the last grouped row directly while preserving selection semantics.
+- [x] T098 Verify focused footer-density tests, broad workspace checks, and refresh SPEC-3 artifacts.

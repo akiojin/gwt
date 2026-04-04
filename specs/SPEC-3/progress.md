@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `101/101` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:33:39Z`
+- Task progress: `104/104` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:39:49Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -65,11 +65,11 @@
   `Branch: ...` context line instead of reserving an extra spacer row, which
   restores the old-TUI popup density.
 - `QuickStart` agent groups now render back-to-back without blank spacer rows
-  between them, preserving headers and the final `Choose different` separator
-  while matching the denser old-TUI grouped layout.
-- The `QuickStart` footer now uses a compact separator before `Choose
-  different settings...` instead of a full-width rule, which keeps the final
-  action distinct without overwhelming the popup chrome.
+  between them, preserving headers while matching the denser old-TUI grouped
+  layout.
+- The final `Choose different settings...` action now follows the last grouped
+  `Start new` row directly without an extra separator line, completing the
+  denser old-TUI footer rhythm.
 - On wide popups, `Choose different settings...` now renders as a descriptive
   old-TUI footer row (`label - description`), while narrow widths keep the
   label-only fallback for readability.

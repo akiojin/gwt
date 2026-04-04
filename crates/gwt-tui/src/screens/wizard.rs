@@ -1531,11 +1531,6 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         );
     }
 
-    items.push(
-        ListItem::new("─".repeat(list_area.width.min(12) as usize))
-            .style(Style::default().fg(Color::DarkGray)),
-    );
-
     let choose_index = state.quick_start_entries.len() * 2;
     let choose_marker = if state.selected >= choose_index {
         "> "
@@ -1906,12 +1901,6 @@ mod tests {
             out.push('\n');
         }
         out
-    }
-
-    fn line_text(buf: &Buffer, y: u16) -> String {
-        (0..buf.area.width)
-            .map(|x| buf[(x, y)].symbol())
-            .collect::<String>()
     }
 
     fn render_buffer(state: &WizardState, width: u16, height: u16) -> Buffer {
@@ -2608,21 +2597,22 @@ mod tests {
     }
 
     #[test]
-    fn render_quick_start_footer_uses_compact_separator_before_choose_different() {
+    fn render_quick_start_choose_different_follows_last_group_without_separator() {
         let mut state = WizardState::default();
         state.step = WizardStep::QuickStart;
         state.has_quick_start = true;
         state.branch_name = "feature/test".to_string();
-        state.quick_start_entries = sample_quick_start_entries();
+        state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
 
         let buf = render_buffer(&state, 100, 24);
+        let (_, start_new_y) =
+            find_text_position(&buf, "Start new with previous settings").unwrap();
         let (_, choose_y) = find_text_position(&buf, "Choose different settings...").unwrap();
-        let separator_line = line_text(&buf, choose_y - 1);
 
         assert_eq!(
-            separator_line.trim(),
-            "────────────",
-            "the footer separator should be compact rather than a full-width rule"
+            choose_y,
+            start_new_y + 1,
+            "the final action should follow the last quick-start action without an extra separator row"
         );
     }
 
