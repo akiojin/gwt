@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `192/192` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T09:12:54Z`
+- Artifact refresh: `2026-04-04T09:16:26Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.

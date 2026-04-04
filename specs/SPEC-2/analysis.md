@@ -38,3 +38,4 @@ Status: CLEAR
 - Notes: Phase 27 aligns the visible guidance with the restored behavior: Branches-list and generic management-list status-bar hints now advertise `Esc:term` so the supplemental escape hatch is discoverable again.
 - Notes: Phase 28 closes the remaining focus-topology drift inside management: `Tab` / `BackTab` now keep non-Branches tabs on the two real surfaces (`Terminal` and `TabContent`), while Branches retains the old three-surface cycle that includes `BranchDetail`.
 - Notes: Phase 29 closes the remaining fixed-width layout drift by making the management split responsive again: `>=120 cols` keeps `40/60`, while narrower widths fall back to `50/50` through the same shared helper used for render-time layout and active-session geometry.
+- Notes: The canonical spec/plan artifacts now state that the three-surface focus loop is Branches-only, eliminating the earlier contradiction with the Phase 28 implementation.

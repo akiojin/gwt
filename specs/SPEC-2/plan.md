@@ -238,6 +238,14 @@ instead of spending most of the narrow pane on a full repository path.
 
 20.1: Compact context contract (2 tasks)
 - Render the repository basename instead of the full repository path in the management header.
+- Show the active management context in the same line so the header carries tab/focus meaning without widening the pane chrome.
+
+20.2: Focused render coverage (2 tasks)
+- Add focused coverage for the compact repository/context header text.
+- Add focused coverage for the Branch Detail focus variant so the header changes as focus moves inside the management pane.
+
+20.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
 ### Phase 28: Tab-Aware Management Focus Cycle (5 tasks)
 Close the remaining supplemental-surface focus gap by making `Tab` / `BackTab` respect which
@@ -267,14 +275,6 @@ layout files outside `app.rs`.
 - Add focused coverage proving `active_session_content_area()` follows the same helper at both widths.
 
 29.3: Verification (1 task)
-- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
-- Show the active management context in the same line so the header carries tab/focus meaning without widening the pane chrome.
-
-20.2: Focused render coverage (2 tasks)
-- Add focused coverage for the compact repository/context header text.
-- Add focused coverage for the Branch Detail focus variant so the header changes as focus moves inside the management pane.
-
-20.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)

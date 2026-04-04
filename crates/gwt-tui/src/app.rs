@@ -6942,6 +6942,21 @@ mod tests {
     }
 
     #[test]
+    fn update_key_input_tab_on_non_branches_management_normalizes_stale_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::BranchDetail;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
     fn switch_management_tab_settings_loads_fields() {
         let mut model = test_model();
         assert!(model.settings.fields.is_empty());
