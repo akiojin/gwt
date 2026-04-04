@@ -385,6 +385,21 @@ the status bar no longer overclaims sub-tab controls or the wrong `Esc` action.
 36.3: Verification (1 task)
 - Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
 
+### Phase 37: Consume Branch Detail Esc Before Warn Fallback (5 tasks)
+Keep the old-TUI Branch Detail `Esc:back` behavior pure even while a warn notification is visible,
+so the detail pane exits first and warn dismissal remains a later fallback from the list surface.
+
+37.1: Esc consumption contract (2 tasks)
+- Branch Detail `Esc` returns focus to the Branches list without mutating detail context even when a warn notification is visible.
+- That same `Esc` does not dismiss the warn notification; a later unclaimed `Esc` from the list surface may dismiss it through the existing management fallback.
+
+37.2: Focused routing coverage (2 tasks)
+- Add RED coverage that Branch Detail `Esc` with a warn toast preserves the warning while returning focus to the list.
+- Add RED coverage that a second `Esc` from the list surface still dismisses the warn notification through the normal fallback path.
+
+37.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

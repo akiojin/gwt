@@ -111,6 +111,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
   - Old-TUI local mnemonics remain available from the detail pane as well: `m` toggles the Branches view mode, `v` jumps to Git View, `f` starts Branches search and returns focus to the list, and `?` / `h` opens the help overlay
   - The Branch Detail pane title keeps the selected branch name visible alongside the section tabs so context is preserved after focus moves off the top list
   - Esc in Branch Detail returns focus to the branch list without clearing the selected branch, active section, or session-row selection
+  - That Branch Detail `Esc` back action is consumed locally; it does not dismiss warn notifications until a later unclaimed `Esc` occurs from the list surface
   - Left/Right cycles between sections within the detail view.
   - Enter in the detail pane directly launches agent (no action modal).
   - PR creation and branch deletion are NOT included (use CLI).

@@ -386,3 +386,11 @@ banner in favor of pane-title chrome.
 - [x] T247 [P] Write RED test: Settings list keeps `Ctrl+←→:sub-tab` while Git View omits it.
 - [x] T248 Update `app.rs` footer hint rendering so non-Branches tabs advertise tab/mode-specific `Esc` and sub-tab affordances.
 - [x] T249 Refresh `SPEC-2` artifacts and verify focused tests and workspace checks.
+
+## Phase 37: Consume Branch Detail Esc Before Warn Fallback
+
+- [x] T250 [P] Write RED test: Branch Detail `Esc` with a warn notification returns focus to the list while preserving the warning.
+- [x] T251 [P] Write RED test: a second `Esc` from the Branches list still dismisses the warn notification through the normal fallback.
+- [x] T252 [P] Write RED test: Branch Detail `Esc` with warn still preserves selected branch/detail/session context.
+- [x] T253 Update `app.rs` Branch Detail routing so the local `Esc:back` action is consumed before warn-dismiss fallback runs.
+- [x] T254 Refresh `SPEC-2` artifacts and verify focused tests and workspace checks.

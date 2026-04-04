@@ -1053,14 +1053,12 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Esc => {
             model.active_focus = FocusPane::TabContent;
-            None
+            return;
         }
         _ => None,
     };
     if let Some(m) = msg {
         update(model, Message::Branches(m));
-    } else if key.code == KeyCode::Esc && model.active_focus == FocusPane::BranchDetail {
-        // Handled above: Esc returns to the branch list without mutating detail state.
     } else if key.code == KeyCode::Esc {
         dismiss_warn_notification(model);
     }
@@ -7019,6 +7017,58 @@ mod tests {
                 .map(|branch| branch.name.as_str()),
             Some("feature/esc-back")
         );
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_esc_with_warn_preserves_notification_and_returns_to_list() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/esc-back".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+        }];
+        model.branches.selected = 0;
+        model.branches.detail_section = 3;
+        model.branches.detail_session_selected = 4;
+        model.active_focus = FocusPane::BranchDetail;
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(model.current_notification.is_some());
+        assert_eq!(model.branches.selected, 0);
+        assert_eq!(model.branches.detail_section, 3);
+        assert_eq!(model.branches.detail_session_selected, 4);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_esc_with_warn_allows_second_escape_to_dismiss_from_list() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/esc-back".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+        }];
+        model.active_focus = FocusPane::BranchDetail;
+        update(
+            &mut model,
+            Message::Notify(Notification::new(Severity::Warn, "git", "Detached HEAD")),
+        );
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(model.current_notification.is_none());
     }
 
     #[test]
