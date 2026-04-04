@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `182/182` completed items after closing Phase 27 for status-bar hint parity.
+- Task traceability snapshot: `tasks.md` currently records `187/187` completed items after closing Phase 28 for tab-aware management focus cycling.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -36,3 +36,4 @@ Status: CLEAR
 - Notes: Phase 25 completes the management-pane side of that supplemental contract: once search/detail/edit flows are out of the way, plain `Esc` now returns focus to `Terminal`, while warn notifications still keep dismissal priority.
 - Notes: Phase 26 closes the one remaining tab-specific hole in that contract: `Profiles` list mode now uses the same supplemental `Esc` fallback, while create/edit/delete flows still keep `Esc=Cancel`.
 - Notes: Phase 27 aligns the visible guidance with the restored behavior: Branches-list and generic management-list status-bar hints now advertise `Esc:term` so the supplemental escape hatch is discoverable again.
+- Notes: Phase 28 closes the remaining focus-topology drift inside management: `Tab` / `BackTab` now keep non-Branches tabs on the two real surfaces (`Terminal` and `TabContent`), while Branches retains the old three-surface cycle that includes `BranchDetail`.

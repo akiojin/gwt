@@ -311,3 +311,11 @@ screens to use.
 - [x] T202 Update `app.rs` status-bar hint text so Branches list and generic management lists advertise `Esc:term`.
 - [x] T203 Refresh `SPEC-2` artifacts to describe hint parity with the supplemental escape contract.
 - [x] T204 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 28: Tab-Aware Management Focus Cycle
+
+- [x] T205 [P] Write RED test: `Tab` on a non-Branches management tab skips `BranchDetail` and returns focus to `Terminal`.
+- [x] T206 [P] Write RED test: `BackTab` on a non-Branches management tab skips `BranchDetail` and returns focus to `TabContent`.
+- [x] T207 [P] Write RED test: `Branches` still retains the old three-surface focus cycle and can enter `BranchDetail`.
+- [x] T208 Update `app.rs` management focus cycling so non-Branches tabs use a two-state `Terminal <-> TabContent` loop while Branches keeps the three-state loop.
+- [x] T209 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

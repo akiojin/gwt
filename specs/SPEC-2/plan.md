@@ -238,6 +238,21 @@ instead of spending most of the narrow pane on a full repository path.
 
 20.1: Compact context contract (2 tasks)
 - Render the repository basename instead of the full repository path in the management header.
+
+### Phase 28: Tab-Aware Management Focus Cycle (5 tasks)
+Close the remaining supplemental-surface focus gap by making `Tab` / `BackTab` respect which
+management tabs actually have a second pane.
+
+28.1: Focus-cycle contract (2 tasks)
+- Keep `Branches` on the existing three-surface cycle: `Terminal <-> TabContent <-> BranchDetail`.
+- Restrict every other management tab to a two-surface cycle: `Terminal <-> TabContent`.
+
+28.2: Focused routing coverage (2 tasks)
+- Add focused coverage for `Tab` on a non-Branches management tab so it skips `BranchDetail`.
+- Add focused coverage for `BackTab` on a non-Branches management tab so it also skips `BranchDetail`.
+
+28.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 - Show the active management context in the same line so the header carries tab/focus meaning without widening the pane chrome.
 
 20.2: Focused render coverage (2 tasks)

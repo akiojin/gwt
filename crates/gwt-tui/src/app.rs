@@ -171,11 +171,11 @@ pub fn update(model: &mut Model, msg: Message) {
                 if !is_in_text_input_mode(model) {
                     match key.code {
                         KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            model.active_focus = model.active_focus.next();
+                            model.active_focus = next_management_focus(model, false);
                             return;
                         }
                         KeyCode::BackTab => {
-                            model.active_focus = model.active_focus.prev();
+                            model.active_focus = next_management_focus(model, true);
                             return;
                         }
                         _ => {}
@@ -1674,6 +1674,25 @@ fn fallback_management_escape(model: &mut Model) {
         update(model, Message::DismissNotification);
     } else {
         model.active_focus = FocusPane::Terminal;
+    }
+}
+
+fn next_management_focus(model: &Model, reverse: bool) -> FocusPane {
+    if model.management_tab == ManagementTab::Branches {
+        return if reverse {
+            model.active_focus.prev()
+        } else {
+            model.active_focus.next()
+        };
+    }
+
+    match (model.active_focus, reverse) {
+        (FocusPane::Terminal, false) => FocusPane::TabContent,
+        (FocusPane::TabContent, false) => FocusPane::Terminal,
+        (FocusPane::BranchDetail, false) => FocusPane::Terminal,
+        (FocusPane::Terminal, true) => FocusPane::TabContent,
+        (FocusPane::TabContent, true) => FocusPane::Terminal,
+        (FocusPane::BranchDetail, true) => FocusPane::TabContent,
     }
 }
 
@@ -6864,6 +6883,51 @@ mod tests {
         );
 
         assert!(model.confirm.accepted());
+    }
+
+    #[test]
+    fn update_key_input_tab_on_non_branches_management_skips_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn update_key_input_backtab_on_non_branches_management_skips_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Logs;
+        model.active_focus = FocusPane::Terminal;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::BackTab, KeyModifiers::SHIFT)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_key_input_tab_on_branches_still_cycles_into_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 
     #[test]
