@@ -15,11 +15,14 @@
 - PR dashboard now loads live PR list data when the tab gains focus and when
   `r` refresh is triggered, so the screen is no longer a static renderer over
   test-only state.
-- The remaining gap is completion-gate review and the explicitly partial
-  GitHub fields called out in `spec.md`, not unchecked execution tasks.
+- PR dashboard detail now loads a live per-PR report when detail view opens and
+  refreshes that report together with the list, so CI / merge / review detail
+  is no longer a static echo of the list row.
+- The remaining gap is completion-gate review plus the explicitly partial
+  GraphQL/REST transport note in `spec.md`, not unchecked execution tasks.
 
 ## Next
-- Run the reviewer flow and capture final evidence for the partial GitHub data
-  surfaces that are already live.
+- Run the reviewer flow and capture final evidence for the live GitHub data
+  surfaces that are now wired.
 - Reconcile acceptance against the current partial implementation before any
   `Done` transition.

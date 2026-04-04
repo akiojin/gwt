@@ -521,15 +521,15 @@ fn load_pr_dashboard(model: &mut Model) {
     load_pr_dashboard_with(model, gwt_git::fetch_pr_list);
 }
 
-fn refresh_pr_dashboard(model: &mut Model) {
-    refresh_pr_dashboard_with(model, gwt_git::fetch_pr_list);
-}
-
-fn refresh_pr_dashboard_with<F>(model: &mut Model, fetch_prs: F)
+fn refresh_pr_dashboard_with<F, D>(model: &mut Model, fetch_prs: F, fetch_detail: D)
 where
     F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+    D: FnOnce(&std::path::Path, u32) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport>,
 {
     load_pr_dashboard_with(model, fetch_prs);
+    if model.pr_dashboard.detail_view {
+        load_pr_dashboard_detail_with(model, fetch_detail);
+    }
 }
 
 fn load_pr_dashboard_with<F>(model: &mut Model, fetch_prs: F)
@@ -544,6 +544,130 @@ where
         &mut model.pr_dashboard,
         screens::pr_dashboard::PrDashboardMessage::SetPrs(items),
     );
+}
+
+fn load_pr_dashboard_detail_with<F>(model: &mut Model, fetch_detail: F)
+where
+    F: FnOnce(&std::path::Path, u32) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport>,
+{
+    let Some(pr) = model.pr_dashboard.selected_pr() else {
+        return;
+    };
+
+    let Ok(detail) = fetch_detail(&model.repo_path, pr.number) else {
+        return;
+    };
+
+    screens::pr_dashboard::update(
+        &mut model.pr_dashboard,
+        screens::pr_dashboard::PrDashboardMessage::SetDetailReport(Some(detail)),
+    );
+}
+
+fn fetch_pr_dashboard_detail_report(
+    repo_path: &std::path::Path,
+    number: u32,
+) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "title,state,mergeable,reviewDecision,statusCheckRollup",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| gwt_core::GwtError::Git(format!("gh pr view: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(gwt_core::GwtError::Git(format!(
+            "gh pr view: {}",
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_pr_dashboard_detail_report_json(&stdout)
+}
+
+fn parse_pr_dashboard_detail_report_json(
+    json: &str,
+) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|err| gwt_core::GwtError::Other(format!("gh pr view JSON: {err}")))?;
+
+    let ci_status = match value.get("statusCheckRollup") {
+        Some(serde_json::Value::Array(checks)) if checks.is_empty() => "pending".to_string(),
+        Some(serde_json::Value::Array(checks)) => {
+            let any_fail = checks.iter().any(|check| {
+                check
+                    .get("conclusion")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| matches!(s, "FAILURE" | "CANCELLED" | "TIMED_OUT"))
+            });
+            let all_pass = checks.iter().all(|check| {
+                check
+                    .get("conclusion")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| matches!(s, "SUCCESS" | "NEUTRAL" | "SKIPPED"))
+            });
+            if any_fail {
+                "failing".to_string()
+            } else if all_pass {
+                "passing".to_string()
+            } else {
+                "pending".to_string()
+            }
+        }
+        _ => "unknown".to_string(),
+    };
+
+    let merge_status = match value.get("mergeable").and_then(|v| v.as_str()) {
+        Some("MERGEABLE") => "ready".to_string(),
+        Some("CONFLICTING") => "conflicts".to_string(),
+        Some(_) => "blocked".to_string(),
+        None => "unknown".to_string(),
+    };
+
+    let review_status = match value.get("reviewDecision").and_then(|v| v.as_str()) {
+        Some("APPROVED") => "approved".to_string(),
+        Some("CHANGES_REQUESTED") => "changes_requested".to_string(),
+        Some("REVIEW_REQUIRED") => "pending".to_string(),
+        _ => "unknown".to_string(),
+    };
+
+    let checks = value
+        .get("statusCheckRollup")
+        .and_then(|v| v.as_array())
+        .map(|checks| {
+            checks
+                .iter()
+                .map(|check| {
+                    let name = check
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let conclusion = check
+                        .get("conclusion")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| check.get("status").and_then(|v| v.as_str()))
+                        .unwrap_or("UNKNOWN")
+                        .to_ascii_lowercase();
+                    format!("{name}: {conclusion}")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(screens::pr_dashboard::PrDetailReport {
+        summary: format!("CI {ci_status}, merge {merge_status}, review {review_status}"),
+        ci_status,
+        merge_status,
+        review_status,
+        checks,
+    })
 }
 
 fn map_pr_item(pr: gwt_git::PrStatus) -> screens::pr_dashboard::PrItem {
@@ -706,7 +830,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::git_view::GitViewMessage;
     use screens::issues::IssuesMessage;
     use screens::logs::LogsMessage;
-    use screens::pr_dashboard::PrDashboardMessage;
     use screens::profiles::ProfilesMessage;
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
@@ -915,19 +1038,15 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::PrDashboard => {
-            let msg = match key.code {
-                KeyCode::Down => Some(PrDashboardMessage::MoveDown),
-                KeyCode::Up => Some(PrDashboardMessage::MoveUp),
-                KeyCode::Enter => Some(PrDashboardMessage::ToggleDetail),
-                KeyCode::Char('r') => Some(PrDashboardMessage::Refresh),
-                _ => None,
-            };
-            if let Some(m) = msg {
-                let should_refresh = matches!(m, PrDashboardMessage::Refresh);
-                screens::pr_dashboard::update(&mut model.pr_dashboard, m);
-                if should_refresh {
-                    refresh_pr_dashboard(model);
-                }
+            if matches!(
+                key.code,
+                KeyCode::Down | KeyCode::Up | KeyCode::Enter | KeyCode::Char('r')
+            ) {
+                route_key_to_management_pr_dashboard_with(
+                    model,
+                    key,
+                    fetch_pr_dashboard_detail_report,
+                );
             } else if key.code == KeyCode::Esc {
                 dismiss_warn_notification(model);
             }
@@ -946,6 +1065,36 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             if let Some(m) = msg {
                 screens::profiles::update(&mut model.profiles, m);
             }
+        }
+    }
+}
+
+fn route_key_to_management_pr_dashboard_with<F>(
+    model: &mut Model,
+    key: crossterm::event::KeyEvent,
+    fetch_detail: F,
+) where
+    F: FnOnce(&std::path::Path, u32) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport>,
+{
+    use screens::pr_dashboard::PrDashboardMessage;
+
+    let msg = match key.code {
+        KeyCode::Down => Some(PrDashboardMessage::MoveDown),
+        KeyCode::Up => Some(PrDashboardMessage::MoveUp),
+        KeyCode::Enter => Some(PrDashboardMessage::ToggleDetail),
+        KeyCode::Char('r') => Some(PrDashboardMessage::Refresh),
+        _ => None,
+    };
+
+    if let Some(m) = msg {
+        let should_open_detail =
+            matches!(m, PrDashboardMessage::ToggleDetail) && !model.pr_dashboard.detail_view;
+        let should_refresh = matches!(m, PrDashboardMessage::Refresh);
+        screens::pr_dashboard::update(&mut model.pr_dashboard, m);
+        if should_open_detail && model.pr_dashboard.detail_view {
+            load_pr_dashboard_detail_with(model, fetch_detail);
+        } else if should_refresh {
+            refresh_pr_dashboard_with(model, gwt_git::fetch_pr_list, fetch_detail);
         }
     }
 }
@@ -3188,17 +3337,29 @@ mod tests {
         assert_eq!(model.pr_dashboard.prs.len(), 1);
         assert_eq!(model.pr_dashboard.prs[0].number, 7);
 
-        refresh_pr_dashboard_with(&mut model, |_repo_path| {
-            Ok(vec![gwt_git::PrStatus {
-                number: 8,
-                title: "Updated".into(),
-                state: GitPrState::Merged,
-                url: "https://example.com/pr/8".into(),
-                ci_status: "FAILURE".into(),
-                mergeable: "CONFLICTING".into(),
-                review_status: "CHANGES_REQUESTED".into(),
-            }])
-        });
+        refresh_pr_dashboard_with(
+            &mut model,
+            |_repo_path| {
+                Ok(vec![gwt_git::PrStatus {
+                    number: 8,
+                    title: "Updated".into(),
+                    state: GitPrState::Merged,
+                    url: "https://example.com/pr/8".into(),
+                    ci_status: "FAILURE".into(),
+                    mergeable: "CONFLICTING".into(),
+                    review_status: "CHANGES_REQUESTED".into(),
+                }])
+            },
+            |_repo_path, _number| {
+                Ok(screens::pr_dashboard::PrDetailReport {
+                    summary: "CI failing".into(),
+                    ci_status: "failing".into(),
+                    merge_status: "conflicts".into(),
+                    review_status: "changes_requested".into(),
+                    checks: vec!["lint: failure".into()],
+                })
+            },
+        );
 
         assert_eq!(model.pr_dashboard.prs.len(), 1);
         assert_eq!(model.pr_dashboard.prs[0].number, 8);
@@ -3210,6 +3371,125 @@ mod tests {
             model.pr_dashboard.prs[0].state,
             screens::pr_dashboard::PrState::Merged
         );
+    }
+
+    #[test]
+    fn refresh_pr_dashboard_with_in_detail_view_updates_detail_report() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::PrDashboard;
+        screens::pr_dashboard::update(
+            &mut model.pr_dashboard,
+            screens::pr_dashboard::PrDashboardMessage::SetPrs(vec![
+                screens::pr_dashboard::PrItem {
+                    number: 8,
+                    title: "Updated".into(),
+                    state: screens::pr_dashboard::PrState::Open,
+                    ci_status: "success".into(),
+                    mergeable: true,
+                    review_status: "approved".into(),
+                },
+            ]),
+        );
+        model.pr_dashboard.detail_view = true;
+
+        refresh_pr_dashboard_with(
+            &mut model,
+            |_repo_path| {
+                Ok(vec![gwt_git::PrStatus {
+                    number: 8,
+                    title: "Updated".into(),
+                    state: GitPrState::Open,
+                    url: "https://example.com/pr/8".into(),
+                    ci_status: "SUCCESS".into(),
+                    mergeable: "MERGEABLE".into(),
+                    review_status: "APPROVED".into(),
+                }])
+            },
+            |_repo_path, number| {
+                assert_eq!(number, 8);
+                Ok(screens::pr_dashboard::PrDetailReport {
+                    summary: "CI passing".into(),
+                    ci_status: "passing".into(),
+                    merge_status: "ready".into(),
+                    review_status: "approved".into(),
+                    checks: vec!["test: success".into()],
+                })
+            },
+        );
+
+        let detail = model
+            .pr_dashboard
+            .detail_report
+            .as_ref()
+            .expect("detail report refreshed");
+        assert_eq!(detail.summary, "CI passing");
+        assert_eq!(detail.checks, vec!["test: success"]);
+    }
+
+    #[test]
+    fn parse_pr_dashboard_detail_report_json_extracts_checks_and_statuses() {
+        let json = r#"{
+            "title": "Add dashboard detail",
+            "state": "OPEN",
+            "mergeable": "CONFLICTING",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "statusCheckRollup": [
+                {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}
+            ]
+        }"#;
+
+        let detail = parse_pr_dashboard_detail_report_json(json).expect("detail report parsed");
+        assert_eq!(detail.ci_status, "failing");
+        assert_eq!(detail.merge_status, "conflicts");
+        assert_eq!(detail.review_status, "changes_requested");
+        assert_eq!(
+            detail.checks,
+            vec!["lint: success".to_string(), "test: failure".to_string()]
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_pr_dashboard_enter_loads_detail_report() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::PrDashboard;
+        screens::pr_dashboard::update(
+            &mut model.pr_dashboard,
+            screens::pr_dashboard::PrDashboardMessage::SetPrs(vec![
+                screens::pr_dashboard::PrItem {
+                    number: 42,
+                    title: "Wire detail report".into(),
+                    state: screens::pr_dashboard::PrState::Open,
+                    ci_status: "success".into(),
+                    mergeable: true,
+                    review_status: "approved".into(),
+                },
+            ]),
+        );
+
+        route_key_to_management_pr_dashboard_with(
+            &mut model,
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            |_repo_path, number| {
+                assert_eq!(number, 42);
+                Ok(screens::pr_dashboard::PrDetailReport {
+                    summary: "CI passing".into(),
+                    ci_status: "passing".into(),
+                    merge_status: "ready".into(),
+                    review_status: "approved".into(),
+                    checks: vec!["lint: success".into()],
+                })
+            },
+        );
+
+        assert!(model.pr_dashboard.detail_view);
+        let detail = model
+            .pr_dashboard
+            .detail_report
+            .as_ref()
+            .expect("detail report loaded");
+        assert_eq!(detail.summary, "CI passing");
+        assert_eq!(detail.checks, vec!["lint: success"]);
     }
 
     #[test]

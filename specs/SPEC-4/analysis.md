@@ -18,8 +18,11 @@ Status: CLEAR
 - Notes: PR dashboard data wiring now loads `fetch_pr_list()` results on tab
   focus and `r` refresh, reducing the remaining gap to the explicitly partial
   detail/GraphQL surfaces in `spec.md`.
+- Notes: PR dashboard detail now loads a live selected-PR report with CI,
+  merge, review, and check-line summaries, reducing the remaining gap to the
+  explicitly partial GraphQL/REST transport note in `spec.md`.
 - Notes: The remaining gap is reviewer-flow and acceptance closure plus the
-  explicitly partial GitHub fields still called out in `spec.md`.
+  explicitly partial transport field still called out in `spec.md`.
 
 ## Next
 - Run completion-gate review and reviewer evidence.

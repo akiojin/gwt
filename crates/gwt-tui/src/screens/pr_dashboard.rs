@@ -47,12 +47,23 @@ pub struct PrItem {
     pub review_status: String,
 }
 
+/// Detail report for the selected PR.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrDetailReport {
+    pub summary: String,
+    pub ci_status: String,
+    pub merge_status: String,
+    pub review_status: String,
+    pub checks: Vec<String>,
+}
+
 /// State for the PR dashboard screen.
 #[derive(Debug, Clone, Default)]
 pub struct PrDashboardState {
     pub(crate) prs: Vec<PrItem>,
     pub(crate) selected: usize,
     pub(crate) detail_view: bool,
+    pub(crate) detail_report: Option<PrDetailReport>,
 }
 
 impl PrDashboardState {
@@ -75,6 +86,7 @@ pub enum PrDashboardMessage {
     ToggleDetail,
     Refresh,
     SetPrs(Vec<PrItem>),
+    SetDetailReport(Option<PrDetailReport>),
 }
 
 /// Update PR dashboard state in response to a message.
@@ -82,13 +94,18 @@ pub fn update(state: &mut PrDashboardState, msg: PrDashboardMessage) {
     match msg {
         PrDashboardMessage::MoveUp => {
             super::move_up(&mut state.selected, state.prs.len());
+            state.detail_report = None;
         }
         PrDashboardMessage::MoveDown => {
             super::move_down(&mut state.selected, state.prs.len());
+            state.detail_report = None;
         }
         PrDashboardMessage::ToggleDetail => {
             if !state.prs.is_empty() {
                 state.detail_view = !state.detail_view;
+                if !state.detail_view {
+                    state.detail_report = None;
+                }
             }
         }
         PrDashboardMessage::Refresh => {
@@ -97,6 +114,10 @@ pub fn update(state: &mut PrDashboardState, msg: PrDashboardMessage) {
         PrDashboardMessage::SetPrs(prs) => {
             state.prs = prs;
             state.clamp_selected();
+            state.detail_report = None;
+        }
+        PrDashboardMessage::SetDetailReport(report) => {
+            state.detail_report = report;
         }
     }
 }
@@ -195,17 +216,43 @@ fn render_detail(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         }
     };
 
-    let merge_str = if pr.mergeable {
-        "Yes"
-    } else {
-        "No (conflicts)"
-    };
-
-    let detail_text =
+    let detail_text = if let Some(report) = &state.detail_report {
+        let checks = if report.checks.is_empty() {
+            " (no checks)".to_string()
+        } else {
+            report
+                .checks
+                .iter()
+                .map(|check| format!("\n - {check}"))
+                .collect::<String>()
+        };
         format!(
-        " #{} - {}\n\n State: {}\n CI: {}\n Mergeable: {}\n Review: {}\n\n Press Enter to go back",
-        pr.number, pr.title, pr.state.label(), pr.ci_status, merge_str, pr.review_status,
-    );
+            " #{} - {}\n\n State: {}\n CI: {}\n Merge: {}\n Review: {}\n Summary: {}\n Checks:{}\n\n Press Enter to go back",
+            pr.number,
+            pr.title,
+            pr.state.label(),
+            report.ci_status,
+            report.merge_status,
+            report.review_status,
+            report.summary,
+            checks,
+        )
+    } else {
+        let merge_str = if pr.mergeable {
+            "Yes"
+        } else {
+            "No (conflicts)"
+        };
+        format!(
+            " #{} - {}\n\n State: {}\n CI: {}\n Mergeable: {}\n Review: {}\n\n Press Enter to go back",
+            pr.number,
+            pr.title,
+            pr.state.label(),
+            pr.ci_status,
+            merge_str,
+            pr.review_status,
+        )
+    };
 
     let block = Block::default().title("PR Detail");
     let paragraph = Paragraph::new(detail_text)
@@ -265,6 +312,7 @@ mod tests {
         assert!(state.prs.is_empty());
         assert_eq!(state.selected, 0);
         assert!(!state.detail_view);
+        assert!(state.detail_report.is_none());
     }
 
     #[test]
@@ -396,6 +444,40 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_detail_shows_report_summary_and_checks() {
+        let mut state = PrDashboardState::default();
+        state.prs = sample_prs();
+        state.detail_view = true;
+        state.detail_report = Some(PrDetailReport {
+            summary: "CI passing, merge ready".to_string(),
+            ci_status: "passing".to_string(),
+            merge_status: "ready".to_string(),
+            review_status: "approved".to_string(),
+            checks: vec!["lint: success".to_string(), "test: success".to_string()],
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("CI passing, merge ready"));
+        assert!(text.contains("lint: success"));
+        assert!(text.contains("test: success"));
     }
 
     #[test]
