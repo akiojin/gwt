@@ -338,6 +338,21 @@ use the generic supplemental fallback only when the tab is in plain list mode.
 26.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 27: Status Bar Hints Reflect Esc-to-Terminal Contract (5 tasks)
+Bring the visible keybind guidance back in line with the restored behavior by teaching the
+management-list hints to advertise `Esc` as a return-to-terminal action.
+
+27.1: Hint parity contract (2 tasks)
+- The Branches list status-bar hint includes `Esc:term` alongside the existing branch-local actions.
+- The generic management list status-bar hint includes `Esc:term` alongside the generic list actions.
+
+27.2: Focused rendering coverage (2 tasks)
+- Add focused rendering coverage for Branches-list hint parity.
+- Add focused rendering coverage for generic management-list hint parity.
+
+27.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

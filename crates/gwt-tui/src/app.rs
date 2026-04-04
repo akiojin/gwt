@@ -3148,10 +3148,10 @@ fn build_session_title(model: &Model) -> Line<'static> {
 fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
     let hints = match model.active_focus {
         FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-            "↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  ?:help".to_string()
+            "↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  Esc:term  ?:help".to_string()
         }
         FocusPane::TabContent => {
-            "↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  ?:help".to_string()
+            "↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  Esc:term  ?:help".to_string()
         }
         FocusPane::BranchDetail => branch_detail_hint_text(model),
         FocusPane::Terminal => "Ctrl+G,g:management  Tab:focus  Ctrl+C×2:quit".to_string(),
@@ -3569,10 +3569,23 @@ mod tests {
             vt: crate::model::VtState::new(24, 80),
         };
 
-        let rendered = render_model_text(&model, 160, 24);
+        let rendered = render_model_text(&model, 220, 24);
         assert!(rendered.contains("branch: feature/status-bar"));
         assert!(rendered.contains("type: Shell"));
         assert!(rendered.contains("Enter:wizard"));
+        assert!(rendered.contains("Esc:term"));
+    }
+
+    #[test]
+    fn render_model_text_generic_management_hints_include_escape_to_terminal() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::GitView;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+        assert!(rendered.contains("Enter:action"));
+        assert!(rendered.contains("Esc:term"));
     }
 
     #[test]

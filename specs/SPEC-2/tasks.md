@@ -303,3 +303,11 @@ screens to use.
 - [x] T197 Update `app.rs` Profiles routing so `Esc` is mode-aware: list mode uses the supplemental fallback, while non-list modes keep `Cancel`.
 - [x] T198 Refresh `SPEC-2` artifacts to describe Profiles list-mode `Esc` parity.
 - [x] T199 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 27: Status Bar Hints Reflect Esc-to-Terminal Contract
+
+- [x] T200 [P] Write RED test: Branches list status-bar hints include `Esc:term`.
+- [x] T201 [P] Write RED test: generic management list status-bar hints include `Esc:term`.
+- [x] T202 Update `app.rs` status-bar hint text so Branches list and generic management lists advertise `Esc:term`.
+- [x] T203 Refresh `SPEC-2` artifacts to describe hint parity with the supplemental escape contract.
+- [x] T204 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
