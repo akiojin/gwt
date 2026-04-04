@@ -283,6 +283,17 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving selected rows keep the short hint
    and unselected rows fall back to the plain `Resume session` label.
 
+### Phase 29: QuickStart Multi-Entry Action Copy Compaction
+
+1. Keep single-entry Quick Start wording intact, but in multi-entry grouped
+   history shorten the action rows to the denser old-TUI copy `Resume` /
+   `Start new`.
+2. Preserve grouped ordering, selected resume-session ID hints, and the final
+   `Choose different settings` action while only tightening the grouped body
+   copy for multi-entry history.
+3. Add focused RED/GREEN coverage proving multi-entry renders the compact
+   action labels without affecting single-entry title promotion.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

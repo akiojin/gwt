@@ -256,6 +256,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-035**: In multi-entry `QuickStart`, resume session ID snippets are
   shown only on the currently selected `Resume session` row so unselected
   rows stay visually compact.
+- **FR-036**: In multi-entry `QuickStart`, grouped action rows use the more
+  compact old-TUI copy `Resume` / `Start new`, while single-entry Quick
+  Start keeps the longer `Resume session` / `Start new session` wording.
 
 ## Non-Functional Requirements
 

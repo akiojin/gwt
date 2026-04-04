@@ -1508,36 +1508,44 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         }
 
         let resume_index = entry_index * 2;
+        let resume_label = if single_entry {
+            "Resume session"
+        } else {
+            "Resume"
+        };
         let show_resume_hint = single_entry || state.selected == resume_index;
         let resume_text = if let Some(session_id) = &entry.resume_session_id {
             if show_resume_hint {
                 format!(
-                    "{}Resume session ({}...)",
+                    "{}{} ({}...)",
                     if state.selected == resume_index {
                         "> "
                     } else {
                         "  "
                     },
+                    resume_label,
                     &session_id[..session_id.len().min(8)]
                 )
             } else {
                 format!(
-                    "{}Resume session",
+                    "{}{}",
                     if state.selected == resume_index {
                         "> "
                     } else {
                         "  "
-                    }
+                    },
+                    resume_label
                 )
             }
         } else {
             format!(
-                "{}Resume session",
+                "{}{}",
                 if state.selected == resume_index {
                     "> "
                 } else {
                     "  "
-                }
+                },
+                resume_label
             )
         };
         items.push(
@@ -1549,13 +1557,19 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         );
 
         let start_new_index = resume_index + 1;
+        let start_new_label = if single_entry {
+            "Start new session"
+        } else {
+            "Start new"
+        };
         let start_new_text = format!(
-            "{}Start new session",
+            "{}{}",
             if state.selected == start_new_index {
                 "> "
             } else {
                 "  "
-            }
+            },
+            start_new_label
         );
         items.push(
             ListItem::new(truncate_with_ellipsis(
@@ -2585,8 +2599,8 @@ mod tests {
         assert!(text.contains("Quick Start"));
         assert!(text.contains("Branch: feature/test"));
         assert!(text.contains("Codex"));
-        assert!(text.contains("> Resume session (sess-123...)"));
-        assert!(text.contains("  Start new session"));
+        assert!(text.contains("> Resume (sess-123...)"));
+        assert!(text.contains("  Start new"));
         assert!(text.contains("Claude Code"));
         assert!(text.contains("Choose different settings"));
     }
@@ -2691,9 +2705,25 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("> Resume session (sess-123...)"));
-        assert!(!text.contains("  Resume session (sess-abc...)"));
-        assert!(text.contains("  Resume session"));
+        assert!(text.contains("> Resume (sess-123...)"));
+        assert!(!text.contains("  Resume (sess-abc...)"));
+        assert!(text.contains("  Resume"));
+    }
+
+    #[test]
+    fn render_quick_start_multi_entry_uses_compact_resume_and_start_new_labels() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("> Resume (sess-123...)"));
+        assert!(text.contains("  Start new"));
+        assert!(!text.contains("Start new session"));
+        assert!(!text.contains("Resume session (sess-123...)"));
     }
 
     #[test]
@@ -2730,8 +2760,8 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("Resume session"));
-        assert!(text.contains("Start new session"));
+        assert!(text.contains("Resume"));
+        assert!(text.contains("Start new"));
     }
 
     #[test]
@@ -2743,7 +2773,7 @@ mod tests {
         state.quick_start_entries = sample_quick_start_entries();
 
         let buf = render_buffer(&state, 100, 24);
-        let (_, start_new_y) = find_text_position(&buf, "Start new session").unwrap();
+        let (_, start_new_y) = find_text_position(&buf, "Start new").unwrap();
         let (_, next_header_y) = find_text_position(&buf, "Claude Code").unwrap();
 
         assert_eq!(
@@ -2753,8 +2783,8 @@ mod tests {
         );
 
         let text = render_text(&state, 40, 24);
-        assert!(text.contains("Resume session"));
-        assert!(text.contains("Start new session"));
+        assert!(text.contains("Resume"));
+        assert!(text.contains("Start new"));
     }
 
     #[test]

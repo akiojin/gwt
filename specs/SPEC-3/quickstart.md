@@ -79,6 +79,9 @@
 31. Verify a branch with multiple persisted Quick Start entries now shows the
    short resume-session ID snippet only on the selected `Resume session` row,
    while unselected resume rows keep the plain label.
+32. Verify a branch with multiple persisted Quick Start entries now renders
+   grouped action rows as `Resume` / `Start new`, while a single-entry Quick
+   Start still uses the longer `Resume session` / `Start new session` copy.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -140,5 +143,8 @@
 - Multi-entry Quick Start resume rows now reserve the short session ID hint
   for the currently selected row, so the grouped history stays visually
   quieter when several tools can resume.
+- Multi-entry Quick Start action rows now use the denser old-TUI copy
+  `Resume` / `Start new`, while single-entry Quick Start keeps the longer
+  session-oriented wording.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

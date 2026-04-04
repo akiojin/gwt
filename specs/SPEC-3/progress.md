@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `119/119` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T13:15:09Z`
+- Task progress: `122/122` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T13:20:58Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -87,6 +87,9 @@
 - Multi-entry `QuickStart` now shows the short resume-session ID hint only on
   the selected `Resume session` row, which reduces noise on unselected rows
   without changing resume semantics.
+- Multi-entry `QuickStart` grouped action rows now use the denser old-TUI
+  copy `Resume` / `Start new`, while single-entry Quick Start keeps the
+  longer session-oriented wording.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

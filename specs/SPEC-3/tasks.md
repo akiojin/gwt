@@ -211,3 +211,9 @@
 - [x] T111 [P] Write RED test: multi-entry Quick Start shows the resume-session ID snippet only on the selected `Resume session` row.
 - [x] T112 Update `wizard.rs` so unselected multi-entry resume rows fall back to `Resume session` while the selected row keeps the short session ID hint.
 - [x] T113 Verify focused selected-resume-hint tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 29: QuickStart Multi-Entry Action Copy Compaction
+
+- [x] T114 [P] Write RED test: multi-entry Quick Start uses the compact old-TUI action labels `Resume` / `Start new` in the grouped body render.
+- [x] T115 Update `wizard.rs` so multi-entry grouped history uses `Resume` / `Start new` while single-entry Quick Start keeps `Resume session` / `Start new session`.
+- [x] T116 Verify focused compact-action-label tests, broad workspace checks, and refresh SPEC-3 artifacts.
