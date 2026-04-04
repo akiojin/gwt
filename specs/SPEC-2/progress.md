@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `121/121` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T07:58:17Z`
+- Task progress: `126/126` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T08:02:22Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -23,6 +23,7 @@
 - Branch Detail now also restores old-TUI direct branch actions after focus leaves the list: `Shift+Enter` opens a shell, `Ctrl+C` opens delete confirmation, and footer hints explain the active section's semantics.
 - Branch Detail bottom-pane chrome now keeps the selected branch name visible next to the section tabs, so context survives after focus moves off the branch list.
 - Branch Detail now honors its advertised `Esc:back` affordance: `Esc` returns focus to the Branches list while preserving the selected branch and the current detail context.
+- Pane focus chrome now matches the documented old-TUI contract again: focused borders render in Cyan and unfocused borders render in Gray instead of the temporary green/white colors.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

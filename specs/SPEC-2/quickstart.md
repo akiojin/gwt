@@ -16,7 +16,8 @@
 13. Verify the bottom status bar now changes its Branch Detail hints by section: `Overview` advertises direct branch actions and Docker controls, while `Sessions` advertises `↑/↓` row selection plus `Enter:focus`.
 14. Confirm the Branch Detail pane title keeps the selected branch name visible next to the section tabs, and that clearing the branch selection falls back to `No branch selected`.
 15. With focus still in Branch Detail, press `Esc` and confirm focus returns to the Branches list while the selected branch, detail section, and session-row selection are unchanged.
-16. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+16. Cycle focus across Tab Content, Branch Detail, and Terminal, and confirm the focused pane border is Cyan while the unfocused pane borders are Gray.
+17. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -27,6 +28,7 @@
 - Branch Detail remains actionable even after focus leaves the list: direct shell launch and delete confirmation stay available from the detail pane itself.
 - Branch Detail chrome keeps the selected branch name visible in the bottom-pane title instead of forcing the user to look back to the top list for context.
 - Branch Detail behaves like an old-TUI deep-focus surface again: `Esc` returns to the Branches list instead of leaving the user trapped in the detail pane.
+- Focus chrome now matches the documented old-TUI palette instead of the temporary green/white implementation.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

@@ -172,6 +172,21 @@ temporary deep-focus surface instead of a focus trap.
 15.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 16: Focus Border Color Parity (5 tasks)
+Restore the old-TUI focus chrome contract so pane borders use the colors already documented in
+the spec instead of the temporary green/white implementation.
+
+16.1: Border color contract (2 tasks)
+- Render focused panes with `Color::Cyan`.
+- Render unfocused panes with `Color::Gray`.
+
+16.2: Focused render coverage (2 tasks)
+- Add focused coverage for the focused border color contract.
+- Add focused coverage for the unfocused border color contract.
+
+16.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

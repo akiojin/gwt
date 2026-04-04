@@ -2877,13 +2877,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_overlays(model, frame, size);
 }
 
-/// Build a bordered block with focus-aware border color (Green when focused, White otherwise).
+/// Build a bordered block with focus-aware border color (Cyan when focused, Gray otherwise).
 fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
-    let border_color = if is_focused {
-        Color::Green
-    } else {
-        Color::White
-    };
+    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
@@ -3192,6 +3188,10 @@ mod tests {
     use gwt_git::pr_status::PrState as GitPrState;
     use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    use ratatui::text::Line;
+    use ratatui::widgets::Widget;
     use ratatui::{buffer::Buffer, Terminal};
     use std::fs;
     use std::io::Write;
@@ -3391,6 +3391,26 @@ mod tests {
         }
 
         panic!("timed out waiting for docker worker: {context}");
+    }
+
+    #[test]
+    fn pane_block_uses_cyan_border_when_focused() {
+        let area = Rect::new(0, 0, 12, 3);
+        let mut buffer = Buffer::empty(area);
+
+        pane_block(Line::from("Focused"), true).render(area, &mut buffer);
+
+        assert_eq!(buffer[(0, 0)].fg, Color::Cyan);
+    }
+
+    #[test]
+    fn pane_block_uses_gray_border_when_unfocused() {
+        let area = Rect::new(0, 0, 12, 3);
+        let mut buffer = Buffer::empty(area);
+
+        pane_block(Line::from("Unfocused"), false).render(area, &mut buffer);
+
+        assert_eq!(buffer[(0, 0)].fg, Color::Gray);
     }
 
     #[test]

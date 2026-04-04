@@ -214,3 +214,11 @@ screens to use.
 - [x] T141 Update `app.rs` Branch Detail routing so `Esc` returns to `TabContent` without mutating detail state.
 - [x] T142 Refresh `SPEC-2` artifacts to describe the restored `Esc:back` contract.
 - [x] T143 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 16: Focus Border Color Parity
+
+- [x] T144 [P] Write RED test: focused pane borders render with `Color::Cyan`.
+- [x] T145 [P] Write RED test: unfocused pane borders render with `Color::Gray`.
+- [x] T146 Update `app.rs` pane chrome so `pane_block()` uses the documented `Cyan/Gray` focus colors.
+- [x] T147 Refresh `SPEC-2` artifacts to describe the restored focus-border parity.
+- [x] T148 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
