@@ -1537,14 +1537,22 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     );
 
     let choose_index = state.quick_start_entries.len() * 2;
-    let choose_text = format!(
-        "{}Choose different settings...",
-        if state.selected >= choose_index {
-            "> "
-        } else {
-            "  "
-        }
-    );
+    let choose_marker = if state.selected >= choose_index {
+        "> "
+    } else {
+        "  "
+    };
+    let choose_text = if list_area.width >= 60 {
+        format_label_description_line(
+            choose_marker,
+            "Choose different settings...",
+            "Open full setup",
+            list_area.width as usize,
+            28,
+        )
+    } else {
+        format!("{choose_marker}Choose different settings...")
+    };
     items.push(
         ListItem::new(truncate_with_ellipsis(
             &choose_text,
@@ -2616,6 +2624,35 @@ mod tests {
             "────────────",
             "the footer separator should be compact rather than a full-width rule"
         );
+    }
+
+    #[test]
+    fn render_quick_start_choose_different_shows_description_on_wide_width() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+        state.selected = state.quick_start_entries.len() * 2;
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("> Choose different settings... - Open full setup"));
+    }
+
+    #[test]
+    fn render_quick_start_choose_different_omits_description_on_narrow_width() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+        state.selected = state.quick_start_entries.len() * 2;
+
+        let text = render_text(&state, 40, 24);
+
+        assert!(text.contains("> Choose different settings..."));
+        assert!(!text.contains("Open full setup"));
     }
 
     #[test]

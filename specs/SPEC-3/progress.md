@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `97/97` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:30:28Z`
+- Task progress: `101/101` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:33:39Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -70,6 +70,9 @@
 - The `QuickStart` footer now uses a compact separator before `Choose
   different settings...` instead of a full-width rule, which keeps the final
   action distinct without overwhelming the popup chrome.
+- On wide popups, `Choose different settings...` now renders as a descriptive
+  old-TUI footer row (`label - description`), while narrow widths keep the
+  label-only fallback for readability.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

@@ -63,6 +63,8 @@
 25. Verify the separator before `Choose different settings...` is now compact
    rather than a full-width rule, while the final action still reads as a
    distinct footer choice.
+26. Verify wide popups now render `Choose different settings... - Open full
+   setup` while narrow popups fall back to the label-only row.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -110,5 +112,8 @@
   footer action.
 - The final `Choose different settings...` action now uses a compact
   separator, so the footer remains distinct without a heavy full-width rule.
+- The final `Choose different settings...` row now explains itself on wide
+  popups via `label - description` formatting and keeps the old label-only
+  fallback on narrow widths.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

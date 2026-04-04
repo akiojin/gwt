@@ -168,3 +168,10 @@
 - [x] T089 [P] Write RED test: `QuickStart` uses a compact separator before `Choose different settings...` instead of a full-width rule.
 - [x] T090 Replace the full-width footer separator with a compact rule while preserving the final action row.
 - [x] T091 Verify focused footer-separator tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 22: QuickStart Footer Action Description
+
+- [x] T092 [P] Write RED test: `Choose different settings...` shows a description on wide popups.
+- [x] T093 [P] Write RED test: `Choose different settings...` falls back to the label-only row on narrow popups.
+- [x] T094 Render the final QuickStart action as a `label - description` row on wide widths while preserving narrow-width fallback.
+- [x] T095 Verify focused footer-action tests, broad workspace checks, and refresh SPEC-3 artifacts.

@@ -237,6 +237,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-029**: The `QuickStart` footer uses a compact separator before
   `Choose different settings...` instead of a full-width rule, preserving the
   end-action boundary while matching the lighter old-TUI popup chrome.
+- **FR-030**: On wider popups, `Choose different settings...` renders as an
+  old-TUI `label - description` row (`Open full setup`); on narrow widths it
+  falls back to the label-only row so the final action stays readable.
 
 ## Non-Functional Requirements
 

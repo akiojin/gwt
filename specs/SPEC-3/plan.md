@@ -223,6 +223,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the footer no longer renders a
    full-width separator rule.
 
+### Phase 22: QuickStart Footer Action Description
+
+1. Render `Choose different settings...` as an old-TUI `label - description`
+   row on sufficiently wide popups so the final action explains that it opens
+   the full setup flow.
+2. Preserve selection semantics and narrow-width readability by falling back
+   to the existing label-only row when there is not enough space.
+3. Add focused RED/GREEN coverage for wide-width description rendering and
+   narrow-width fallback behavior.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).
