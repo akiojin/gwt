@@ -25,4 +25,4 @@ expression: output
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
- ▣ Shell  branch: n/a  type: Shell  [Main]  /tmp/test-repo  Ctrl+G,b/i/s:views
+ ▣ Shell  br:n/a  [Main]  Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2

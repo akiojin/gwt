@@ -346,3 +346,11 @@ banner in favor of pane-title chrome.
 - [x] T222 Update `app.rs` terminal hint text so Terminal focus advertises the restored global workspace mnemonics.
 - [x] T223 Refresh `SPEC-2` artifacts to describe terminal-focused footer-hint parity.
 - [x] T224 Verify focused tests, workspace checks, and SPEC-2 artifact sync.
+
+## Phase 32: Make Terminal Footer Hints Survive Standard Width
+
+- [x] T225 [P] Write RED test: the compact grouped terminal footer hint remains visible at `80x24`.
+- [x] T226 [P] Write RED test: `Tab:focus` and `^C×2` remain visible in the terminal footer at `80x24`.
+- [x] T227 Update `status_bar.rs` and `app.rs` so narrow terminal footers compact context and use grouped shortcut notation.
+- [x] T228 Refresh `SPEC-2` artifacts to describe the standard-width compact-footer contract precisely.
+- [x] T229 Verify focused tests, snapshot refresh, workspace checks, and SPEC-2 artifact sync.

@@ -3133,7 +3133,7 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 fn terminal_hint_text() -> String {
-    "Ctrl+G,b/i/s:views  Ctrl+G,g:panel  Ctrl+G,c:new  Ctrl+G,[]/1-9:tabs  Ctrl+G,z:layout  Ctrl+G,?:help  Ctrl+C×2:quit".to_string()
+    "Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2".to_string()
 }
 
 fn branch_detail_hint_text(model: &Model) -> String {
@@ -3638,28 +3638,45 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_terminal_hints_include_global_management_shortcuts() {
+    fn render_model_text_terminal_hints_include_grouped_global_shortcuts() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
 
         let rendered = render_model_text(&model, 220, 24);
 
-        assert!(rendered.contains("Ctrl+G,b/i/s"));
-        assert!(rendered.contains("Ctrl+G,g:panel"));
+        assert!(rendered.contains("Ctrl+G:b/i/s g c []/1-9 z ?"));
     }
 
     #[test]
-    fn render_model_text_terminal_hints_include_session_shortcuts() {
+    fn render_model_text_terminal_hints_include_focus_and_quit_shortcuts() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
 
         let rendered = render_model_text(&model, 220, 24);
 
-        assert!(rendered.contains("Ctrl+G,c:new"));
-        assert!(rendered.contains("Ctrl+G,[]/1-9:tabs"));
-        assert!(rendered.contains("Ctrl+G,z:layout"));
+        assert!(rendered.contains("Tab:focus"));
+        assert!(rendered.contains("^C×2"));
+    }
+
+    #[test]
+    fn render_model_text_terminal_hints_remain_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions[0] = crate::model::SessionTab {
+            id: "shell-0".to_string(),
+            name: "Shell: feature/compact-footer".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+        };
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("Ctrl+G:b/i/s g c []/1-9 z ?"));
+        assert!(rendered.contains("Tab:focus"));
+        assert!(rendered.contains("^C×2"));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use ratatui::{
 use gwt_notification::{Notification, Severity};
 
 use crate::input::voice;
-use crate::model::{ActiveLayer, Model, SessionLayout, SessionTabType};
+use crate::model::{ActiveLayer, FocusPane, Model, SessionLayout, SessionTabType};
 
 /// Render the status bar.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
@@ -45,6 +45,10 @@ pub fn render_with_notification_and_hints(
         .map(|s| session_type_label(&s.tab_type))
         .unwrap_or_else(|| "None".to_string());
     let branch_context = derive_branch_context(model).unwrap_or_else(|| "n/a".to_string());
+    let compact_terminal_footer = notification.is_none()
+        && hints.is_some()
+        && matches!(model.active_focus, FocusPane::Terminal)
+        && area.width <= 80;
 
     let layout_icon = match model.session_layout {
         SessionLayout::Tab => "\u{25A3}",
@@ -57,26 +61,45 @@ pub fn render_with_notification_and_hints(
         ActiveLayer::Management => "Mgmt",
     };
 
-    let mut spans = vec![
-        Span::styled(
-            format!(" {layout_icon} {session_name} "),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled(
-            format!(" branch: {branch_context} "),
-            Style::default().fg(Color::Green),
-        ),
-        Span::styled(
-            format!(" type: {session_type} "),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::styled(
-            format!(" [{layer}] "),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut spans = if compact_terminal_footer {
+        vec![
+            Span::styled(
+                format!(" {layout_icon} {session_type} "),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(" br:{} ", compact_branch_context(&branch_context, 10)),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!(" [{layer}] "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled(
+                format!(" {layout_icon} {session_name} "),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(" branch: {branch_context} "),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!(" type: {session_type} "),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!(" [{layer}] "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    };
 
     // Voice indicator (when active)
     if let Some(indicator) = voice::render_indicator(&model.voice) {
@@ -90,10 +113,12 @@ pub fn render_with_notification_and_hints(
         spans.push(notification_span(notification));
     }
 
-    spans.push(Span::styled(
-        format!(" {} ", model.repo_path.display()),
-        Style::default().fg(Color::DarkGray),
-    ));
+    if !compact_terminal_footer {
+        spans.push(Span::styled(
+            format!(" {} ", model.repo_path.display()),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
     if let Some(hints) = hints.filter(|value| !value.is_empty()) {
         spans.push(Span::styled(
             format!(" {hints} "),
@@ -112,6 +137,17 @@ pub fn render_with_notification_and_hints(
     frame.render_widget(bar, area);
 }
 
+fn compact_branch_context(branch_context: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = branch_context.chars().collect();
+    if chars.len() <= max_chars {
+        return branch_context.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(1);
+    let truncated: String = chars.into_iter().take(keep).collect();
+    format!("{truncated}…")
+}
+
 fn derive_branch_context(model: &Model) -> Option<String> {
     if let Some(session) = model.active_session_tab() {
         if let Some(branch) = session.name.strip_prefix("Shell: ") {
@@ -119,7 +155,10 @@ fn derive_branch_context(model: &Model) -> Option<String> {
         }
     }
 
-    model.branches.selected_branch().map(|branch| branch.name.clone())
+    model
+        .branches
+        .selected_branch()
+        .map(|branch| branch.name.clone())
 }
 
 fn session_type_label(tab_type: &SessionTabType) -> String {
