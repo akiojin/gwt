@@ -402,3 +402,11 @@ banner in favor of pane-title chrome.
 - [x] T257 [P] Write RED test: Issues list footer hints advertise `Enter:detail`, `/:search`, and `r:refresh`.
 - [x] T258 [P] Write RED test: PR Dashboard detail footer hints advertise `Enter:close`, `r:refresh`, and `Esc:back`.
 - [x] T259 Update `app.rs` non-Branches management footer hints so each tab advertises only its real primary actions and refresh/search affordances, then refresh `SPEC-2` artifacts and verification evidence.
+
+## Phase 39: Remove Redundant Branch Detail Inner Titles
+
+- [x] T260 [P] Write RED test: `render_detail_content()` keeps Overview body text while omitting the redundant inner `Overview` title.
+- [x] T261 [P] Write RED test: `render_detail_content()` keeps session rows while omitting the redundant inner `Sessions` title.
+- [x] T262 Update `branches.rs` detail renderers so Overview, SPECs, Git, and Sessions stay borderless/title-free inside the already-labelled pane.
+- [x] T263 Refresh branch-detail snapshots to the chrome-light contract.
+- [x] T264 Refresh `SPEC-2` artifacts and verify focused tests, snapshots, and workspace checks.

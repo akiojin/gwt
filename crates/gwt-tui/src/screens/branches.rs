@@ -673,10 +673,7 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
         ));
     }
 
-    let block = Block::default().title("Overview");
-    let paragraph = Paragraph::new(lines.join("\n"))
-        .block(block)
-        .style(Style::default().fg(Color::White));
+    let paragraph = Paragraph::new(lines.join("\n")).style(Style::default().fg(Color::White));
     frame.render_widget(paragraph, area);
 }
 
@@ -711,10 +708,8 @@ fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
 /// SPECs section: list loaded from the worktree.
 fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
     if state.selected_branch().is_none() {
-        let block = Block::default().title("SPECs");
-        let paragraph = Paragraph::new(" No branch selected")
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+        let paragraph =
+            Paragraph::new(" No branch selected").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
     }
@@ -729,10 +724,7 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
         } else {
             " No worktree (no SPECs available)"
         };
-        let block = Block::default().title("SPECs");
-        let paragraph = Paragraph::new(msg)
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+        let paragraph = Paragraph::new(msg).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
     }
@@ -758,18 +750,15 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let block = Block::default().title(format!("SPECs ({})", state.detail_specs.len()));
-    let list = List::new(items).block(block);
+    let list = List::new(items);
     frame.render_widget(list, area);
 }
 
 /// Git Status section: files and recent commits from the worktree.
 fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect) {
     if state.selected_branch().is_none() {
-        let block = Block::default().title("Git Status");
-        let paragraph = Paragraph::new(" No branch selected")
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+        let paragraph =
+            Paragraph::new(" No branch selected").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
     }
@@ -780,9 +769,7 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
         .is_some();
 
     if !has_worktree {
-        let block = Block::default().title("Git Status");
         let paragraph = Paragraph::new(" No worktree (no git status available)")
-            .block(block)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
@@ -835,10 +822,7 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
         }
     }
 
-    let block = Block::default().title("Git Status");
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .style(Style::default().fg(Color::White));
+    let paragraph = Paragraph::new(lines).style(Style::default().fg(Color::White));
     frame.render_widget(paragraph, area);
 }
 
@@ -849,16 +833,9 @@ fn render_detail_sessions(
     sessions: &[DetailSessionSummary],
     selected_session: usize,
 ) {
-    let block = Block::default().title(if sessions.is_empty() {
-        "Sessions".to_string()
-    } else {
-        format!("Sessions ({})", sessions.len())
-    });
-
     if sessions.is_empty() {
-        let paragraph = Paragraph::new(" No active sessions")
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+        let paragraph =
+            Paragraph::new(" No active sessions").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
     }
@@ -897,7 +874,7 @@ fn render_detail_sessions(
         }
     }
 
-    let paragraph = Paragraph::new(lines).block(block);
+    let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
 }
 

@@ -415,6 +415,21 @@ match each tab's real primary action and refresh/search affordances.
 38.3: Verification (1 task)
 - Re-run focused tests, broad workspace verification, and SPEC-2 artifact sync.
 
+### Phase 39: Remove Redundant Branch Detail Inner Titles (5 tasks)
+Keep Branch Detail chrome aligned with the old-TUI border contract by letting the pane title carry
+section and branch context, while the inner detail renderer stays borderless and title-free.
+
+39.1: Chrome contract (2 tasks)
+- Branch Detail content no longer repeats nested titles such as `Overview` or `Sessions` inside the body when the surrounding pane title already names the active section.
+- Empty states and populated states both remain readable without relying on inner block titles.
+
+39.2: Focused render coverage (2 tasks)
+- Add RED coverage that `render_detail_content()` keeps Overview body text while omitting the redundant `Overview` title.
+- Add RED coverage that `render_detail_content()` keeps session rows while omitting the redundant `Sessions` title.
+
+39.3: Verification (1 task)
+- Re-run focused tests, snapshot verification, broad workspace verification, and SPEC-2 artifact sync.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

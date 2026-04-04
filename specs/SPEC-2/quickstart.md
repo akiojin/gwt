@@ -37,7 +37,8 @@
 34. Open `Issues` detail and confirm the footer says `Esc:back`; open `Profiles` create mode and confirm the footer says `Esc:cancel`; compare `Settings` and `Git View` list mode and confirm only `Settings` advertises `Ctrl+←→:sub-tab`.
 35. With a warn notification visible while focus is still in Branch Detail, press `Esc` and confirm focus returns to the Branches list while the warn notification stays visible; press `Esc` once more from the list and confirm the warn notification dismisses.
 36. Compare `Git View`, `Versions`, `Issues`, and `PR Dashboard` detail footers and confirm they no longer show a generic `Enter:action`: `Git View` should say `Enter:expand`, `Versions` should stay refresh-only, `Issues` list should say `Enter:detail` plus `/:search`, and `PR Dashboard` detail should say `Enter:close`.
-37. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+37. Open Branch Detail on `Overview` and `Sessions` and confirm the pane border still carries the section/branch context while the body itself no longer repeats nested titles such as `Overview` or `Sessions`.
+38. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.

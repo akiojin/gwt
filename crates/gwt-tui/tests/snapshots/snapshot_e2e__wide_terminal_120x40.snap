@@ -23,11 +23,11 @@ expression: output
 │                                              ││                                                                      │
 └──────────────────────────────────────────────┘│                                                                      │
 ┌ Overview │ SPECs │ Git │ Sessions  · No branc┐│                                                                      │
-│Overview                                      ││                                                                      │
 │ No branch selected                           ││                                                                      │
 │                                              ││                                                                      │
 │ Docker status                                ││                                                                      │
 │ No containers found                          ││                                                                      │
+│                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │

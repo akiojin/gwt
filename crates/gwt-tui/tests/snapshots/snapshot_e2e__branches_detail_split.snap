@@ -15,13 +15,13 @@ expression: output
 │                                      ││                                      │
 └──────────────────────────────────────┘│                                      │
 ┌ Overview │ SPECs │ Git │ Sessions  · ┐│                                      │
-│Overview                              ││                                      │
 │ Branch: main (HEAD)                  ││                                      │
 │ Category: Main                       ││                                      │
 │ Type: Local                          ││                                      │
 │                                      ││                                      │
 │ Docker status                        ││                                      │
 │ No containers found                  ││                                      │
+│                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘

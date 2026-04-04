@@ -15,11 +15,11 @@ expression: output
 │                                      ││                                      │
 └──────────────────────────────────────┘│                                      │
 ┌ Overview │ SPECs │ Git │ Sessions  · ┐│                                      │
-│Overview                              ││                                      │
 │ No branch selected                   ││                                      │
 │                                      ││                                      │
 │ Docker status                        ││                                      │
 │ No containers found                  ││                                      │
+│                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
