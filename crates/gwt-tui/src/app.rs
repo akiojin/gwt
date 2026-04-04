@@ -1101,8 +1101,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 let msg = match key.code {
                     KeyCode::Enter => Some(SpecsMessage::SaveEdit),
                     KeyCode::Esc => Some(SpecsMessage::CancelEdit),
-                    KeyCode::Backspace => Some(SpecsMessage::EditBackspace),
-                    KeyCode::Char(ch) => Some(SpecsMessage::EditInput(ch)),
+                    KeyCode::Up => Some(SpecsMessage::MoveUp),
+                    KeyCode::Down => Some(SpecsMessage::MoveDown),
                     _ => None,
                 };
                 if let Some(m) = msg {
@@ -1136,6 +1136,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 {
                     Some(SpecsMessage::StartSectionEdit)
                 }
+                KeyCode::Char('E') if model.specs.detail_view => Some(SpecsMessage::StartFileEdit),
                 KeyCode::Char('e') if model.specs.detail_view => Some(SpecsMessage::StartEdit),
                 KeyCode::Char('s') if model.specs.detail_view => {
                     Some(SpecsMessage::StartStatusEdit)
@@ -4060,6 +4061,32 @@ mod tests {
     }
 
     #[test]
+    fn route_key_to_management_specs_shift_e_starts_raw_file_edit_from_detail() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.spec_root = Some(model.repo_path.clone());
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-5003".into(),
+            title: "Local SPEC Management".into(),
+            phase: "implementation".into(),
+            status: "in-progress".into(),
+        }];
+        model.specs.detail_view = true;
+        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5003")).expect("create spec dir");
+        std::fs::write(
+            model.repo_path.join("specs/SPEC-5003/spec.md"),
+            "# SPEC-5003\n\n## Background\n\nfull file body\n",
+        )
+        .expect("write spec body");
+
+        route_key_to_management(&mut model, key(KeyCode::Char('E'), KeyModifiers::SHIFT));
+
+        assert!(model.specs.detail_editing);
+        assert!(model.specs.detail_edit_buffer.contains("# SPEC-5003"));
+        assert!(model.specs.detail_edit_buffer.contains("## Background"));
+    }
+
+    #[test]
     fn route_key_to_management_specs_s_starts_status_edit_from_detail() {
         let mut model = test_model();
         model.management_tab = ManagementTab::Specs;
@@ -4097,6 +4124,26 @@ mod tests {
         assert!(!model.specs.search_active);
         assert!(model.specs.editing);
         assert_eq!(model.specs.edit_field, "implementation");
+    }
+
+    #[test]
+    fn route_key_to_management_specs_down_cycles_phase_selection_menu() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-5".into(),
+            title: "Local SPEC Management".into(),
+            phase: "implementation".into(),
+            status: "in-progress".into(),
+        }];
+        model.specs.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
+
+        assert!(model.specs.editing);
+        assert_eq!(model.specs.selected, 0);
+        assert_eq!(model.specs.edit_field, "done");
     }
 
     #[test]

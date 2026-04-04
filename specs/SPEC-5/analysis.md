@@ -14,15 +14,21 @@ Status: CLEAR
   items.
 - Notes: The SPEC now reflects the restored live-shell Specs entry point and includes persisted `analysis.md` in the local artifact model.
 - Notes: The shell can now load local metadata, open detail, return with `Esc`, prefill the wizard from the selected SPEC, pass `spec.md` body into the wizard context, derive a title-based branch seed, and expose `analysis.md` as a detail tab.
-- Notes: The live shell now exposes `e` for phase edit, `s` for status edit,
-  and `Ctrl+e` for raw active-artifact editing from Specs detail.
+- Notes: The live shell now exposes `e` for phase selection, `s` for status
+  selection, `Ctrl+e` for selected `spec.md` section editing, and `E` for raw
+  active-artifact editing from Specs detail.
+- Notes: Phase/status metadata editing now satisfies the selection-menu
+  requirement by constraining edits to the detail-view option list instead of
+  free text input.
 - Notes: `spec.md` detail now supports section-scoped editing by selecting a
-  `##` section with `Up` / `Down` and editing only that section body with
-  `Ctrl+e`, while nested headings remain inside the selected section.
+  parsed `##` section with `Up` / `Down` and editing only that section body
+  with `Ctrl+e`; fenced-code pseudo-headings are ignored, duplicate titles are
+  disambiguated by section order, and save now errors if the selected section
+  no longer matches the file.
 - Notes: The remaining implementation gaps are still the ones called out in
-  `spec.md`: semantic search, markdown-rendered detail parity, and the missing
-  selection-menu UX for phase/status editing. Completion-gate review remains
-  future work after those gaps are either implemented or explicitly de-scoped.
+  `spec.md`: semantic search and markdown-rendered detail parity.
+  Completion-gate review remains future work after those gaps are either
+  implemented or explicitly de-scoped.
 
 ## Next
 - Run completion-gate review and reviewer evidence.

@@ -64,7 +64,7 @@
 - [x] TEST: Unit test for metadata.json update (status change) (obsolete: covered by phase change test; same update_spec_metadata path)
 - [x] IMPL: Add `update_spec_metadata(id, field, value)` function
   - File: `crates/gwt-core/src/spec/metadata.rs`
-- [x] IMPL: Selection popup menu widget for phase/status (obsolete: edit mode uses direct field cycling in SPEC detail view)
+- [x] IMPL: Selection popup menu widget for phase/status (implemented as a constrained selection menu in SPEC detail view)
 
 ### 3.2 Content Editor [P]
 

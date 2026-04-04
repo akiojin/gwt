@@ -23,6 +23,9 @@ const DETAIL_SECTIONS: [&str; 6] = [
     "data-model.md",
 ];
 
+const PHASE_OPTIONS: [&str; 4] = ["design", "planning", "implementation", "done"];
+const STATUS_OPTIONS: [&str; 5] = ["draft", "open", "in-progress", "blocked", "done"];
+
 /// A single spec entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpecItem {
@@ -54,6 +57,10 @@ pub struct SpecsState {
     pub(crate) edit_field: String,
     /// Metadata field currently being edited.
     edit_target: SpecEditTarget,
+    /// Available metadata values for the current edit session.
+    edit_options: Vec<String>,
+    /// Selected index within `edit_options`.
+    edit_option_index: usize,
     /// Root directory used for spec file persistence.
     pub(crate) spec_root: Option<PathBuf>,
     /// Whether the detail section is being edited inline.
@@ -62,6 +69,8 @@ pub struct SpecsState {
     detail_heading_index: usize,
     /// Heading currently being edited from `spec.md`.
     detail_edit_heading: Option<String>,
+    /// Parsed section index currently being edited from `spec.md`.
+    detail_edit_section_index: Option<usize>,
     /// Buffer for the detail section content being edited.
     pub(crate) detail_edit_buffer: String,
     /// Latest persistence error.
@@ -104,24 +113,160 @@ fn edit_target_label(target: SpecEditTarget) -> &'static str {
     }
 }
 
+fn metadata_options(target: SpecEditTarget, current_value: &str) -> Vec<String> {
+    let mut options = match target {
+        SpecEditTarget::Phase => PHASE_OPTIONS
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>(),
+        SpecEditTarget::Status => STATUS_OPTIONS
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>(),
+    };
+
+    if current_value.is_empty() {
+        return options;
+    }
+
+    if let Some(index) = options
+        .iter()
+        .position(|option| option.eq_ignore_ascii_case(current_value))
+    {
+        options[index] = current_value.to_string();
+    } else {
+        options.insert(0, current_value.to_string());
+    }
+
+    options
+}
+
+fn start_metadata_edit(state: &mut SpecsState, target: SpecEditTarget, current_value: String) {
+    let options = metadata_options(target, &current_value);
+    let selected_index = options
+        .iter()
+        .position(|option| option == &current_value)
+        .unwrap_or_default();
+    state.edit_field = current_value;
+    state.edit_target = target;
+    state.edit_options = options;
+    state.edit_option_index = selected_index;
+    state.editing = true;
+    state.save_error = None;
+}
+
+fn cycle_metadata_option(state: &mut SpecsState, direction: SpecsMessage) {
+    if state.edit_options.is_empty() {
+        return;
+    }
+    match direction {
+        SpecsMessage::MoveUp => {
+            super::move_up(&mut state.edit_option_index, state.edit_options.len())
+        }
+        SpecsMessage::MoveDown => {
+            super::move_down(&mut state.edit_option_index, state.edit_options.len())
+        }
+        _ => return,
+    }
+    if let Some(selected) = state.edit_options.get(state.edit_option_index) {
+        state.edit_field = selected.clone();
+    }
+}
+
 fn spec_root_for_state(state: &SpecsState) -> Option<&Path> {
     state.spec_root.as_deref()
 }
 
-fn markdown_section_headings(content: &str) -> Vec<String> {
-    content
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with("## ") || trimmed.starts_with("###") {
-                return None;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkdownSection {
+    title: String,
+    level: usize,
+    start_line: usize,
+    end_line: usize,
+}
+
+fn markdown_fence_marker(line: &str) -> Option<&'static str> {
+    ["```", "~~~"]
+        .into_iter()
+        .find(|marker| line.trim_start().starts_with(marker))
+}
+
+fn markdown_heading_parts(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+
+    let level = trimmed.chars().take_while(|c| *c == '#').count();
+    if trimmed.chars().nth(level) != Some(' ') {
+        return None;
+    }
+
+    Some((level, trimmed[level + 1..].trim()))
+}
+
+fn markdown_sections(content: &str) -> Vec<MarkdownSection> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut sections = Vec::new();
+    let mut current: Option<MarkdownSection> = None;
+    let mut active_fence: Option<&'static str> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+
+        if let Some(marker) = active_fence {
+            if trimmed.starts_with(marker) {
+                active_fence = None;
             }
-            Some(trimmed.trim_start_matches("## ").trim().to_string())
-        })
+            continue;
+        }
+
+        if let Some(marker) = markdown_fence_marker(trimmed) {
+            active_fence = Some(marker);
+            continue;
+        }
+
+        let Some((level, title)) = markdown_heading_parts(trimmed) else {
+            continue;
+        };
+
+        if current
+            .as_ref()
+            .is_some_and(|section| level <= section.level)
+        {
+            if let Some(mut section) = current.take() {
+                section.end_line = idx;
+                sections.push(section);
+            }
+        }
+
+        if level == 2 {
+            current = Some(MarkdownSection {
+                title: title.to_string(),
+                level,
+                start_line: idx,
+                end_line: lines.len(),
+            });
+        }
+    }
+
+    if let Some(mut section) = current {
+        section.end_line = lines.len();
+        sections.push(section);
+    }
+
+    sections
+}
+
+#[cfg(test)]
+fn markdown_section_headings(content: &str) -> Vec<String> {
+    markdown_sections(content)
+        .into_iter()
+        .map(|section| section.title)
         .collect()
 }
 
-fn current_spec_markdown_headings(state: &SpecsState) -> Vec<String> {
+fn current_spec_markdown_sections(state: &SpecsState) -> Vec<MarkdownSection> {
     if !state.detail_view || DETAIL_SECTIONS.get(state.detail_section) != Some(&"spec.md") {
         return Vec::new();
     }
@@ -134,7 +279,7 @@ fn current_spec_markdown_headings(state: &SpecsState) -> Vec<String> {
     let Ok(content) = read_spec_markdown_file(root, &spec.id, "spec.md") else {
         return Vec::new();
     };
-    markdown_section_headings(&content)
+    markdown_sections(&content)
 }
 
 fn spec_dir(root: &Path, spec_id: &str) -> PathBuf {
@@ -180,63 +325,27 @@ pub fn update_spec_metadata_field(
 }
 
 /// Replace a markdown section by heading, preserving the rest of the file.
-pub fn replace_markdown_section(
+fn replace_markdown_section(
     content: &str,
-    heading: &str,
+    section: &MarkdownSection,
     new_body: &str,
 ) -> Result<String, String> {
     let lines: Vec<&str> = content.lines().collect();
-    let mut start_idx = None;
-    let mut heading_level = 0usize;
-
-    for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count();
-            let title = trimmed[level..].trim();
-            if title == heading {
-                start_idx = Some(idx);
-                heading_level = level;
-                break;
-            }
-        }
+    if section.start_line >= lines.len()
+        || section.end_line > lines.len()
+        || section.start_line >= section.end_line
+    {
+        return Err("selected markdown section is no longer present".to_string());
     }
-
-    let start_idx = match start_idx {
-        Some(idx) => idx,
-        None => {
-            let mut appended = String::new();
-            if !content.is_empty() {
-                appended.push_str(content.trim_end_matches('\n'));
-                appended.push_str("\n\n");
-            }
-            appended.push_str(&format!(
-                "{} {}\n",
-                "#".repeat(heading_level.max(2)),
-                heading
-            ));
-            if !new_body.is_empty() {
-                appended.push_str(new_body.trim_end_matches('\n'));
-                appended.push('\n');
-            }
-            return Ok(appended);
-        }
+    let Some((level, title)) = markdown_heading_parts(lines[section.start_line]) else {
+        return Err("selected markdown section heading is invalid".to_string());
     };
-
-    let mut end_idx = lines.len();
-    for (idx, line) in lines.iter().enumerate().skip(start_idx + 1) {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count();
-            if level <= heading_level {
-                end_idx = idx;
-                break;
-            }
-        }
+    if level != section.level || title != section.title {
+        return Err("selected markdown section no longer matches the file".to_string());
     }
 
     let mut output = String::new();
-    for line in &lines[..=start_idx] {
+    for line in &lines[..=section.start_line] {
         output.push_str(line);
         output.push('\n');
     }
@@ -246,8 +355,8 @@ pub fn replace_markdown_section(
         output.push('\n');
         output.push('\n');
     }
-    if end_idx < lines.len() {
-        for line in &lines[end_idx..] {
+    if section.end_line < lines.len() {
+        for line in &lines[section.end_line..] {
             output.push_str(line);
             output.push('\n');
         }
@@ -256,38 +365,16 @@ pub fn replace_markdown_section(
 }
 
 /// Extract a markdown section body by heading.
-pub fn extract_markdown_section(content: &str, heading: &str) -> Option<String> {
+fn extract_markdown_section(content: &str, section: &MarkdownSection) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
-    let mut start_idx = None;
-    let mut heading_level = 0usize;
-
-    for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count();
-            let title = trimmed[level..].trim();
-            if title == heading {
-                start_idx = Some(idx);
-                heading_level = level;
-                break;
-            }
-        }
+    if section.start_line >= lines.len()
+        || section.end_line > lines.len()
+        || section.start_line >= section.end_line
+    {
+        return None;
     }
 
-    let start_idx = start_idx?;
-    let mut end_idx = lines.len();
-    for (idx, line) in lines.iter().enumerate().skip(start_idx + 1) {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count();
-            if level <= heading_level {
-                end_idx = idx;
-                break;
-            }
-        }
-    }
-
-    let body = lines[start_idx + 1..end_idx]
+    let body = lines[section.start_line + 1..section.end_line]
         .iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
@@ -296,7 +383,7 @@ pub fn extract_markdown_section(content: &str, heading: &str) -> Option<String> 
 }
 
 /// Update a markdown artifact file on disk.
-pub fn update_spec_markdown_section(
+fn update_spec_markdown_section(
     root: &Path,
     spec_id: &str,
     file_name: &str,
@@ -326,6 +413,8 @@ pub enum SpecsMessage {
     StartEdit,
     /// Start editing the status of the selected spec.
     StartStatusEdit,
+    /// Start raw file editing for the active detail section.
+    StartFileEdit,
     /// Save the current edit.
     SaveEdit,
     /// Cancel the current edit.
@@ -350,23 +439,29 @@ pub enum SpecsMessage {
 pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
     match msg {
         SpecsMessage::MoveUp => {
-            let headings = current_spec_markdown_headings(state);
-            if state.detail_view && !state.editing && !state.detail_editing && !headings.is_empty()
-            {
-                super::move_up(&mut state.detail_heading_index, headings.len());
+            if state.editing {
+                cycle_metadata_option(state, SpecsMessage::MoveUp);
             } else {
-                let len = state.filtered_specs().len();
-                super::move_up(&mut state.selected, len);
+                let sections = current_spec_markdown_sections(state);
+                if state.detail_view && !state.detail_editing && !sections.is_empty() {
+                    super::move_up(&mut state.detail_heading_index, sections.len());
+                } else {
+                    let len = state.filtered_specs().len();
+                    super::move_up(&mut state.selected, len);
+                }
             }
         }
         SpecsMessage::MoveDown => {
-            let headings = current_spec_markdown_headings(state);
-            if state.detail_view && !state.editing && !state.detail_editing && !headings.is_empty()
-            {
-                super::move_down(&mut state.detail_heading_index, headings.len());
+            if state.editing {
+                cycle_metadata_option(state, SpecsMessage::MoveDown);
             } else {
-                let len = state.filtered_specs().len();
-                super::move_down(&mut state.selected, len);
+                let sections = current_spec_markdown_sections(state);
+                if state.detail_view && !state.detail_editing && !sections.is_empty() {
+                    super::move_down(&mut state.detail_heading_index, sections.len());
+                } else {
+                    let len = state.filtered_specs().len();
+                    super::move_down(&mut state.selected, len);
+                }
             }
         }
         SpecsMessage::ToggleDetail => {
@@ -375,6 +470,7 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 state.search_active = false;
                 state.detail_heading_index = 0;
                 state.detail_edit_heading = None;
+                state.detail_edit_section_index = None;
                 if state.detail_view {
                     state.detail_section = 0;
                 }
@@ -385,6 +481,7 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 state.detail_section = (state.detail_section + 1) % DETAIL_SECTIONS.len();
                 state.detail_heading_index = 0;
                 state.detail_edit_heading = None;
+                state.detail_edit_section_index = None;
             }
         }
         SpecsMessage::PrevSection => {
@@ -396,6 +493,7 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 };
                 state.detail_heading_index = 0;
                 state.detail_edit_heading = None;
+                state.detail_edit_section_index = None;
             }
         }
         SpecsMessage::SearchStart => {
@@ -433,20 +531,14 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
         SpecsMessage::StartEdit => {
             if !state.editing {
                 if let Some(spec) = state.selected_spec() {
-                    state.edit_field = spec.phase.clone();
-                    state.edit_target = SpecEditTarget::Phase;
-                    state.editing = true;
-                    state.save_error = None;
+                    start_metadata_edit(state, SpecEditTarget::Phase, spec.phase.clone());
                 }
             }
         }
         SpecsMessage::StartStatusEdit => {
             if !state.editing {
                 if let Some(spec) = state.selected_spec() {
-                    state.edit_field = spec.status.clone();
-                    state.edit_target = SpecEditTarget::Status;
-                    state.editing = true;
-                    state.save_error = None;
+                    start_metadata_edit(state, SpecEditTarget::Status, spec.status.clone());
                 }
             }
         }
@@ -477,21 +569,25 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 state.editing = false;
                 state.edit_field.clear();
                 state.edit_target = SpecEditTarget::Phase;
+                state.edit_options.clear();
+                state.edit_option_index = 0;
             }
         }
         SpecsMessage::CancelEdit => {
             state.editing = false;
             state.edit_field.clear();
             state.edit_target = SpecEditTarget::Phase;
+            state.edit_options.clear();
+            state.edit_option_index = 0;
             state.save_error = None;
         }
         SpecsMessage::EditInput(ch) => {
-            if state.editing {
+            if state.editing && state.edit_options.is_empty() {
                 state.edit_field.push(ch);
             }
         }
         SpecsMessage::EditBackspace => {
-            if state.editing {
+            if state.editing && state.edit_options.is_empty() {
                 state.edit_field.pop();
             }
         }
@@ -500,20 +596,24 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 let selected_id = state.selected_spec().map(|spec| spec.id.clone());
                 if let Some(id) = selected_id {
                     let section_name = DETAIL_SECTIONS[state.detail_section];
-                    let headings = current_spec_markdown_headings(state);
+                    let sections = current_spec_markdown_sections(state);
                     let spec_root = state.spec_root.clone();
-                    let (edit_heading, edit_buffer) = if let Some(root) = spec_root.as_deref() {
+                    let (edit_heading, edit_section_index, edit_buffer) = if let Some(root) =
+                        spec_root.as_deref()
+                    {
                         if section_name == "spec.md" {
-                            if let Some(heading) = headings.get(state.detail_heading_index) {
+                            if let Some(section) = sections.get(state.detail_heading_index) {
                                 let content =
                                     fs::read_to_string(spec_markdown_path(root, &id, section_name))
                                         .unwrap_or_default();
                                 (
-                                    Some(heading.clone()),
-                                    extract_markdown_section(&content, heading).unwrap_or_default(),
+                                    Some(section.title.clone()),
+                                    Some(state.detail_heading_index),
+                                    extract_markdown_section(&content, section).unwrap_or_default(),
                                 )
                             } else {
                                 (
+                                    None,
                                     None,
                                     fs::read_to_string(spec_markdown_path(root, &id, section_name))
                                         .unwrap_or_default(),
@@ -522,15 +622,36 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                         } else {
                             (
                                 None,
+                                None,
                                 fs::read_to_string(spec_markdown_path(root, &id, section_name))
                                     .unwrap_or_default(),
                             )
                         }
                     } else {
-                        (None, String::new())
+                        (None, None, String::new())
                     };
                     state.detail_edit_heading = edit_heading;
+                    state.detail_edit_section_index = edit_section_index;
                     state.detail_edit_buffer = edit_buffer;
+                    state.detail_editing = true;
+                    state.save_error = None;
+                }
+            }
+        }
+        SpecsMessage::StartFileEdit => {
+            if state.detail_view && !state.detail_editing {
+                let selected_id = state.selected_spec().map(|spec| spec.id.clone());
+                if let Some(id) = selected_id {
+                    let section_name = DETAIL_SECTIONS[state.detail_section];
+                    let spec_root = state.spec_root.clone();
+                    state.detail_edit_heading = None;
+                    state.detail_edit_section_index = None;
+                    state.detail_edit_buffer = if let Some(root) = spec_root.as_deref() {
+                        fs::read_to_string(spec_markdown_path(root, &id, section_name))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     state.detail_editing = true;
                     state.save_error = None;
                 }
@@ -541,7 +662,7 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 if let Some(spec) = state.selected_spec() {
                     if let Some(root) = spec_root_for_state(state) {
                         let file_name = DETAIL_SECTIONS[state.detail_section];
-                        if let Some(heading) = state.detail_edit_heading.as_deref() {
+                        if let Some(section_index) = state.detail_edit_section_index {
                             let existing = match read_spec_markdown_file(root, &spec.id, file_name)
                             {
                                 Ok(content) => content,
@@ -550,9 +671,24 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                                     return;
                                 }
                             };
+                            let sections = markdown_sections(&existing);
+                            let Some(section) = sections.get(section_index) else {
+                                state.save_error = Some(
+                                    "selected markdown section is no longer present".to_string(),
+                                );
+                                return;
+                            };
+                            if state.detail_edit_heading.as_deref() != Some(section.title.as_str())
+                            {
+                                state.save_error = Some(
+                                    "selected markdown section no longer matches the file"
+                                        .to_string(),
+                                );
+                                return;
+                            }
                             let updated = match replace_markdown_section(
                                 &existing,
-                                heading,
+                                section,
                                 &state.detail_edit_buffer,
                             ) {
                                 Ok(content) => content,
@@ -581,11 +717,13 @@ pub fn update(state: &mut SpecsState, msg: SpecsMessage) {
                 }
                 state.detail_editing = false;
                 state.detail_edit_heading = None;
+                state.detail_edit_section_index = None;
             }
         }
         SpecsMessage::CancelSectionEdit => {
             state.detail_editing = false;
             state.detail_edit_heading = None;
+            state.detail_edit_section_index = None;
             state.detail_edit_buffer.clear();
             state.save_error = None;
         }
@@ -739,16 +877,23 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         ])
         .split(area);
 
+    let section_name = DETAIL_SECTIONS[state.detail_section];
+    let edit_hint = if section_name == "spec.md" {
+        "Ctrl+e: edit section | E: edit file"
+    } else {
+        "Ctrl+e: edit file"
+    };
+
     // Header section
     let header_text = if let Some(err) = &state.save_error {
         format!(
-            " {} - {}\n Phase: {} | Status: {}\n Save error: {}\n Esc: back | ←→: sections | e: edit phase | s: edit status | Ctrl+e: edit file",
-            spec.id, spec.title, spec.phase, spec.status, err
+            " {} - {}\n Phase: {} | Status: {}\n Save error: {}\n Esc: back | ←→: sections | e: edit phase | s: edit status | {}",
+            spec.id, spec.title, spec.phase, spec.status, err, edit_hint
         )
     } else {
         format!(
-            " {} - {}\n Phase: {} | Status: {}\n Esc: back | ←→: sections | e: edit phase | s: edit status | Ctrl+e: edit file",
-            spec.id, spec.title, spec.phase, spec.status,
+            " {} - {}\n Phase: {} | Status: {}\n Esc: back | ←→: sections | e: edit phase | s: edit status | {}",
+            spec.id, spec.title, spec.phase, spec.status, edit_hint,
         )
     };
     let header_block = Block::default().title("Spec Detail");
@@ -757,9 +902,9 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
 
-    let section_name = DETAIL_SECTIONS[state.detail_section];
-    let headings = current_spec_markdown_headings(state);
-    let selected_heading = headings.get(state.detail_heading_index).cloned();
+    let sections = current_spec_markdown_sections(state);
+    let selected_section = sections.get(state.detail_heading_index);
+    let selected_heading = selected_section.map(|section| section.title.clone());
     let tab_title = if section_name == "spec.md" {
         match selected_heading.as_deref() {
             Some(heading) => format!("{section_name} :: {heading}"),
@@ -781,25 +926,43 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
             ),
         }
     } else if state.editing {
+        let options = if state.edit_options.is_empty() {
+            vec![state.edit_field.clone()]
+        } else {
+            state.edit_options.clone()
+        };
+        let option_lines = options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| {
+                let marker = if index == state.edit_option_index {
+                    ">"
+                } else {
+                    " "
+                };
+                format!("{marker} {option}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         format!(
-            "Editing {}:\n{}_\nEnter: save | Esc: cancel | Backspace: delete",
+            "Select {}:\n↑↓: choose value | Enter: save | Esc: cancel\n\n{}",
             edit_target_label(state.edit_target),
-            state.edit_field
+            option_lines
         )
     } else if let Some(root) = spec_root_for_state(state) {
         read_spec_markdown_file(root, &spec.id, section_name)
             .map(|content| {
                 if section_name == "spec.md" {
-                    if let Some(heading) = selected_heading.as_deref() {
-                        let body = extract_markdown_section(&content, heading)
+                    if let Some(section) = selected_section {
+                        let body = extract_markdown_section(&content, section)
                             .unwrap_or_else(|| "(empty section)".to_string());
                         format!(
-                            "Selected section: {}\n↑↓: choose section | Ctrl+e: edit selected section\n\n{}",
-                            heading, body
+                            "Selected section: {}\n↑↓: choose section | Ctrl+e: edit selected section | E: edit file\n\n{}",
+                            section.title, body
                         )
                     } else {
                         format!(
-                            "{}\n\nCtrl+e edits the entire file until a top-level section exists.",
+                            "{}\n\nCtrl+e or E edits the entire file until a top-level section exists.",
                             content
                         )
                     }
@@ -809,7 +972,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
             })
             .unwrap_or_else(|_| {
                 format!(
-                    "Unable to load {} for {}\n\nPress Ctrl+e to create or replace this file.",
+                    "Unable to load {} for {}\n\nPress Ctrl+e or E to create or replace this file.",
                     section_name, spec.id
                 )
             })
@@ -915,6 +1078,16 @@ mod tests {
         fs::write(
             spec_dir.join("spec.md"),
             "# SPEC fixture\n\n## Background\n\nbackground body\n\n## User Stories\n\nstories body\n",
+        )
+        .unwrap();
+    }
+
+    fn write_duplicate_section_fixture(root: &std::path::Path, spec_id: &str) {
+        write_spec_fixture(root, spec_id);
+        let spec_dir = super::spec_dir(root, spec_id);
+        fs::write(
+            spec_dir.join("spec.md"),
+            "# SPEC fixture\n\n## Duplicate\n\nfirst body\n\n## Duplicate\n\nsecond body\n",
         )
         .unwrap();
     }
@@ -1212,6 +1385,14 @@ mod tests {
         state.editing = true;
         state.edit_target = SpecEditTarget::Status;
         state.edit_field = "in-progress".to_string();
+        state.edit_options = vec![
+            "draft".to_string(),
+            "open".to_string(),
+            "in-progress".to_string(),
+            "blocked".to_string(),
+            "done".to_string(),
+        ];
+        state.edit_option_index = 2;
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1223,9 +1404,9 @@ mod tests {
             .unwrap();
 
         let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("Editing status"));
-        assert!(text.contains("in-progress_"));
-        assert!(text.contains("Enter: save | Esc: cancel | Backspace: delete"));
+        assert!(text.contains("Select status:"));
+        assert!(text.contains("↑↓: choose value"));
+        assert!(text.contains("> in-progress"));
     }
 
     #[test]
@@ -1420,11 +1601,87 @@ mod tests {
     }
 
     #[test]
+    fn save_section_edit_uses_selected_duplicate_heading_index() {
+        let dir = tempfile::tempdir().unwrap();
+        write_duplicate_section_fixture(dir.path(), "SPEC-105A");
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-105A".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.detail_view = true;
+        state.detail_section = 0;
+        state.detail_heading_index = 1;
+
+        update(&mut state, SpecsMessage::StartSectionEdit);
+        state.detail_edit_buffer = "updated second body".to_string();
+        update(&mut state, SpecsMessage::SaveSectionEdit);
+
+        let body = fs::read_to_string(super::spec_markdown_path(
+            dir.path(),
+            "SPEC-105A",
+            "spec.md",
+        ))
+        .unwrap();
+        assert!(body.contains("## Duplicate\n\nfirst body"));
+        assert!(body.contains("## Duplicate\n\nupdated second body"));
+        assert!(
+            !body.contains("## Duplicate\n\nupdated second body\n\n## Duplicate\n\nsecond body")
+        );
+        assert!(!state.detail_editing);
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
+    fn save_section_edit_errors_when_selected_section_disappears() {
+        let dir = tempfile::tempdir().unwrap();
+        write_sectioned_spec_fixture(dir.path(), "SPEC-105B");
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-105B".to_string(),
+            title: "Fixture".to_string(),
+            phase: "draft".to_string(),
+            status: "open".to_string(),
+        }];
+        state.detail_view = true;
+        state.detail_section = 0;
+        state.detail_heading_index = 1;
+
+        update(&mut state, SpecsMessage::StartSectionEdit);
+        fs::write(
+            super::spec_markdown_path(dir.path(), "SPEC-105B", "spec.md"),
+            "# SPEC fixture\n\n## Background\n\nbackground body\n",
+        )
+        .unwrap();
+        state.detail_edit_buffer = "updated stories".to_string();
+
+        update(&mut state, SpecsMessage::SaveSectionEdit);
+
+        let body = fs::read_to_string(super::spec_markdown_path(
+            dir.path(),
+            "SPEC-105B",
+            "spec.md",
+        ))
+        .unwrap();
+        assert!(state.detail_editing);
+        assert!(state.save_error.is_some());
+        assert!(!body.contains("updated stories"));
+        assert!(!body.contains("## User Stories"));
+    }
+
+    #[test]
     fn extract_markdown_section_preserves_nested_headings() {
         let content =
             "# SPEC\n\n## User Stories\n\n### US-1\n\nstory body\n\n## Success Criteria\n\nsuccess\n";
+        let sections = markdown_sections(content);
 
-        let extracted = extract_markdown_section(content, "User Stories").expect("section");
+        let extracted = extract_markdown_section(content, &sections[0]).expect("section");
 
         assert!(extracted.contains("### US-1"));
         assert!(extracted.contains("story body"));
@@ -1435,13 +1692,23 @@ mod tests {
     fn replace_markdown_section_preserves_nested_headings() {
         let content =
             "# SPEC\n\n## User Stories\n\n### US-1\n\nstory body\n\n## Success Criteria\n\nsuccess\n";
+        let sections = markdown_sections(content);
 
         let replaced =
-            replace_markdown_section(content, "User Stories", "updated body").expect("replace");
+            replace_markdown_section(content, &sections[0], "updated body").expect("replace");
 
         assert!(replaced.contains("## User Stories\n\nupdated body"));
         assert!(replaced.contains("## Success Criteria\n\nsuccess"));
         assert!(!replaced.contains("### US-1"));
+    }
+
+    #[test]
+    fn markdown_section_headings_ignores_fenced_code_blocks() {
+        let content = "# SPEC\n\n```md\n## Not a section\n```\n\n## Real Section\n\nbody\n";
+
+        let headings = markdown_section_headings(content);
+
+        assert_eq!(headings, vec!["Real Section".to_string()]);
     }
 
     #[test]
@@ -1547,12 +1814,12 @@ mod tests {
     }
 
     #[test]
-    fn edit_input_appends() {
+    fn edit_input_is_ignored_for_selection_menu_metadata_edit() {
         let mut state = SpecsState::default();
         state.specs = sample_specs();
         update(&mut state, SpecsMessage::StartEdit);
         update(&mut state, SpecsMessage::EditInput('x'));
-        assert_eq!(state.edit_field, "implementationx");
+        assert_eq!(state.edit_field, "implementation");
     }
 
     #[test]
@@ -1564,12 +1831,40 @@ mod tests {
     }
 
     #[test]
-    fn edit_backspace_removes() {
+    fn move_down_while_editing_phase_cycles_selection_menu_value() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartEdit);
+
+        update(&mut state, SpecsMessage::MoveDown);
+
+        assert!(state.editing);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.edit_field, "done");
+    }
+
+    #[test]
+    fn move_down_while_editing_status_cycles_selection_menu_value() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartStatusEdit);
+
+        update(&mut state, SpecsMessage::MoveDown);
+
+        assert!(state.editing);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.edit_field, "blocked");
+    }
+
+    #[test]
+    fn edit_backspace_is_ignored_for_selection_menu_metadata_edit() {
         let mut state = SpecsState::default();
         state.specs = sample_specs();
         update(&mut state, SpecsMessage::StartEdit);
         update(&mut state, SpecsMessage::EditBackspace);
-        assert_eq!(state.edit_field, "implementatio");
+        assert_eq!(state.edit_field, "implementation");
     }
 
     #[test]
@@ -1620,6 +1915,32 @@ mod tests {
     }
 
     #[test]
+    fn save_edit_updates_phase_from_selection_menu_value() {
+        let dir = tempfile::tempdir().unwrap();
+        write_spec_fixture(dir.path(), "SPEC-103");
+
+        let mut state = SpecsState::default();
+        state.spec_root = Some(dir.path().to_path_buf());
+        state.specs = vec![SpecItem {
+            id: "SPEC-103".to_string(),
+            title: "Fixture".to_string(),
+            phase: "implementation".to_string(),
+            status: "open".to_string(),
+        }];
+        state.selected = 0;
+        update(&mut state, SpecsMessage::StartEdit);
+        update(&mut state, SpecsMessage::MoveDown);
+        update(&mut state, SpecsMessage::SaveEdit);
+
+        let metadata =
+            fs::read_to_string(super::spec_metadata_path(dir.path(), "SPEC-103")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(parsed["phase"], "done");
+        assert_eq!(state.specs[0].phase, "done");
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
     fn cancel_edit_discards() {
         let mut state = SpecsState::default();
         state.specs = sample_specs();
@@ -1654,5 +1975,28 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_detail_phase_edit_shows_selection_menu_hint() {
+        let mut state = SpecsState::default();
+        state.specs = sample_specs();
+        state.selected = 0;
+        state.detail_view = true;
+        update(&mut state, SpecsMessage::StartEdit);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("Select phase:"));
+        assert!(text.contains("↑↓: choose value"));
+        assert!(text.contains("> implementation"));
     }
 }
