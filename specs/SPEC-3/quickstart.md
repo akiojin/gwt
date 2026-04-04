@@ -69,7 +69,7 @@
 28. Verify grouped Quick Start actions now read `Resume` / `Start new`,
    while resume-capable entries still show the short session ID snippet.
 29. Verify a branch with exactly one persisted Quick Start entry now shows
-   `Quick Start — <Agent/Model>` in the popup title and starts the action
+   `Quick Start — Agent (Model)` in the popup title and starts the action
    rows immediately below the compact branch-name context line without a
    duplicated grouped header row.
 30. Verify a branch with multiple persisted Quick Start entries now renders
@@ -160,5 +160,7 @@
 - Quick Start now renders the branch name as a compact context line instead
   of the rebuilt `Branch: ...` copy, while keeping the grouped history order
   unchanged.
+- Single-entry Quick Start title promotion now keeps `Agent (Model)` only,
+  dropping the rebuilt reasoning copy while leaving body actions unchanged.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

@@ -247,3 +247,9 @@
 - [x] T129 [P] Write RED test: `QuickStart` uses a compact branch-name context line without the rebuilt `Branch: ...` prefix.
 - [x] T130 Update `wizard.rs` so `QuickStart` renders the branch name as the compact context line while preserving grouped ordering and title-promotion behavior.
 - [x] T131 Verify focused branch-context tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 35: Single-Entry QuickStart Title Compaction
+
+- [x] T132 [P] Write RED test: single-entry `QuickStart` title uses `Agent (Model)` without the rebuilt reasoning copy.
+- [x] T133 Update `wizard.rs` so single-entry title promotion keeps only the model-level summary while body actions stay compact.
+- [x] T134 Verify focused title-compaction tests, broad workspace checks, and refresh SPEC-3 artifacts.

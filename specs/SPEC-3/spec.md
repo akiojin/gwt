@@ -246,12 +246,13 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-032**: The final Quick Start action label matches the old-TUI copy
   `Choose different settings` without an ellipsis.
 - **FR-033**: When `QuickStart` has exactly one persisted entry, the popup
-  title promotes that entry's agent/model summary (`Quick Start — ...`) and
-  the body omits the duplicated grouped header so the first action row starts
-  directly below the compact branch-name context line.
+  title promotes that entry's compact agent/model summary (`Quick Start —
+  Agent (Model)`) and the body omits the duplicated grouped header so the
+  first action row starts directly below the compact branch-name context
+  line.
 - **FR-034**: When `QuickStart` has multiple persisted entries, the grouped
-  headers render the agent label only while the detailed model/reasoning
-  summary remains reserved for the single-entry title variant.
+  headers render the agent label only while the compact model-only summary
+  remains reserved for the single-entry title variant.
 - **FR-035**: In multi-entry `QuickStart`, resume session ID snippets are
   shown only on the currently selected `Resume` row so unselected rows stay
   visually compact.

@@ -80,6 +80,9 @@ Status: CLEAR
 - Notes: `QuickStart` now renders the branch name as a compact context line
   without the rebuilt `Branch: ...` prefix, which restores the denser old-TUI
   copy while keeping grouped ordering unchanged.
+- Notes: Single-entry `QuickStart` title promotion now keeps only `Agent
+  (Model)` and no longer repeats the rebuilt reasoning copy, which tightens
+  the popup chrome without changing body behavior.
 
 ## Next
 - `gwt-spec-implement`

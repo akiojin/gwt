@@ -1436,29 +1436,12 @@ fn agent_row_color(agent_id: &str) -> Color {
     }
 }
 
-fn quick_start_entry_header(entry: &QuickStartEntry) -> String {
-    if entry.agent_id == "codex" {
-        if let Some(reasoning) = &entry.reasoning {
-            format!(
-                "{} ({}, Reasoning: {})",
-                entry.tool_label,
-                entry.model.as_deref().unwrap_or("default"),
-                reasoning
-            )
-        } else {
-            format!(
-                "{} ({})",
-                entry.tool_label,
-                entry.model.as_deref().unwrap_or("default")
-            )
-        }
-    } else {
-        format!(
-            "{} ({})",
-            entry.tool_label,
-            entry.model.as_deref().unwrap_or("default")
-        )
-    }
+fn quick_start_title_summary(entry: &QuickStartEntry) -> String {
+    format!(
+        "{} ({})",
+        entry.tool_label,
+        entry.model.as_deref().unwrap_or("default")
+    )
 }
 
 fn quick_start_group_header(entry: &QuickStartEntry) -> String {
@@ -1470,7 +1453,7 @@ fn popup_title(state: &WizardState) -> String {
         format!(
             "{} — {}",
             state.step.title(),
-            quick_start_entry_header(&state.quick_start_entries[0])
+            quick_start_title_summary(&state.quick_start_entries[0])
         )
     } else {
         state.step.title().to_string()
@@ -2616,10 +2599,10 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("Quick Start — Codex (gpt-5.3-codex, Reasoning: high)"));
+        assert!(text.contains("Quick Start — Codex (gpt-5.3-codex)"));
+        assert!(!text.contains("Reasoning: high"));
         assert_eq!(
-            text.match_indices("Codex (gpt-5.3-codex, Reasoning: high)")
-                .count(),
+            text.match_indices("Codex (gpt-5.3-codex)").count(),
             1,
             "single-entry quick start should show the agent summary only in the popup title"
         );

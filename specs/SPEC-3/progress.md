@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `137/137` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:20:31Z`
+- Task progress: `140/140` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:25:22Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -98,6 +98,8 @@
 - `QuickStart` now uses a compact branch-name context line instead of the
   rebuilt `Branch: ...` prefix, which tightens the popup body without
   changing grouped history ordering.
+- Single-entry `QuickStart` title promotion now keeps `Agent (Model)` only,
+  dropping the rebuilt reasoning copy while preserving compact body actions.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

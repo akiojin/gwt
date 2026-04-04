@@ -348,6 +348,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the prefix is gone and the first
    grouped row still starts immediately below the branch context.
 
+### Phase 35: Single-Entry QuickStart Title Compaction
+
+1. Keep the single-entry title promotion intact, but compact the promoted
+   summary to `Agent (Model)` so the popup title no longer carries the
+   rebuilt reasoning copy.
+2. Preserve single-entry body actions, multi-entry grouped headers, and
+   title-promotion behavior while only reducing the title summary density.
+3. Add focused RED/GREEN coverage proving the single-entry title drops the
+   reasoning copy while compact action rows remain unchanged.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say
