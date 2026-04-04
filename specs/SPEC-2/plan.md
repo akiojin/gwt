@@ -94,6 +94,21 @@ session summary list so the Branches view can function as the primary workspace 
 10.3: Regression and verification (1 task)
 - Add focused extraction/render coverage and re-run workspace verification.
 
+### Phase 11: Branch Detail Session Focus Actions (5 tasks)
+Turn the restored `Sessions` pane into an actionable branch-first surface so the user can move
+from the selected branch directly into one of its running sessions without leaving Branches first.
+
+11.1: Session row selection (2 tasks)
+- Track a lightweight selection index for branch-scoped session rows inside `BranchesState`.
+- Keep the selection clamped/reset when the branch list changes or when session rows disappear.
+
+11.2: Focus handoff (2 tasks)
+- Route `Up/Down` inside the `Sessions` section to row selection instead of Docker controls.
+- Route `Enter` inside the `Sessions` section to activate the selected session and move focus to the terminal pane.
+
+11.3: Regression and verification (1 task)
+- Add focused routing/render coverage and re-run workspace verification.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

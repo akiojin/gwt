@@ -174,3 +174,11 @@ screens to use.
 - [x] T116 Add a lightweight branch-session summary helper in `app.rs` without touching `model.rs`.
 - [x] T117 Replace the count-only `Sessions` detail placeholder in `branches.rs` with the typed session list while preserving the empty state.
 - [x] T118 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 11: Branch Detail Session Focus Actions
+
+- [x] T119 [P] Write RED test: `Sessions` detail renders a selection marker for the currently selected branch session row.
+- [x] T120 [P] Write RED test: `Up/Down` inside the `Sessions` detail section cycles the session-row selection.
+- [x] T121 [P] Write RED test: `Enter` inside the `Sessions` detail section activates the selected session and focuses the terminal pane.
+- [x] T122 Add lightweight session-row selection state and routing in `app.rs` / `branches.rs`.
+- [x] T123 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

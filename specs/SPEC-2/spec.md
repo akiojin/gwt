@@ -100,7 +100,8 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
   - **Overview**: Branch name, head status, worktree path, linked Issues, PR status
   - **SPECs**: SPEC list from the branch's worktree `specs/` directory (worktree-only)
   - **Git Status**: Staged/unstaged/untracked files, recent commits
-  - **Sessions**: Active agent/shell sessions on this branch, rendered as a typed session list with an active-session marker
+  - **Sessions**: Active agent/shell sessions on this branch, rendered as a typed session list with an active-session marker and a current selection marker
+  - In the Sessions section, Up/Down cycles branch-scoped session rows and Enter focuses the selected session in the terminal pane
   - Left/Right cycles between sections within the detail view.
   - Enter in the detail pane directly launches agent (no action modal).
   - PR creation and branch deletion are NOT included (use CLI).

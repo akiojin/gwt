@@ -167,6 +167,8 @@ pub struct BranchesState {
     pub(crate) search_active: bool,
     /// Active detail section: 0=Overview, 1=SPECs, 2=Git, 3=Sessions.
     pub(crate) detail_section: usize,
+    /// Selected row within the Sessions detail section.
+    pub(crate) detail_session_selected: usize,
     /// Flag: caller should open agent selection.
     pub(crate) pending_launch_agent: bool,
     /// Flag: caller should spawn shell in worktree cwd.
@@ -230,6 +232,11 @@ impl BranchesState {
         super::clamp_index(&mut self.docker_selected, len);
     }
 
+    /// Clamp the session-row selection for the Sessions detail section.
+    pub(crate) fn clamp_detail_session_selected(&mut self, len: usize) {
+        super::clamp_index(&mut self.detail_session_selected, len);
+    }
+
     /// Return the currently selected Docker container, if any.
     fn selected_docker_container(&self) -> Option<&gwt_docker::ContainerInfo> {
         self.docker_containers.get(self.docker_selected)
@@ -278,10 +285,12 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::MoveUp => {
             let len = state.filtered_branches().len();
             super::move_up(&mut state.selected, len);
+            state.detail_session_selected = 0;
         }
         BranchesMessage::MoveDown => {
             let len = state.filtered_branches().len();
             super::move_down(&mut state.selected, len);
+            state.detail_session_selected = 0;
         }
         BranchesMessage::Select => {
             if !state.filtered_branches().is_empty() {
@@ -290,10 +299,12 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         }
         BranchesMessage::ToggleSort => {
             state.sort_mode = state.sort_mode.next();
+            state.detail_session_selected = 0;
         }
         BranchesMessage::ToggleView => {
             state.view_mode = state.view_mode.next();
             state.clamp_selected();
+            state.detail_session_selected = 0;
         }
         BranchesMessage::SearchStart => {
             state.search_active = true;
@@ -302,18 +313,21 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             if state.search_active {
                 state.search_query.push(ch);
                 state.clamp_selected();
+                state.detail_session_selected = 0;
             }
         }
         BranchesMessage::SearchBackspace => {
             if state.search_active {
                 state.search_query.pop();
                 state.clamp_selected();
+                state.detail_session_selected = 0;
             }
         }
         BranchesMessage::SearchClear => {
             state.search_query.clear();
             state.search_active = false;
             state.clamp_selected();
+            state.detail_session_selected = 0;
         }
         BranchesMessage::Refresh => {
             // Signal to reload branches — handled by caller
@@ -321,6 +335,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::SetBranches(branches) => {
             state.branches = branches;
             state.clamp_selected();
+            state.detail_session_selected = 0;
         }
         BranchesMessage::NextDetailSection => {
             state.detail_section = (state.detail_section + 1) % DETAIL_SECTION_COUNT;
@@ -526,7 +541,7 @@ pub fn render_detail_content(
         0 => render_detail_overview(state, frame, area),
         1 => render_detail_specs(state, frame, area),
         2 => render_detail_git_status(state, frame, area),
-        3 => render_detail_sessions(frame, area, sessions),
+        3 => render_detail_sessions(frame, area, sessions, state.detail_session_selected),
         _ => {}
     }
 }
@@ -828,7 +843,12 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
 }
 
 /// Sessions section: shows branch-scoped active session summaries.
-fn render_detail_sessions(frame: &mut Frame, area: Rect, sessions: &[DetailSessionSummary]) {
+fn render_detail_sessions(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[DetailSessionSummary],
+    selected_session: usize,
+) {
     let block = Block::default().title(if sessions.is_empty() {
         "Sessions".to_string()
     } else {
@@ -844,14 +864,16 @@ fn render_detail_sessions(frame: &mut Frame, area: Rect, sessions: &[DetailSessi
     }
 
     let mut lines = Vec::new();
-    for session in sessions {
+    let selected_session = selected_session.min(sessions.len().saturating_sub(1));
+    for (index, session) in sessions.iter().enumerate() {
+        let selected_marker = if index == selected_session { ">" } else { " " };
         let marker = if session.active { "●" } else { " " };
         let kind_style = match session.kind {
             "Agent" => Style::default().fg(Color::Cyan),
             "Shell" => Style::default().fg(Color::Green),
             _ => Style::default().fg(Color::White),
         };
-        let name_style = if session.active {
+        let name_style = if index == selected_session || session.active {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
@@ -859,7 +881,10 @@ fn render_detail_sessions(frame: &mut Frame, area: Rect, sessions: &[DetailSessi
             Style::default().fg(Color::White)
         };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {marker} "), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" {selected_marker} {marker} "),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::styled(session.kind, kind_style),
             Span::raw("  "),
             Span::styled(&session.name, name_style),
@@ -1119,6 +1144,20 @@ mod tests {
         update(&mut state, BranchesMessage::SetBranches(sample_branches()));
         assert_eq!(state.branches.len(), 5);
         assert_eq!(state.selected, 4); // clamped
+    }
+
+    #[test]
+    fn toggle_sort_and_view_reset_detail_session_selection() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_session_selected = 3;
+
+        update(&mut state, BranchesMessage::ToggleSort);
+        assert_eq!(state.detail_session_selected, 0);
+
+        state.detail_session_selected = 2;
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.detail_session_selected, 0);
     }
 
     #[test]
@@ -1656,6 +1695,45 @@ mod tests {
         assert!(
             lines.iter().any(|line| line.contains("No active sessions")),
             "Sessions pane should keep the empty-state fallback"
+        );
+    }
+
+    #[test]
+    fn render_detail_sessions_shows_selection_marker_for_current_row() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 3;
+        state.detail_session_selected = 1;
+        let sessions = vec![
+            DetailSessionSummary {
+                kind: "Agent",
+                name: "Codex".to_string(),
+                detail: None,
+                active: false,
+            },
+            DetailSessionSummary {
+                kind: "Shell",
+                name: "Shell: develop".to_string(),
+                detail: None,
+                active: true,
+            },
+        ];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &sessions);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("> ● Shell  Shell: develop")),
+            "Sessions pane should show the selected-row marker on the current row"
         );
     }
 

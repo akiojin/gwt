@@ -952,20 +952,53 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     false
 }
 
-/// Route a key event to the branch detail pane (sections, Enter launches agent).
+/// Route a key event to the branch detail pane (sections, session handoff, launch agent).
 fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
 
     let msg = match key.code {
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
-        KeyCode::Enter => Some(BranchesMessage::LaunchAgent),
         KeyCode::Up if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerUp)
         }
         KeyCode::Down if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerDown)
         }
+        KeyCode::Up if model.branches.detail_section == 3 => {
+            let len = branch_session_matches(model).len();
+            if len > 0 {
+                model.branches.clamp_detail_session_selected(len);
+                model.branches.detail_session_selected =
+                    if model.branches.detail_session_selected == 0 {
+                        len - 1
+                    } else {
+                        model.branches.detail_session_selected - 1
+                    };
+            }
+            None
+        }
+        KeyCode::Down if model.branches.detail_section == 3 => {
+            let len = branch_session_matches(model).len();
+            if len > 0 {
+                model.branches.clamp_detail_session_selected(len);
+                model.branches.detail_session_selected =
+                    (model.branches.detail_session_selected + 1) % len;
+            }
+            None
+        }
+        KeyCode::Enter if model.branches.detail_section == 3 => {
+            let sessions = branch_session_matches(model);
+            model
+                .branches
+                .clamp_detail_session_selected(sessions.len());
+            if let Some(selected) = sessions.get(model.branches.detail_session_selected) {
+                model.active_session = selected.session_index;
+                model.active_focus = FocusPane::Terminal;
+            }
+            None
+        }
+        KeyCode::Enter => Some(BranchesMessage::LaunchAgent),
         KeyCode::Char('s') if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerStart)
         }
@@ -1407,13 +1440,34 @@ fn check_branch_pending_actions(model: &mut Model) {
 
 /// Build lightweight summaries of active sessions associated with the selected branch.
 fn branch_session_summaries(model: &Model) -> Vec<screens::branches::DetailSessionSummary> {
-    branch_session_summaries_with(model, &gwt_sessions_dir())
+    branch_session_matches(model)
+        .into_iter()
+        .map(|entry| entry.summary)
+        .collect()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn branch_session_summaries_with(
     model: &Model,
     sessions_dir: &Path,
 ) -> Vec<screens::branches::DetailSessionSummary> {
+    branch_session_matches_with(model, sessions_dir)
+        .into_iter()
+        .map(|entry| entry.summary)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BranchSessionMatch {
+    session_index: usize,
+    summary: screens::branches::DetailSessionSummary,
+}
+
+fn branch_session_matches(model: &Model) -> Vec<BranchSessionMatch> {
+    branch_session_matches_with(model, &gwt_sessions_dir())
+}
+
+fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<BranchSessionMatch> {
     let Some(branch) = model.branches.selected_branch() else {
         return Vec::new();
     };
@@ -1428,11 +1482,14 @@ fn branch_session_summaries_with(
         .enumerate()
         .filter_map(|(index, session)| match &session.tab_type {
             SessionTabType::Shell if session.name == branch_shell_name => {
-                Some(screens::branches::DetailSessionSummary {
-                    kind: "Shell",
-                    name: session.name.clone(),
-                    detail: None,
-                    active: index == model.active_session,
+                Some(BranchSessionMatch {
+                    session_index: index,
+                    summary: screens::branches::DetailSessionSummary {
+                        kind: "Shell",
+                        name: session.name.clone(),
+                        detail: None,
+                        active: index == model.active_session,
+                    },
                 })
             }
             SessionTabType::Agent { .. } => {
@@ -1452,11 +1509,14 @@ fn branch_session_summaries_with(
                     (None, None) => None,
                 };
 
-                Some(screens::branches::DetailSessionSummary {
-                    kind: "Agent",
-                    name: session.name.clone(),
-                    detail,
-                    active: index == model.active_session,
+                Some(BranchSessionMatch {
+                    session_index: index,
+                    summary: screens::branches::DetailSessionSummary {
+                        kind: "Agent",
+                        name: session.name.clone(),
+                        detail,
+                        active: index == model.active_session,
+                    },
                 })
             }
             _ => None,
@@ -5667,6 +5727,111 @@ mod tests {
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(model.branches.docker_selected, 0);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_sessions_moves_selection() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+        }];
+        model.branches.detail_section = 3;
+
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: "shell-0".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+            },
+            crate::model::SessionTab {
+                id: "shell-1".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+            },
+        ];
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(model.branches.detail_session_selected, 1);
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(model.branches.detail_session_selected, 0);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_sessions_enter_focuses_selected_session() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+        }];
+        model.branches.detail_section = 3;
+        model.active_focus = FocusPane::BranchDetail;
+
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: "shell-0".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+            },
+            crate::model::SessionTab {
+                id: "shell-1".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+            },
+        ];
+        model.branches.detail_session_selected = 1;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.active_session, 1);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_sessions_enter_clamps_stale_selection() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+        }];
+        model.branches.detail_section = 3;
+        model.active_focus = FocusPane::BranchDetail;
+
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: "shell-0".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+            },
+            crate::model::SessionTab {
+                id: "shell-1".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+            },
+        ];
+        model.branches.detail_session_selected = 99;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.branches.detail_session_selected, 1);
+        assert_eq!(model.active_session, 1);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
     }
 
     #[test]
