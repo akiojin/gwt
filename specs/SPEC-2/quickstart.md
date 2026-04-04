@@ -19,7 +19,8 @@
 16. Cycle focus across Tab Content, Branch Detail, and Terminal, and confirm the focused pane border is Cyan while the unfocused pane borders are Gray.
 17. Move Branch Detail to a branch without a worktree and confirm the footer no longer advertises `Shift+Enter:shell` or `Ctrl+C:delete`, and that pressing those keys does not open a shell or delete confirmation.
 18. Toggle the management panel on a wide terminal and confirm the left pane is visibly narrower than the session pane, with the default layout matching a `40/60` split instead of `50/50`.
-19. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+19. While focus stays in Branch Detail, press `m` to change Branches view mode, `v` to jump to Git View, and `f` to return to the list with search active; confirm `?` or `h` still opens the help overlay from the detail pane.
+20. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -33,6 +34,7 @@
 - Focus chrome now matches the documented old-TUI palette instead of the temporary green/white implementation.
 - Branch Detail only advertises worktree-backed direct actions when the selected branch can actually execute them.
 - The visible workspace balance favors the terminal pane again: the management panel uses a sensible default width instead of splitting the screen evenly.
+- Branch Detail preserves the old-TUI local mnemonic muscle memory instead of forcing a focus hop back to the list before `m`, `v`, `f`, or help works.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

@@ -1013,6 +1013,25 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Char('r') if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerRestart)
         }
+        KeyCode::Char('m') => {
+            screens::branches::update(&mut model.branches, BranchesMessage::ToggleView);
+            let repo_path = model.repo_path.clone();
+            screens::branches::load_branch_detail(&mut model.branches, &repo_path);
+            None
+        }
+        KeyCode::Char('v') => {
+            update(model, Message::SwitchManagementTab(ManagementTab::GitView));
+            None
+        }
+        KeyCode::Char('f') | KeyCode::Char('/') => {
+            screens::branches::update(&mut model.branches, BranchesMessage::SearchStart);
+            model.active_focus = FocusPane::TabContent;
+            None
+        }
+        KeyCode::Char('?') | KeyCode::Char('h') => {
+            update(model, Message::ToggleHelp);
+            None
+        }
         KeyCode::Char('c')
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && model.branches.detail_section != 3
@@ -3084,6 +3103,7 @@ fn branch_detail_hint_text(model: &Model) -> String {
     } else {
         ""
     };
+    let local_mnemonics = "  m:view  v:git  f:search  ?:help";
     match model.branches.detail_section {
         0 => {
             let docker_hints = model
@@ -3099,11 +3119,13 @@ fn branch_detail_hint_text(model: &Model) -> String {
                 })
                 .unwrap_or("");
             format!(
-                "←→:section  Enter:launch{direct_action_hints}{docker_hints}  Tab:focus  Esc:back"
+                "←→:section  Enter:launch{direct_action_hints}{docker_hints}{local_mnemonics}  Tab:focus  Esc:back"
             )
         }
-        3 => "↑↓:session  ←→:section  Enter:focus  Tab:focus  Esc:back".to_string(),
-        _ => format!("←→:section  Enter:launch{direct_action_hints}  Tab:focus  Esc:back"),
+        3 => format!("↑↓:session  ←→:section  Enter:focus{local_mnemonics}  Tab:focus  Esc:back"),
+        _ => format!(
+            "←→:section  Enter:launch{direct_action_hints}{local_mnemonics}  Tab:focus  Esc:back"
+        ),
     }
 }
 
@@ -6139,6 +6161,62 @@ mod tests {
     }
 
     #[test]
+    fn route_key_to_branch_detail_m_toggles_view_mode() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/view-mode".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-view-mode")),
+        }];
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.detail_section = 0;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Char('m'), KeyModifiers::NONE));
+
+        assert_eq!(model.branches.view_mode, screens::branches::ViewMode::Local);
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_v_switches_to_git_view() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.detail_section = 2;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Char('v'), KeyModifiers::NONE));
+
+        assert_eq!(model.management_tab, ManagementTab::GitView);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_f_starts_search_and_returns_to_list_focus() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.detail_section = 1;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        assert!(model.branches.search_active);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_h_toggles_help_overlay() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+
+        assert!(model.help_visible);
+    }
+
+    #[test]
     fn render_model_text_branch_detail_hints_are_section_sensitive() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
@@ -6173,6 +6251,27 @@ mod tests {
         let sessions = render_model_text(&model, 200, 24);
         assert!(sessions.contains("↑↓:session"));
         assert!(sessions.contains("Enter:focus"));
+    }
+
+    #[test]
+    fn render_model_text_branch_detail_hints_include_branch_local_mnemonics() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/mnemonics".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-mnemonics")),
+        }];
+
+        let rendered = render_model_text(&model, 220, 24);
+        assert!(rendered.contains("m:view"));
+        assert!(rendered.contains("v:git"));
+        assert!(rendered.contains("f:search"));
+        assert!(rendered.contains("?:help"));
     }
 
     #[test]

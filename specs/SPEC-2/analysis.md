@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `136/136` completed items after closing Phase 18 for the management-panel width default.
+- Task traceability snapshot: `tasks.md` currently records `141/141` completed items after closing Phase 19 for Branch Detail local mnemonics.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -27,3 +27,4 @@ Status: CLEAR
 - Notes: Phase 16 closed the remaining pane-focus color drift by restoring `pane_block()` to the documented `Color::Cyan` / `Color::Gray` border contract.
 - Notes: Phase 17 aligned Branch Detail affordances with actual reachability; shell/delete direct actions are now offered only for selected branches that have a worktree.
 - Notes: Phase 18 restored a more sensible old-TUI-like workspace balance by moving the visible management/session split from `50/50` to `40/60` through a shared layout helper.
+- Notes: Phase 19 restored the old-TUI Branches local mnemonic set inside Branch Detail as well, so `m`, `v`, `f`, and help remain available after focus moves off the list.

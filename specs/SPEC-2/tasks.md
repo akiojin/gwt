@@ -238,3 +238,11 @@ screens to use.
 - [x] T156 Update `app.rs` layout code to use a shared `40/60` management/session split helper for both rendering and active-session geometry.
 - [x] T157 Refresh `SPEC-2` artifacts to describe the restored management width default.
 - [x] T158 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 19: Branch Detail Local Mnemonics
+
+- [x] T159 [P] Write RED test: `m` in Branch Detail toggles the Branches view mode without leaving the detail pane.
+- [x] T160 [P] Write RED test: `v` and `f` in Branch Detail mirror Git View and search routing, and `?` / `h` still opens help.
+- [x] T161 [P] Write RED test: Branch Detail footer hints advertise the restored local mnemonics.
+- [x] T162 Update `app.rs` Branch Detail routing and hint text to mirror `m=view`, `v=Git View`, `f=search`, and `?` / `h=help`.
+- [x] T163 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

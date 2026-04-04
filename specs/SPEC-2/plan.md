@@ -217,6 +217,21 @@ session pane while keeping the implementation closed to the existing layout code
 18.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 19: Branch Detail Local Mnemonics (5 tasks)
+Restore the old-TUI branch-first muscle memory inside Branch Detail so the user can keep using the
+same local mnemonics after moving focus off the list.
+
+19.1: Local mnemonic routing (2 tasks)
+- Allow `m` in Branch Detail to toggle the Branches view mode and refresh the visible detail.
+- Allow `v`, `f`, and `?` / `h` in Branch Detail to mirror the Branches-list local actions without requiring a focus hop first.
+
+19.2: Focused routing coverage (2 tasks)
+- Add focused coverage for Branch Detail `m` / `v` / `f` routing.
+- Add focused coverage for the Branch Detail footer hint text that advertises the restored local mnemonics.
+
+19.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
