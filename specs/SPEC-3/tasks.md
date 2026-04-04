@@ -90,7 +90,7 @@
 ## Phase 10: Quick Start History Restoration
 
 - [x] T046 [P] Write RED test: existing-branch wizard startup loads newest per-agent Quick Start history from persisted sessions for the current repository and branch.
-- [x] T047 [P] Write RED test: `QuickStart` renders old-TUI grouped rows (`Branch: ...`, colored agent headers, `Resume`, `Start new`, `Choose different settings...`) and uses `entries * 2 + 1` selectable options.
+- [x] T047 [P] Write RED test: `QuickStart` renders old-TUI grouped rows (`Branch: ...`, colored agent headers, `Resume`, `Start new`, `Choose different settings`) and uses `entries * 2 + 1` selectable options.
 - [x] T048 Implement persisted-session-backed Quick Start loading, old-TUI grouped rendering, and `Resume`/`Start new` selection semantics including resume-ID fallback to `Continue`.
 - [x] T049 Verify focused Quick Start tests, workspace checks, and refresh SPEC-3 artifacts.
 
@@ -165,20 +165,20 @@
 
 ## Phase 21: QuickStart Footer Separator Compaction
 
-- [x] T089 [P] Write RED test: `QuickStart` uses a compact separator before `Choose different settings...` instead of a full-width rule.
+- [x] T089 [P] Write RED test: `QuickStart` uses a compact separator before `Choose different settings` instead of a full-width rule.
 - [x] T090 Replace the full-width footer separator with a compact rule while preserving the final action row.
 - [x] T091 Verify focused footer-separator tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
 ## Phase 22: QuickStart Footer Action Description
 
-- [x] T092 [P] Write RED test: `Choose different settings...` shows a description on wide popups.
-- [x] T093 [P] Write RED test: `Choose different settings...` falls back to the label-only row on narrow popups.
+- [x] T092 [P] Write RED test: `Choose different settings` shows a description on wide popups.
+- [x] T093 [P] Write RED test: `Choose different settings` falls back to the label-only row on narrow popups.
 - [x] T094 Render the final QuickStart action as a `label - description` row on wide widths while preserving narrow-width fallback.
 - [x] T095 Verify focused footer-action tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
 ## Phase 23: QuickStart Footer Separator Removal
 
-- [x] T096 [P] Write RED test: `Choose different settings...` follows the last grouped `Start new` row without an extra separator line.
+- [x] T096 [P] Write RED test: `Choose different settings` follows the last grouped `Start new` row without an extra separator line.
 - [x] T097 Remove the remaining footer separator so the final action follows the last grouped row directly while preserving selection semantics.
 - [x] T098 Verify focused footer-density tests, broad workspace checks, and refresh SPEC-3 artifacts.
 
@@ -187,3 +187,9 @@
 - [x] T099 [P] Write RED test: `QuickStart` uses `Resume session` / `Start new session` labels in the grouped history render and option list.
 - [x] T100 Restore the old-TUI action labels while preserving resume-session ID snippets and existing selection semantics.
 - [x] T101 Verify focused label-restoration tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 25: QuickStart Final Label Copy
+
+- [x] T102 [P] Write RED test: the final Quick Start action uses `Choose different settings` without an ellipsis in wide and narrow render paths.
+- [x] T103 Remove the rebuilt ellipsis from the final Quick Start action label while preserving the wide description row and narrow fallback.
+- [x] T104 Verify focused final-label tests, broad workspace checks, and refresh SPEC-3 artifacts.

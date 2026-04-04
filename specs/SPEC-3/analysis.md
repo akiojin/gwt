@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `107/107` completed items.
+- Task traceability snapshot: `tasks.md` now records `110/110` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -51,12 +51,14 @@ Status: CLEAR
 - Notes: `QuickStart` agent groups no longer insert blank spacer rows between
   groups, so grouped headers render back-to-back while the final action stays
   in the same denser rhythm.
-- Notes: The final `Choose different settings...` action now follows the last
+- Notes: The final `Choose different settings` action now follows the last
   grouped `Start new` row directly without an extra separator line.
 - Notes: `QuickStart` action rows now use the shorter old-TUI labels
   `Resume session` and `Start new session` while preserving resume-session ID
   snippets.
-- Notes: The final `Choose different settings...` row now uses old-TUI
+- Notes: The final Quick Start action label now matches the old-TUI copy
+  `Choose different settings` without an ellipsis.
+- Notes: The final `Choose different settings` row now uses old-TUI
   `label - description` formatting on wide popups and falls back to the
   label-only row on narrow widths.
 

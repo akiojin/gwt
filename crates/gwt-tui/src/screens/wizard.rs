@@ -620,7 +620,7 @@ impl WizardState {
                     options.push("Start new session".to_string());
                 }
                 if !self.quick_start_entries.is_empty() {
-                    options.push("Choose different settings...".to_string());
+                    options.push("Choose different settings".to_string());
                 }
                 options
             }
@@ -1540,13 +1540,13 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let choose_text = if list_area.width >= 60 {
         format_label_description_line(
             choose_marker,
-            "Choose different settings...",
+            "Choose different settings",
             "Open full setup",
             list_area.width as usize,
             28,
         )
     } else {
-        format!("{choose_marker}Choose different settings...")
+        format!("{choose_marker}Choose different settings")
     };
     items.push(
         ListItem::new(truncate_with_ellipsis(
@@ -2553,7 +2553,7 @@ mod tests {
         assert!(text.contains("> Resume session (sess-123...)"));
         assert!(text.contains("  Start new session"));
         assert!(text.contains("Claude Code (sonnet)"));
-        assert!(text.contains("Choose different settings..."));
+        assert!(text.contains("Choose different settings"));
     }
 
     #[test]
@@ -2628,7 +2628,7 @@ mod tests {
 
         let buf = render_buffer(&state, 100, 24);
         let (_, start_new_y) = find_text_position(&buf, "Start new session").unwrap();
-        let (_, choose_y) = find_text_position(&buf, "Choose different settings...").unwrap();
+        let (_, choose_y) = find_text_position(&buf, "Choose different settings").unwrap();
 
         assert_eq!(
             choose_y,
@@ -2648,7 +2648,7 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("> Choose different settings... - Open full setup"));
+        assert!(text.contains("> Choose different settings - Open full setup"));
     }
 
     #[test]
@@ -2662,7 +2662,7 @@ mod tests {
 
         let text = render_text(&state, 40, 24);
 
-        assert!(text.contains("> Choose different settings..."));
+        assert!(text.contains("> Choose different settings"));
         assert!(!text.contains("Open full setup"));
     }
 

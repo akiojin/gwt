@@ -109,7 +109,7 @@ persisted agent session before activation.
    current repository and branch.
 2. Restore old-TUI `QuickStart` rendering with a branch summary row, colored
    agent headers, paired `Resume` / `Start new` actions, and a trailing
-   `Choose different settings...` option.
+   `Choose different settings` option.
 3. Restore Quick Start selection semantics so `Resume` reuses the persisted
    resume session ID when available, otherwise falls back to `Continue`, and
    `Start new` keeps the previous configuration while resetting session
@@ -198,7 +198,7 @@ persisted agent session before activation.
 1. Remove the extra spacer row between `Branch: ...` and the first grouped
    Quick Start history entry so the popup matches old-TUI information density.
 2. Preserve grouped agent headers, `Resume` / `Start new`, separators, and
-   the trailing `Choose different settings...` action while tightening only
+   the trailing `Choose different settings` action while tightening only
    the vertical spacing above the list.
 3. Add focused RED/GREEN coverage proving the first group begins immediately
    below the branch context line.
@@ -215,17 +215,17 @@ persisted agent session before activation.
 
 ### Phase 21: QuickStart Footer Separator Compaction
 
-1. Replace the full-width separator before `Choose different settings...`
+1. Replace the full-width separator before `Choose different settings`
    with a compact rule so the footer keeps its boundary without dominating the
    popup width.
-2. Preserve the final `Choose different settings...` action and its
+2. Preserve the final `Choose different settings` action and its
    selection semantics while only lightening the separator chrome.
 3. Add focused RED/GREEN coverage proving the footer no longer renders a
    full-width separator rule.
 
 ### Phase 22: QuickStart Footer Action Description
 
-1. Render `Choose different settings...` as an old-TUI `label - description`
+1. Render `Choose different settings` as an old-TUI `label - description`
    row on sufficiently wide popups so the final action explains that it opens
    the full setup flow.
 2. Preserve selection semantics and narrow-width readability by falling back
@@ -235,12 +235,21 @@ persisted agent session before activation.
 
 ### Phase 23: QuickStart Footer Separator Removal
 
-1. Remove the remaining footer separator so `Choose different settings...`
+1. Remove the remaining footer separator so `Choose different settings`
    follows the last grouped `Start new` action directly in the old-TUI rhythm.
 2. Preserve the final action's selection semantics and wide/narrow rendering
    contract while only tightening the vertical density of the grouped history.
 3. Add focused RED/GREEN coverage proving the final action now follows the last
    grouped row without an extra separator line.
+
+### Phase 25: QuickStart Final Label Copy
+
+1. Align the final Quick Start action label with the old-TUI copy
+   `Choose different settings` by removing the rebuilt ellipsis.
+2. Preserve the wide `label - description` row and narrow fallback while only
+   changing the label text itself.
+3. Add focused RED/GREEN coverage for both wide and narrow render paths using
+   the non-ellipsis label.
 
 ### Phase 24: QuickStart Action Label Restoration
 

@@ -16,7 +16,7 @@
    shows scroll indicators when the list overflows.
 7. Launch from an existing branch that has persisted session history and
    verify `Quick Start` shows `Branch: ...`, grouped agent headers,
-   `Resume`, `Start new`, and `Choose different settings...`.
+   `Resume`, `Start new`, and `Choose different settings`.
 8. Launch from an existing branch without persisted session history and
    verify the wizard starts at `BranchAction` instead of showing a stub
    Quick Start placeholder.
@@ -58,13 +58,15 @@
    below the `Branch: ...` context line instead of leaving an extra blank row
    before the grouped list.
 24. Verify consecutive Quick Start agent groups now render without a blank
-   spacer row between them while `Choose different settings...` still follows
+   spacer row between them while `Choose different settings` still follows
    the grouped history as the final footer action.
-25. Verify `Choose different settings...` now appears directly below the last
+25. Verify `Choose different settings` now appears directly below the last
    grouped `Start new` row without an extra separator line.
-26. Verify wide popups now render `Choose different settings... - Open full
+26. Verify wide popups now render `Choose different settings - Open full
    setup` while narrow popups fall back to the label-only row.
-27. Verify grouped Quick Start actions now read `Resume session` / `Start new
+27. Verify the final action label no longer uses an ellipsis and now matches
+   the old-TUI copy `Choose different settings`.
+28. Verify grouped Quick Start actions now read `Resume session` / `Start new
    session`, while resume-capable entries still show the short session ID
    snippet.
 
@@ -111,12 +113,12 @@
   history rows starting immediately below the branch context line.
 - Quick Start agent groups now render back-to-back without spacer rows,
   making the grouped history denser while preserving the final footer action.
-- The final `Choose different settings...` action now follows the last grouped
+- The final `Choose different settings` action now follows the last grouped
   row directly instead of being separated by its own divider.
 - The grouped Quick Start actions now use the shorter old-TUI labels
   `Resume session` and `Start new session` while keeping the short
   resume-session hint where available.
-- The final `Choose different settings...` row now explains itself on wide
+- The final `Choose different settings` row now explains itself on wide
   popups via `label - description` formatting and keeps the old label-only
   fallback on narrow widths.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.

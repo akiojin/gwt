@@ -106,7 +106,7 @@ As a developer, I want to quickly re-launch a previous agent session configurati
 1. Given I have previously launched an agent on branch `feature/foo`, when I open Quick Start, then the previous configuration for that branch is listed.
 2. Given Quick Start history has multiple entries, when I select one, then the wizard pre-fills all fields from the selected history entry.
 3. Given Quick Start history is empty, when I launch from an existing branch, then the wizard skips Quick Start and starts at `BranchAction`.
-4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own colored header, `Resume`, `Start new`, and a final `Choose different settings...` row in the old-TUI layout.
+4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own colored header, `Resume`, `Start new`, and a final `Choose different settings` row in the old-TUI layout.
 5. Given the selected history entry has a persisted resume session ID, when I choose `Resume`, then launch configuration restores `Resume` mode with that session ID. When no resume session ID exists, the wizard falls back to `Continue`.
 
 ### US-4: Manage Custom Agents (P1) -- IMPLEMENTED
@@ -234,15 +234,18 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-028**: `QuickStart` does not insert blank spacer rows between agent
   groups; the next agent header follows directly after the previous group's
   `Start new` action while preserving grouped headers and the final action.
-- **FR-029**: The final `Choose different settings...` action follows the last
+- **FR-029**: The final `Choose different settings` action follows the last
   grouped `Start new` row directly without an extra separator line, so the
   `QuickStart` popup keeps the denser old-TUI rhythm.
-- **FR-030**: On wider popups, `Choose different settings...` renders as an
+- **FR-030**: On wider popups, `Choose different settings` renders as an
   old-TUI `label - description` row (`Open full setup`); on narrow widths it
   falls back to the label-only row so the final action stays readable.
 - **FR-031**: `QuickStart` action rows use the shorter old-TUI labels
   `Resume session` and `Start new session`, while still showing the resume
   session ID snippet when one exists.
+- **FR-032**: The final Quick Start action label matches the old-TUI copy
+  `Choose different settings` without an ellipsis, while preserving the wide
+  description row and narrow fallback behavior.
 
 ## Non-Functional Requirements
 
