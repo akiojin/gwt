@@ -3470,11 +3470,20 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style)
-                    .title(session.name.as_str());
+                    .title(grid_session_title(session_idx, session));
                 frame.render_widget(block, *col_area);
             }
         }
     }
+}
+
+fn grid_session_title(session_idx: usize, session: &crate::model::SessionTab) -> String {
+    format!(
+        " {}: {} {} ",
+        session_idx.saturating_add(1),
+        session.tab_type.icon(),
+        session.name
+    )
 }
 
 #[cfg(test)]
@@ -4120,6 +4129,39 @@ mod tests {
         assert!(
             !first_line.contains("2/4"),
             "extra-wide panes should keep the full strip rather than the compact index/count chrome"
+        );
+    }
+
+    #[test]
+    fn render_model_text_grid_session_titles_include_index_and_icon() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+            shell_tab("shell-2", "Shell: feature/session-three"),
+        ];
+        model.active_session = 1;
+
+        let rendered = render_model_text(&model, 120, 24);
+
+        assert!(
+            rendered.contains("1:"),
+            "grid pane titles should expose a stable numeric affordance for the first session"
+        );
+        assert!(
+            rendered.contains("2:"),
+            "grid pane titles should expose a stable numeric affordance for the active session"
+        );
+        assert!(
+            rendered.contains("3:"),
+            "grid pane titles should expose a stable numeric affordance for later sessions"
+        );
+        assert!(
+            rendered.contains("▶"),
+            "grid pane titles should preserve the session-type icon instead of showing name-only chrome"
         );
     }
 

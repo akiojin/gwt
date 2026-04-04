@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `248/248` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T10:40:27Z`
+- Task progress: `253/253` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T10:46:17Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -46,6 +46,7 @@
 - Non-Branches management footers are now action-aware as well: `Issues` list shows `Enter:detail` / `/:search` / `r:refresh`, `Git View` shows `Enter:expand`, `Versions` stays refresh-only, and `PR Dashboard` detail shows `Enter:close` / `r:refresh` / `Esc:back` instead of generic `Enter:action`.
 - Branch Detail content now stays chrome-light: the pane border owns the active section and branch context, while inner Overview / SPECs / Git / Sessions renderers no longer repeat nested titles inside the body.
 - Compact session titles now keep the active `n/N` position visible alongside the active session label, so standard-width workspaces preserve multi-session context even after the full strip collapses.
+- Split/grid pane titles now keep old-TUI session identity cues as well: each pane shows its stable `n:` position plus the session-type icon before the session label.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

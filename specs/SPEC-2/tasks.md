@@ -418,3 +418,11 @@ banner in favor of pane-title chrome.
 - [x] T267 Update `app.rs` compact session title rendering so collapsed titles preserve active index/count context.
 - [x] T268 Refresh `SPEC-2` artifacts to describe compact session-title count parity.
 - [x] T269 Verify focused tests, workspace checks, and artifact sync.
+
+## Phase 41: Restore Split-Grid Session Title Identity
+
+- [x] T270 [P] Write RED test: split/grid pane titles expose the stable `n:` position for each visible session pane.
+- [x] T271 [P] Write RED test: split/grid pane titles keep the session-type icon visible instead of rendering name-only chrome.
+- [x] T272 Update `app.rs` grid-session title rendering to include `n:` plus the session-type icon before the session label.
+- [x] T273 Refresh grid-layout snapshots and `SPEC-2` artifacts to describe split-grid title parity.
+- [x] T274 Verify focused tests, snapshot verification, broad workspace verification, and artifact sync.

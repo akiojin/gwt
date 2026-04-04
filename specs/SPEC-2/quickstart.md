@@ -34,11 +34,12 @@
 31. In an `80x24` terminal with no notification occupying the footer, move through Branches list, Branch Detail, and a generic management tab such as `Issues`, then confirm the footer/status bar keeps their compact pane-local hints visible instead of truncating them at the right edge.
 32. In an `80x24` terminal with the management pane visible, confirm the top-left pane title shows only the active management tab label instead of a truncated multi-tab strip; then widen to an extra-wide terminal such as `220x40` and confirm the full tab strip returns.
 33. In a multi-session workspace at `80x24`, confirm the session pane title collapses to the active session while still showing the active `n/N` position (for example `2/4`); then widen to an extra-wide terminal such as `220x40` and confirm the full session strip returns and the compact `n/N` badge disappears.
-34. Open `Issues` detail and confirm the footer says `Esc:back`; open `Profiles` create mode and confirm the footer says `Esc:cancel`; compare `Settings` and `Git View` list mode and confirm only `Settings` advertises `Ctrl+←→:sub-tab`.
-35. With a warn notification visible while focus is still in Branch Detail, press `Esc` and confirm focus returns to the Branches list while the warn notification stays visible; press `Esc` once more from the list and confirm the warn notification dismisses.
-36. Compare `Git View`, `Versions`, `Issues`, and `PR Dashboard` detail footers and confirm they no longer show a generic `Enter:action`: `Git View` should say `Enter:expand`, `Versions` should stay refresh-only, `Issues` list should say `Enter:detail` plus `/:search`, and `PR Dashboard` detail should say `Enter:close`.
-37. Open Branch Detail on `Overview` and `Sessions` and confirm the pane border still carries the section/branch context while the body itself no longer repeats nested titles such as `Overview` or `Sessions`.
-38. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+34. Switch to split/grid mode with at least three sessions open and confirm each pane title shows its stable `n:` position plus the session-type icon before the session label, so the visible panes still match the `Ctrl+G,1-9` muscle memory.
+35. Open `Issues` detail and confirm the footer says `Esc:back`; open `Profiles` create mode and confirm the footer says `Esc:cancel`; compare `Settings` and `Git View` list mode and confirm only `Settings` advertises `Ctrl+←→:sub-tab`.
+36. With a warn notification visible while focus is still in Branch Detail, press `Esc` and confirm focus returns to the Branches list while the warn notification stays visible; press `Esc` once more from the list and confirm the warn notification dismisses.
+37. Compare `Git View`, `Versions`, `Issues`, and `PR Dashboard` detail footers and confirm they no longer show a generic `Enter:action`: `Git View` should say `Enter:expand`, `Versions` should stay refresh-only, `Issues` list should say `Enter:detail` plus `/:search`, and `PR Dashboard` detail should say `Enter:close`.
+38. Open Branch Detail on `Overview` and `Sessions` and confirm the pane border still carries the section/branch context while the body itself no longer repeats nested titles such as `Overview` or `Sessions`.
+39. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -67,6 +68,7 @@
 - Management and Branch Detail footers now use compact wording at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of dropping the trailing affordances.
 - Management pane titles now compact whenever the full tab strip would truncate, showing only the active tab label until the pane is wide enough to restore the full strip.
 - Session pane titles now compact by the same fit-based rule, showing the active session plus its `n/N` position until the pane is wide enough to restore the full strip.
+- Split/grid pane titles now preserve old-TUI session identity too, showing each visible pane's `n:` shortcut position plus the session-type icon before the session label.
 - Non-Branches management footer hints now match the actual tab/mode contract instead of advertising one generic set of controls across list, detail, and form flows.
 - Branch Detail `Esc` now behaves like a pure back action even when a warn toast is visible; warn dismissal happens only on a later unclaimed `Esc` from the list surface.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.

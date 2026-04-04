@@ -551,6 +551,21 @@ position/count even after the full strip collapses to a single active label.
 40.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 41: Restore Split-Grid Session Title Identity (5 tasks)
+Bring split/grid mode closer to old-TUI muscle memory by making each pane title carry the same
+session identity cues that tab mode already exposes.
+
+41.1: Grid-title identity contract (2 tasks)
+- Grid pane titles show each pane's stable `n:` session position before the session label.
+- Grid pane titles keep the session-type icon alongside the label instead of rendering name-only chrome.
+
+41.2: Focused rendering coverage (2 tasks)
+- Add RED coverage that grid pane titles expose the numeric session position for multiple panes.
+- Add RED coverage that the grid pane titles keep the session-type icon visible.
+
+41.3: Verification (1 task)
+- Re-run focused tests, snapshot verification, broad workspace verification, and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
