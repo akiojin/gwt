@@ -271,3 +271,9 @@
 - [x] T141 [P] Write RED test: render and `current_options()` both use `Choose different` for the final Quick Start action.
 - [x] T142 Update `wizard.rs` so the final Quick Start action label is compacted to `Choose different` without changing selection semantics.
 - [x] T143 Verify focused footer-label tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 39: AgentSelect Branch Context Compaction
+
+- [x] T144 [P] Write RED test: existing-branch `AgentSelect` uses the compact branch-name line and places the first agent row directly below it.
+- [x] T145 Update `wizard.rs` so existing-branch `AgentSelect` removes the `Branch: ...` prefix and closes the extra spacer row.
+- [x] T146 Verify focused agent-select tests, broad workspace checks, and refresh SPEC-3 artifacts.

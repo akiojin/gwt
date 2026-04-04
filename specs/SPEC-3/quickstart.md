@@ -35,8 +35,9 @@
    session remains intact on conversion failure.
 14. Verify the wizard popup border uses the current step title and shows a
    right-aligned `[ESC]` hint.
-15. Verify `AgentSelect` from an existing branch shows `Branch: ...` above a
-   name-only agent list with the old-TUI cyan selection highlight.
+15. Verify `AgentSelect` from an existing branch shows the compact
+   branch-name line above a name-only agent list with the old-TUI cyan
+   selection highlight.
 16. Verify `BranchNameInput` and `IssueSelect` render inline prompt labels
    inside the popup body and do not add nested titled boxes.
 17. Verify list-oriented steps such as `BranchAction`, `ModelSelect`,
@@ -175,5 +176,8 @@
 - The final Quick Start action now uses the compact old-TUI copy
   `Choose different`, and `current_options()` now returns the same shorter
   footer label.
+- Existing-branch AgentSelect now uses that same compact branch-name line and
+  places the first agent row directly below it instead of leaving an extra
+  spacer row after a `Branch: ...` prefix.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

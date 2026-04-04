@@ -1576,7 +1576,7 @@ fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
     let start_y = if !state.is_new_branch {
         frame.render_widget(
             Paragraph::new(truncate_with_ellipsis(
-                &format!("Branch: {}", state.branch_name),
+                &state.branch_name,
                 area.width as usize,
             ))
             .style(
@@ -1586,7 +1586,7 @@ fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
             ),
             Rect::new(area.x, area.y, area.width, 1),
         );
-        2
+        1
     } else {
         0
     };
@@ -2906,7 +2906,8 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("Branch: feature/test"));
+        assert!(text.contains("feature/test"));
+        assert!(!text.contains("Branch: feature/test"));
         assert!(text.contains("> Claude Code"));
         assert!(text.contains("  Codex CLI"));
         assert!(text.contains("  Aider"));
@@ -2922,7 +2923,8 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("Branch: feature/test"));
+        assert!(text.contains("feature/test"));
+        assert!(!text.contains("Branch: feature/test"));
         assert!(text.contains("(no agents detected)"));
     }
 
@@ -2944,6 +2946,25 @@ mod tests {
         assert_eq!(selected_style.bg, Some(Color::Cyan));
         assert_eq!(selected_style.fg, Some(Color::Black));
         assert_eq!(unselected_style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn render_agent_select_places_first_agent_directly_below_compact_branch_context() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::AgentSelect;
+        state.is_new_branch = false;
+        state.branch_name = "feature/test".to_string();
+        state.detected_agents = sample_agents();
+
+        let buf = render_buffer(&state, 100, 24);
+        let (_, branch_y) = find_text_position(&buf, "feature/test").unwrap();
+        let (_, agent_y) = find_text_position(&buf, "Claude Code").unwrap();
+
+        assert_eq!(
+            agent_y,
+            branch_y + 1,
+            "existing-branch agent select should place the first agent row directly below the compact branch context"
+        );
     }
 
     #[test]

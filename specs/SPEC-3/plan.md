@@ -382,6 +382,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the single-entry title falls back
    to the agent label alone when no model was persisted.
 
+### Phase 39: AgentSelect Branch Context Compaction
+
+1. Keep `AgentSelect` existing-branch context visible, but remove the rebuilt
+   `Branch: ...` prefix so it matches the denser branch-name line used by
+   `QuickStart`.
+2. Preserve name-only agent rows, selection colors, and popup chrome while
+   only tightening the context line and its vertical spacing.
+3. Add focused RED/GREEN coverage proving the first agent row now starts
+   directly below the compact branch-name context line.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

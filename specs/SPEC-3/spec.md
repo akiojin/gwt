@@ -79,7 +79,8 @@ first flow that was already restored.
 **Acceptance Scenarios**
 
 1. Given I enter `AgentSelect` from an existing branch, when the popup
-   renders, then the content shows `Branch: ...` above the agent list.
+   renders, then the content shows the compact branch-name context line above
+   the agent list.
 2. Given `AgentSelect` renders, when the list is shown, then rows use agent
    names only instead of status-heavy labels, with the selected row using the
    old-TUI cyan highlight.
@@ -203,9 +204,10 @@ As a developer, I want to convert an existing session to a different agent type 
   a compact branch-name context line, colored per-agent action rows, two
   selectable rows per entry (`Resume` / `Start new`), and a trailing
   `Choose different` action.
-- **FR-019**: `AgentSelect` renders old-TUI-style existing-branch context and
-  name-only agent rows, while the popup chrome shows the current step title
-  in the border and a right-aligned `[ESC]` hint.
+- **FR-019**: `AgentSelect` renders old-TUI-style existing-branch context as
+  the compact branch-name line plus name-only agent rows, while the popup
+  chrome shows the current step title in the border and a right-aligned
+  `[ESC]` hint.
 - **FR-020**: `BranchNameInput` and `IssueSelect` render as old-TUI inline
   prompts inside the popup body, reusing the popup chrome instead of adding
   nested titled input boxes.
