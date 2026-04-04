@@ -960,7 +960,8 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
         KeyCode::Enter
-            if key.modifiers.contains(KeyModifiers::SHIFT) && model.branches.detail_section != 3 =>
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                && model.branches.detail_section != 3 =>
         {
             Some(BranchesMessage::OpenShell)
         }
@@ -994,9 +995,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Enter if model.branches.detail_section == 3 => {
             let sessions = branch_session_matches(model);
-            model
-                .branches
-                .clamp_detail_session_selected(sessions.len());
+            model.branches.clamp_detail_session_selected(sessions.len());
             if let Some(selected) = sessions.get(model.branches.detail_session_selected) {
                 model.active_session = selected.session_index;
                 model.active_focus = FocusPane::Terminal;
@@ -1014,14 +1013,21 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
             Some(BranchesMessage::DockerContainerRestart)
         }
         KeyCode::Char('c')
-            if key.modifiers.contains(KeyModifiers::CONTROL) && model.branches.detail_section != 3 =>
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && model.branches.detail_section != 3 =>
         {
             Some(BranchesMessage::DeleteWorktree)
+        }
+        KeyCode::Esc => {
+            model.active_focus = FocusPane::TabContent;
+            None
         }
         _ => None,
     };
     if let Some(m) = msg {
         update(model, Message::Branches(m));
+    } else if key.code == KeyCode::Esc && model.active_focus == FocusPane::BranchDetail {
+        // Handled above: Esc returns to the branch list without mutating detail state.
     } else if key.code == KeyCode::Esc {
         dismiss_warn_notification(model);
     }
@@ -2962,10 +2968,9 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
 fn branch_detail_title(model: &Model) -> Line<'static> {
     let detail_labels: Vec<&str> = screens::branches::detail_section_labels().to_vec();
     let mut title = screens::build_tab_title(&detail_labels, model.branches.detail_section);
-    title.spans.push(Span::styled(
-        " · ",
-        Style::default().fg(Color::DarkGray),
-    ));
+    title
+        .spans
+        .push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
     let branch_label = model
         .branches
         .selected_branch()
@@ -5955,8 +5960,7 @@ mod tests {
 
         assert_eq!(model.sessions.len(), initial_sessions + 1);
         assert_eq!(
-            model.active_session,
-            initial_sessions,
+            model.active_session, initial_sessions,
             "new shell session should become active"
         );
         assert_eq!(model.active_focus, FocusPane::Terminal);
@@ -5985,6 +5989,54 @@ mod tests {
         assert!(
             model.confirm.message.contains("feature/direct-actions"),
             "delete confirmation should reference the selected branch"
+        );
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_esc_returns_to_tab_content_focus() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/esc-back".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+        }];
+        model.branches.selected = 0;
+        model.branches.detail_section = 2;
+        model.active_focus = FocusPane::BranchDetail;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_esc_preserves_detail_context() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/esc-back".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+        }];
+        model.branches.selected = 0;
+        model.branches.detail_section = 3;
+        model.branches.detail_session_selected = 4;
+        model.active_focus = FocusPane::BranchDetail;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(model.branches.selected, 0);
+        assert_eq!(model.branches.detail_section, 3);
+        assert_eq!(model.branches.detail_session_selected, 4);
+        assert_eq!(
+            model
+                .branches
+                .selected_branch()
+                .map(|branch| branch.name.as_str()),
+            Some("feature/esc-back")
         );
     }
 

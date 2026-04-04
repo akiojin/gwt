@@ -206,3 +206,11 @@ screens to use.
 - [x] T136 Update `app.rs` Branch Detail pane chrome to append selected branch context to the title without touching shared tab-title utilities.
 - [x] T137 Refresh `SPEC-2` artifacts to describe the restored title-context contract.
 - [x] T138 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 15: Branch Detail Escape Back
+
+- [x] T139 [P] Write RED test: `Esc` in Branch Detail returns focus to the Branches list.
+- [x] T140 [P] Write RED test: `Esc` in Branch Detail preserves the selected branch, active section, and session-row selection.
+- [x] T141 Update `app.rs` Branch Detail routing so `Esc` returns to `TabContent` without mutating detail state.
+- [x] T142 Refresh `SPEC-2` artifacts to describe the restored `Esc:back` contract.
+- [x] T143 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

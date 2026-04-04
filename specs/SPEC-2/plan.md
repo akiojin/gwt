@@ -157,6 +157,21 @@ visible even when the user is reading another detail section.
 14.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 15: Branch Detail Escape Back (5 tasks)
+Restore the old-TUI `Esc:back` affordance in Branch Detail so the detail pane behaves like a
+temporary deep-focus surface instead of a focus trap.
+
+15.1: Escape focus contract (2 tasks)
+- Route `Esc` in Branch Detail back to the Branches list focus.
+- Preserve the selected branch, active detail section, and `Sessions` row selection when focus returns.
+
+15.2: Focused routing coverage (2 tasks)
+- Add focused routing coverage for the list-focus handoff.
+- Add focused routing coverage proving the detail context survives the handoff.
+
+15.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

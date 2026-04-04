@@ -104,6 +104,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
   - In the Sessions section, Up/Down cycles branch-scoped session rows and Enter focuses the selected session in the terminal pane
   - Outside the Sessions section, old-TUI direct branch actions remain available from the detail pane: Shift+Enter opens a shell on the selected branch and Ctrl+C opens the delete-worktree confirmation
   - The Branch Detail pane title keeps the selected branch name visible alongside the section tabs so context is preserved after focus moves off the top list
+  - Esc in Branch Detail returns focus to the branch list without clearing the selected branch, active section, or session-row selection
   - Left/Right cycles between sections within the detail view.
   - Enter in the detail pane directly launches agent (no action modal).
   - PR creation and branch deletion are NOT included (use CLI).
@@ -200,6 +201,7 @@ Management tabs are displayed in the Block title of the management panel area. T
 | `Enter` | Launch agent for the selected branch, or focus the selected session inside `Sessions` |
 | `Shift+Enter` | Open shell for the selected branch (outside `Sessions`) |
 | `Ctrl+C` | Open delete-worktree confirmation (outside `Sessions`) |
+| `Esc` | Return focus to the Branches list while preserving detail context |
 
 ### Focus: Terminal
 
