@@ -15,8 +15,8 @@
    `SkipPermissions` render descriptive old-TUI rows and `VersionSelect`
    shows scroll indicators when the list overflows.
 7. Launch from an existing branch that has persisted session history and
-   verify `Quick Start` shows `Branch: ...`, grouped agent headers,
-   `Resume`, `Start new`, and `Choose different settings`.
+   verify `Quick Start` shows the compact branch-name context line, grouped
+   agent headers, `Resume`, `Start new`, and `Choose different settings`.
 8. Launch from an existing branch without persisted session history and
    verify the wizard starts at `BranchAction` instead of showing a stub
    Quick Start placeholder.
@@ -55,8 +55,8 @@
    yellow input value on separate rows instead of sharing a single inline
    paragraph.
 23. Verify `QuickStart` now starts the first grouped history entry directly
-   below the `Branch: ...` context line instead of leaving an extra blank row
-   before the grouped list.
+   below the compact branch-name context line instead of leaving an extra
+   blank row before the grouped list.
 24. Verify consecutive Quick Start agent groups now render without a blank
    spacer row between them while `Choose different settings` still follows
    the grouped history as the final footer action.
@@ -70,8 +70,8 @@
    while resume-capable entries still show the short session ID snippet.
 29. Verify a branch with exactly one persisted Quick Start entry now shows
    `Quick Start — <Agent/Model>` in the popup title and starts the action
-   rows immediately below `Branch: ...` without a duplicated grouped header
-   row.
+   rows immediately below the compact branch-name context line without a
+   duplicated grouped header row.
 30. Verify a branch with multiple persisted Quick Start entries now renders
    grouped headers as agent labels only (`Codex`, `Claude Code`, etc.) while
    keeping the generic `Quick Start` title.
@@ -140,7 +140,7 @@
   available.
 - Single-entry Quick Start popups now move the lone agent/model summary into
   the popup title so the body can start directly with the available actions
-  under `Branch: ...`.
+  under the compact branch-name context line.
 - Multi-entry Quick Start popups now keep grouped headers agent-only so the
   grouped list remains denser and the extra model/reasoning detail does not
   repeat across every group.
@@ -157,5 +157,8 @@
   `Start new` copy.
 - The popup no longer shows a separate `Step N/M` row above the chrome, so
   the border title remains the only step-context chrome.
+- Quick Start now renders the branch name as a compact context line instead
+  of the rebuilt `Branch: ...` copy, while keeping the grouped history order
+  unchanged.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

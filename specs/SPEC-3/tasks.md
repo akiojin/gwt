@@ -241,3 +241,9 @@
 - [x] T126 [P] Write RED test: single-entry `QuickStart` render and `current_options()` use compact `Resume` / `Start new` labels while keeping the resume-session hint.
 - [x] T127 Update `wizard.rs` so single-entry `QuickStart` matches the compact body-action copy already used by multi-entry history.
 - [x] T128 Verify focused single-entry copy tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 34: QuickStart Branch Context Compaction
+
+- [x] T129 [P] Write RED test: `QuickStart` uses a compact branch-name context line without the rebuilt `Branch: ...` prefix.
+- [x] T130 Update `wizard.rs` so `QuickStart` renders the branch name as the compact context line while preserving grouped ordering and title-promotion behavior.
+- [x] T131 Verify focused branch-context tests, broad workspace checks, and refresh SPEC-3 artifacts.

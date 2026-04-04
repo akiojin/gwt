@@ -46,8 +46,8 @@ Status: CLEAR
   input steps, so prompt and value each occupy their own row while the popup
   chrome remains the wizard's only boxed surface.
 - Notes: `QuickStart` now starts its grouped history immediately below the
-  `Branch: ...` context line, restoring the denser old-TUI popup layout
-  without changing grouped actions.
+  compact branch-name context line, restoring the denser old-TUI popup
+  layout without changing grouped actions.
 - Notes: `QuickStart` agent groups no longer insert blank spacer rows between
   groups, so grouped headers render back-to-back while the final action stays
   in the same denser rhythm.
@@ -77,6 +77,9 @@ Status: CLEAR
 - Notes: The wizard popup now uses the border title as its only step-context
   chrome, removing the separate `Step N/M` row and reclaiming that line for
   content.
+- Notes: `QuickStart` now renders the branch name as a compact context line
+  without the rebuilt `Branch: ...` prefix, which restores the denser old-TUI
+  copy while keeping grouped ordering unchanged.
 
 ## Next
 - `gwt-spec-implement`

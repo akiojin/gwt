@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `134/134` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:13:50Z`
+- Task progress: `137/137` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:20:31Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -61,8 +61,8 @@
 - `BranchNameInput` and `IssueSelect` now use the old-TUI compact two-row
   layout, with a cyan prompt line above the yellow input value while the
   popup chrome remains the only boxed surface.
-- `QuickStart` now begins its grouped history immediately below the
-  `Branch: ...` context line instead of reserving an extra spacer row, which
+- `QuickStart` now begins its grouped history immediately below the compact
+  branch-name context line instead of reserving an extra spacer row, which
   restores the old-TUI popup density.
 - `QuickStart` agent groups now render back-to-back without blank spacer rows
   between them, preserving headers while matching the denser old-TUI grouped
@@ -77,7 +77,8 @@
   settings` without an ellipsis.
 - Single-entry `QuickStart` popups now promote the lone agent/model summary
   into the popup title and start the action rows directly below
-  `Branch: ...`, while multi-entry history keeps the grouped header rows.
+  the compact branch-name context line, while multi-entry history keeps the
+  grouped header rows.
 - Multi-entry `QuickStart` grouped headers now render agent labels only,
   leaving the more detailed model/reasoning summary to the single-entry title
   variant and keeping grouped history visually denser.
@@ -94,6 +95,9 @@
   compact `Resume` / `Start new` copy consistently.
 - The wizard popup now uses the border title as its only step-context chrome,
   removing the redundant `Step N/M` row so content starts one line higher.
+- `QuickStart` now uses a compact branch-name context line instead of the
+  rebuilt `Branch: ...` prefix, which tightens the popup body without
+  changing grouped history ordering.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

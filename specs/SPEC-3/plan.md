@@ -195,8 +195,9 @@ persisted agent session before activation.
 
 ### Phase 19: QuickStart Density Restoration
 
-1. Remove the extra spacer row between `Branch: ...` and the first grouped
-   Quick Start history entry so the popup matches old-TUI information density.
+1. Remove the extra spacer row between the compact branch-name context line
+   and the first grouped Quick Start history entry so the popup matches
+   old-TUI information density.
 2. Preserve grouped agent headers, `Resume` / `Start new`, separators, and
    the trailing `Choose different settings` action while tightening only
    the vertical spacing above the list.
@@ -258,7 +259,7 @@ persisted agent session before activation.
    context instead of repeating it in the body.
 2. Preserve multi-entry grouped headers unchanged while omitting the
    duplicated header row only for the single-entry branch, making the first
-   action row follow `Branch: ...` directly.
+   action row follow the compact branch-name context line directly.
 3. Add focused RED/GREEN coverage for single-entry title promotion and
    multi-entry fallback before updating artifacts.
 
@@ -335,6 +336,17 @@ persisted agent session before activation.
    copy from the single-entry branch.
 3. Add focused RED/GREEN coverage proving single-entry render and
    `current_options()` stay aligned on the compact copy.
+
+### Phase 34: QuickStart Branch Context Compaction
+
+1. Replace the rebuilt `Branch: ...` prefix in `QuickStart` with the denser
+   old-TUI-style branch-name context line while leaving `AgentSelect`
+   untouched.
+2. Preserve grouped ordering, title promotion, and selection semantics while
+   making the first grouped row continue directly below the compact branch
+   context line.
+3. Add focused RED/GREEN coverage proving the prefix is gone and the first
+   grouped row still starts immediately below the branch context.
 
 ### Phase 24: QuickStart Action Label Restoration
 

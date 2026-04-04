@@ -1484,7 +1484,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(truncate_with_ellipsis(
-            &format!("Branch: {}", state.branch_name),
+            &state.branch_name,
             area.width as usize,
         ))
         .style(
@@ -2492,7 +2492,8 @@ mod tests {
 
         assert!(!text.contains("Step 1/"));
         assert!(text.contains("Quick Start"));
-        assert!(text.contains("Branch: feature/test"));
+        assert!(text.contains("feature/test"));
+        assert!(!text.contains("Branch: feature/test"));
     }
 
     #[test]
@@ -2596,7 +2597,8 @@ mod tests {
         let text = render_text(&state, 100, 24);
 
         assert!(text.contains("Quick Start"));
-        assert!(text.contains("Branch: feature/test"));
+        assert!(text.contains("feature/test"));
+        assert!(!text.contains("Branch: feature/test"));
         assert!(text.contains("Codex"));
         assert!(text.contains("> Resume (sess-123...)"));
         assert!(text.contains("  Start new"));
@@ -2632,7 +2634,7 @@ mod tests {
         state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
 
         let buf = render_buffer(&state, 100, 24);
-        let (_, branch_y) = find_text_position(&buf, "Branch: feature/test").unwrap();
+        let (_, branch_y) = find_text_position(&buf, "feature/test").unwrap();
         let (_, resume_y) = find_text_position(&buf, "Resume").unwrap();
 
         assert_eq!(
@@ -2734,7 +2736,7 @@ mod tests {
         state.quick_start_entries = sample_quick_start_entries();
 
         let buf = render_buffer(&state, 100, 24);
-        let (_, branch_y) = find_text_position(&buf, "Branch: feature/test").unwrap();
+        let (_, branch_y) = find_text_position(&buf, "feature/test").unwrap();
         let (_, header_y) = find_text_position(&buf, "Codex").unwrap();
 
         assert_eq!(
@@ -2742,6 +2744,20 @@ mod tests {
             branch_y + 1,
             "the first quick-start group should start immediately below the branch context"
         );
+    }
+
+    #[test]
+    fn render_quick_start_uses_compact_branch_context_without_prefix() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("feature/test"));
+        assert!(!text.contains("Branch: feature/test"));
     }
 
     #[test]

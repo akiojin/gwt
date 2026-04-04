@@ -200,9 +200,9 @@ As a developer, I want to convert an existing session to a different agent type 
   `SkipPermissions`, and `VersionSelect` use old-TUI-style row formatting
   with descriptive text and version-list scroll indicators.
 - **FR-018**: `QuickStart` renders old-TUI-style grouped history rows with
-  `Branch: ...`, colored per-agent headers, two selectable rows per entry
-  (`Resume` / `Start new`), and a trailing `Choose different settings...`
-  action.
+  a compact branch-name context line, colored per-agent headers, two
+  selectable rows per entry (`Resume` / `Start new`), and a trailing
+  `Choose different settings` action.
 - **FR-019**: `AgentSelect` renders old-TUI-style existing-branch context and
   name-only agent rows, while the popup chrome shows the current step title
   in the border and a right-aligned `[ESC]` hint.
@@ -229,8 +229,8 @@ As a developer, I want to convert an existing session to a different agent type 
   input steps with a cyan prompt line above a yellow value line, while still
   reusing the popup chrome as the only boxed surface.
 - **FR-027**: `QuickStart` starts its grouped history immediately below the
-  `Branch: ...` context line instead of reserving an extra spacer row, so the
-  popup matches the old-TUI information density.
+  compact branch-name context line instead of reserving an extra spacer row,
+  so the popup matches the old-TUI information density.
 - **FR-028**: `QuickStart` does not insert blank spacer rows between agent
   groups; the next agent header follows directly after the previous group's
   `Start new` action while preserving grouped headers and the final action.
@@ -248,7 +248,7 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-033**: When `QuickStart` has exactly one persisted entry, the popup
   title promotes that entry's agent/model summary (`Quick Start — ...`) and
   the body omits the duplicated grouped header so the first action row starts
-  directly below `Branch: ...`.
+  directly below the compact branch-name context line.
 - **FR-034**: When `QuickStart` has multiple persisted entries, the grouped
   headers render the agent label only while the detailed model/reasoning
   summary remains reserved for the single-entry title variant.
