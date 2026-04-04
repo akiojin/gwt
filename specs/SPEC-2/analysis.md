@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `106/106` completed items after closing Phase 12 for status-bar restoration.
+- Task traceability snapshot: `tasks.md` currently records `111/111` completed items after closing Phase 13 for Branch Detail direct-action restoration.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -21,3 +21,4 @@ Status: CLEAR
 - Notes: Phase 10 closed the remaining branch-detail UX gap by replacing the count-only `Sessions` pane with branch-scoped shell/agent summaries built at render time from live tabs and persisted agent-session metadata.
 - Notes: Phase 11 closed the next branch-first UX gap by making the `Sessions` pane actionable: `Up/Down` selects branch-scoped session rows and `Enter` focuses the selected running session in the terminal pane.
 - Notes: Phase 12 closed the footer UX gap by restoring the shared status-bar widget in the main view; the bottom line now carries session/branch/agent context, notifications, and focus-specific hints together.
+- Notes: Phase 13 closed the next Branch Detail affordance gap by restoring `Shift+Enter` and `Ctrl+C` as direct branch actions outside the `Sessions` section and by making Branch Detail footer hints section-sensitive.

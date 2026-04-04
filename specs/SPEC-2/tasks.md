@@ -190,3 +190,11 @@ screens to use.
 - [x] T126 [P] Write RED test: Branches focus still shows the branch-first keybind hints when the footer is rendered through the status-bar widget.
 - [x] T127 Restore the bottom status bar in `app.rs` / `widgets/status_bar.rs` so it carries session context, branch/agent metadata, notifications, and hints together.
 - [x] T128 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 13: Branch Detail Direct Actions
+
+- [x] T129 [P] Write RED test: `Shift+Enter` in Branch Detail opens a shell for the selected branch outside the `Sessions` section.
+- [x] T130 [P] Write RED test: `Ctrl+C` in Branch Detail opens the delete-worktree confirmation outside the `Sessions` section.
+- [x] T131 [P] Write RED test: Branch Detail footer hints become section-sensitive (`Sessions` shows focus-session semantics, Overview shows direct branch actions).
+- [x] T132 Update `app.rs` Branch Detail routing and footer hints to restore old-TUI direct actions without regressing the `Sessions` section handoff.
+- [x] T133 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

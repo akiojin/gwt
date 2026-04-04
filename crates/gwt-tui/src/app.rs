@@ -959,6 +959,11 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     let msg = match key.code {
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
+        KeyCode::Enter
+            if key.modifiers.contains(KeyModifiers::SHIFT) && model.branches.detail_section != 3 =>
+        {
+            Some(BranchesMessage::OpenShell)
+        }
         KeyCode::Up if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerUp)
         }
@@ -1007,6 +1012,11 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Char('r') if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerRestart)
+        }
+        KeyCode::Char('c')
+            if key.modifiers.contains(KeyModifiers::CONTROL) && model.branches.detail_section != 3 =>
+        {
+            Some(BranchesMessage::DeleteWorktree)
         }
         _ => None,
     };
@@ -3016,24 +3026,47 @@ fn build_session_title(model: &Model) -> Line<'static> {
 fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
     let hints = match model.active_focus {
         FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-            "\u{2191}\u{2193}:move  \u{2190}\u{2192}:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  ?:help"
+            "↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  ?:help".to_string()
         }
         FocusPane::TabContent => {
-            "\u{2191}\u{2193}:select  \u{2190}\u{2192}:tab  Ctrl+\u{2190}\u{2192}:sub-tab  Enter:action  Tab:focus  ?:help"
+            "↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  ?:help".to_string()
         }
-        FocusPane::BranchDetail => {
-            "\u{2190}\u{2192}:section  Enter:action  Tab:focus  Esc:back"
-        }
-        FocusPane::Terminal => "Ctrl+G,g:management  Tab:focus  Ctrl+C\u{00d7}2:quit",
+        FocusPane::BranchDetail => branch_detail_hint_text(model),
+        FocusPane::Terminal => "Ctrl+G,g:management  Tab:focus  Ctrl+C×2:quit".to_string(),
     };
 
     crate::widgets::status_bar::render_with_notification_and_hints(
         model,
         model.current_notification.as_ref(),
-        Some(hints),
+        Some(&hints),
         frame,
         area,
     );
+}
+
+fn branch_detail_hint_text(model: &Model) -> String {
+    match model.branches.detail_section {
+        0 => {
+            let docker_hints = model
+                .branches
+                .docker_containers
+                .get(model.branches.docker_selected)
+                .map(|container| match container.status {
+                    gwt_docker::ContainerStatus::Running => "  T:stop  R:restart",
+                    gwt_docker::ContainerStatus::Paused => "  S:start  T:stop  R:restart",
+                    gwt_docker::ContainerStatus::Created
+                    | gwt_docker::ContainerStatus::Stopped
+                    | gwt_docker::ContainerStatus::Exited => "  S:start  R:restart",
+                })
+                .unwrap_or("");
+            format!(
+                "←→:section  Enter:launch  Shift+Enter:shell  Ctrl+C:delete{docker_hints}  Tab:focus  Esc:back"
+            )
+        }
+        3 => "↑↓:session  ←→:section  Enter:focus  Tab:focus  Esc:back".to_string(),
+        _ => "←→:section  Enter:launch  Shift+Enter:shell  Ctrl+C:delete  Tab:focus  Esc:back"
+            .to_string(),
+    }
 }
 
 /// Render all overlay widgets on top of the main layout.
@@ -5838,6 +5871,88 @@ mod tests {
         assert_eq!(model.branches.detail_session_selected, 1);
         assert_eq!(model.active_session, 1);
         assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_shift_enter_opens_shell_for_selected_branch() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/direct-actions".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+        }];
+        model.branches.detail_section = 0;
+        model.active_focus = FocusPane::BranchDetail;
+        let initial_sessions = model.sessions.len();
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        assert_eq!(model.sessions.len(), initial_sessions + 1);
+        assert_eq!(
+            model.active_session,
+            initial_sessions,
+            "new shell session should become active"
+        );
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(
+            model.sessions.last().map(|session| session.name.as_str()),
+            Some("Shell: feature/direct-actions")
+        );
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_ctrl_c_opens_delete_confirm() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/direct-actions".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+        }];
+        model.branches.detail_section = 0;
+        model.active_focus = FocusPane::BranchDetail;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(model.confirm.visible);
+        assert!(
+            model.confirm.message.contains("feature/direct-actions"),
+            "delete confirmation should reference the selected branch"
+        );
+    }
+
+    #[test]
+    fn render_model_text_branch_detail_hints_are_section_sensitive() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/direct-actions".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+        }];
+        model.branches.detail_section = 0;
+        model.branches.docker_containers = vec![docker_container(
+            "abc123",
+            "web",
+            gwt_docker::ContainerStatus::Running,
+        )];
+
+        let overview = render_model_text(&model, 200, 24);
+        assert!(overview.contains("Shift+Enter:shell"));
+        assert!(overview.contains("Ctrl+C:delete"));
+        assert!(overview.contains("T:stop"));
+
+        model.branches.detail_section = 3;
+        let sessions = render_model_text(&model, 200, 24);
+        assert!(sessions.contains("↑↓:session"));
+        assert!(sessions.contains("Enter:focus"));
     }
 
     #[test]

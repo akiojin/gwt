@@ -124,6 +124,24 @@ acting as a keybind-hints-only strip.
 12.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 13: Branch Detail Direct Actions (5 tasks)
+Restore the old-TUI direct-action ergonomics inside Branch Detail so the selected branch remains
+actionable even after focus leaves the top list.
+
+13.1: Direct branch actions (2 tasks)
+- Route `Shift+Enter` in Branch Detail to open a shell for the selected branch when the active
+  section is not `Sessions`.
+- Route `Ctrl+C` in Branch Detail to open the delete-worktree confirmation when the active
+  section is not `Sessions`.
+
+13.2: Section-sensitive hints (2 tasks)
+- Replace the generic Branch Detail footer hint with section-aware hints that explain when
+  `Enter` focuses a session versus when direct branch actions are available.
+- Keep Docker lifecycle hints visible in the Overview section without touching shared layout code.
+
+13.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
