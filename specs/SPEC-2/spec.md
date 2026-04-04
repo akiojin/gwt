@@ -125,7 +125,8 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-013a**: The bottom status line keeps the old-TUI always-on context model: session summary and branch/agent context stay visible even while focus changes.
 - **FR-013b**: Context-sensitive keybind hints remain visible in the status bar instead of replacing the status context entirely.
-- **FR-013c**: On standard-width terminals, Terminal-focused status-bar hints use a compact grouped notation (`Ctrl+G:b/i/s g c []/1-9 z ?`) and keep `Tab:focus` / `^C×2` visible without truncating the footer.
+- **FR-013c**: At terminal widths `<= 80` and while no notification is occupying the footer, Terminal-focused status-bar hints use a compact grouped notation (`Ctrl+G:b/i/s g c []/1-9 z ?`) and keep `Tab:focus` / `^C×2` visible without truncating the footer.
+- **FR-013d**: At terminal widths `<= 80` and while no notification is occupying the footer, management and Branch Detail footers also switch to compact hint notation so the pane-local affordances remain visible instead of truncating behind the status context.
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion. The current default split is responsive: wide terminals (`>=120 cols`) use `40% management / 60% session`, while standard or narrower terminals fall back to `50% / 50%` so management chrome remains legible.
 - **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Tab`/`Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.

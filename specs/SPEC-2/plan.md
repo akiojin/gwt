@@ -324,6 +324,22 @@ notation that remains visible on standard-width terminals.
 32.3: Verification (1 task)
 - Re-run focused tests, snapshot refresh, broad workspace verification, and SPEC-2 artifact sync.
 
+### Phase 33: Compact Management Footers at Standard Width (5 tasks)
+Extend the `width <= 80`, notification-free footer compaction to management and Branch Detail
+panes so pane-local guidance remains visible instead of truncating behind the shared status
+context.
+
+33.1: Compact-management contract (2 tasks)
+- `width <= 80` Branches-list and generic management footers use compact hint notation that fits alongside the shared status context when no notification is showing.
+- `width <= 80` Branch Detail footers keep the local branch affordances visible with a compact hint form instead of losing the trailing actions when no notification is showing.
+
+33.2: Focused render coverage (2 tasks)
+- Add RED coverage that `width <= 80` Branches list and generic management hints remain visible.
+- Add RED coverage that `width <= 80` Branch Detail hints remain visible.
+
+33.3: Verification (1 task)
+- Re-run focused tests, snapshot refresh, broad workspace verification, and SPEC-2 artifact sync.
+
 ### Phase 21: Focus-Preserving Layer Toggle (5 tasks)
 Make the management panel behave like a supplemental surface again so toggling it on/off does not
 leave the workspace in a stale management-focus state.

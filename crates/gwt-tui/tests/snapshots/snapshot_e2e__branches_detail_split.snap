@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Shell  branch: main  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:move  ←→:tab  En
+ ▣ Sh  br:main  [G]  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Esc→T

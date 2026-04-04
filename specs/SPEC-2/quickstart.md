@@ -30,8 +30,9 @@
 27. While focused on Branches list and on another management list such as Git View, confirm the footer/status bar now advertises `Esc:term` so the restored return-to-terminal behavior is visible in the UI.
 28. On a non-Branches management tab such as `Issues` or `Logs`, use `Tab` / `BackTab` and confirm focus only cycles between the list pane and the terminal; it must never land on a nonexistent `BranchDetail` surface.
 29. Compare a wide terminal (`120x40`) and a standard terminal (`100x24`) and confirm the management pane uses `40/60` on the wider layout but falls back to `50/50` on the standard layout so the left-side chrome stays readable.
-30. In an `80x24` terminal with Terminal focus active, confirm the footer/status bar keeps the compact grouped hint fully visible: `Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2`.
-31. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+30. In an `80x24` terminal with Terminal focus active and no notification occupying the footer, confirm the footer/status bar keeps the compact grouped hint fully visible: `Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2`.
+31. In an `80x24` terminal with no notification occupying the footer, move through Branches list, Branch Detail, and a generic management tab such as `Issues`, then confirm the footer/status bar keeps their compact pane-local hints visible instead of truncating them at the right edge.
+32. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -56,7 +57,8 @@
 - The status-bar hints now tell the truth about that contract, advertising `Esc:term` on Branches list and generic management lists instead of implying that only `Tab` can exit those panes.
 - Management focus cycling now matches the visible pane topology: Branches keeps the old three-surface loop, while other management tabs stay on `Terminal` and `TabContent` only.
 - The management/session width balance is now responsive instead of hard-coded: wide terminals keep the 40/60 emphasis on the session pane, while standard widths fall back to 50/50 to preserve management readability.
-- Terminal-focused footer hints now use a compact grouped form so the main workspace mnemonics, `Tab:focus`, and `^C×2` stay visible on standard-width terminals instead of truncating behind the status context.
+- Terminal-focused footer hints now use a compact grouped form so the main workspace mnemonics, `Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
+- Management and Branch Detail footers now use compact wording at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of dropping the trailing affordances.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

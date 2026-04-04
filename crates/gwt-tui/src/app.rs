@@ -3112,14 +3112,13 @@ fn build_session_title(model: &Model) -> Line<'static> {
 ///
 /// The status bar keeps session context visible and appends the relevant hints.
 fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
+    let compact = area.width <= 80;
     let hints = match model.active_focus {
         FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-            "↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  Esc:term  ?:help".to_string()
+            branches_list_hint_text(compact)
         }
-        FocusPane::TabContent => {
-            "↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  Esc:term  ?:help".to_string()
-        }
-        FocusPane::BranchDetail => branch_detail_hint_text(model),
+        FocusPane::TabContent => generic_management_hint_text(compact),
+        FocusPane::BranchDetail => branch_detail_hint_text(model, compact),
         FocusPane::Terminal => terminal_hint_text(),
     };
 
@@ -3136,13 +3135,53 @@ fn terminal_hint_text() -> String {
     "Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2".to_string()
 }
 
-fn branch_detail_hint_text(model: &Model) -> String {
+fn branches_list_hint_text(compact: bool) -> String {
+    if compact {
+        "↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Esc→T".to_string()
+    } else {
+        "↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  Esc:term  ?:help".to_string()
+    }
+}
+
+fn generic_management_hint_text(compact: bool) -> String {
+    if compact {
+        "↑↓ sel  ←→ tab  C-←→ sub  ↵ act  Tab pane  Esc term  ?".to_string()
+    } else {
+        "↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  Esc:term  ?:help".to_string()
+    }
+}
+
+fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
     let direct_action_hints = if selected_branch_has_worktree(model) {
         "  Shift+Enter:shell  Ctrl+C:delete"
     } else {
         ""
     };
     let local_mnemonics = "  m:view  v:git  f:search  ?:help";
+    if compact {
+        let direct_action_hints = if selected_branch_has_worktree(model) {
+            "  S↵ sh  ^C del"
+        } else {
+            ""
+        };
+        let docker_hints = model
+            .branches
+            .docker_containers
+            .get(model.branches.docker_selected)
+            .map(|container| match container.status {
+                gwt_docker::ContainerStatus::Running => "  T/R",
+                gwt_docker::ContainerStatus::Paused => "  S/T/R",
+                gwt_docker::ContainerStatus::Created
+                | gwt_docker::ContainerStatus::Stopped
+                | gwt_docker::ContainerStatus::Exited => "  S/R",
+            })
+            .unwrap_or("");
+        return match model.branches.detail_section {
+            0 => format!("←→ sec  ↵ act{direct_action_hints}{docker_hints}  mvf?  Tab↔P  Esc←"),
+            3 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  Tab↔P  Esc←".to_string(),
+            _ => format!("←→ sec  ↵ act{direct_action_hints}  mvf?  Tab↔P  Esc←"),
+        };
+    }
     match model.branches.detail_section {
         0 => {
             let docker_hints = model
@@ -3677,6 +3716,57 @@ mod tests {
         assert!(rendered.contains("Ctrl+G:b/i/s g c []/1-9 z ?"));
         assert!(rendered.contains("Tab:focus"));
         assert!(rendered.contains("^C×2"));
+    }
+
+    #[test]
+    fn render_model_text_branches_list_hints_remain_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("↑↓ mv  ←→ tab  ↵ wiz"));
+        assert!(rendered.contains("mvf?"));
+        assert!(rendered.contains("Esc→T"));
+    }
+
+    #[test]
+    fn render_model_text_branch_detail_hints_remain_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/compact-detail".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from(
+                "/tmp/demo/project-repo-feature-compact-detail",
+            )),
+        }];
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("←→ sec  ↵ act  S↵ sh"));
+        assert!(rendered.contains("mvf?"));
+        assert!(rendered.contains("Tab↔P  Esc←"));
+    }
+
+    #[test]
+    fn render_model_text_generic_management_hints_remain_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("↑↓ sel  ←→ tab  C-←→ sub"));
+        assert!(rendered.contains("Tab pane"));
+        assert!(rendered.contains("Esc term"));
     }
 
     #[test]

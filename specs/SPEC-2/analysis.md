@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `208/208` completed items after closing Phase 32 for the standard-width terminal footer compacting fix-forward.
+- Task traceability snapshot: `tasks.md` currently records `213/213` completed items after closing Phase 33 for the standard-width management-footer compacting follow-up.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -40,4 +40,5 @@ Status: CLEAR
 - Notes: The canonical spec/plan artifacts now state that the three-surface focus loop is Branches-only, eliminating the earlier contradiction with the Phase 28 implementation.
 - Notes: Phase 30 removes the standalone management banner entirely; pane titles now carry the management context so the management pane reclaims the top row for actual list/detail content.
 - Notes: Phase 20 remains in the artifact set only as an intermediate restoration step; Phase 30 supersedes it as the final management-chrome contract.
-- Notes: Phase 31 introduced the wider terminal footer guidance, and Phase 32 follows immediately with the compact grouped notation needed to keep those terminal mnemonics visible at `80x24`.
+- Notes: Phase 31 introduced the wider terminal footer guidance, and Phase 32 follows immediately with the compact grouped notation needed to keep those terminal mnemonics visible at terminal widths `<= 80` when no notification is occupying the footer.
+- Notes: Phase 33 extends that `width <= 80`, notification-free footer compaction to management and Branch Detail hints so the pane-local guidance also remains visible without truncation.

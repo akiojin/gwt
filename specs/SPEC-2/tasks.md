@@ -354,3 +354,11 @@ banner in favor of pane-title chrome.
 - [x] T227 Update `status_bar.rs` and `app.rs` so narrow terminal footers compact context and use grouped shortcut notation.
 - [x] T228 Refresh `SPEC-2` artifacts to describe the standard-width compact-footer contract precisely.
 - [x] T229 Verify focused tests, snapshot refresh, workspace checks, and SPEC-2 artifact sync.
+
+## Phase 33: Compact Management Footers at Standard Width
+
+- [x] T230 [P] Write RED test: standard-width Branches-list footer keeps its compact hints visible.
+- [x] T231 [P] Write RED test: standard-width Branch Detail footer keeps its compact hints visible.
+- [x] T232 [P] Write RED test: standard-width generic management footer keeps its compact hints visible.
+- [x] T233 Update `app.rs` and `status_bar.rs` so narrow management footers use compact context and hint notation.
+- [x] T234 Refresh `SPEC-2` artifacts and verify focused tests, snapshot refresh, and workspace checks.

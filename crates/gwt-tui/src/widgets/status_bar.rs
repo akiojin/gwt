@@ -11,7 +11,7 @@ use ratatui::{
 use gwt_notification::{Notification, Severity};
 
 use crate::input::voice;
-use crate::model::{ActiveLayer, FocusPane, Model, SessionLayout, SessionTabType};
+use crate::model::{ActiveLayer, Model, SessionLayout, SessionTabType};
 
 /// Render the status bar.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
@@ -45,10 +45,7 @@ pub fn render_with_notification_and_hints(
         .map(|s| session_type_label(&s.tab_type))
         .unwrap_or_else(|| "None".to_string());
     let branch_context = derive_branch_context(model).unwrap_or_else(|| "n/a".to_string());
-    let compact_terminal_footer = notification.is_none()
-        && hints.is_some()
-        && matches!(model.active_focus, FocusPane::Terminal)
-        && area.width <= 80;
+    let compact_footer = notification.is_none() && hints.is_some() && area.width <= 80;
 
     let layout_icon = match model.session_layout {
         SessionLayout::Tab => "\u{25A3}",
@@ -61,18 +58,21 @@ pub fn render_with_notification_and_hints(
         ActiveLayer::Management => "Mgmt",
     };
 
-    let mut spans = if compact_terminal_footer {
+    let mut spans = if compact_footer {
         vec![
             Span::styled(
-                format!(" {layout_icon} {session_type} "),
+                format!(
+                    " {layout_icon} {} ",
+                    compact_session_type_label(&session_type)
+                ),
                 Style::default().fg(Color::White),
             ),
             Span::styled(
-                format!(" br:{} ", compact_branch_context(&branch_context, 10)),
+                format!(" br:{} ", compact_branch_context(&branch_context, 8)),
                 Style::default().fg(Color::Green),
             ),
             Span::styled(
-                format!(" [{layer}] "),
+                format!(" [{}] ", compact_layer_label(layer)),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -113,7 +113,7 @@ pub fn render_with_notification_and_hints(
         spans.push(notification_span(notification));
     }
 
-    if !compact_terminal_footer {
+    if !compact_footer {
         spans.push(Span::styled(
             format!(" {} ", model.repo_path.display()),
             Style::default().fg(Color::DarkGray),
@@ -146,6 +146,26 @@ fn compact_branch_context(branch_context: &str, max_chars: usize) -> String {
     let keep = max_chars.saturating_sub(1);
     let truncated: String = chars.into_iter().take(keep).collect();
     format!("{truncated}…")
+}
+
+fn compact_session_type_label(session_type: &str) -> &str {
+    match session_type {
+        "Shell" => "Sh",
+        "Claude" => "Cl",
+        "Codex" => "Cx",
+        "Gemini CLI" => "Gm",
+        "OpenCode" => "Op",
+        _ => session_type,
+    }
+}
+
+fn compact_layer_label(layer: &str) -> &str {
+    match layer {
+        "Main" => "M",
+        "Mgmt" => "G",
+        "Init" => "I",
+        _ => layer,
+    }
 }
 
 fn derive_branch_context(model: &Model) -> Option<String> {
