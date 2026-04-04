@@ -247,13 +247,21 @@ Commands can be invoked as `/gwt:<command-name>`.
 | gwt-pr-check | `/gwt:gwt-pr-check` | Check GitHub PR status with REST-first PR lookups, including unmerged PR detection and post-merge new-commit detection. Use when user says "check PR status", "is the PR merged?", "PR state", or asks about the current branch's pull request progress. |
 | gwt-pr-fix | `/gwt:gwt-pr-fix` | Inspect GitHub PR for CI failures, merge conflicts, reviewer comments, and unresolved review threads. Autonomously fix high-confidence blockers and reply to ALL reviewer comments. Use when user says "fix CI", "fix the PR", "CI is failing", "resolve PR blockers", or after creating/pushing a PR when CI failures are detected. |
 
+### Agent Pane Management
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| gwt-agent-discover | `/gwt:gwt-agent-discover` | List active agent panes with their IDs, agent types, branches, and statuses. Use when user says "list panes", "what agents are running?", "show active agents", or when discovering available panes before dispatch. |
+| gwt-agent-read | `/gwt:gwt-agent-read` | Read the scrollback tail of an agent pane to check progress and status. Use when user says "check pane output", "read agent output", "what is the agent doing?", or when monitoring agent progress. |
+| gwt-agent-send | `/gwt:gwt-agent-send` | Send key input to a specific agent pane or broadcast to all panes. Use when user says "send to pane", "dispatch to agent", "broadcast instructions", or when dispatching tasks to agents. |
+| gwt-agent-lifecycle | `/gwt:gwt-agent-lifecycle` | Stop an agent pane when escalation is needed or the agent is stuck. Use when user says "stop the agent", "close pane", "escalation needed", or when managing pane lifecycle. |
+
 ### Utilities
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-project-index | `/gwt:gwt-project-index` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
-| gwt-pty-communication | `/gwt:gwt-pty-communication` | PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer). |
-| gwt-spec-to-issue-migration | — | Migrate legacy spec sources to artifact-first GitHub Issue specs. Supports local `specs/SPEC-*` directories and body-canonical `gwt-spec` Issues using the bundled migration script. |
+| gwt-project-search | `/gwt:gwt-project-search` | Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. |
+| gwt-spec-to-issue-migration | — | Migrate GitHub Issue-based specs to local SPEC directories. Supports reverse migration from gwt-spec Issues to local specs/SPEC-{id}/ directories using the bundled migration script. |
 
 ### Recommended Workflow
 
