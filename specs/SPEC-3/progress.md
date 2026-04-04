@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `80/80` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T12:08:00Z`
+- Task progress: `84/84` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T12:22:00Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -56,6 +56,8 @@
 - AI suggestion loading and error body copy now stays compact and leaves
   manual-input guidance to the footer hint row instead of repeating it in the
   popup body.
+- Wizard list-based steps now share the same cyan selected-row highlight,
+  so generic option lists and specialized steps no longer drift visually.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

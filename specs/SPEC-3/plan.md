@@ -174,6 +174,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage that proves the removed guidance does not
    reappear inside the body content.
 
+### Phase 17: Wizard Selection Highlight Consistency
+
+1. Introduce a wizard-local selected-row style helper so list-based wizard
+   steps share the same cyan/black old-TUI selection highlight.
+2. Apply that helper to generic option lists, model/version/reasoning rows,
+   and the existing `QuickStart` / `AgentSelect` rows without changing step
+   transitions or launch semantics.
+3. Add focused RED/GREEN coverage proving both generic option lists and
+   `ModelSelect` now use the cyan highlight contract.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

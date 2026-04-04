@@ -222,6 +222,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-024**: AI suggestion loading and error states keep their body copy
   compact and do not duplicate the manual-input guidance that is already
   present in the footer hint row.
+- **FR-025**: Wizard list-based steps share the same old-TUI cyan selected-row
+  highlight across generic option lists, `ModelSelect`, `QuickStart`, and
+  `AgentSelect`.
 
 ## Non-Functional Requirements
 

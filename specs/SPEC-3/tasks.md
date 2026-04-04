@@ -136,3 +136,10 @@
 - [x] T072 [P] Write RED test: AI suggestion error body copy omits duplicate manual-input guidance.
 - [x] T073 Compact AI suggestion loading/error body copy to a single status line while keeping footer hints as the sole manual-guidance surface.
 - [x] T074 Verify focused AI suggestion compaction tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 17: Wizard Selection Highlight Consistency
+
+- [x] T075 [P] Write RED test: generic wizard option lists use the old-TUI cyan selected-row highlight.
+- [x] T076 [P] Write RED test: `ModelSelect` uses the same cyan selected-row highlight.
+- [x] T077 Add a wizard-local selected-row style helper and apply it across list-based wizard steps.
+- [x] T078 Verify focused highlight tests, broad workspace checks, and refresh SPEC-3 artifacts.

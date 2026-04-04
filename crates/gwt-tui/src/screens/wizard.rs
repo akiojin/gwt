@@ -1242,6 +1242,18 @@ fn render_list_content(frame: &mut Frame, area: Rect, items: Vec<ListItem>) {
     frame.render_widget(List::new(items), area);
 }
 
+fn wizard_row_style(is_selected: bool) -> Style {
+    wizard_row_style_with_fg(is_selected, Color::White)
+}
+
+fn wizard_row_style_with_fg(is_selected: bool, fg: Color) -> Style {
+    if is_selected {
+        Style::default().bg(Color::Cyan).fg(Color::Black)
+    } else {
+        Style::default().fg(fg)
+    }
+}
+
 fn version_option_description(option: &VersionOption) -> &'static str {
     match option.value.as_str() {
         "installed" => "Use installed version",
@@ -1264,7 +1276,7 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                     &format!("{marker}{label}"),
                     available_width,
                 ))
-                .style(super::list_item_style(idx == state.selected))
+                .style(wizard_row_style(idx == state.selected))
             })
             .collect()
     } else {
@@ -1280,7 +1292,7 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                     available_width,
                     25,
                 );
-                ListItem::new(text).style(super::list_item_style(idx == state.selected))
+                ListItem::new(text).style(wizard_row_style(idx == state.selected))
             })
             .collect()
     };
@@ -1295,7 +1307,7 @@ fn render_reasoning_level_step(state: &WizardState, frame: &mut Frame, area: Rec
         .map(|(idx, (label, description))| {
             let marker = if idx == state.selected { "> " } else { "  " };
             let text = format_fixed_width_line(marker, label, description, 10, available_width);
-            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
     render_list_content(frame, area, items);
@@ -1309,7 +1321,7 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
         .map(|(idx, (label, description))| {
             let marker = if idx == state.selected { "> " } else { "  " };
             let text = format_fixed_width_line(marker, label, description, 12, available_width);
-            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
     render_list_content(frame, area, items);
@@ -1323,7 +1335,7 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
         .map(|(idx, (label, description))| {
             let marker = if idx == state.selected { "> " } else { "  " };
             let text = format_fixed_width_line(marker, label, description, 6, available_width);
-            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
     render_list_content(frame, area, items);
@@ -1373,7 +1385,7 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                 available_width,
                 20,
             );
-            ListItem::new(text).style(super::list_item_style(idx == state.selected))
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect::<Vec<_>>();
 
@@ -1498,11 +1510,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                 &resume_text,
                 list_area.width as usize,
             ))
-            .style(if state.selected == resume_index {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
-            } else {
-                Style::default()
-            }),
+            .style(wizard_row_style(state.selected == resume_index)),
         );
 
         let start_new_index = resume_index + 1;
@@ -1519,11 +1527,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                 &start_new_text,
                 list_area.width as usize,
             ))
-            .style(if state.selected == start_new_index {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
-            } else {
-                Style::default()
-            }),
+            .style(wizard_row_style(state.selected == start_new_index)),
         );
 
         if entry_index + 1 < state.quick_start_entries.len() {
@@ -1550,11 +1554,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             &choose_text,
             list_area.width as usize,
         ))
-        .style(if state.selected >= choose_index {
-            Style::default().bg(Color::Cyan).fg(Color::Black)
-        } else {
-            Style::default()
-        }),
+        .style(wizard_row_style(state.selected >= choose_index)),
     );
 
     frame.render_widget(List::new(items), list_area);
@@ -1591,11 +1591,8 @@ fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
             .enumerate()
             .map(|(idx, agent)| {
                 let marker = if idx == state.selected { "> " } else { "  " };
-                let style = if idx == state.selected {
-                    Style::default().bg(Color::Cyan).fg(Color::Black)
-                } else {
-                    Style::default().fg(agent_row_color(&agent.id))
-                };
+                let style =
+                    wizard_row_style_with_fg(idx == state.selected, agent_row_color(&agent.id));
                 let text = truncate_with_ellipsis(
                     &format!("{marker}{}", agent.display_label()),
                     area.width as usize,
@@ -1735,10 +1732,15 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, opt)| {
-            let style = super::list_item_style(idx == state.selected);
+            let style = wizard_row_style(idx == state.selected);
             let marker = if idx == state.selected { "> " } else { "  " };
+            let marker_style = if idx == state.selected {
+                style
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
             let line = Line::from(vec![
-                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(marker, marker_style),
                 Span::styled(opt.clone(), style),
             ]);
             ListItem::new(line)
@@ -2597,6 +2599,20 @@ mod tests {
     }
 
     #[test]
+    fn render_branch_action_uses_old_tui_cyan_selected_highlight() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::BranchAction;
+        state.selected = 1;
+
+        let buf = render_buffer(&state, 90, 24);
+        let (x, y) = find_text_position(&buf, "Create new from selected").expect("selected row");
+        let style = buf[(x, y)].style();
+
+        assert_eq!(style.bg, Some(Color::Cyan));
+        assert_eq!(style.fg, Some(Color::Black));
+    }
+
+    #[test]
     fn render_model_step_shows_old_tui_label_and_description_layout() {
         let mut state = WizardState::default();
         state.step = WizardStep::ModelSelect;
@@ -2625,6 +2641,23 @@ mod tests {
 
         assert!(text.contains("Default (recommended) - Opus 4.6"));
         assert!(text.matches('┌').count() == 1);
+    }
+
+    #[test]
+    fn render_model_step_uses_old_tui_cyan_selected_highlight() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ModelSelect;
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.selected = 1;
+
+        let buf = render_buffer(&state, 120, 24);
+        let (x, y) = find_text_position(&buf, "> Opus 4.6 - Most capable for complex work")
+            .expect("selected model row");
+        let style = buf[(x, y)].style();
+
+        assert_eq!(style.bg, Some(Color::Cyan));
+        assert_eq!(style.fg, Some(Color::Black));
     }
 
     #[test]

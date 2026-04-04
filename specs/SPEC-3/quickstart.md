@@ -49,6 +49,8 @@
 20. Verify AI suggestion loading and error body copy stays compact and does
    not repeat manual-input guidance that already appears in the footer hint
    row.
+21. Verify generic option lists such as `BranchAction` and `ModelSelect` use
+   the same cyan selected-row highlight as `QuickStart` and `AgentSelect`.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -84,5 +86,7 @@
   the paragraph copy.
 - The AI suggestion loading and error body copy now stays compact, and the
   footer hint row remains the single source of manual-input guidance.
+- Wizard list-based steps now share the same cyan selected-row highlight
+  instead of mixing dark-gray generic selection with specialized cyan rows.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.
