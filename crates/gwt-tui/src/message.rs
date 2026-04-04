@@ -18,7 +18,7 @@ use crate::screens::profiles::ProfilesMessage;
 use crate::screens::service_select::ServiceSelectMessage;
 use crate::screens::settings::SettingsMessage;
 use crate::screens::versions::VersionsMessage;
-use crate::screens::wizard::WizardMessage;
+use crate::screens::wizard::{SpecContext, WizardMessage};
 
 /// Every possible action in the TUI.
 #[derive(Debug, Clone)]
@@ -99,8 +99,8 @@ pub enum Message {
     ToggleHelp,
     /// Paste file paths from clipboard.
     PasteFiles,
-    /// Open the wizard overlay with SPEC context for prefilling (spec_id, title).
-    OpenWizardWithSpec(String, String),
+    /// Open the wizard overlay with SPEC context for prefilling.
+    OpenWizardWithSpec(SpecContext),
     /// Close the wizard overlay.
     CloseWizard,
 }
@@ -159,7 +159,7 @@ mod tests {
         let _ = Message::Initialization(InitializationMessage::Exit);
         let _ = Message::OpenSessionConversion;
         let _ = Message::PasteFiles;
-        let _ = Message::OpenWizardWithSpec("SPEC-1".into(), "Title".into());
+        let _ = Message::OpenWizardWithSpec(SpecContext::new("SPEC-1", "Title", ""));
         let _ = Message::CloseWizard;
     }
 }

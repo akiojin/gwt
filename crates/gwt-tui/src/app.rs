@@ -1,7 +1,7 @@
 //! App — Update and View functions for the Elm Architecture.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -363,11 +363,8 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::OpenSessionConversion => {
             open_session_conversion(model);
         }
-        Message::OpenWizardWithSpec(spec_id, title) => {
-            open_wizard(
-                model,
-                Some(crate::screens::wizard::SpecContext { spec_id, title }),
-            );
+        Message::OpenWizardWithSpec(spec_context) => {
+            open_wizard(model, Some(spec_context));
         }
         Message::CloseWizard => {
             model.wizard = None;
@@ -635,6 +632,10 @@ fn load_specs(model: &mut Model) {
         &mut model.specs,
         screens::specs::SpecsMessage::SetSpecs(items),
     );
+}
+
+fn read_spec_body(repo_path: &Path, spec_id: &str) -> String {
+    std::fs::read_to_string(repo_path.join("specs").join(spec_id).join("spec.md")).unwrap_or_default()
 }
 
 fn spec_sort_key(spec_id: &str) -> (u32, &str) {
@@ -1147,9 +1148,14 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 && model.specs.detail_view
             {
                 if let Some(spec) = model.specs.selected_spec() {
+                    let spec_context = screens::wizard::SpecContext::new(
+                        spec.id.clone(),
+                        spec.title.clone(),
+                        read_spec_body(&model.repo_path, &spec.id),
+                    );
                     update(
                         model,
-                        Message::OpenWizardWithSpec(spec.id.clone(), spec.title.clone()),
+                        Message::OpenWizardWithSpec(spec_context),
                     );
                 }
             } else if key.code == KeyCode::Esc {
@@ -1817,6 +1823,12 @@ fn wizard_branch_suggestion_context(wizard: &screens::wizard::WizardState) -> St
     if let Some(summary) = wizard.spec_context_summary() {
         parts.push(format!("SPEC: {summary}"));
     }
+    if let Some(spec_context) = wizard.spec_context.as_ref() {
+        let spec_body = spec_context.spec_body.trim();
+        if !spec_body.is_empty() {
+            parts.push(format!("SPEC body:\n{spec_body}"));
+        }
+    }
     if !wizard.branch_name.trim().is_empty() {
         parts.push(format!(
             "Current branch seed: {}",
@@ -2219,7 +2231,7 @@ fn prepare_wizard_startup(
 ) -> (screens::wizard::WizardState, Vec<AgentId>) {
     let branch_name = spec_context
         .as_ref()
-        .map(|ctx| format!("feature/{}", ctx.spec_id.to_lowercase()))
+        .and_then(|ctx| ctx.branch_seed())
         .unwrap_or_default();
     let starts_new_branch = spec_context.is_some();
 
@@ -3967,6 +3979,7 @@ mod tests {
     fn route_key_to_management_specs_shift_enter_opens_prefilled_wizard() {
         let mut model = test_model();
         model.management_tab = ManagementTab::Specs;
+        model.specs.spec_root = Some(model.repo_path.clone());
         model.specs.specs = vec![screens::specs::SpecItem {
             id: "SPEC-5".into(),
             title: "Local SPEC Management".into(),
@@ -3974,6 +3987,12 @@ mod tests {
             status: "in-progress".into(),
         }];
         model.specs.detail_view = true;
+        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5")).expect("create spec dir");
+        std::fs::write(
+            model.repo_path.join("specs/SPEC-5/spec.md"),
+            "# SPEC-5\n\nLocal SPEC detail body\n",
+        )
+        .expect("write spec body");
 
         route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
 
@@ -3981,7 +4000,8 @@ mod tests {
         let context = wizard.spec_context.as_ref().expect("spec context captured");
         assert_eq!(context.spec_id, "SPEC-5");
         assert_eq!(context.title, "Local SPEC Management");
-        assert_eq!(wizard.branch_name, "feature/spec-5");
+        assert_eq!(context.spec_body, "# SPEC-5\n\nLocal SPEC detail body\n");
+        assert_eq!(wizard.branch_name, "feature/spec-5-local-spec-management");
     }
 
     #[test]
@@ -4075,18 +4095,20 @@ mod tests {
         ];
 
         let (wizard, refresh_targets) = prepare_wizard_startup(
-            Some(screens::wizard::SpecContext {
-                spec_id: "SPEC-42".into(),
-                title: "My Feature".into(),
-            }),
+            Some(screens::wizard::SpecContext::new(
+                "SPEC-42",
+                "My Feature",
+                "# SPEC-42\n\nBody\n",
+            )),
             detected,
             &cache,
         );
 
-        assert_eq!(wizard.branch_name, "feature/spec-42");
+        assert_eq!(wizard.branch_name, "feature/spec-42-my-feature");
         let ctx = wizard.spec_context.as_ref().unwrap();
         assert_eq!(ctx.spec_id, "SPEC-42");
         assert_eq!(ctx.title, "My Feature");
+        assert_eq!(ctx.spec_body, "# SPEC-42\n\nBody\n");
         // All 4 builtins are always listed
         assert_eq!(wizard.detected_agents.len(), 4);
         // Claude Code: installed with cache
@@ -4134,16 +4156,17 @@ mod tests {
         let cache = VersionCache::new();
 
         let (wizard, _) = prepare_wizard_startup(
-            Some(screens::wizard::SpecContext {
-                spec_id: "SPEC-42".into(),
-                title: "My Feature".into(),
-            }),
+            Some(screens::wizard::SpecContext::new(
+                "SPEC-42",
+                "My Feature",
+                "",
+            )),
             vec![],
             &cache,
         );
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
-        assert_eq!(wizard.branch_name, "feature/spec-42");
+        assert_eq!(wizard.branch_name, "feature/spec-42-my-feature");
     }
 
     #[test]
@@ -4753,10 +4776,11 @@ mod tests {
         let mut wizard = screens::wizard::WizardState::default();
         wizard.step = screens::wizard::WizardStep::AIBranchSuggest;
         wizard.ai_suggest.loading = true;
-        wizard.spec_context = Some(screens::wizard::SpecContext {
-            spec_id: "SPEC-42".into(),
-            title: "My Feature".into(),
-        });
+        wizard.spec_context = Some(screens::wizard::SpecContext::new(
+            "SPEC-42",
+            "My Feature",
+            "# SPEC-42\n\nDetailed implementation notes",
+        ));
 
         maybe_start_wizard_branch_suggestions_with(&mut wizard, |_| {
             Ok(vec!["feature/spec-42-my-feature".into()])
@@ -4791,14 +4815,17 @@ mod tests {
         let mut wizard = screens::wizard::WizardState::default();
         wizard.branch_name = "feature/spec-7-voice".into();
         wizard.issue_id = "1776".into();
-        wizard.spec_context = Some(screens::wizard::SpecContext {
-            spec_id: "SPEC-7".into(),
-            title: "Voice settings".into(),
-        });
+        wizard.spec_context = Some(screens::wizard::SpecContext::new(
+            "SPEC-7",
+            "Voice settings",
+            "# Voice settings\n\nCapture the selected microphone and language.\n",
+        ));
 
         let context = wizard_branch_suggestion_context(&wizard);
 
         assert!(context.contains("SPEC: SPEC-7 - Voice settings"));
+        assert!(context.contains("SPEC body:"));
+        assert!(context.contains("Capture the selected microphone and language."));
         assert!(context.contains("Current branch seed: feature/spec-7-voice"));
         assert!(context.contains("Issue: 1776"));
     }

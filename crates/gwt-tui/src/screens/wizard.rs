@@ -274,6 +274,33 @@ pub struct QuickStartEntry {
 pub struct SpecContext {
     pub spec_id: String,
     pub title: String,
+    pub spec_body: String,
+}
+
+impl SpecContext {
+    pub fn new(
+        spec_id: impl Into<String>,
+        title: impl Into<String>,
+        spec_body: impl Into<String>,
+    ) -> Self {
+        let spec_id = spec_id.into();
+        let title = title.into();
+        let spec_body = spec_body.into();
+        Self {
+            spec_id,
+            title,
+            spec_body,
+        }
+    }
+
+    pub fn branch_seed(&self) -> Option<String> {
+        let branch_seed = derive_spec_branch_seed(&self.spec_id, &self.title);
+        if branch_seed == "feature/" {
+            None
+        } else {
+            Some(branch_seed)
+        }
+    }
 }
 
 /// A version option for the VersionSelect step.
@@ -674,21 +701,20 @@ impl WizardState {
 
     /// Suggested branch name derived from the current SPEC context, if any.
     pub fn spec_context_branch_seed(&self) -> Option<String> {
-        let ctx = self.spec_context.as_ref()?;
-        let mut suffix = slugify_branch_component(&ctx.spec_id);
-        if !ctx.title.trim().is_empty() {
-            let title = slugify_branch_component(&ctx.title);
-            if !title.is_empty() {
-                suffix.push('-');
-                suffix.push_str(&title);
-            }
-        }
-        if suffix.is_empty() {
-            None
-        } else {
-            Some(format!("feature/{}", suffix))
+        self.spec_context.as_ref().and_then(SpecContext::branch_seed)
+    }
+}
+
+fn derive_spec_branch_seed(spec_id: &str, title: &str) -> String {
+    let mut suffix = slugify_branch_component(spec_id);
+    if !title.trim().is_empty() {
+        let title = slugify_branch_component(title);
+        if !title.is_empty() {
+            suffix.push('-');
+            suffix.push_str(&title);
         }
     }
+    format!("feature/{suffix}")
 }
 
 /// Messages specific to the wizard overlay.
@@ -2951,10 +2977,7 @@ mod tests {
     #[test]
     fn spec_context_branch_seed_is_derived() {
         let mut state = WizardState::default();
-        state.spec_context = Some(SpecContext {
-            spec_id: "SPEC-42".to_string(),
-            title: "My Feature".to_string(),
-        });
+        state.spec_context = Some(SpecContext::new("SPEC-42", "My Feature", ""));
 
         assert_eq!(
             state.spec_context_branch_seed(),

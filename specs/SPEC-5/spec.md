@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. The management shell now exposes a live Specs tab again, and the shell can load local `metadata.json` entries, open detail, and launch the wizard with SPEC id/title context. Semantic search via ChromaDB, richer SPEC context assembly, and full SPEC editing from the TUI remain incomplete.
+gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. The management shell now exposes a live Specs tab again, and the shell can load local `metadata.json` entries, open detail, and launch the wizard with SPEC id/title/spec.md context plus a title-derived branch seed. Semantic search via ChromaDB, markdown-rendered detail parity, and full SPEC editing from the TUI remain incomplete.
 
 ## User Stories
 
@@ -77,8 +77,8 @@ As a developer, I want to generate a new SPEC through a guided wizard so that I 
 | FR-002 | Detail view renders markdown for all artifact types, including `analysis.md` | P0 | Partially Implemented |
 | FR-003 | Semantic search via ChromaDB index (action_index_specs, action_search_specs) | P1 | Not Implemented |
 | FR-004 | Search results ranked by relevance score | P1 | Not Implemented |
-| FR-005 | Shift+Enter on SPEC opens agent launch wizard with SPEC context | P1 | Partially Implemented |
-| FR-006 | Agent launch auto-suggests branch name from SPEC title | P1 | Not Implemented |
+| FR-005 | Shift+Enter on SPEC opens agent launch wizard with SPEC context | P1 | Implemented |
+| FR-006 | Agent launch auto-suggests branch name from SPEC title | P1 | Implemented |
 | FR-007 | SPEC edit: update phase/status in metadata.json | P1 | Not Implemented |
 | FR-008 | SPEC edit: inline edit of spec.md sections | P1 | Not Implemented |
 | FR-009 | SpecKit Wizard: Clarify -> Specify -> Plan -> Tasks -> Done | P0 | Implemented |
