@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `126/126` completed items after closing Phase 16 for focus-border color parity.
+- Task traceability snapshot: `tasks.md` currently records `131/131` completed items after closing Phase 17 for worktree-aware Branch Detail direct actions.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -25,3 +25,4 @@ Status: CLEAR
 - Notes: Phase 14 closed the remaining Branch Detail chrome gap in this area by keeping the selected branch name visible in the bottom-pane title next to the section tabs, with a graceful fallback when no branch is selected.
 - Notes: Phase 15 closed the Branch Detail focus-loop gap by making the advertised `Esc:back` affordance real; `Esc` now returns focus to the Branches list without clearing the current detail context.
 - Notes: Phase 16 closed the remaining pane-focus color drift by restoring `pane_block()` to the documented `Color::Cyan` / `Color::Gray` border contract.
+- Notes: Phase 17 aligned Branch Detail affordances with actual reachability; shell/delete direct actions are now offered only for selected branches that have a worktree.

@@ -961,7 +961,8 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::SHIFT)
-                && model.branches.detail_section != 3 =>
+                && model.branches.detail_section != 3
+                && selected_branch_has_worktree(model) =>
         {
             Some(BranchesMessage::OpenShell)
         }
@@ -1014,7 +1015,8 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Char('c')
             if key.modifiers.contains(KeyModifiers::CONTROL)
-                && model.branches.detail_section != 3 =>
+                && model.branches.detail_section != 3
+                && selected_branch_has_worktree(model) =>
         {
             Some(BranchesMessage::DeleteWorktree)
         }
@@ -1443,7 +1445,11 @@ fn check_branch_pending_actions(model: &mut Model) {
         }
     }
     if model.branches.pending_delete_worktree && !model.confirm.visible {
-        if let Some(branch) = model.branches.selected_branch() {
+        if let Some(branch) = model
+            .branches
+            .selected_branch()
+            .filter(|branch| branch.worktree_path.is_some())
+        {
             model.confirm = screens::confirm::ConfirmState::with_message(format!(
                 "Delete worktree for {}?",
                 branch.name
@@ -1452,6 +1458,13 @@ fn check_branch_pending_actions(model: &mut Model) {
             model.branches.pending_delete_worktree = false;
         }
     }
+}
+
+fn selected_branch_has_worktree(model: &Model) -> bool {
+    model
+        .branches
+        .selected_branch()
+        .is_some_and(|branch| branch.worktree_path.is_some())
 }
 
 /// Build lightweight summaries of active sessions associated with the selected branch.
@@ -3066,6 +3079,11 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 fn branch_detail_hint_text(model: &Model) -> String {
+    let direct_action_hints = if selected_branch_has_worktree(model) {
+        "  Shift+Enter:shell  Ctrl+C:delete"
+    } else {
+        ""
+    };
     match model.branches.detail_section {
         0 => {
             let docker_hints = model
@@ -3081,12 +3099,11 @@ fn branch_detail_hint_text(model: &Model) -> String {
                 })
                 .unwrap_or("");
             format!(
-                "←→:section  Enter:launch  Shift+Enter:shell  Ctrl+C:delete{docker_hints}  Tab:focus  Esc:back"
+                "←→:section  Enter:launch{direct_action_hints}{docker_hints}  Tab:focus  Esc:back"
             )
         }
         3 => "↑↓:session  ←→:section  Enter:focus  Tab:focus  Esc:back".to_string(),
-        _ => "←→:section  Enter:launch  Shift+Enter:shell  Ctrl+C:delete  Tab:focus  Esc:back"
-            .to_string(),
+        _ => format!("←→:section  Enter:launch{direct_action_hints}  Tab:focus  Esc:back"),
     }
 }
 
@@ -6013,6 +6030,46 @@ mod tests {
     }
 
     #[test]
+    fn route_key_to_branch_detail_shift_enter_ignores_branches_without_worktree() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/no-worktree".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+        }];
+        model.branches.detail_section = 0;
+        model.active_focus = FocusPane::BranchDetail;
+        let initial_sessions = model.sessions.len();
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        assert_eq!(model.sessions.len(), initial_sessions);
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
+        assert!(!model.branches.pending_open_shell);
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_ctrl_c_ignores_branches_without_worktree() {
+        let mut model = test_model();
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/no-worktree".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+        }];
+        model.branches.detail_section = 0;
+        model.active_focus = FocusPane::BranchDetail;
+
+        route_key_to_branch_detail(&mut model, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(!model.confirm.visible);
+        assert!(!model.branches.pending_delete_worktree);
+    }
+
+    #[test]
     fn route_key_to_branch_detail_esc_returns_to_tab_content_focus() {
         let mut model = test_model();
         model.branches.branches = vec![screens::branches::BranchItem {
@@ -6084,6 +6141,12 @@ mod tests {
         assert!(overview.contains("Shift+Enter:shell"));
         assert!(overview.contains("Ctrl+C:delete"));
         assert!(overview.contains("T:stop"));
+
+        model.branches.branches[0].worktree_path = None;
+        let no_worktree = render_model_text(&model, 200, 24);
+        assert!(!no_worktree.contains("Shift+Enter:shell"));
+        assert!(!no_worktree.contains("Ctrl+C:delete"));
+        assert!(no_worktree.contains("Enter:launch"));
 
         model.branches.detail_section = 3;
         let sessions = render_model_text(&model, 200, 24);

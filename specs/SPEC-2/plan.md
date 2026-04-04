@@ -187,6 +187,21 @@ the spec instead of the temporary green/white implementation.
 16.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 17: Worktree-Aware Branch Detail Direct Actions (5 tasks)
+Align Branch Detail direct-action affordances with reachability so the detail pane only advertises
+and executes worktree-backed actions when the selected branch can actually serve them.
+
+17.1: Reachability contract (2 tasks)
+- Hide `Shift+Enter:shell` and `Ctrl+C:delete` from Branch Detail hints when the selected branch has no worktree.
+- Block worktree-backed direct actions from Branch Detail when the selected branch has no worktree.
+
+17.2: Focused routing coverage (2 tasks)
+- Add focused coverage for the no-worktree shell no-op.
+- Add focused coverage for the no-worktree delete-confirm no-op and the updated hint text.
+
+17.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

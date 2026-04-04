@@ -222,3 +222,11 @@ screens to use.
 - [x] T146 Update `app.rs` pane chrome so `pane_block()` uses the documented `Cyan/Gray` focus colors.
 - [x] T147 Refresh `SPEC-2` artifacts to describe the restored focus-border parity.
 - [x] T148 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 17: Worktree-Aware Branch Detail Direct Actions
+
+- [x] T149 [P] Write RED test: no-worktree Branch Detail hints omit `Shift+Enter:shell` and `Ctrl+C:delete`.
+- [x] T150 [P] Write RED test: `Shift+Enter` in Branch Detail does not open a shell when the selected branch has no worktree.
+- [x] T151 [P] Write RED test: `Ctrl+C` in Branch Detail does not open delete confirmation when the selected branch has no worktree.
+- [x] T152 Update `app.rs` Branch Detail hint/routing/pending-action handling to require a selected worktree branch for direct shell/delete actions.
+- [x] T153 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
