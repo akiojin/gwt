@@ -294,6 +294,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving multi-entry renders the compact
    action labels without affecting single-entry title promotion.
 
+### Phase 30: QuickStart Footer Label-Only Copy
+
+1. Render the final Quick Start action as the label-only old-TUI copy
+   `Choose different settings` on both wide and narrow popups.
+2. Preserve selection semantics and the dense grouped footer rhythm while
+   removing the rebuilt inline description text.
+3. Add focused RED/GREEN coverage proving wide and narrow render paths both
+   keep the label-only final action.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

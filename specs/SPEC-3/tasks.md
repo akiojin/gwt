@@ -217,3 +217,9 @@
 - [x] T114 [P] Write RED test: multi-entry Quick Start uses the compact old-TUI action labels `Resume` / `Start new` in the grouped body render.
 - [x] T115 Update `wizard.rs` so multi-entry grouped history uses `Resume` / `Start new` while single-entry Quick Start keeps `Resume session` / `Start new session`.
 - [x] T116 Verify focused compact-action-label tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 30: QuickStart Footer Label-Only Copy
+
+- [x] T117 [P] Write RED test: the final Quick Start action uses label-only `Choose different settings` even on wide popups.
+- [x] T118 Update `wizard.rs` so `Choose different settings` stays label-only across wide and narrow render paths.
+- [x] T119 Verify focused footer-copy tests, broad workspace checks, and refresh SPEC-3 artifacts.

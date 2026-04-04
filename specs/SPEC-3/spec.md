@@ -259,6 +259,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-036**: In multi-entry `QuickStart`, grouped action rows use the more
   compact old-TUI copy `Resume` / `Start new`, while single-entry Quick
   Start keeps the longer `Resume session` / `Start new session` wording.
+- **FR-037**: The final `QuickStart` action uses the label-only copy
+  `Choose different settings` on both wide and narrow popups, without an
+  inline description row.
 
 ## Non-Functional Requirements
 

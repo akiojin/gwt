@@ -82,6 +82,9 @@
 32. Verify a branch with multiple persisted Quick Start entries now renders
    grouped action rows as `Resume` / `Start new`, while a single-entry Quick
    Start still uses the longer `Resume session` / `Start new session` copy.
+33. Verify the final Quick Start action now stays `Choose different settings`
+   on both wide and narrow popups, without the rebuilt `Open full setup`
+   description text.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -146,5 +149,7 @@
 - Multi-entry Quick Start action rows now use the denser old-TUI copy
   `Resume` / `Start new`, while single-entry Quick Start keeps the longer
   session-oriented wording.
+- The final Quick Start action now stays label-only on both wide and narrow
+  popups, so the footer no longer uses the rebuilt inline description text.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

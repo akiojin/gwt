@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `122/122` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T13:20:58Z`
+- Task progress: `125/125` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T13:24:24Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -90,6 +90,9 @@
 - Multi-entry `QuickStart` grouped action rows now use the denser old-TUI
   copy `Resume` / `Start new`, while single-entry Quick Start keeps the
   longer session-oriented wording.
+- The final `QuickStart` action now stays label-only (`Choose different
+  settings`) on both wide and narrow popups, removing the rebuilt inline
+  description text.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

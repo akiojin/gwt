@@ -1586,17 +1586,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     } else {
         "  "
     };
-    let choose_text = if list_area.width >= 60 {
-        format_label_description_line(
-            choose_marker,
-            "Choose different settings",
-            "Open full setup",
-            list_area.width as usize,
-            28,
-        )
-    } else {
-        format!("{choose_marker}Choose different settings")
-    };
+    let choose_text = format!("{choose_marker}Choose different settings");
     items.push(
         ListItem::new(truncate_with_ellipsis(
             &choose_text,
@@ -2807,7 +2797,7 @@ mod tests {
     }
 
     #[test]
-    fn render_quick_start_choose_different_shows_description_on_wide_width() {
+    fn render_quick_start_choose_different_uses_label_only_on_wide_width() {
         let mut state = WizardState::default();
         state.step = WizardStep::QuickStart;
         state.has_quick_start = true;
@@ -2817,7 +2807,8 @@ mod tests {
 
         let text = render_text(&state, 100, 24);
 
-        assert!(text.contains("> Choose different settings - Open full setup"));
+        assert!(text.contains("> Choose different settings"));
+        assert!(!text.contains("Open full setup"));
     }
 
     #[test]
