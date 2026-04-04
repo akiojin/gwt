@@ -1,16 +1,15 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 426
 expression: output
 ---
- GWT v8.17.2 | /tmp/test-repo | 0 branch┌ ▶ Shell ─────────────────────────────┐
-┌ Branches │ Specs │ Issues │ PRs │ Pro┐│Session: Shell (80x24)                │
-│ View: All │ Sort: Default            ││                                      │
-│No branches loaded                    ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+ GWT v8.17.2 | /tmp/test-repo | ┌ ▶ Shell ─────────────────────────────────────┐
+┌ Branches │ Specs │ Issues │ P┐│Session: Shell (80x24)                        │
+│ View: All │ Sort: Default    ││                                              │
+│No branches loaded            ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
 │               ┌Error─────────────────────────────────────────┐               │
 │               │Something went wrong                          │               │
 │               │                                              │               │
@@ -18,12 +17,12 @@ expression: output
 ┌ Overview │ SPE│                                              │               │
 │Overview       │                                              │               │
 │ No branch sele└──────────────────────────────────────────────┘               │
-│                                      ││                                      │
-│ Docker status                        ││                                      │
-│ No containers found                  ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-└──────────────────────────────────────┘└──────────────────────────────────────┘
+│                              ││                                              │
+│ Docker status                ││                                              │
+│ No containers found          ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
  ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:move  ←→:tab  Ent

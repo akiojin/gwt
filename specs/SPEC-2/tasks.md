@@ -230,3 +230,11 @@ screens to use.
 - [x] T151 [P] Write RED test: `Ctrl+C` in Branch Detail does not open delete confirmation when the selected branch has no worktree.
 - [x] T152 Update `app.rs` Branch Detail hint/routing/pending-action handling to require a selected worktree branch for direct shell/delete actions.
 - [x] T153 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 18: Management Panel Width Default
+
+- [x] T154 [P] Write RED test: the shared management/session split helper returns a `40/60` geometry.
+- [x] T155 [P] Write RED test: `active_session_content_area()` uses the session side of the `40/60` split while management is visible.
+- [x] T156 Update `app.rs` layout code to use a shared `40/60` management/session split helper for both rendering and active-session geometry.
+- [x] T157 Refresh `SPEC-2` artifacts to describe the restored management width default.
+- [x] T158 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

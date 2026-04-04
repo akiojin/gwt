@@ -2728,16 +2728,20 @@ fn active_session_content_area(model: &Model) -> Option<Rect> {
         ..size
     };
     let session_area = if model.active_layer == ActiveLayer::Management {
-        let lr = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(main_area);
-        lr[1]
+        management_split(main_area)[1]
     } else {
         main_area
     };
 
     session_content_area(model, session_area)
+}
+
+fn management_split(area: Rect) -> [Rect; 2] {
+    let lr = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+    [lr[0], lr[1]]
 }
 
 fn session_content_area(model: &Model, session_area: Rect) -> Option<Rect> {
@@ -2872,11 +2876,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     };
 
     if model.active_layer == ActiveLayer::Management {
-        // 50/50 split: left = management panes, right = session pane
-        let lr = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(main_area);
+        let lr = management_split(main_area);
 
         render_management_panes(model, frame, lr[0]);
         render_session_pane(model, frame, lr[1]);
@@ -3428,6 +3428,27 @@ mod tests {
         pane_block(Line::from("Unfocused"), false).render(area, &mut buffer);
 
         assert_eq!(buffer[(0, 0)].fg, Color::Gray);
+    }
+
+    #[test]
+    fn management_split_uses_40_60_ratio() {
+        let area = Rect::new(0, 0, 100, 20);
+        let [management, session] = management_split(area);
+
+        assert_eq!(management, Rect::new(0, 0, 40, 20));
+        assert_eq!(session, Rect::new(40, 0, 60, 20));
+    }
+
+    #[test]
+    fn active_session_content_area_uses_session_side_of_40_60_management_split() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.terminal_size = (100, 24);
+
+        let area = active_session_content_area(&model).expect("active session content area");
+
+        assert_eq!(area, Rect::new(41, 1, 58, 21));
     }
 
     #[test]

@@ -202,6 +202,21 @@ and executes worktree-backed actions when the selected branch can actually serve
 17.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 18: Management Panel Width Default (5 tasks)
+Restore a more old-TUI-like workspace balance by making the management panel narrower than the
+session pane while keeping the implementation closed to the existing layout code in `app.rs`.
+
+18.1: Layout contract (2 tasks)
+- Use a sensible default proportion of `40% management / 60% session` when the management panel is visible.
+- Share the same split helper between render-time layout and `active_session_content_area()` so hit-testing and rendering agree.
+
+18.2: Focused geometry coverage (2 tasks)
+- Add focused coverage for the 40/60 split helper geometry.
+- Add focused coverage for the session content rect geometry while management is visible.
+
+18.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

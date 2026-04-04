@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `131/131` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T08:06:23Z`
+- Task progress: `136/136` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T08:12:19Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -25,6 +25,7 @@
 - Branch Detail now honors its advertised `Esc:back` affordance: `Esc` returns focus to the Branches list while preserving the selected branch and the current detail context.
 - Pane focus chrome now matches the documented old-TUI contract again: focused borders render in Cyan and unfocused borders render in Gray instead of the temporary green/white colors.
 - Branch Detail direct shell/delete affordances are now worktree-aware: branches without a worktree no longer advertise or trigger `Shift+Enter` shell launch or `Ctrl+C` delete confirmation.
+- The workspace shell now uses a more old-TUI-like `40/60` default split while management is visible, so terminal sessions keep more horizontal space than the management pane.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

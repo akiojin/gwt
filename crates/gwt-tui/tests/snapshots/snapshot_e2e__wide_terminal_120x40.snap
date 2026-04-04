@@ -1,45 +1,44 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 488
 expression: output
 ---
- GWT v8.17.2 | /tmp/test-repo | 0 branches (0 worktrees)    ┌ ▶ Shell ─────────────────────────────────────────────────┐
-┌ Branches │ Specs │ Issues │ PRs │ Profiles │ Git View │ V┐│Session: Shell (80x24)                                    │
-│ View: All │ Sort: Default                                ││                                                          │
-│No branches loaded                                        ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-└──────────────────────────────────────────────────────────┘│                                                          │
-┌ Overview │ SPECs │ Git │ Sessions  · No branch selected──┐│                                                          │
-│Overview                                                  ││                                                          │
-│ No branch selected                                       ││                                                          │
-│                                                          ││                                                          │
-│ Docker status                                            ││                                                          │
-│ No containers found                                      ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+ GWT v8.17.2 | /tmp/test-repo | 0 branches (0 wo┌ ▶ Shell ─────────────────────────────────────────────────────────────┐
+┌ Branches │ Specs │ Issues │ PRs │ Profiles │ ┐│Session: Shell (80x24)                                                │
+│ View: All │ Sort: Default                    ││                                                                      │
+│No branches loaded                            ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+└──────────────────────────────────────────────┘│                                                                      │
+┌ Overview │ SPECs │ Git │ Sessions  · No branc┐│                                                                      │
+│Overview                                      ││                                                                      │
+│ No branch selected                           ││                                                                      │
+│                                              ││                                                                      │
+│ Docker status                                ││                                                                      │
+│ No containers found                          ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
  ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:deta

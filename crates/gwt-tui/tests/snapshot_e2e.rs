@@ -277,7 +277,7 @@ fn e2e_notifications_land_in_structured_log_for_all_severities() {
 
     app::update(&mut model, Message::DismissError);
 
-    let output = render_to_string(&model, 160, 24);
+    let output = render_to_string(&model, 220, 24);
     assert!(output.contains("DEBUG"));
     assert!(output.contains("INFO"));
     assert!(output.contains("WARN"));
