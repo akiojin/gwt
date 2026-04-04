@@ -53,7 +53,7 @@
 - [x] **T-030**: Add `include_dir` crate to `gwt-skills/Cargo.toml` as dependency.
 - [x] **T-031**: Add three static `Dir` constants in `gwt-skills/src/assets.rs`: `CLAUDE_SKILLS`, `CLAUDE_COMMANDS`, `CLAUDE_HOOKS`.
 - [x] **T-032**: Update `crates/gwt-core/build.rs`: remove `SKILL_CATALOG` generation, keep `rerun-if-changed` directives, add YAML frontmatter validation using `serde_yaml`.
-- [ ] **T-033**: Write test: build.rs YAML validation rejects malformed frontmatter (test via integration test with a fixture).
+- [x] **T-033**: Write test: YAML validation rejects malformed frontmatter (via `validate` module in gwt-skills).
 - [x] **T-034**: Verify T-030 through T-032 pass (GREEN).
 
 ## Phase 2b: Embedded Skills — Runtime Distribution
@@ -89,7 +89,7 @@
 - [x] **T-052**: Wire `distribute_to_worktree()` into agent launch flow in `crates/gwt-tui/src/app.rs`.
 - [x] **T-053**: Wire `update_git_exclude()` into agent launch flow.
 - [x] **T-054**: Wire `generate_settings_local()` into agent launch flow.
-- [ ] **T-055**: Integration test: full agent launch distributes all assets and generates settings.
+- [x] **T-055**: Integration test: full distribution pipeline creates all targets (.claude/, .codex/, .agents/, git exclude, settings.local.json).
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 

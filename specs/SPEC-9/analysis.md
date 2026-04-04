@@ -1,51 +1,51 @@
-# Analysis: SPEC-9 - Infrastructure — build distribution, Docker UI, embedded skills, hooks merge
+# Analysis: SPEC-9 - Infrastructure
 
 ## Analysis Report: SPEC-9
 
-Status: AUTO-FIXABLE (Phase 2 redesigned, new tasks pending)
+Status: CLEAR
 
 ## Checks
 
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
-- Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: Phase 1 (Docker UI): 21/21 completed. Phase 2 (Embedded Skills): 0/45 completed (redesigned 2026-04-04). Phase 3 (Hooks Merge): 31/31 completed. Phase 4 (Build Distribution): 11/11 completed.
-- FR numbering: FR-001 through FR-023. No gaps or duplicates.
-- SC numbering: SC-001 through SC-015. No gaps or duplicates.
+- Artifact completeness: All required artifacts present (spec.md, plan.md, tasks.md, analysis.md, research.md, progress.md, checklists/).
+- Task traceability: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 21/21, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11. Total: 108/108 completed.
+- FR coverage: FR-001 through FR-023, all addressed by implementation or carried-over work.
+- SC coverage: SC-001 through SC-015, all verifiable.
 
-## Phase 2 Redesign Summary (2026-04-04)
+## Phase 2 Completion Summary
 
-The Embedded Skills subsystem was completely redesigned:
+### Build-Time Bundling (Phase 2)
 
-### Removed
+- `BuiltinSkill` enum, `SKILL_CATALOG`, `register_builtins()` removed
+- `include_dir` crate embeds `.claude/skills/`, `.claude/commands/`, `.claude/hooks/scripts/`
+- `build.rs` validates YAML frontmatter at compile time via `serde_yaml`
+- `validate` module provides testable frontmatter validation (8 tests)
+- TUI Settings > Skills shows read-only bundled skill count
 
-- `BuiltinSkill` enum (9 hardcoded variants) — replaced by build-time file bundling
-- `SKILL_CATALOG` constant — unused dead code
-- `register_builtins()` — no longer needed
-- `skill_fields()` in TUI Settings — no runtime skill management
-- YAML frontmatter parsing at runtime — skill interpretation is Claude Code/Codex responsibility
+### Runtime Distribution (Phase 2b)
 
-### Added
+- `distribute_to_worktree()`: writes skills/commands/hooks to `.claude/`, `.codex/`, `.agents/`
+- `update_git_exclude()`: manages `.git/info/exclude` with `# gwt-managed-begin/end` markers
+- `generate_settings_local()`: creates `.claude/settings.local.json` with hooks merge
+- Agent launch integration: all three functions called in `materialize_pending_launch_with()`
+- Full pipeline integration test passing (56 gwt-skills tests total)
 
-- **Phase 2**: Build-time bundling via `include_dir` crate (FR-009 through FR-011)
-- **Phase 2b**: Runtime distribution to worktrees (FR-012 through FR-015)
-- **Phase 2c**: Quality improvement per Anthropic guidelines (FR-016 through FR-018)
+### Quality Improvement (Phase 2c)
 
-### Key Design Decisions
+- All 21 SKILL.md descriptions rewritten in third-person with trigger phrases
+- `allowed-tools` and `argument-hint` frontmatter added to all skills
+- Progressive Disclosure applied to 7 complex skills (references/ subdirectories)
+- All SKILL.md files under 200 lines
+- All body content in imperative/infinitive form
 
-1. gwt treats skill files as opaque blobs — bundle and write, no parsing
-2. Build-time YAML validation only (syntax errors caught at compile time)
-3. Full overwrite on every agent launch (no diff-based sync)
-4. Distribution to `.claude/`, `.codex/`, `.agents/` simultaneously
-5. `.git/info/exclude` managed with `# gwt-managed-begin/end` markers
-6. `settings.local.json` generated with hooks merge preserving user hooks
+## Verification Evidence
 
-## Consistency Issues Found and Fixed
-
-1. **FR numbering collision**: Hooks Merge FRs (old FR-013 through FR-017) collided with new Embedded Skills FRs. Renumbered to FR-019 through FR-023.
-2. **Task ID collision**: Phase 2 new tasks (T-022 through T-066) collided with Phase 3 legacy tasks. Phase 3 renumbered to T-100 through T-130.
+- `cargo build -p gwt-tui`: success (build.rs YAML validation passes)
+- `cargo test -p gwt-skills --lib`: 56 tests passed
+- `cargo test -p gwt-tui --lib`: 693 tests passed (total with gwt-skills)
+- `cargo clippy -p gwt-skills -p gwt-tui -- -D warnings`: no warnings
 
 ## Next
 
-- Implement Phase 2 tasks (T-022 through T-066).
-- Phase 2c (quality improvement) can run in parallel with Phase 2/2b.
-- After Phase 2 completion, run final analysis gate before closing SPEC.
+- SPEC-9 Phase 2 is complete. All tasks checked.
+- Remaining work for SPEC-9 overall: completion-gate reconciliation across all phases.

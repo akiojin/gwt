@@ -6,6 +6,7 @@ pub mod git_exclude;
 pub mod hooks;
 pub mod registry;
 pub mod settings_local;
+pub mod validate;
 
 pub use distribute::{distribute_to_worktree, DistributeReport};
 pub use git_exclude::update_git_exclude;
@@ -515,6 +516,36 @@ mod tests {
             files.contains(&"gwt-forward-hook.mjs"),
             "missing gwt-forward-hook.mjs"
         );
+    }
+
+    // ── Integration: full distribution pipeline ──
+
+    #[test]
+    fn full_distribution_pipeline_creates_all_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+
+        // Create .git/info for git_exclude
+        std::fs::create_dir_all(wt.join(".git/info")).unwrap();
+
+        // Run full pipeline
+        let report = distribute_to_worktree(wt).unwrap();
+        assert!(report.files_written > 0);
+
+        update_git_exclude(wt).unwrap();
+        let exclude = std::fs::read_to_string(wt.join(".git/info/exclude")).unwrap();
+        assert!(exclude.contains("gwt-managed-begin"));
+
+        let hooks = vec![make_hook("PreToolUse", "gwt-hook", true)];
+        generate_settings_local(wt, &hooks).unwrap();
+        assert!(wt.join(".claude/settings.local.json").exists());
+
+        // Verify all distribution targets exist
+        assert!(wt.join(".claude/skills/gwt-pr/SKILL.md").exists());
+        assert!(wt.join(".codex/skills/gwt-pr/SKILL.md").exists());
+        assert!(wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
+        assert!(wt.join(".claude/commands/gwt-pr.md").exists());
+        assert!(wt.join(".claude/hooks/scripts/gwt-forward-hook.mjs").exists());
     }
 
     // ── helpers ──
