@@ -5,17 +5,17 @@
 2. Move into `Specs`, confirm local `metadata.json` entries populate the list, and use `Enter` / `Esc` to move between list and detail.
 3. Use `Shift+Enter` from Specs detail and verify the wizard opens with the selected SPEC id/title prefilled.
 4. Switch detail sections with `Left` / `Right` and confirm `analysis.md` is available alongside the other local SPEC artifacts.
-5. Track semantic search, markdown-rendered detail parity, and richer metadata/content editing as the remaining execution steps.
+5. Track semantic search, markdown-rendered detail parity, live edit keypaths, and richer launch context / branch-name parity as the remaining execution steps.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-tui management_tab_labels -- --nocapture`
 - `cargo test -p gwt-tui management_tab_all_has_nine_entries -- --nocapture`
 - `cargo test -p gwt-tui load_initial_data_populates_specs_from_metadata -- --nocapture`
 - `cargo test -p gwt-tui route_key_to_management_specs_enter_opens_detail_and_escape_returns_list -- --nocapture`
+- `cargo test -p gwt-tui route_key_to_management_specs_left_right_cycle_sections_without_switching_tabs -- --nocapture`
 - `cargo test -p gwt-tui route_key_to_management_specs_shift_enter_opens_prefilled_wizard -- --nocapture`
 - `cargo test -p gwt-tui detail_sections_constant_includes_analysis_md -- --nocapture`
 - `cargo test -p gwt-tui start_section_edit_reads_analysis_markdown_file -- --nocapture`
-- `cargo test -p gwt-tui save_edit_updates_metadata_file -- --nocapture`
 - `cargo test -p gwt-tui --lib`
 
 ## Expected Result

@@ -992,9 +992,16 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
 
-    // Left/Right switches tabs when not in text input mode
-    // (Ctrl+Left/Right is reserved for sub-tab switching within individual tabs)
-    if !is_in_text_input_mode(model) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+    let specs_detail_handles_horizontal_navigation =
+        model.management_tab == ManagementTab::Specs && model.specs.detail_view;
+
+    // Left/Right switches tabs when not in text input mode.
+    // Ctrl+Left/Right is reserved for sub-tab switching within individual tabs,
+    // and Specs detail owns plain Left/Right for artifact section navigation.
+    if !is_in_text_input_mode(model)
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !specs_detail_handles_horizontal_navigation
+    {
         match key.code {
             KeyCode::Right => {
                 model.management_tab = model.management_tab.next();
@@ -3933,6 +3940,27 @@ mod tests {
 
         route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!model.specs.detail_view);
+    }
+
+    #[test]
+    fn route_key_to_management_specs_left_right_cycle_sections_without_switching_tabs() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Specs;
+        model.specs.specs = vec![screens::specs::SpecItem {
+            id: "SPEC-5".into(),
+            title: "Local SPEC Management".into(),
+            phase: "implementation".into(),
+            status: "in-progress".into(),
+        }];
+        model.specs.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(model.management_tab, ManagementTab::Specs);
+        assert_eq!(model.specs.detail_section, 1);
+
+        route_key_to_management(&mut model, key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(model.management_tab, ManagementTab::Specs);
+        assert_eq!(model.specs.detail_section, 0);
     }
 
     #[test]
