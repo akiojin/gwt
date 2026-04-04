@@ -24,7 +24,8 @@
 21. From a terminal-focused management session, press `Ctrl+G,g` to hide the panel and confirm the main layer keeps terminal-oriented hints; press `Ctrl+G,g` again and confirm the management panel reappears without stealing terminal focus.
 22. From Terminal focus, press `Ctrl+G,s` or `Ctrl+G,b` and confirm the requested management tab opens without stealing focus away from the terminal pane.
 23. Open an Issue detail and a PR detail, then press `Esc` in each case and confirm the detail pane closes back to the list while preserving the current selection.
-24. Record any remaining gaps against `tasks.md` before claiming the shell complete.
+24. Open a log entry detail, press `Esc`, and confirm the detail pane closes back to the list while the selected log entry remains highlighted.
+25. Record any remaining gaps against `tasks.md` before claiming the shell complete.
 
 ## Expected Result
 - The reviewer sees the current implemented scope for workspace shell.
@@ -43,6 +44,7 @@
 - Toggling the management panel now behaves like a supplemental old-TUI surface instead of leaving stale management focus behind when returning to the main terminal layer.
 - Global tab shortcuts now respect the same supplemental-surface contract: the requested management tab opens, but terminal focus stays in the main workstream unless the user explicitly tabs into the panel.
 - `Issues` and `PR Dashboard` detail panes now behave like temporary drill-downs instead of traps: `Esc` closes them back to the list without losing the current selection.
+- The `Logs` detail pane follows that same drill-down contract, so `Esc` returns to the log list instead of forcing another Enter or leaking into warn-dismiss behavior.
 - The footer behaves like an old-TUI status bar again: current session context stays visible while the relevant keybind hints remain discoverable.
 - Git View reflects repository status and recent commits after refresh.
 - Session layout and management panel state survive a restart.

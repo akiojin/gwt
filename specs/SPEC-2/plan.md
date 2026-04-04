@@ -292,6 +292,21 @@ downs that close with `Esc` instead of trapping the user until another action ke
 23.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
+### Phase 24: Esc-Back for Logs Detail View (5 tasks)
+Bring the Logs tab into the same management-detail contract so the log detail pane behaves like a
+temporary drill-down instead of forcing the user to use Enter again to escape.
+
+24.1: Detail-close contract (2 tasks)
+- `Esc` closes `Logs` detail view and returns to the list without changing the selected log entry.
+- Existing log filter/detail routing (`f`, `d`, Enter) remains unchanged.
+
+24.2: Focused routing coverage (2 tasks)
+- Add focused coverage for `Logs` detail closing via `Esc`.
+- Add focused coverage that existing log routing still works after the change.
+
+24.3: Verification (1 task)
+- Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

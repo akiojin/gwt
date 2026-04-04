@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `161/161` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T09:09:30Z`
+- Task progress: `166/166` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T09:21:30Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -31,6 +31,7 @@
 - Ctrl+G,g now treats the management panel as a supplemental surface again: showing it keeps terminal focus, and hiding it always normalizes focus back to Terminal so Main layer hints never leak stale management focus.
 - Global management-tab shortcuts now follow the same supplemental contract: opening Branches/Issues/Settings/etc. from Terminal surfaces the requested tab without stealing focus, while management-local tab switches still land on the list pane.
 - `Issues` and `PR Dashboard` detail panes now honor the documented `Esc` contract as well: `Esc` closes the detail view and returns to the list without changing the selected row.
+- The `Logs` detail pane now matches that same contract: `Esc` closes the detail drill-down and returns to the list without disturbing the selected entry.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

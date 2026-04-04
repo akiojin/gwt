@@ -278,3 +278,11 @@ screens to use.
 - [x] T181 Update `app.rs` management routing so `Esc` closes Issues / PR detail views before falling back to warn-dismiss behavior.
 - [x] T182 Refresh `SPEC-2` artifacts to describe detail-close-on-Esc parity.
 - [x] T183 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
+
+## Phase 24: Esc-Back for Logs Detail View
+
+- [x] T184 [P] Write RED test: `Esc` in `Logs` detail closes the detail view while preserving the selected row.
+- [x] T185 [P] Write RED test: existing `Logs` routing (`f`, `d`, Enter`) still behaves unchanged after the `Esc` detail-close addition.
+- [x] T186 Update `app.rs` management routing so `Esc` closes `Logs` detail before falling back to warn-dismiss behavior.
+- [x] T187 Refresh `SPEC-2` artifacts to describe Logs detail-close-on-Esc parity.
+- [x] T188 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.

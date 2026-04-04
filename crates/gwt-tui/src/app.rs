@@ -1341,6 +1341,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::logs::update(&mut model.logs, m);
+            } else if key.code == KeyCode::Esc && model.logs.detail_view {
+                screens::logs::update(&mut model.logs, LogsMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
                 dismiss_warn_notification(model);
             }
@@ -5923,6 +5925,45 @@ mod tests {
 
         route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(model.logs.filter_level, screens::logs::FilterLevel::All);
+    }
+
+    #[test]
+    fn route_key_to_management_logs_esc_closes_detail_view_and_preserves_selection() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Logs;
+        model.logs.entries = vec![
+            Notification::new(Severity::Info, "core", "first"),
+            Notification::new(Severity::Warn, "core", "second"),
+        ];
+        model.logs.selected = 1;
+        model.logs.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!model.logs.detail_view);
+        assert_eq!(model.logs.selected, 1);
+        assert_eq!(
+            model
+                .logs
+                .selected_entry()
+                .map(|entry| entry.message.as_str()),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_logs_filter_controls_still_work_after_detail_close_support() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Logs;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(
+            model.logs.filter_level,
+            screens::logs::FilterLevel::ErrorOnly
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(model.logs.filter_level, screens::logs::FilterLevel::DebugUp);
     }
 
     #[test]
