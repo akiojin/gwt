@@ -181,3 +181,9 @@
 - [x] T096 [P] Write RED test: `Choose different settings...` follows the last grouped `Start new` row without an extra separator line.
 - [x] T097 Remove the remaining footer separator so the final action follows the last grouped row directly while preserving selection semantics.
 - [x] T098 Verify focused footer-density tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 24: QuickStart Action Label Restoration
+
+- [x] T099 [P] Write RED test: `QuickStart` uses `Resume session` / `Start new session` labels in the grouped history render and option list.
+- [x] T100 Restore the old-TUI action labels while preserving resume-session ID snippets and existing selection semantics.
+- [x] T101 Verify focused label-restoration tests, broad workspace checks, and refresh SPEC-3 artifacts.

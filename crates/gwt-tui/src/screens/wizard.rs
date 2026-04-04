@@ -610,14 +610,14 @@ impl WizardState {
                 for entry in &self.quick_start_entries {
                     let resume = if let Some(session_id) = &entry.resume_session_id {
                         format!(
-                            "Resume with previous settings ({}...)",
+                            "Resume session ({}...)",
                             &session_id[..session_id.len().min(8)]
                         )
                     } else {
-                        "Resume with previous settings".to_string()
+                        "Resume session".to_string()
                     };
                     options.push(resume);
-                    options.push("Start new with previous settings".to_string());
+                    options.push("Start new session".to_string());
                 }
                 if !self.quick_start_entries.is_empty() {
                     options.push("Choose different settings...".to_string());
@@ -1487,7 +1487,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         let resume_index = entry_index * 2;
         let resume_text = if let Some(session_id) = &entry.resume_session_id {
             format!(
-                "{}Resume with previous settings ({}...)",
+                "{}Resume session ({}...)",
                 if state.selected == resume_index {
                     "> "
                 } else {
@@ -1497,7 +1497,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             )
         } else {
             format!(
-                "{}Resume with previous settings",
+                "{}Resume session",
                 if state.selected == resume_index {
                     "> "
                 } else {
@@ -1515,7 +1515,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
         let start_new_index = resume_index + 1;
         let start_new_text = format!(
-            "{}Start new with previous settings",
+            "{}Start new session",
             if state.selected == start_new_index {
                 "> "
             } else {
@@ -2550,8 +2550,8 @@ mod tests {
         assert!(text.contains("Quick Start"));
         assert!(text.contains("Branch: feature/test"));
         assert!(text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
-        assert!(text.contains("> Resume with previous settings (sess-123...)"));
-        assert!(text.contains("  Start new with previous settings"));
+        assert!(text.contains("> Resume session (sess-123...)"));
+        assert!(text.contains("  Start new session"));
         assert!(text.contains("Claude Code (sonnet)"));
         assert!(text.contains("Choose different settings..."));
     }
@@ -2584,9 +2584,27 @@ mod tests {
         state.branch_name = "feature/test".to_string();
         state.quick_start_entries = sample_quick_start_entries();
 
+        let options = state.current_options();
+
+        assert_eq!(options[0], "Resume session (sess-123...)");
+        assert_eq!(options[1], "Start new session");
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Resume session"));
+        assert!(text.contains("Start new session"));
+    }
+
+    #[test]
+    fn render_quick_start_old_tui_action_labels_remain_legible_on_narrow_width() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
         let buf = render_buffer(&state, 100, 24);
-        let (_, start_new_y) =
-            find_text_position(&buf, "Start new with previous settings").unwrap();
+        let (_, start_new_y) = find_text_position(&buf, "Start new session").unwrap();
         let (_, next_header_y) = find_text_position(&buf, "Claude Code (sonnet)").unwrap();
 
         assert_eq!(
@@ -2594,6 +2612,10 @@ mod tests {
             start_new_y + 1,
             "the next quick-start group should start immediately below the previous group's actions"
         );
+
+        let text = render_text(&state, 40, 24);
+        assert!(text.contains("Resume session"));
+        assert!(text.contains("Start new session"));
     }
 
     #[test]
@@ -2605,8 +2627,7 @@ mod tests {
         state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
 
         let buf = render_buffer(&state, 100, 24);
-        let (_, start_new_y) =
-            find_text_position(&buf, "Start new with previous settings").unwrap();
+        let (_, start_new_y) = find_text_position(&buf, "Start new session").unwrap();
         let (_, choose_y) = find_text_position(&buf, "Choose different settings...").unwrap();
 
         assert_eq!(

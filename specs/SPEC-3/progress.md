@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `104/104` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T11:39:49Z`
+- Task progress: `107/107` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T11:43:40Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -70,6 +70,9 @@
 - The final `Choose different settings...` action now follows the last grouped
   `Start new` row directly without an extra separator line, completing the
   denser old-TUI footer rhythm.
+- `QuickStart` grouped action rows now use the shorter old-TUI labels
+  `Resume session` and `Start new session`, while still showing a resume
+  session ID snippet when one exists.
 - On wide popups, `Choose different settings...` now renders as a descriptive
   old-TUI footer row (`label - description`), while narrow widths keep the
   label-only fallback for readability.

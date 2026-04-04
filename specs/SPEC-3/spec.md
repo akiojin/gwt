@@ -240,6 +240,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-030**: On wider popups, `Choose different settings...` renders as an
   old-TUI `label - description` row (`Open full setup`); on narrow widths it
   falls back to the label-only row so the final action stays readable.
+- **FR-031**: `QuickStart` action rows use the shorter old-TUI labels
+  `Resume session` and `Start new session`, while still showing the resume
+  session ID snippet when one exists.
 
 ## Non-Functional Requirements
 

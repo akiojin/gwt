@@ -242,6 +242,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the final action now follows the last
    grouped row without an extra separator line.
 
+### Phase 24: QuickStart Action Label Restoration
+
+1. Restore the old-TUI action copy so grouped Quick Start rows say
+   `Resume session` and `Start new session` instead of the rebuilt
+   longer phrases.
+2. Preserve resume-session ID hints and existing selection semantics while
+   tightening the visual density of the grouped history rows.
+3. Add focused RED/GREEN coverage for wide and narrow render paths using the
+   restored labels.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).

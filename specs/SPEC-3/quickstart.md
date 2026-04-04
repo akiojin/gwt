@@ -64,6 +64,9 @@
    grouped `Start new` row without an extra separator line.
 26. Verify wide popups now render `Choose different settings... - Open full
    setup` while narrow popups fall back to the label-only row.
+27. Verify grouped Quick Start actions now read `Resume session` / `Start new
+   session`, while resume-capable entries still show the short session ID
+   snippet.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -110,6 +113,9 @@
   making the grouped history denser while preserving the final footer action.
 - The final `Choose different settings...` action now follows the last grouped
   row directly instead of being separated by its own divider.
+- The grouped Quick Start actions now use the shorter old-TUI labels
+  `Resume session` and `Start new session` while keeping the short
+  resume-session hint where available.
 - The final `Choose different settings...` row now explains itself on wide
   popups via `label - description` formatting and keeps the old label-only
   fallback on narrow widths.
