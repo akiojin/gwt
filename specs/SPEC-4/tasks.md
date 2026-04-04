@@ -24,13 +24,14 @@
 ### 1.4 Git View Screen
 
 - [x] TEST: Snapshot test for Git View screen layout (file list + diff + commits)
+- [x] TEST: Git View header wiring shows live divergence and PR link metadata
 - [x] IMPL: Create `screens/git_view.rs` with `GitViewScreen`
   - File: `crates/gwt-tui/src/screens/git_view.rs`
 - [x] IMPL: File list widget with [S]/[U]/[?] markers
 - [x] IMPL: Diff pane with syntax-aware rendering
 - [x] IMPL: Commit history pane
-- [x] IMPL: Divergence status in header (FUTURE: requires data wiring)
-- [x] IMPL: PR link display when PR exists (FUTURE: requires PR data integration)
+- [x] IMPL: Divergence status in header with live ahead/behind metadata wiring
+- [x] IMPL: PR link display when PR exists via current-branch PR lookup
 
 ### 1.5 Tab Registration
 
@@ -56,11 +57,12 @@
 ### 2.3 PR Dashboard Screen
 
 - [x] TEST: Snapshot test for PR dashboard layout (list + detail)
+- [x] TEST: Detail view reloads live data when tab focus returns or selection changes
 - [x] IMPL: Create `screens/pr_dashboard.rs` with `PrDashboardScreen`
   - File: `crates/gwt-tui/src/screens/pr_dashboard.rs`
 - [x] IMPL: PR list widget with CI status icons
 - [x] IMPL: PR detail pane with check badges and review status
-- [x] IMPL: Auto-refresh on tab focus (FUTURE: UX enhancement)
+- [x] IMPL: Auto-refresh on tab focus, preserving live detail when already open
 
 ### 2.4 Tab Registration
 

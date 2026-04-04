@@ -62,6 +62,8 @@ pub struct GitViewState {
     pub(crate) selected: usize,
     pub(crate) expanded: HashSet<usize>,
     pub(crate) commits: Vec<GitCommitItem>,
+    pub(crate) divergence_summary: Option<String>,
+    pub(crate) pr_link: Option<String>,
 }
 
 impl GitViewState {
@@ -90,6 +92,10 @@ pub enum GitViewMessage {
     Refresh,
     SetFiles(Vec<GitFileItem>),
     SetCommits(Vec<GitCommitItem>),
+    SetMetadata {
+        divergence_summary: Option<String>,
+        pr_link: Option<String>,
+    },
 }
 
 /// Update git view state in response to a message.
@@ -122,6 +128,13 @@ pub fn update(state: &mut GitViewState, msg: GitViewMessage) {
         GitViewMessage::SetCommits(commits) => {
             state.commits = commits;
         }
+        GitViewMessage::SetMetadata {
+            divergence_summary,
+            pr_link,
+        } => {
+            state.divergence_summary = divergence_summary;
+            state.pr_link = pr_link;
+        }
     }
 }
 
@@ -150,7 +163,13 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let title = format!("Files ({})", state.files.len());
+    let mut title = format!("Files ({})", state.files.len());
+    if let Some(summary) = &state.divergence_summary {
+        title.push_str(&format!(" | {summary}"));
+    }
+    if let Some(pr_link) = &state.pr_link {
+        title.push_str(&format!(" | PR {pr_link}"));
+    }
     let mut items: Vec<ListItem> = Vec::new();
 
     for (idx, file) in state.files.iter().enumerate() {
@@ -292,6 +311,8 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert!(state.expanded.is_empty());
         assert!(state.commits.is_empty());
+        assert!(state.divergence_summary.is_none());
+        assert!(state.pr_link.is_none());
     }
 
     #[test]
@@ -367,6 +388,24 @@ mod tests {
     }
 
     #[test]
+    fn set_metadata_populates_header_fields() {
+        let mut state = GitViewState::default();
+        update(
+            &mut state,
+            GitViewMessage::SetMetadata {
+                divergence_summary: Some("Ahead 2 Behind 1".to_string()),
+                pr_link: Some("https://example.com/pr/42".to_string()),
+            },
+        );
+
+        assert_eq!(
+            state.divergence_summary.as_deref(),
+            Some("Ahead 2 Behind 1")
+        );
+        assert_eq!(state.pr_link.as_deref(), Some("https://example.com/pr/42"));
+    }
+
+    #[test]
     fn selected_file_returns_correct() {
         let mut state = GitViewState::default();
         state.files = sample_files();
@@ -407,6 +446,30 @@ mod tests {
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
         assert!(text.contains("Files"));
+    }
+
+    #[test]
+    fn render_header_includes_divergence_and_pr_link() {
+        let mut state = GitViewState::default();
+        state.files = sample_files();
+        state.commits = sample_commits();
+        state.divergence_summary = Some("Ahead 2 Behind 1".to_string());
+        state.pr_link = Some("https://example.com/pr/42".to_string());
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("Ahead 2 Behind 1"));
+        assert!(text.contains("https://example.com/pr/42"));
     }
 
     #[test]

@@ -453,7 +453,30 @@ pub fn load_initial_data(model: &mut Model) {
     screens::branches::load_branch_detail(&mut model.branches, &repo_path);
 
     // -- Git View --
-    if let Ok(entries) = gwt_git::diff::get_status(&model.repo_path) {
+    load_git_view_with(
+        model,
+        gwt_git::diff::get_status,
+        |repo_path| gwt_git::commit::recent_commits(repo_path, 10),
+        gwt_git::branch::list_branches,
+        fetch_current_pr_link,
+    );
+
+    load_pr_dashboard(model);
+}
+
+fn load_git_view_with<S, C, B, P>(
+    model: &mut Model,
+    load_status: S,
+    load_commits: C,
+    load_branches: B,
+    load_pr_link: P,
+) where
+    S: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::diff::FileEntry>>,
+    C: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::commit::CommitEntry>>,
+    B: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::Branch>>,
+    P: FnOnce(&std::path::Path) -> gwt_core::Result<Option<String>>,
+{
+    if let Ok(entries) = load_status(&model.repo_path) {
         let files = entries
             .into_iter()
             .map(|entry| {
@@ -479,7 +502,7 @@ pub fn load_initial_data(model: &mut Model) {
         );
     }
 
-    if let Ok(entries) = gwt_git::commit::recent_commits(&model.repo_path, 10) {
+    if let Ok(entries) = load_commits(&model.repo_path) {
         let commits = entries
             .into_iter()
             .map(|entry| screens::git_view::GitCommitItem {
@@ -495,16 +518,83 @@ pub fn load_initial_data(model: &mut Model) {
         );
     }
 
-    load_pr_dashboard(model);
+    let divergence_summary = load_branches(&model.repo_path)
+        .ok()
+        .and_then(|branches| git_view_divergence_summary(&branches));
+    let pr_link = load_pr_link(&model.repo_path).ok().flatten();
+    screens::git_view::update(
+        &mut model.git_view,
+        screens::git_view::GitViewMessage::SetMetadata {
+            divergence_summary,
+            pr_link,
+        },
+    );
+}
+
+fn git_view_divergence_summary(branches: &[gwt_git::Branch]) -> Option<String> {
+    let current = branches
+        .iter()
+        .find(|branch| branch.is_head && branch.is_local)?;
+    current.upstream.as_ref()?;
+
+    match (current.ahead, current.behind) {
+        (0, 0) => Some("Up to date".to_string()),
+        (ahead, 0) => Some(format!("Ahead {ahead}")),
+        (0, behind) => Some(format!("Behind {behind}")),
+        (ahead, behind) => Some(format!("Ahead {ahead} Behind {behind}")),
+    }
+}
+
+fn fetch_current_pr_link(repo_path: &std::path::Path) -> gwt_core::Result<Option<String>> {
+    let output = Command::new("gh")
+        .args(["pr", "view", "--json", "url"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| gwt_core::GwtError::Git(format!("gh pr view: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+        if lowered.contains("no pull requests found")
+            || lowered.contains("no pull request found")
+            || lowered.contains("could not resolve to a pull request")
+        {
+            return Ok(None);
+        }
+        return Err(gwt_core::GwtError::Git(format!("gh pr view: {trimmed}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_current_pr_link_json(&stdout)
+}
+
+fn parse_current_pr_link_json(json: &str) -> gwt_core::Result<Option<String>> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|err| gwt_core::GwtError::Other(format!("gh pr view JSON: {err}")))?;
+    Ok(value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned))
 }
 
 fn switch_management_tab(model: &mut Model, tab: ManagementTab) {
-    switch_management_tab_with(model, tab, gwt_git::fetch_pr_list);
+    switch_management_tab_with(
+        model,
+        tab,
+        gwt_git::fetch_pr_list,
+        fetch_pr_dashboard_detail_report,
+    );
 }
 
-fn switch_management_tab_with<F>(model: &mut Model, tab: ManagementTab, fetch_prs: F)
-where
+fn switch_management_tab_with<F, D>(
+    model: &mut Model,
+    tab: ManagementTab,
+    fetch_prs: F,
+    fetch_detail: D,
+) where
     F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+    D: FnOnce(&std::path::Path, u32) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport>,
 {
     model.management_tab = tab;
     model.active_layer = ActiveLayer::Management;
@@ -513,7 +603,7 @@ where
         model.settings.load_category_fields();
     }
     if tab == ManagementTab::PrDashboard {
-        load_pr_dashboard_with(model, fetch_prs);
+        refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
     }
 }
 
@@ -1090,8 +1180,11 @@ fn route_key_to_management_pr_dashboard_with<F>(
         let should_open_detail =
             matches!(m, PrDashboardMessage::ToggleDetail) && !model.pr_dashboard.detail_view;
         let should_refresh = matches!(m, PrDashboardMessage::Refresh);
+        let should_reload_detail_selection = model.pr_dashboard.detail_view
+            && matches!(m, PrDashboardMessage::MoveUp | PrDashboardMessage::MoveDown);
         screens::pr_dashboard::update(&mut model.pr_dashboard, m);
-        if should_open_detail && model.pr_dashboard.detail_view {
+        if (should_open_detail && model.pr_dashboard.detail_view) || should_reload_detail_selection
+        {
             load_pr_dashboard_detail_with(model, fetch_detail);
         } else if should_refresh {
             refresh_pr_dashboard_with(model, gwt_git::fetch_pr_list, fetch_detail);
@@ -3292,20 +3385,97 @@ mod tests {
     }
 
     #[test]
+    fn load_git_view_with_populates_divergence_and_pr_link_metadata() {
+        let mut model = test_model();
+
+        load_git_view_with(
+            &mut model,
+            |_repo_path| {
+                Ok(vec![gwt_git::diff::FileEntry {
+                    path: std::path::PathBuf::from("tracked.txt"),
+                    status: gwt_git::diff::FileStatus::Staged,
+                }])
+            },
+            |_repo_path| {
+                Ok(vec![gwt_git::commit::CommitEntry {
+                    hash: "abcdef1".into(),
+                    subject: "Initial commit".into(),
+                    author: "Alice".into(),
+                    timestamp: "2026-04-04T00:00:00Z".into(),
+                }])
+            },
+            |_repo_path| {
+                Ok(vec![gwt_git::Branch {
+                    name: "feature/live-meta".into(),
+                    is_local: true,
+                    is_remote: false,
+                    is_head: true,
+                    upstream: Some("origin/feature/live-meta".into()),
+                    ahead: 2,
+                    behind: 1,
+                    last_commit_date: None,
+                }])
+            },
+            |_repo_path| Ok(Some("https://example.com/pr/42".into())),
+        );
+
+        assert_eq!(
+            model.git_view.divergence_summary.as_deref(),
+            Some("Ahead 2 Behind 1")
+        );
+        assert_eq!(
+            model.git_view.pr_link.as_deref(),
+            Some("https://example.com/pr/42")
+        );
+    }
+
+    #[test]
+    fn load_git_view_with_omits_divergence_without_upstream() {
+        let mut model = test_model();
+
+        load_git_view_with(
+            &mut model,
+            |_repo_path| Ok(Vec::new()),
+            |_repo_path| Ok(Vec::new()),
+            |_repo_path| {
+                Ok(vec![gwt_git::Branch {
+                    name: "feature/no-upstream".into(),
+                    is_local: true,
+                    is_remote: false,
+                    is_head: true,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    last_commit_date: None,
+                }])
+            },
+            |_repo_path| Ok(None),
+        );
+
+        assert!(model.git_view.divergence_summary.is_none());
+        assert!(model.git_view.pr_link.is_none());
+    }
+
+    #[test]
     fn switch_management_tab_pr_dashboard_loads_prs_on_focus() {
         let mut model = test_model();
 
-        switch_management_tab_with(&mut model, ManagementTab::PrDashboard, |_repo_path| {
-            Ok(vec![gwt_git::PrStatus {
-                number: 42,
-                title: "Wire PR dashboard".into(),
-                state: GitPrState::Open,
-                url: "https://example.com/pr/42".into(),
-                ci_status: "SUCCESS".into(),
-                mergeable: "MERGEABLE".into(),
-                review_status: "APPROVED".into(),
-            }])
-        });
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::PrDashboard,
+            |_repo_path| {
+                Ok(vec![gwt_git::PrStatus {
+                    number: 42,
+                    title: "Wire PR dashboard".into(),
+                    state: GitPrState::Open,
+                    url: "https://example.com/pr/42".into(),
+                    ci_status: "SUCCESS".into(),
+                    mergeable: "MERGEABLE".into(),
+                    review_status: "APPROVED".into(),
+                }])
+            },
+            |_repo_path, _number| panic!("detail loader should not run for list-only focus"),
+        );
 
         assert_eq!(model.management_tab, ManagementTab::PrDashboard);
         assert_eq!(model.active_layer, ActiveLayer::Management);
@@ -3316,6 +3486,58 @@ mod tests {
         assert_eq!(model.pr_dashboard.prs[0].ci_status, "success");
         assert_eq!(model.pr_dashboard.prs[0].review_status, "approved");
         assert!(model.pr_dashboard.prs[0].mergeable);
+    }
+
+    #[test]
+    fn switch_management_tab_pr_dashboard_reloads_detail_when_open() {
+        let mut model = test_model();
+        screens::pr_dashboard::update(
+            &mut model.pr_dashboard,
+            screens::pr_dashboard::PrDashboardMessage::SetPrs(vec![
+                screens::pr_dashboard::PrItem {
+                    number: 42,
+                    title: "Existing detail".into(),
+                    state: screens::pr_dashboard::PrState::Open,
+                    ci_status: "pending".into(),
+                    mergeable: true,
+                    review_status: "review_required".into(),
+                },
+            ]),
+        );
+        model.pr_dashboard.detail_view = true;
+
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::PrDashboard,
+            |_repo_path| {
+                Ok(vec![gwt_git::PrStatus {
+                    number: 42,
+                    title: "Existing detail".into(),
+                    state: GitPrState::Open,
+                    url: "https://example.com/pr/42".into(),
+                    ci_status: "SUCCESS".into(),
+                    mergeable: "MERGEABLE".into(),
+                    review_status: "APPROVED".into(),
+                }])
+            },
+            |_repo_path, number| {
+                assert_eq!(number, 42);
+                Ok(screens::pr_dashboard::PrDetailReport {
+                    summary: "live detail".into(),
+                    ci_status: "passing".into(),
+                    merge_status: "ready".into(),
+                    review_status: "approved".into(),
+                    checks: vec!["lint: success".into()],
+                })
+            },
+        );
+
+        let detail = model
+            .pr_dashboard
+            .detail_report
+            .as_ref()
+            .expect("detail report refreshed on tab focus");
+        assert_eq!(detail.summary, "live detail");
     }
 
     #[test]
@@ -3490,6 +3712,57 @@ mod tests {
             .expect("detail report loaded");
         assert_eq!(detail.summary, "CI passing");
         assert_eq!(detail.checks, vec!["lint: success"]);
+    }
+
+    #[test]
+    fn route_key_to_management_pr_dashboard_move_in_detail_view_reloads_selected_pr_detail() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::PrDashboard;
+        screens::pr_dashboard::update(
+            &mut model.pr_dashboard,
+            screens::pr_dashboard::PrDashboardMessage::SetPrs(vec![
+                screens::pr_dashboard::PrItem {
+                    number: 41,
+                    title: "First".into(),
+                    state: screens::pr_dashboard::PrState::Open,
+                    ci_status: "pending".into(),
+                    mergeable: true,
+                    review_status: "review_required".into(),
+                },
+                screens::pr_dashboard::PrItem {
+                    number: 42,
+                    title: "Second".into(),
+                    state: screens::pr_dashboard::PrState::Open,
+                    ci_status: "success".into(),
+                    mergeable: true,
+                    review_status: "approved".into(),
+                },
+            ]),
+        );
+        model.pr_dashboard.detail_view = true;
+
+        route_key_to_management_pr_dashboard_with(
+            &mut model,
+            key(KeyCode::Down, KeyModifiers::NONE),
+            |_repo_path, number| {
+                assert_eq!(number, 42);
+                Ok(screens::pr_dashboard::PrDetailReport {
+                    summary: "second detail".into(),
+                    ci_status: "passing".into(),
+                    merge_status: "ready".into(),
+                    review_status: "approved".into(),
+                    checks: vec!["test: success".into()],
+                })
+            },
+        );
+
+        assert_eq!(model.pr_dashboard.selected, 1);
+        let detail = model
+            .pr_dashboard
+            .detail_report
+            .as_ref()
+            .expect("detail report reloaded for moved selection");
+        assert_eq!(detail.summary, "second detail");
     }
 
     #[test]
