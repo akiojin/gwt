@@ -262,6 +262,17 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage for single-entry title promotion and
    multi-entry fallback before updating artifacts.
 
+### Phase 27: QuickStart Multi-Entry Header Simplification
+
+1. Keep the single-entry title summary intact, but simplify multi-entry
+   grouped headers to the agent label only so the grouped list stays dense
+   and action-first.
+2. Preserve the generic `Quick Start` title, grouped row ordering, and
+   selection semantics while only reducing the header copy for multi-entry
+   history.
+3. Add focused RED/GREEN coverage proving multi-entry headers no longer show
+   model/reasoning details while single-entry title promotion still works.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

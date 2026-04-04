@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `113/113` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T13:05:29Z`
+- Task progress: `116/116` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T13:12:02Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -81,6 +81,9 @@
 - Single-entry `QuickStart` popups now promote the lone agent/model summary
   into the popup title and start the action rows directly below
   `Branch: ...`, while multi-entry history keeps the grouped header rows.
+- Multi-entry `QuickStart` grouped headers now render agent labels only,
+  leaving the more detailed model/reasoning summary to the single-entry title
+  variant and keeping grouped history visually denser.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

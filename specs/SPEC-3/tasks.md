@@ -199,3 +199,9 @@
 - [x] T105 [P] Write RED test: a single-entry Quick Start promotes the agent/model summary into the popup title and removes the duplicated body header.
 - [x] T106 Update `wizard.rs` so single-entry Quick Start titles render `Quick Start — ...` while multi-entry grouped headers remain unchanged.
 - [x] T107 Verify focused single-entry Quick Start tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 27: QuickStart Multi-Entry Header Simplification
+
+- [x] T108 [P] Write RED test: multi-entry Quick Start grouped headers render the agent label only instead of model/reasoning detail.
+- [x] T109 Update `wizard.rs` so multi-entry grouped headers use `tool_label` only while single-entry title promotion remains intact.
+- [x] T110 Verify focused multi-entry Quick Start tests, broad workspace checks, and refresh SPEC-3 artifacts.

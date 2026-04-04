@@ -1451,6 +1451,10 @@ fn quick_start_entry_header(entry: &QuickStartEntry) -> String {
     }
 }
 
+fn quick_start_group_header(entry: &QuickStartEntry) -> String {
+    entry.tool_label.clone()
+}
+
 fn popup_title(state: &WizardState) -> String {
     if state.step == WizardStep::QuickStart && state.quick_start_entries.len() == 1 {
         format!(
@@ -1496,7 +1500,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     for (entry_index, entry) in state.quick_start_entries.iter().enumerate() {
         if !single_entry {
-            let header = quick_start_entry_header(entry);
+            let header = quick_start_group_header(entry);
             items.push(
                 ListItem::new(truncate_with_ellipsis(&header, list_area.width as usize))
                     .style(Style::default().fg(quick_start_agent_color(&entry.agent_id))),
@@ -2568,10 +2572,10 @@ mod tests {
 
         assert!(text.contains("Quick Start"));
         assert!(text.contains("Branch: feature/test"));
-        assert!(text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
+        assert!(text.contains("Codex"));
         assert!(text.contains("> Resume session (sess-123...)"));
         assert!(text.contains("  Start new session"));
-        assert!(text.contains("Claude Code (sonnet)"));
+        assert!(text.contains("Claude Code"));
         assert!(text.contains("Choose different settings"));
     }
 
@@ -2625,8 +2629,24 @@ mod tests {
 
         assert!(text.contains("Quick Start"));
         assert!(!text.contains("Quick Start —"));
-        assert!(text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
-        assert!(text.contains("Claude Code (sonnet)"));
+        assert!(text.contains("Codex"));
+        assert!(text.contains("Claude Code"));
+    }
+
+    #[test]
+    fn render_quick_start_multi_entry_group_headers_use_agent_name_only() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Codex"));
+        assert!(text.contains("Claude Code"));
+        assert!(!text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
+        assert!(!text.contains("Claude Code (sonnet)"));
     }
 
     #[test]
@@ -2639,8 +2659,7 @@ mod tests {
 
         let buf = render_buffer(&state, 100, 24);
         let (_, branch_y) = find_text_position(&buf, "Branch: feature/test").unwrap();
-        let (_, header_y) =
-            find_text_position(&buf, "Codex (gpt-5.3-codex, Reasoning: high)").unwrap();
+        let (_, header_y) = find_text_position(&buf, "Codex").unwrap();
 
         assert_eq!(
             header_y,
@@ -2678,7 +2697,7 @@ mod tests {
 
         let buf = render_buffer(&state, 100, 24);
         let (_, start_new_y) = find_text_position(&buf, "Start new session").unwrap();
-        let (_, next_header_y) = find_text_position(&buf, "Claude Code (sonnet)").unwrap();
+        let (_, next_header_y) = find_text_position(&buf, "Claude Code").unwrap();
 
         assert_eq!(
             next_header_y,

@@ -73,6 +73,9 @@
    `Quick Start — <Agent/Model>` in the popup title and starts the action
    rows immediately below `Branch: ...` without a duplicated grouped header
    row.
+30. Verify a branch with multiple persisted Quick Start entries now renders
+   grouped headers as agent labels only (`Codex`, `Claude Code`, etc.) while
+   keeping the generic `Quick Start` title.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -128,5 +131,8 @@
 - Single-entry Quick Start popups now move the lone agent/model summary into
   the popup title so the body can start directly with the available actions
   under `Branch: ...`.
+- Multi-entry Quick Start popups now keep grouped headers agent-only so the
+  grouped list remains denser and the extra model/reasoning detail does not
+  repeat across every group.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

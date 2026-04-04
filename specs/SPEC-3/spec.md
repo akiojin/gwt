@@ -250,6 +250,9 @@ As a developer, I want to convert an existing session to a different agent type 
   title promotes that entry's agent/model summary (`Quick Start — ...`) and
   the body omits the duplicated grouped header so the first action row starts
   directly below `Branch: ...`.
+- **FR-034**: When `QuickStart` has multiple persisted entries, the grouped
+  headers render the agent label only while the detailed model/reasoning
+  summary remains reserved for the single-entry title variant.
 
 ## Non-Functional Requirements
 
