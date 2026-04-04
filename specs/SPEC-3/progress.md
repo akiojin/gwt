@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `152/152` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:53:19Z`
+- Task progress: `155/155` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:56:10Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -109,6 +109,9 @@
 - The final `QuickStart` action label is now compacted from
   `Choose different settings` to `Choose different`, while preserving the
   same selection semantics and footer density.
+- Multi-entry `QuickStart` now keeps the agent label on the `Resume` row
+  only, while the paired `Start new` row falls back to the compact plain
+  label.
 - Existing-branch `AgentSelect` now uses the same compact branch-name line as
   `QuickStart`, and the first agent row starts directly below that context
   instead of after an extra spacer row.

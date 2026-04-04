@@ -74,9 +74,9 @@
    rows immediately below the compact branch-name context line without a
    duplicated grouped header row.
 30. Verify a branch with multiple persisted Quick Start entries now renders
-   action rows that inline the agent labels (`Codex Resume`,
-   `Claude Code Start new`, etc.) while keeping the generic `Quick Start`
-   title.
+   action rows where only the `Resume` row keeps the inline agent label
+   (`Codex Resume`, `Claude Code Resume`), while the paired `Start new` rows
+   stay plain and compact.
 31. Verify a branch with multiple persisted Quick Start entries now shows the
    short resume-session ID snippet only on the selected `Resume` row, while
    unselected resume rows keep the plain label.

@@ -392,6 +392,17 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the first agent row now starts
    directly below the compact branch-name context line.
 
+### Phase 40: QuickStart Start-New Copy Compaction
+
+1. In multi-entry `QuickStart`, keep the agent identity on the `Resume` row
+   only and let the paired `Start new` row fall back to the compact plain
+   label.
+2. Preserve single-entry `QuickStart`, including the promoted title and
+   compact `Resume` / `Start new` rows, while tightening only the multi-entry
+   repeated copy.
+3. Add focused RED/GREEN coverage proving both render and `current_options()`
+   use the same split between agent-labeled `Resume` and plain `Start new`.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

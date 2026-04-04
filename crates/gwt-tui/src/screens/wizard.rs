@@ -617,12 +617,7 @@ impl WizardState {
                         show_resume_hint,
                         !single_entry,
                     ));
-                    options.push(quick_start_action_label(
-                        entry,
-                        "Start new",
-                        false,
-                        !single_entry,
-                    ));
+                    options.push(quick_start_action_label(entry, "Start new", false, false));
                 }
                 if !self.quick_start_entries.is_empty() {
                     options.push("Choose different".to_string());
@@ -1536,7 +1531,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             } else {
                 "  "
             },
-            quick_start_action_label(entry, "Start new", false, !single_entry)
+            quick_start_action_label(entry, "Start new", false, false)
         );
         items.push(
             ListItem::new(truncate_with_ellipsis(
@@ -2572,9 +2567,9 @@ mod tests {
         assert!(text.contains("feature/test"));
         assert!(!text.contains("Branch: feature/test"));
         assert!(text.contains("> Codex Resume (sess-123...)"));
-        assert!(text.contains("  Codex Start new"));
+        assert!(text.contains("  Start new"));
         assert!(text.contains("  Claude Code Resume"));
-        assert!(text.contains("  Claude Code Start new"));
+        assert!(!text.contains("  Claude Code Start new"));
         assert!(text.contains("Choose different"));
     }
 
@@ -2665,9 +2660,9 @@ mod tests {
         let text = render_text(&state, 100, 24);
 
         assert!(text.contains("> Codex Resume (sess-123...)"));
-        assert!(text.contains("  Codex Start new"));
+        assert!(text.contains("  Start new"));
         assert!(text.contains("  Claude Code Resume"));
-        assert!(text.contains("  Claude Code Start new"));
+        assert!(!text.contains("  Claude Code Start new"));
     }
 
     #[test]
@@ -2716,9 +2711,9 @@ mod tests {
         let text = render_text(&state, 100, 24);
 
         assert!(text.contains("> Codex Resume (sess-123...)"));
-        assert!(text.contains("  Codex Start new"));
+        assert!(text.contains("  Start new"));
         assert!(text.contains("  Claude Code Resume"));
-        assert!(text.contains("  Claude Code Start new"));
+        assert!(!text.contains("  Claude Code Start new"));
         assert!(!text.contains("Start new session"));
         assert!(!text.contains("Resume session (sess-123...)"));
     }
@@ -2767,12 +2762,12 @@ mod tests {
         let options = state.current_options();
 
         assert_eq!(options[0], "Codex Resume (sess-123...)");
-        assert_eq!(options[1], "Codex Start new");
+        assert_eq!(options[1], "Start new");
 
         let text = render_text(&state, 100, 24);
 
         assert!(text.contains("Codex Resume"));
-        assert!(text.contains("Codex Start new"));
+        assert!(text.contains("Start new"));
     }
 
     #[test]
@@ -2787,9 +2782,9 @@ mod tests {
         let options = state.current_options();
 
         assert_eq!(options[0], "Codex Resume (sess-123...)");
-        assert_eq!(options[1], "Codex Start new");
+        assert_eq!(options[1], "Start new");
         assert_eq!(options[2], "Claude Code Resume");
-        assert_eq!(options[3], "Claude Code Start new");
+        assert_eq!(options[3], "Start new");
         assert_eq!(options[4], "Choose different");
     }
 

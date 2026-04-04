@@ -252,9 +252,10 @@ As a developer, I want to convert an existing session to a different agent type 
   Agent (Model)`, or just `Agent` when no model was persisted) and the body
   omits the duplicated grouped header so the first action row starts directly
   below the compact branch-name context line.
-- **FR-034**: When `QuickStart` has multiple persisted entries, each action
-  row inlines the agent label while the compact model-only summary remains
-  reserved for the single-entry title variant.
+- **FR-034**: When `QuickStart` has multiple persisted entries, each
+  `Resume` row inlines the agent label while the paired `Start new` row
+  stays plain and compact; the model-only summary remains reserved for the
+  single-entry title variant.
 - **FR-035**: In multi-entry `QuickStart`, resume session ID snippets are
   shown only on the currently selected `Resume` row so unselected rows stay
   visually compact.
