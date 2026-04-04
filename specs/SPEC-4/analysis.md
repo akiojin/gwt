@@ -18,15 +18,15 @@ Status: CLEAR
 - Notes: Git View now loads live divergence metadata from the current HEAD
   branch and resolves the current branch PR link into the rendered header.
 - Notes: PR dashboard data wiring now loads `fetch_pr_list()` results on tab
-  focus and `r` refresh, reducing the remaining gap to the explicitly partial
-  detail/GraphQL surfaces in `spec.md`.
+  focus and `r` refresh, and `fetch_pr_list()` now uses the gh CLI's
+  GraphQL-backed `pr list --json` surface with REST fallback when that surface
+  is unavailable.
 - Notes: PR dashboard detail now loads a live selected-PR report with CI,
   merge, review, and check-line summaries, and it now refreshes again when tab
   focus returns or selection changes while detail view remains open.
 - Notes: PR dashboard detail rendering now presents CI checks as badge-style
   lines rather than plain summary-only text, so the remaining gap is reviewer
-  closure plus the explicitly partial GraphQL/REST transport note in
-  `spec.md`.
+  closure only.
 
 ## Next
 - Run completion-gate review and reviewer evidence.

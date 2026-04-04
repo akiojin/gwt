@@ -19,11 +19,13 @@
    checked-out branch.
 10. Confirm the PR detail view renders CI checks as badge-style lines for the
     selected PR report.
-11. Log any still-partial transport gaps as acceptance gaps rather than
-    unchecked execution tasks.
+11. Log only reviewer/manual acceptance gaps rather than reopening execution
+    tasks that are already backed by tests.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-git -- --nocapture`
+- `cargo test -p gwt-git fetch_pr_list_with_uses_primary_pr_list_when_available -- --nocapture`
+- `cargo test -p gwt-git fetch_pr_list_with_falls_back_to_rest_when_pr_list_call_fails -- --nocapture`
 - `cargo test -p gwt-tui git_view -- --nocapture`
 - `cargo test -p gwt-tui pr_dashboard -- --nocapture`
 - `cargo test -p gwt-tui load_git_view_with_populates_divergence_and_pr_link_metadata -- --nocapture`
@@ -38,6 +40,6 @@
 
 ## Expected Result
 - The reviewer sees the current implemented scope for github integration.
-- Any missing behavior is logged against acceptance gaps, not against unchecked
-  tasks.
+- Any remaining gap is a reviewer/manual acceptance gap, not an unchecked
+  execution task.
 - No step should be treated as complete unless the code path is actually reachable today.

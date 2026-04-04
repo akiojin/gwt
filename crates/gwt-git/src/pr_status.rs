@@ -122,31 +122,12 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
     })
 }
 
-/// Fetch a list of open PRs for the repository at `repo_path` using `gh pr list --json`.
+/// Fetch a list of open PRs for the repository at `repo_path`.
 ///
-/// Returns up to 20 open pull requests. Uses the GitHub CLI which handles
-/// authentication and GraphQL/REST negotiation internally.
+/// Uses the GitHub CLI's `pr list --json` surface as the primary path and
+/// falls back to the REST pulls endpoint when that surface is unavailable.
 pub fn fetch_pr_list(repo_path: &Path) -> Result<Vec<PrStatus>> {
-    let output = std::process::Command::new("gh")
-        .args([
-            "pr",
-            "list",
-            "--json",
-            "number,title,state,url,statusCheckRollup,mergeable,reviewDecision",
-            "--limit",
-            "20",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("gh pr list: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(GwtError::Git(format!("gh pr list: {stderr}")));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_pr_list_json(&stdout)
+    fetch_pr_list_with(repo_path, run_gh_command)
 }
 
 /// Parse `gh pr list --json` output (a JSON array) into a `Vec<PrStatus>`.
@@ -157,11 +138,96 @@ pub fn parse_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
     let mut results = Vec::with_capacity(arr.len());
     for v in &arr {
         // Reuse the single-PR parser by serializing back to string
-        let single_json =
-            serde_json::to_string(v).map_err(|e| GwtError::Other(e.to_string()))?;
+        let single_json = serde_json::to_string(v).map_err(|e| GwtError::Other(e.to_string()))?;
         results.push(parse_pr_status_json(&single_json)?);
     }
     Ok(results)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GhCliOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn fetch_pr_list_with<F>(repo_path: &Path, mut run_gh: F) -> Result<Vec<PrStatus>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let primary = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--json",
+            "number,title,state,url,statusCheckRollup,mergeable,reviewDecision",
+            "--limit",
+            "20",
+        ],
+    );
+
+    if let Ok(output) = primary {
+        if output.success {
+            if let Ok(prs) = parse_pr_list_json(&output.stdout) {
+                return Ok(prs);
+            }
+        }
+    }
+
+    let rest = run_gh(repo_path, &["api", "repos/{owner}/{repo}/pulls?state=open&per_page=20"])?;
+    if !rest.success {
+        return Err(GwtError::Git(format!("gh api pulls: {}", rest.stderr.trim())));
+    }
+    parse_rest_pr_list_json(&rest.stdout)
+}
+
+fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+    let output = std::process::Command::new("gh")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::Git(format!("gh {}: {e}", args.join(" "))))?;
+
+    Ok(GhCliOutput {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json)
+        .map_err(|e| GwtError::Other(format!("gh api pulls JSON: {e}")))?;
+
+    Ok(arr
+        .into_iter()
+        .map(|v| {
+            let state = match v.get("state").and_then(|s| s.as_str()).unwrap_or("open") {
+                "closed" => PrState::Closed,
+                "merged" => PrState::Merged,
+                _ => PrState::Open,
+            };
+            PrStatus {
+                number: v.get("number").and_then(|n| n.as_u64()).unwrap_or(0),
+                title: v
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                state,
+                url: v
+                    .get("html_url")
+                    .or_else(|| v.get("url"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                ci_status: "UNKNOWN".to_string(),
+                mergeable: "UNKNOWN".to_string(),
+                review_status: "UNKNOWN".to_string(),
+            }
+        })
+        .collect())
 }
 
 // ── Extended PR check report ──
@@ -468,6 +534,105 @@ mod tests {
     #[test]
     fn parse_pr_list_invalid_json() {
         assert!(parse_pr_list_json("not json").is_err());
+    }
+
+    #[test]
+    fn parse_rest_pr_list_json_sets_missing_ci_merge_review_fields_to_unknown() {
+        let json = r#"[
+            {
+                "number": 11,
+                "title": "REST fallback PR",
+                "state": "open",
+                "html_url": "https://github.com/o/r/pull/11"
+            }
+        ]"#;
+
+        let prs = parse_rest_pr_list_json(json).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 11);
+        assert_eq!(prs[0].title, "REST fallback PR");
+        assert_eq!(prs[0].state, PrState::Open);
+        assert_eq!(prs[0].url, "https://github.com/o/r/pull/11");
+        assert_eq!(prs[0].ci_status, "UNKNOWN");
+        assert_eq!(prs[0].mergeable, "UNKNOWN");
+        assert_eq!(prs[0].review_status, "UNKNOWN");
+    }
+
+    #[test]
+    fn fetch_pr_list_with_uses_primary_pr_list_when_available() {
+        let repo_path = Path::new("/tmp/repo");
+        let mut calls = Vec::new();
+
+        let prs = fetch_pr_list_with(repo_path, |path, args| {
+            assert_eq!(path, repo_path);
+            calls.push(args[..2].join(" "));
+            match args {
+                ["pr", "list", ..] => Ok(GhCliOutput {
+                    success: true,
+                    stdout: r#"[
+                        {
+                            "number": 7,
+                            "title": "Primary transport",
+                            "state": "OPEN",
+                            "url": "https://github.com/o/r/pull/7",
+                            "mergeable": "MERGEABLE",
+                            "statusCheckRollup": [],
+                            "reviewDecision": "APPROVED"
+                        }
+                    ]"#
+                    .to_string(),
+                    stderr: String::new(),
+                }),
+                other => panic!("unexpected gh invocation: {other:?}"),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(calls, vec!["pr list"]);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 7);
+        assert_eq!(prs[0].review_status, "APPROVED");
+    }
+
+    #[test]
+    fn fetch_pr_list_with_falls_back_to_rest_when_pr_list_call_fails() {
+        let repo_path = Path::new("/tmp/repo");
+        let mut calls = Vec::new();
+
+        let prs = fetch_pr_list_with(repo_path, |path, args| {
+            assert_eq!(path, repo_path);
+            calls.push(args[..2].join(" "));
+            match args {
+                ["pr", "list", ..] => Ok(GhCliOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "pr list unavailable".to_string(),
+                }),
+                ["api", "repos/{owner}/{repo}/pulls?state=open&per_page=20"] => Ok(GhCliOutput {
+                    success: true,
+                    stdout: r#"[
+                        {
+                            "number": 21,
+                            "title": "REST fallback",
+                            "state": "open",
+                            "html_url": "https://github.com/o/r/pull/21"
+                        }
+                    ]"#
+                    .to_string(),
+                    stderr: String::new(),
+                }),
+                other => panic!("unexpected gh invocation: {other:?}"),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec!["pr list", "api repos/{owner}/{repo}/pulls?state=open&per_page=20"]
+        );
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 21);
+        assert_eq!(prs[0].ci_status, "UNKNOWN");
     }
 
     #[test]

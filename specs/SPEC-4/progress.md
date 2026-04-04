@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `40/40` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T07:05:00Z`
+- Artifact refresh: `2026-04-04T08:10:00Z`
 
 ## Done
 - The missing planning support files for this SPEC are now present.
@@ -19,11 +19,13 @@
 - PR dashboard detail now loads a live per-PR report when detail view opens and
   refreshes that report together with the list, and now also re-loads detail
   when tab focus returns or selection changes while detail view stays open.
-- The remaining gap is completion-gate review plus the explicitly partial
-  GitHub transport note in `spec.md`, not unchecked execution tasks.
+- `fetch_pr_list()` now uses the gh CLI's GraphQL-backed `pr list --json`
+  surface as the primary transport and falls back to the REST pulls endpoint
+  when that surface is unavailable, so `FR-008` is now implemented.
+- The remaining gap is completion-gate review, not unchecked execution tasks.
 
 ## Next
 - Run the reviewer flow and capture final evidence for the live GitHub data
   surfaces that are now wired.
-- Reconcile acceptance against the remaining GraphQL/REST transport gap before
-  any `Done` transition.
+- Reconcile acceptance against the remaining manual reviewer steps before any
+  `Done` transition.

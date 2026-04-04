@@ -80,7 +80,7 @@ As a developer, I want to launch an agent session from an Issue detail view so t
 | FR-005 | PR dashboard as independent management tab: PR list, CI check status, merge state, review status | P1 | Implemented |
 | FR-006 | PR detail with CI check badges | P1 | Implemented |
 | FR-007 | PR status from gwt-core::git::pr_status (PrStatus struct) | P1 | Implemented |
-| FR-008 | GraphQL primary, REST fallback for GitHub API | P1 | Partially Implemented |
+| FR-008 | GraphQL primary, REST fallback for GitHub API | P1 | Implemented |
 
 ## Non-Functional Requirements
 
@@ -93,7 +93,7 @@ As a developer, I want to launch an agent session from an Issue detail view so t
 
 - Git View is modeled after the old TUI v6.30.3 Git View screen (`screens/git_view.rs`)
 - PR dashboard uses the existing `gwt-core::git::pr_status` module and `PrStatus` struct
-- GitHub API calls prefer GraphQL for efficiency; REST is used as fallback when GraphQL is unavailable
+- GitHub API calls prefer the gh CLI's GraphQL-backed `pr list --json` surface for efficiency; REST is used as fallback when that surface is unavailable
 
 ## Success Criteria
 
