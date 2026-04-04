@@ -32,35 +32,77 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 - `gwt-docker` synchronous detection and lifecycle APIs.
 - docker CLI available on the system.
 
-## Phase 2: Embedded Skills
+## Phase 2: Embedded Skills — Build-Time Bundling
 
-**Goal**: Implement skill registration on startup, add a pre-SPEC brainstorming entrypoint, and expose embedded skill state in the UI.
+**Goal**: Bundle all skill, command, and hook files into the gwt binary at build time. Remove the legacy BuiltinSkill enum and unused SKILL_CATALOG.
 
 ### Key Changes
 
-1. **gwt-core**: Define `EmbeddedSkill` struct with name, description, entry point, and status.
-   - Registry: `Vec<EmbeddedSkill>` populated at startup.
-   - Skills: gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-brainstorm, gwt-spec-ops, etc.
-   - Bundled gwt-spec skills stay aligned with the local SPEC artifact model, including persisted `analysis.md`.
+1. **gwt-core (build.rs)**: Replace the current SKILL_CATALOG generator with:
+   - YAML frontmatter validation of all SKILL.md files using `serde_yaml` (build dependency only).
+   - `cargo:rerun-if-changed` directives for `.claude/skills/`, `.claude/commands/`, `.claude/hooks/scripts/`.
+   - Remove the `parse_frontmatter()` function and `SkillCatalogEntry` generation.
 
-2. **embedded skills**: Add `gwt-spec-brainstorm` as the cross-agent pre-SPEC intake skill and expose `/gwt:gwt-spec-brainstorm` as the Claude command entrypoint.
-   - One-question-at-a-time interview flow.
-   - Duplicate search across Issues and SPECs before new registration.
-   - Auto-handoff to `gwt-spec-ops`, `gwt-spec-register`, or `gwt-issue-register`.
+2. **gwt-skills**: Add `include_dir` crate to embed file directories:
+   - `CLAUDE_SKILLS: Dir` — `.claude/skills/` (all subdirectories recursively)
+   - `CLAUDE_COMMANDS: Dir` — `.claude/commands/` (all .md files)
+   - `CLAUDE_HOOKS: Dir` — `.claude/hooks/scripts/` (all .mjs files)
 
-3. **gwt-tui**: Add skill management panel (accessible from Settings or a dedicated screen).
-   - List registered skills with status indicators.
-   - Allow enable/disable per skill.
+3. **gwt-skills (registry.rs)**: Remove `BuiltinSkill` enum, `register_builtins()`, `to_embedded()`, `all()`. Remove all related tests.
 
-4. **gwt-core**: Extend `gwt-pr-check` to produce structured status report.
-   - CI check status (pass/fail/pending per check).
-   - Merge readiness (conflicts, approvals, required checks).
-   - Review thread states (resolved/unresolved counts).
+4. **gwt-tui (settings.rs)**: Remove `skill_fields()` function. Replace Skills settings category content with a read-only display of bundled skill count (no toggle).
+
+5. **gwt-tui (model.rs)**: Remove `embedded_skills: SkillRegistry` field and `register_builtins()` call from `Model::new()`.
 
 ### Dependencies
 
-- Existing skill definitions in `.claude/skills/`.
-- GitHub API access for gwt-pr-check.
+- `include_dir` crate (build dependency)
+- `serde_yaml` crate (build dependency for validation only)
+
+## Phase 2b: Embedded Skills — Runtime Distribution
+
+**Goal**: Distribute bundled skills to target worktrees on every agent launch.
+
+### Key Changes
+
+1. **gwt-skills**: Add `distribute` module with:
+   - `distribute_to_worktree(worktree_path: &Path) -> Result<DistributeReport>` — writes all bundled files to target.
+   - Distribution targets: `.claude/skills/gwt-*/`, `.claude/commands/gwt-*.md`, `.claude/hooks/scripts/gwt-*.mjs`, `.codex/skills/gwt-*/`, `.agents/skills/gwt-*/`.
+   - Full overwrite strategy: all gwt-managed files are replaced unconditionally.
+
+2. **gwt-skills**: Add `git_exclude` module:
+   - Reads/creates `.git/info/exclude`.
+   - Manages gwt-managed block delimited by `# gwt-managed-begin` / `# gwt-managed-end`.
+   - Adds exclude patterns for all distributed asset paths.
+
+3. **gwt-skills**: Add `settings_local` module:
+   - Generates `.claude/settings.local.json` with gwt-managed hooks.
+   - Uses existing `hooks.rs` merge logic to preserve user-defined hooks.
+
+4. **gwt-tui (app.rs)**: Call `distribute_to_worktree()` in agent launch flow, after `PaneManager::launch_agent()` resolves the worktree path.
+
+### Dependencies
+
+- Phase 2 (bundled assets available at runtime)
+- Existing `hooks.rs` merge logic
+
+## Phase 2c: Embedded Skills — Quality Improvement
+
+**Goal**: Rewrite all 21 SKILL.md files to comply with Anthropic's skill authoring guidelines.
+
+### Key Changes
+
+1. **All SKILL.md description fields**: Rewrite in third-person voice with specific trigger phrases, under 250 characters for the front-loaded key use case.
+
+2. **All SKILL.md frontmatter**: Add `allowed-tools`, `argument-hint`, and other applicable fields per skill.
+
+3. **All SKILL.md body content**: Rewrite in imperative/infinitive form. Keep under 500 lines.
+
+4. **Progressive Disclosure**: Extract detailed logic from SKILL.md into `references/` subdirectories for complex skills (gwt-pr-fix, gwt-spec-ops, gwt-spec-implement, etc.).
+
+### Dependencies
+
+- None (can run in parallel with Phase 2/2b)
 
 ## Phase 3: Hooks Merge Completion
 

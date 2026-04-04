@@ -29,17 +29,18 @@ As a developer, I want gwt to detect Docker environments and launch agents insid
 5. Given a running container, when I use the container management UI, then I can start, stop, or restart the container.
 6. Given a .devcontainer/devcontainer.json exists, when gwt starts, then DevContainer detection is offered as an alternative.
 
-### US-3: Manage Embedded Skills Registration and Pre-SPEC Intake (P1) -- NOT IMPLEMENTED
+### US-3: Distribute Embedded Skills to Worktrees on Agent Launch (P1) -- NOT IMPLEMENTED
 
-As a developer, I want gwt to register its embedded skills on startup and expose a pre-SPEC brainstorming entrypoint so that AI agents can handle rough requests without manual configuration or premature SPEC creation.
+As a developer, I want gwt to bundle all embedded skills, commands, and hooks into the binary and distribute them to the target worktree every time an agent is launched, so that agents always have up-to-date skill definitions without manual configuration.
 
 **Acceptance Scenarios**
 
-1. Given gwt starts, when initialization completes, then all embedded skills (gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-brainstorm, etc.) are registered.
-2. Given I open the skill management panel, when I view registered skills, then each skill shows its name, description, and status.
-3. Given gwt-pr-check is invoked, when it runs, then it reports CI status, merge readiness, and review state in a structured format.
-4. Given the local SPEC workflow changes its persisted artifact model, when embedded gwt-spec skills are refreshed, then the bundled skill docs stay aligned with that model (including `analysis.md`).
-5. Given a user starts with a rough idea or asks whether an existing SPEC should be updated, when `gwt-spec-brainstorm` is invoked, then it performs one-question-at-a-time intake, searches existing owners first, and routes existing-Issue matches into `gwt-issue-resolve` and existing-SPEC updates into `gwt-spec-ops` instead of creating duplicate artifacts prematurely.
+1. Given an agent is launched from gwt, when the launch completes, then `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.codex/skills/`, and `.agents/skills/` are written to the target worktree with the bundled skill files.
+2. Given the target worktree already has older skill files, when an agent is launched, then all gwt-managed skill files are overwritten with the latest bundled versions.
+3. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` is generated with gwt-managed hooks, preserving any existing user-defined hooks via merge logic.
+4. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.agents/skills/gwt-*`, `.claude/settings.local.json`).
+5. Given the gwt binary is built, when build.rs runs, then all SKILL.md files are validated for YAML frontmatter syntax errors, and the build fails with a clear error if any SKILL.md has malformed YAML.
+6. Given all skills are bundled, when the binary starts, then no runtime file I/O is needed to read skill definitions — skills are embedded in the binary via `include_dir`.
 
 ### US-4: Merge hooks.json Preserving User Hooks (P1) -- PARTIALLY IMPLEMENTED
 
@@ -60,7 +61,11 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - hooks.json contains syntax errors or is not valid JSON.
 - hooks.json is a symlink to a shared configuration.
 - Multiple gwt instances attempting concurrent hooks.json merge.
-- Embedded skill registration fails for one skill (partial registration).
+- Target worktree is read-only or has insufficient disk space for skill distribution.
+- `.git/info/exclude` does not exist (must be created).
+- `.claude/settings.local.json` contains user-defined hooks that conflict with gwt-managed hooks.
+- SKILL.md frontmatter contains YAML syntax errors (caught at build time).
+- Agent launch is interrupted mid-distribution (partial write).
 - npm postinstall script runs in an environment without internet access.
 - GitHub Release workflow runs but binary compilation fails on one platform.
 
@@ -80,26 +85,48 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - **FR-007**: Container lifecycle management: start, stop, restart containers from TUI with status feedback.
 - **FR-008**: DevContainer detection: parse .devcontainer/devcontainer.json and offer DevContainer launch workflow.
 
-### Embedded Skills
+### Embedded Skills — Build-Time Bundling
 
-- **FR-009**: Skill registration on startup: register gwt-pr, gwt-pr-check, gwt-pr-fix, `gwt-spec-brainstorm`, and other embedded skills, and keep embedded gwt-spec workflow docs aligned with the local SPEC artifact model.
-- **FR-010**: `gwt-spec-brainstorm` must provide a cross-agent pre-SPEC intake workflow that performs duplicate search first, interviews the user one question at a time, and routes to `EXISTING-ISSUE` via `gwt-issue-resolve`, `EXISTING-SPEC` via `gwt-spec-ops`, `NEW-SPEC`, or `ISSUE` before any new `spec.md` is drafted.
-- **FR-011**: Skill management UI: display registered skills with name, description, and status in a settings panel or dedicated screen.
-- **FR-012**: gwt-pr-check extended status report: CI check status, merge readiness, review thread states, combined in a structured output.
+- **FR-009**: All skill, command, and hook files under `.claude/skills/`, `.claude/commands/`, `.claude/hooks/scripts/` are embedded into the gwt binary at build time using `include_dir` crate. Embedded skill categories:
+  - PR management: gwt-pr, gwt-pr-check, gwt-pr-fix
+  - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
+  - Issue management: gwt-issue-register, gwt-issue-resolve, gwt-issue-search
+  - Agent pane management: gwt-agent-discover, gwt-agent-read, gwt-agent-send, gwt-agent-lifecycle
+  - Utilities: gwt-project-search, gwt-spec-to-issue-migration
+- **FR-010**: `build.rs` validates YAML frontmatter of every `SKILL.md` at compile time using `serde_yaml`. Malformed YAML causes a build failure with file path and error details.
+- **FR-011**: The `BuiltinSkill` enum, `SKILL_CATALOG` constant, `register_builtins()` function, and `skill_fields()` in the TUI Settings screen are removed. Skill interpretation is the responsibility of Claude Code / Codex, not gwt.
+
+### Embedded Skills — Runtime Distribution
+
+- **FR-012**: On every agent launch, gwt writes bundled skill files to the target worktree. Distribution targets:
+  - `.claude/skills/gwt-*/` — Claude Code skill definitions
+  - `.claude/commands/gwt-*.md` — Claude Code slash commands
+  - `.claude/hooks/scripts/gwt-*.mjs` — Claude Code hooks
+  - `.codex/skills/gwt-*/` — Codex skill definitions (same content as Claude)
+  - `.agents/skills/gwt-*/` — Agent Skills standard directory (same content)
+- **FR-013**: Distribution uses full overwrite: all gwt-managed files are replaced unconditionally on each agent launch.
+- **FR-014**: `.claude/settings.local.json` is generated on each agent launch. gwt-managed hooks are merged using `hooks.rs` merge logic, preserving user-defined hooks.
+- **FR-015**: `.git/info/exclude` is updated on each agent launch to exclude gwt-managed asset paths. Existing user entries are preserved; gwt-managed entries are delimited by `# gwt-managed-begin` / `# gwt-managed-end` markers.
+
+### Embedded Skills — Quality Standards (Anthropic Guidelines)
+
+- **FR-016**: All SKILL.md `description` fields follow Anthropic guidelines: third-person voice, specific trigger phrases, front-loaded key use case within 250 characters.
+- **FR-017**: All SKILL.md body content uses imperative/infinitive form, stays under 500 lines, and delegates detailed logic to `references/` subdirectories (Progressive Disclosure).
+- **FR-018**: All SKILL.md frontmatter actively uses `allowed-tools`, `argument-hint`, and other applicable fields as defined by the Claude Code skill specification.
 
 ### Hooks Merge (carried over from archived SPEC-1786)
 
-- **FR-013**: `write_managed_codex_hooks()` uses merge mode: read existing hooks.json, update only gwt-managed entries, write back.
-- **FR-014**: Preserve user-defined hooks during gwt-managed hook updates; never delete or modify entries without the gwt marker.
-- **FR-015**: gwt-managed hooks identified by a `"_gwt_managed": true` field on each managed hook entry.
-- **FR-016**: Confirmation dialog displayed for Codex agent sessions only before writing hooks.
-- **FR-017**: JSON corruption recovery: on parse failure, create timestamped backup, attempt recovery from last known good state, and fall back to writing gwt-only hooks if recovery fails.
+- **FR-019**: `write_managed_codex_hooks()` uses merge mode: read existing hooks.json, update only gwt-managed entries, write back.
+- **FR-020**: Preserve user-defined hooks during gwt-managed hook updates; never delete or modify entries without the gwt marker.
+- **FR-021**: gwt-managed hooks identified by a `"_gwt_managed": true` field on each managed hook entry.
+- **FR-022**: Confirmation dialog displayed for Codex agent sessions only before writing hooks.
+- **FR-023**: JSON corruption recovery: on parse failure, create timestamped backup, attempt recovery from last known good state, and fall back to writing gwt-only hooks if recovery fails.
 
 ## Non-Functional Requirements
 
 - **NFR-001**: Docker detection completes within 2 seconds (check for docker CLI and project files).
 - **NFR-002**: Hooks merge preserves 100% of user-defined hooks in all scenarios including corruption recovery.
-- **NFR-003**: Skill registration completes within 1 second at startup.
+- **NFR-003**: Skill distribution to a worktree completes within 1 second.
 - **NFR-004**: Binary download via postinstall completes within 60 seconds on a typical connection.
 - **NFR-005**: Docker Progress screen updates in real-time (at least 1 update per second during build).
 
@@ -167,7 +194,12 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - **SC-004**: Service Select screen lists services from a test docker-compose.yml.
 - **SC-005**: Port Select screen detects and resolves a simulated port conflict.
 - **SC-006**: Container start/stop/restart commands execute and report status.
-- **SC-007**: All embedded skills, including `gwt-spec-brainstorm`, are registered and queryable after startup.
+- **SC-007**: After agent launch, all embedded skill files exist in `.claude/skills/`, `.codex/skills/`, and `.agents/skills/` in the target worktree.
+- **SC-011**: build.rs rejects a SKILL.md with malformed YAML frontmatter and produces a clear error message.
+- **SC-012**: `.git/info/exclude` contains gwt-managed markers and excludes all distributed asset paths.
+- **SC-013**: `.claude/settings.local.json` is generated with gwt-managed hooks and preserves user hooks across consecutive agent launches.
+- **SC-014**: All SKILL.md descriptions use third-person voice and include specific trigger phrases.
+- **SC-015**: All SKILL.md bodies stay under 500 lines with detailed logic in `references/` subdirectories.
 - **SC-008**: hooks.json merge preserves user hooks across 10 consecutive gwt-managed updates.
 - **SC-009**: hooks.json corruption recovery creates backup and restores functionality.
 - **SC-010**: All carried-over hooks merge tests from SPEC-1786 continue to pass.

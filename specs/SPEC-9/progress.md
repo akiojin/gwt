@@ -1,27 +1,31 @@
 # Progress: SPEC-9 - Infrastructure
 
 ## Progress
+
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `82/82` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T13:05:00Z`
+- Task progress: Phase 1: 21/21, Phase 2: 0/45 (redesigned), Phase 3: 31/31, Phase 4: 11/11
+- Artifact refresh: `2026-04-04T18:00:00Z`
 
 ## Done
-- Supporting artifacts now cover the full infrastructure umbrella instead of
-  only the core four files.
-- Progress notes now reflect that the execution task list is fully checked and
-  only completion-gate evidence remains.
-- Checklists are now present for final completion-gate reconciliation.
-- Embedded skill registry tests and builtin catalog registration are in place, and the TUI model now initializes the builtin registry at startup.
-- DockerProgress now has explicit stage-status and failure-render tests, so the overlay itself is no longer speculative.
-- DockerProgress can now be driven by a TUI-local background producer that wraps synchronous `gwt-docker` lifecycle calls and drains completion events on `Tick`.
-- The extended `gwt-pr-check` report now has deterministic parser coverage for CI, merge, and review state summaries.
-- ServiceSelect now has focused coverage for multi-service listing, empty-state errors, and single-service auto-selection.
-- PortSelect now has focused coverage for conflict detection, explicit acceptance flows, and auto-closing when all conflicts are resolved.
-- Container lifecycle command execution is now testable without a real Docker daemon via a fake-binary seam in `gwt-docker`.
-- Settings now expose a `Skills` category, render builtin embedded skills, and sync toggle state back into `SkillRegistry`.
-- Branch detail `Overview` now exposes a Docker status area with container selection and background lifecycle feedback wired through `app.rs`, including ready/failure transitions after the worker drains.
+
+- Phase 1 (Docker UI): All screens implemented and tested.
+- Phase 3 (Hooks Merge): All merge logic, backup/recovery, and polish completed.
+- Phase 4 (Build Distribution): Release workflow and npm distribution verified.
+- Supporting artifacts cover the full infrastructure umbrella.
+
+## Phase 2 Redesign (2026-04-04)
+
+Embedded Skills subsystem was completely redesigned based on Anthropic/OpenAI skill authoring guidelines:
+
+- **Removed**: `BuiltinSkill` enum, `SKILL_CATALOG`, `register_builtins()`, TUI skill toggle
+- **Added**: Build-time bundling (`include_dir`), runtime distribution to worktrees, `.git/info/exclude` management, `settings.local.json` generation
+- **Quality**: All 21 SKILL.md files to be rewritten per Anthropic guidelines (third-person descriptions, Progressive Disclosure, `allowed-tools` frontmatter)
+- **YAML validation**: Build-time only (syntax check). No runtime parsing.
 
 ## Next
-- Reconcile the remaining reviewer evidence and acceptance checklist items.
-- Re-run infrastructure verification before any `Done` transition.
+
+- Implement Phase 2 (Build-Time Bundling): T-022 through T-034
+- Implement Phase 2b (Runtime Distribution): T-035 through T-055
+- Implement Phase 2c (Quality Improvement): T-056 through T-066 (parallel)
+- After Phase 2 completion, run final analysis gate

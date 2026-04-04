@@ -35,38 +35,83 @@
 - [x] **T-020**: Implement container lifecycle controls in Docker status area.
 - [x] **T-021**: Verify T-017 through T-019 pass (GREEN).
 
-## Phase 2: Embedded Skills
+## Phase 2: Embedded Skills — Build-Time Bundling
 
-### 2.1 Skill Registration
+### 2.1 Remove Legacy BuiltinSkill System
 
-- [P] [x] **T-022**: Write test for EmbeddedSkill struct fields (name, description, entry_point, status).
-- [P] [x] **T-023**: Write test for skill registry populated with expected skills on startup.
-- [P] [x] **T-024**: Write test for partial registration failure (one skill fails, others succeed).
-- [x] **T-025**: Implement `EmbeddedSkill` struct and registry in `crates/gwt-skills/src/registry.rs`.
-- [x] **T-026**: Register gwt-pr, gwt-pr-check, gwt-pr-fix, gwt-spec-ops at startup, and keep bundled gwt-spec skill docs aligned with the local SPEC artifact model (`analysis.md` included).
-- [x] **T-027**: Verify T-022 through T-024 pass (GREEN).
+- [x] **T-022**: Write test: `CLAUDE_SKILLS` static contains all expected skill directories (gwt-pr, gwt-agent-discover, etc.).
+- [x] **T-023**: Write test: `CLAUDE_COMMANDS` static contains all expected command files.
+- [x] **T-024**: Write test: `CLAUDE_HOOKS` static contains all expected hook scripts.
+- [x] **T-025**: Remove `BuiltinSkill` enum, `register_builtins()`, `to_embedded()`, `all()` from `crates/gwt-skills/src/registry.rs`.
+- [x] **T-026**: Remove `skill_fields()` from `crates/gwt-tui/src/screens/settings.rs`. Replace Skills settings category with bundled skill count display.
+- [x] **T-027**: Remove `embedded_skills: SkillRegistry` from `crates/gwt-tui/src/model.rs` and `register_builtins()` call from `Model::new()`.
+- [x] **T-028**: Remove all BuiltinSkill-related tests from `crates/gwt-skills/src/lib.rs`.
+- [x] **T-029**: Verify T-022 through T-024 pass (GREEN).
 
-### 2.2 Skill Management UI
+### 2.2 Build-Time Bundling with include_dir
 
-- [x] **T-028**: Write test for skill management panel rendering with registered skills.
-- [x] **T-029**: Write test for skill enable/disable toggle.
-- [x] **T-030**: Implement skill management panel in gwt-tui.
-- [x] **T-031**: Verify T-028, T-029 pass (GREEN).
+- [x] **T-030**: Add `include_dir` crate to `gwt-skills/Cargo.toml` as dependency.
+- [x] **T-031**: Add three static `Dir` constants in `gwt-skills/src/assets.rs`: `CLAUDE_SKILLS`, `CLAUDE_COMMANDS`, `CLAUDE_HOOKS`.
+- [x] **T-032**: Update `crates/gwt-core/build.rs`: remove `SKILL_CATALOG` generation, keep `rerun-if-changed` directives, add YAML frontmatter validation using `serde_yaml`.
+- [ ] **T-033**: Write test: build.rs YAML validation rejects malformed frontmatter (test via integration test with a fixture).
+- [x] **T-034**: Verify T-030 through T-032 pass (GREEN).
 
-### 2.3 gwt-pr-check Extended Report
+## Phase 2b: Embedded Skills — Runtime Distribution
 
-- [x] **T-032**: Write test for structured status report containing CI, merge, and review states.
-- [x] **T-033**: Write test for report when PR has no checks (empty CI section).
-- [x] **T-034**: Implement extended gwt-pr-check status report in `crates/gwt-git/src/pr_status.rs`.
-- [x] **T-035**: Verify T-032, T-033 pass (GREEN).
+### 2b.1 Worktree Distribution
 
-### 2.4 Pre-SPEC Brainstorming Skill
+- [P] [ ] **T-035**: Write test: `distribute_to_worktree()` creates `.claude/skills/gwt-pr/SKILL.md` in target path.
+- [P] [ ] **T-036**: Write test: `distribute_to_worktree()` creates `.codex/skills/gwt-pr/SKILL.md` in target path.
+- [P] [ ] **T-037**: Write test: `distribute_to_worktree()` creates `.agents/skills/gwt-pr/SKILL.md` in target path.
+- [P] [ ] **T-038**: Write test: `distribute_to_worktree()` creates `.claude/commands/gwt-pr.md` in target path.
+- [P] [ ] **T-039**: Write test: `distribute_to_worktree()` creates `.claude/hooks/scripts/gwt-forward-hook.mjs` in target path.
+- [x] **T-040**: Implement `distribute_to_worktree()` in `crates/gwt-skills/src/distribute.rs`.
+- [ ] **T-041**: Verify T-035 through T-039 pass (GREEN).
 
-- [x] **T-078**: Write a failing test for `gwt-spec-brainstorm` registration and tracked asset presence.
-- [x] **T-079**: Add `.claude/skills/gwt-spec-brainstorm/SKILL.md` and `.claude/commands/gwt-spec-brainstorm.md` as the cross-agent pre-SPEC intake entrypoint.
-- [x] **T-080**: Register `gwt-spec-brainstorm` in the embedded skill builtin catalog.
-- [x] **T-081**: Update `SPEC-9` artifacts and the managed skill catalog in `AGENTS.md` to include `gwt-spec-brainstorm`.
-- [x] **T-082**: Verify `gwt-spec-brainstorm` via targeted cargo tests, embedded skill lint, and build/catalog refresh.
+### 2b.2 Git Exclude Management
+
+- [x] **T-042**: Write test: `update_git_exclude()` adds gwt-managed block to `.git/info/exclude`.
+- [x] **T-043**: Write test: `update_git_exclude()` preserves existing user entries.
+- [x] **T-044**: Write test: `update_git_exclude()` creates `.git/info/exclude` if missing.
+- [x] **T-045**: Implement `update_git_exclude()` in `crates/gwt-skills/src/git_exclude.rs`.
+- [x] **T-046**: Verify T-042 through T-044 pass (GREEN).
+
+### 2b.3 settings.local.json Generation
+
+- [ ] **T-047**: Write test: `generate_settings_local()` creates `.claude/settings.local.json` with gwt-managed hooks.
+- [ ] **T-048**: Write test: `generate_settings_local()` preserves existing user hooks via merge.
+- [ ] **T-049**: Write test: `generate_settings_local()` handles missing file (creates new).
+- [x] **T-050**: Implement `generate_settings_local()` in `crates/gwt-skills/src/settings_local.rs`.
+- [ ] **T-051**: Verify T-047 through T-049 pass (GREEN).
+
+### 2b.4 Agent Launch Integration
+
+- [ ] **T-052**: Wire `distribute_to_worktree()` into agent launch flow in `crates/gwt-tui/src/app.rs`.
+- [ ] **T-053**: Wire `update_git_exclude()` into agent launch flow.
+- [ ] **T-054**: Wire `generate_settings_local()` into agent launch flow.
+- [ ] **T-055**: Integration test: full agent launch distributes all assets and generates settings.
+
+## Phase 2c: Embedded Skills — Quality Improvement
+
+### 2c.1 Description Rewrite (all 21 skills)
+
+- [P] [ ] **T-056**: Rewrite all SKILL.md descriptions to third-person voice with trigger phrases (Anthropic guidelines).
+- [P] [ ] **T-057**: Add `allowed-tools`, `argument-hint` and applicable frontmatter fields to all SKILL.md files.
+
+### 2c.2 Progressive Disclosure (complex skills)
+
+- [P] [ ] **T-058**: Extract detailed logic from gwt-pr-fix SKILL.md into `references/` subdirectory.
+- [P] [ ] **T-059**: Extract detailed logic from gwt-spec-ops SKILL.md into `references/` subdirectory.
+- [P] [ ] **T-060**: Extract detailed logic from gwt-spec-implement SKILL.md into `references/` subdirectory.
+- [P] [ ] **T-061**: Extract detailed logic from gwt-pr SKILL.md into `references/` subdirectory.
+- [P] [ ] **T-062**: Extract detailed logic from gwt-issue-resolve SKILL.md into `references/` subdirectory.
+- [P] [ ] **T-063**: Review remaining skills for progressive disclosure opportunities.
+
+### 2c.3 Body Content Rewrite
+
+- [P] [ ] **T-064**: Rewrite all SKILL.md body content in imperative/infinitive form per Anthropic guidelines.
+- [ ] **T-065**: Verify all SKILL.md files are under 500 lines.
+- [ ] **T-066**: Verify all YAML frontmatter passes `serde_yaml` validation (build test).
 
 ## Phase 3: Hooks Merge Completion (carried over from SPEC-1786)
 
@@ -74,52 +119,52 @@
 
 ### 3.1 Core Merge Logic (COMPLETED from SPEC-1786)
 
-- [x] **T-036**: write_managed_codex_hooks() reads existing hooks.json before writing.
-- [x] **T-037**: Managed hooks identified by `_gwt_managed: true` marker.
-- [x] **T-038**: User-defined hooks preserved during merge.
-- [x] **T-039**: New managed hooks appended without duplicating existing ones.
-- [x] **T-040**: Removed managed hooks cleaned up from hooks.json.
-- [x] **T-041**: Merge handles empty hooks.json (fresh file).
-- [x] **T-042**: Merge handles missing hooks.json (creates new file).
+- [x] **T-100**: write_managed_codex_hooks() reads existing hooks.json before writing.
+- [x] **T-101**: Managed hooks identified by `_gwt_managed: true` marker.
+- [x] **T-102**: User-defined hooks preserved during merge.
+- [x] **T-103**: New managed hooks appended without duplicating existing ones.
+- [x] **T-104**: Removed managed hooks cleaned up from hooks.json.
+- [x] **T-105**: Merge handles empty hooks.json (fresh file).
+- [x] **T-106**: Merge handles missing hooks.json (creates new file).
 
 ### 3.2 Confirmation Dialog (COMPLETED from SPEC-1786)
 
-- [x] **T-043**: Confirmation dialog shown for Codex agent sessions.
-- [x] **T-044**: Non-Codex agent sessions skip confirmation.
-- [x] **T-045**: User can cancel hook writing from confirmation dialog.
+- [x] **T-107**: Confirmation dialog shown for Codex agent sessions.
+- [x] **T-108**: Non-Codex agent sessions skip confirmation.
+- [x] **T-109**: User can cancel hook writing from confirmation dialog.
 
 ### 3.3 Basic Error Handling (COMPLETED from SPEC-1786)
 
-- [x] **T-046**: Invalid JSON in hooks.json detected before merge.
-- [x] **T-047**: Error message displayed to user on parse failure.
-- [x] **T-048**: Write failure rolls back to previous state.
+- [x] **T-110**: Invalid JSON in hooks.json detected before merge.
+- [x] **T-111**: Error message displayed to user on parse failure.
+- [x] **T-112**: Write failure rolls back to previous state.
 
 ### 3.4 Advanced Hooks Array Handling (COMPLETED from SPEC-1786)
 
-- [x] **T-049**: Hooks with same event type merged correctly.
-- [x] **T-050**: Hook ordering preserved (user hooks first, managed hooks after).
-- [x] **T-051**: Duplicate managed hook detection and dedup.
-- [x] **T-052**: Hook entry validation (required fields present).
-- [x] **T-053**: Large hooks.json (100+ entries) handled without performance degradation.
-- [x] **T-054**: Unicode content in hook commands preserved.
-- [x] **T-055**: Nested JSON structures in hook configs preserved.
+- [x] **T-113**: Hooks with same event type merged correctly.
+- [x] **T-114**: Hook ordering preserved (user hooks first, managed hooks after).
+- [x] **T-115**: Duplicate managed hook detection and dedup.
+- [x] **T-116**: Hook entry validation (required fields present).
+- [x] **T-117**: Large hooks.json (100+ entries) handled without performance degradation.
+- [x] **T-118**: Unicode content in hook commands preserved.
+- [x] **T-119**: Nested JSON structures in hook configs preserved.
 
 ### 3.5 Polish (remaining from SPEC-1786 Phase 3)
 
-- [x] **T-056**: Write test for timestamped backup creation on corruption detection.
-- [x] **T-057**: Write test for last-known-good restoration after backup.
-- [x] **T-058**: Write test for concurrent write handling (file lock contention).
-- [x] **T-059**: Write test for symlinked hooks.json merge behavior.
-- [x] **T-060**: Write test for empty hooks.json file (0 bytes) recovery.
-- [x] **T-061**: Implement timestamped backup and recovery logic.
-- [x] **T-062**: Implement file locking for concurrent write prevention.
-- [x] **T-063**: Improve error messages for merge failure scenarios.
-- [x] **T-064**: Verify T-056 through T-060 pass (GREEN).
+- [x] **T-120**: Write test for timestamped backup creation on corruption detection.
+- [x] **T-121**: Write test for last-known-good restoration after backup.
+- [x] **T-122**: Write test for concurrent write handling (file lock contention).
+- [x] **T-123**: Write test for symlinked hooks.json merge behavior.
+- [x] **T-124**: Write test for empty hooks.json file (0 bytes) recovery.
+- [x] **T-125**: Implement timestamped backup and recovery logic.
+- [x] **T-126**: Implement file locking for concurrent write prevention.
+- [x] **T-127**: Improve error messages for merge failure scenarios.
+- [x] **T-128**: Verify T-120 through T-124 pass (GREEN).
 
 ### 3.6 Manual E2E Verification (remaining from SPEC-1786 Phase 4)
 
-- [x] **T-065**: Manual E2E: merge across 10 consecutive gwt-managed updates, verify all user hooks preserved. (obsolete: covered by unit tests on merge logic with multiple iterations)
-- [x] **T-066**: Manual E2E: inject JSON corruption, verify backup created and recovery succeeds. (obsolete: covered by unit tests T-056, T-060 on corruption detection and recovery)
+- [x] **T-129**: Manual E2E: merge across 10 consecutive gwt-managed updates, verify all user hooks preserved. (obsolete: covered by unit tests)
+- [x] **T-130**: Manual E2E: inject JSON corruption, verify backup created and recovery succeeds. (obsolete: covered by unit tests)
 
 ## Phase 4: Build Distribution
 
