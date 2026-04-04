@@ -7,8 +7,7 @@ argument-hint: "[spec-id]"
 
 # gwt SPEC Implement
 
-Use this skill after a SPEC has a stable `spec.md`, `plan.md`, `tasks.md`, and a `CLEAR`
-analysis report persisted in `analysis.md`.
+Use this skill after a SPEC has a stable `spec.md`, `plan.md`, `tasks.md`, and a `CLEAR` analysis report persisted in `analysis.md`.
 
 - Primary caller: `gwt-spec-ops`
 - If the user only wants spec maintenance, stay in `gwt-spec-ops`
@@ -25,60 +24,25 @@ Once started, keep moving until one of these is true:
 - a merge conflict or reviewer request cannot be resolved with high confidence
 - required auth or tooling is unavailable
 
-Routine CI failures, update-branch merges, and test-first edits should be handled autonomously.
+Handle routine CI failures, update-branch merges, and test-first edits autonomously.
 
 ## Required inputs
 
-- `spec.md`
-- `plan.md`
-- `tasks.md`
-- `analysis.md` with the latest `CLEAR` result
+- `spec.md`, `plan.md`, `tasks.md`, `analysis.md` (with latest `CLEAR` result)
 - `progress.md` when present
-- supporting artifacts: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`
+- Supporting artifacts: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`
 
 ## Workflow
 
-1. **Read the execution context.**
-   - Load the SPEC directory, the three core artifacts, `analysis.md`, `progress.md` when present, and any supporting contracts/checklists.
-   - Identify the next incomplete task slice in phase order.
-
-2. **Execute tasks in dependency order.**
-   - Finish Setup before Foundational work.
-   - Finish shared Foundational work before user-story-specific work.
-   - Prefer a narrow task slice that can be verified in one loop.
-
-3. **Work test-first.**
-   - Add or update the narrowest failing test that proves the task.
-   - Reuse existing test suites when they already cover the target behavior.
-   - Do not skip tests when the task changes observable behavior.
-
-4. **Implement the task slice.**
-   - Edit only the files implied by `tasks.md` unless execution reveals a missing dependency.
-   - Keep the change aligned with `spec.md` and `plan.md`; do not silently widen scope.
-
-5. **Verify before moving on.**
-   - Run the smallest meaningful validation set first, then broader checks as the slice stabilizes.
-   - If a failure indicates a spec gap rather than a code bug, return to `gwt-spec-ops`.
-
-6. **Update execution tracking.**
-   - Update `tasks.md` with completed work when the task format supports completion markers.
-   - Append progress updates to `specs/SPEC-{id}/progress.md` using the `Progress / Done / Next` template.
-   - Keep progress entries factual and incremental.
-   - Do not mark the SPEC complete yet; completion requires the exit gate below.
-
-7. **Keep PR flow moving.**
-   - If there is no active PR for the branch, or prior PRs are already merged, use `gwt-pr`.
-   - If the current PR is behind, conflicting, failing CI, or has review blockers, use `gwt-pr-fix`.
-   - Let those skills handle routine merge/push/fix loops autonomously.
-
-8. **Repeat until the scoped tasks are done.**
-   - Continue task-by-task until the SPEC is complete or a true decision blocker remains.
-
-9. **Run the post-implementation completion gate.**
-   - Reconcile the implemented behavior against `spec.md`, `tasks.md`, `analysis.md`, `checklists/acceptance.md`, `checklists/tdd.md`, latest progress files, and executed verification.
-   - If these artifacts disagree, return to `gwt-spec-ops` and repair the artifact set or rollback false completion markers.
-   - Only after reconciliation passes may the workflow declare the SPEC complete.
-   - Do not treat GitHub Issue bodies or Issue comments as completion authority; they are contextual references only.
+1. **Read the execution context.** Load the SPEC directory, three core artifacts, `analysis.md`, `progress.md`, and any supporting contracts/checklists. Identify the next incomplete task slice in phase order.
+2. **Execute tasks in dependency order.** Finish Setup before Foundational work. Finish shared Foundational work before user-story-specific work. Prefer a narrow task slice verifiable in one loop.
+3. **Work test-first.** Add or update the narrowest failing test that proves the task. Reuse existing test suites when they already cover the target behavior. Do not skip tests when the task changes observable behavior.
+4. **Implement the task slice.** Edit only the files implied by `tasks.md` unless execution reveals a missing dependency. Keep the change aligned with `spec.md` and `plan.md`; do not silently widen scope.
+5. **Verify before moving on.** Run the smallest meaningful validation set first, then broader checks as the slice stabilizes. If a failure indicates a spec gap rather than a code bug, return to `gwt-spec-ops`.
+6. **Update execution tracking.** Update `tasks.md` with completed work. Append progress updates to `specs/SPEC-{id}/progress.md` using the `Progress / Done / Next` template. Keep entries factual and incremental.
+7. **Keep PR flow moving.** If there is no active PR, use `gwt-pr`. If the current PR is behind, conflicting, failing CI, or has review blockers, use `gwt-pr-fix`.
+8. **Repeat until the scoped tasks are done.** Continue task-by-task until the SPEC is complete or a true decision blocker remains.
+9. **Run the post-implementation completion gate.** Reconcile implemented behavior against `spec.md`, `tasks.md`, `analysis.md`, `checklists/acceptance.md`, `checklists/tdd.md`, latest progress files, and executed verification. If artifacts disagree, return to `gwt-spec-ops`.
 
 ## Stop Conditions
 
@@ -86,7 +50,7 @@ Stop only when:
 
 - the next task depends on a product or scope decision that is not inferable
 - a merge conflict or review request is ambiguous enough to risk the wrong behavior
-- the required repo/auth/tooling access is unavailable
+- required repo/auth/tooling access is unavailable
 
 ## Completion gate requirements
 
