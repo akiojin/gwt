@@ -69,6 +69,10 @@
 28. Verify grouped Quick Start actions now read `Resume session` / `Start new
    session`, while resume-capable entries still show the short session ID
    snippet.
+29. Verify a branch with exactly one persisted Quick Start entry now shows
+   `Quick Start — <Agent/Model>` in the popup title and starts the action
+   rows immediately below `Branch: ...` without a duplicated grouped header
+   row.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -121,5 +125,8 @@
 - The final `Choose different settings` row now explains itself on wide
   popups via `label - description` formatting and keeps the old label-only
   fallback on narrow widths.
+- Single-entry Quick Start popups now move the lone agent/model summary into
+  the popup title so the body can start directly with the available actions
+  under `Branch: ...`.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

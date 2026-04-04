@@ -246,6 +246,10 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-032**: The final Quick Start action label matches the old-TUI copy
   `Choose different settings` without an ellipsis, while preserving the wide
   description row and narrow fallback behavior.
+- **FR-033**: When `QuickStart` has exactly one persisted entry, the popup
+  title promotes that entry's agent/model summary (`Quick Start — ...`) and
+  the body omits the duplicated grouped header so the first action row starts
+  directly below `Branch: ...`.
 
 ## Non-Functional Requirements
 

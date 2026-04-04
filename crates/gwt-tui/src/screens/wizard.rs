@@ -1426,6 +1426,43 @@ fn agent_row_color(agent_id: &str) -> Color {
     }
 }
 
+fn quick_start_entry_header(entry: &QuickStartEntry) -> String {
+    if entry.agent_id == "codex" {
+        if let Some(reasoning) = &entry.reasoning {
+            format!(
+                "{} ({}, Reasoning: {})",
+                entry.tool_label,
+                entry.model.as_deref().unwrap_or("default"),
+                reasoning
+            )
+        } else {
+            format!(
+                "{} ({})",
+                entry.tool_label,
+                entry.model.as_deref().unwrap_or("default")
+            )
+        }
+    } else {
+        format!(
+            "{} ({})",
+            entry.tool_label,
+            entry.model.as_deref().unwrap_or("default")
+        )
+    }
+}
+
+fn popup_title(state: &WizardState) -> String {
+    if state.step == WizardStep::QuickStart && state.quick_start_entries.len() == 1 {
+        format!(
+            "{} — {}",
+            state.step.title(),
+            quick_start_entry_header(&state.quick_start_entries[0])
+        )
+    } else {
+        state.step.title().to_string()
+    }
+}
+
 fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1455,34 +1492,16 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         area.height.saturating_sub(1),
     );
     let mut items = Vec::new();
+    let single_entry = state.quick_start_entries.len() == 1;
 
     for (entry_index, entry) in state.quick_start_entries.iter().enumerate() {
-        let header = if entry.agent_id == "codex" {
-            if let Some(reasoning) = &entry.reasoning {
-                format!(
-                    "{} ({}, Reasoning: {})",
-                    entry.tool_label,
-                    entry.model.as_deref().unwrap_or("default"),
-                    reasoning
-                )
-            } else {
-                format!(
-                    "{} ({})",
-                    entry.tool_label,
-                    entry.model.as_deref().unwrap_or("default")
-                )
-            }
-        } else {
-            format!(
-                "{} ({})",
-                entry.tool_label,
-                entry.model.as_deref().unwrap_or("default")
-            )
-        };
-        items.push(
-            ListItem::new(truncate_with_ellipsis(&header, list_area.width as usize))
-                .style(Style::default().fg(quick_start_agent_color(&entry.agent_id))),
-        );
+        if !single_entry {
+            let header = quick_start_entry_header(entry);
+            items.push(
+                ListItem::new(truncate_with_ellipsis(&header, list_area.width as usize))
+                    .style(Style::default().fg(quick_start_agent_color(&entry.agent_id))),
+            );
+        }
 
         let resume_index = entry_index * 2;
         let resume_text = if let Some(session_id) = &entry.resume_session_id {
@@ -1642,7 +1661,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title_top(
-            Line::from(state.step.title()).style(
+            Line::from(popup_title(state)).style(
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -2554,6 +2573,60 @@ mod tests {
         assert!(text.contains("  Start new session"));
         assert!(text.contains("Claude Code (sonnet)"));
         assert!(text.contains("Choose different settings"));
+    }
+
+    #[test]
+    fn render_quick_start_single_entry_moves_agent_summary_into_title() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Quick Start — Codex (gpt-5.3-codex, Reasoning: high)"));
+        assert_eq!(
+            text.match_indices("Codex (gpt-5.3-codex, Reasoning: high)")
+                .count(),
+            1,
+            "single-entry quick start should show the agent summary only in the popup title"
+        );
+    }
+
+    #[test]
+    fn render_quick_start_single_entry_starts_actions_directly_below_branch_context() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = vec![sample_quick_start_entries().into_iter().next().unwrap()];
+
+        let buf = render_buffer(&state, 100, 24);
+        let (_, branch_y) = find_text_position(&buf, "Branch: feature/test").unwrap();
+        let (_, resume_y) = find_text_position(&buf, "Resume session").unwrap();
+
+        assert_eq!(
+            resume_y,
+            branch_y + 1,
+            "single-entry quick start should place the first action directly below the branch context"
+        );
+    }
+
+    #[test]
+    fn render_quick_start_multi_entry_keeps_generic_title_and_group_headers() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Quick Start"));
+        assert!(!text.contains("Quick Start —"));
+        assert!(text.contains("Codex (gpt-5.3-codex, Reasoning: high)"));
+        assert!(text.contains("Claude Code (sonnet)"));
     }
 
     #[test]

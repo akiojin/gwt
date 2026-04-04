@@ -193,3 +193,9 @@
 - [x] T102 [P] Write RED test: the final Quick Start action uses `Choose different settings` without an ellipsis in wide and narrow render paths.
 - [x] T103 Remove the rebuilt ellipsis from the final Quick Start action label while preserving the wide description row and narrow fallback.
 - [x] T104 Verify focused final-label tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 26: QuickStart Single-Entry Title Promotion
+
+- [x] T105 [P] Write RED test: a single-entry Quick Start promotes the agent/model summary into the popup title and removes the duplicated body header.
+- [x] T106 Update `wizard.rs` so single-entry Quick Start titles render `Quick Start — ...` while multi-entry grouped headers remain unchanged.
+- [x] T107 Verify focused single-entry Quick Start tests, broad workspace checks, and refresh SPEC-3 artifacts.

@@ -251,6 +251,17 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage for both wide and narrow render paths using
    the non-ellipsis label.
 
+### Phase 26: QuickStart Single-Entry Title Promotion
+
+1. When `QuickStart` contains exactly one persisted entry, promote that
+   agent/model summary into the popup title so the old-TUI chrome carries the
+   context instead of repeating it in the body.
+2. Preserve multi-entry grouped headers unchanged while omitting the
+   duplicated header row only for the single-entry branch, making the first
+   action row follow `Branch: ...` directly.
+3. Add focused RED/GREEN coverage for single-entry title promotion and
+   multi-entry fallback before updating artifacts.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say
