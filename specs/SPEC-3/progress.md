@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `128/128` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T13:29:15Z`
+- Task progress: `131/131` checked in `tasks.md`
+- Artifact refresh: `2026-04-04T23:06:49Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -75,9 +75,6 @@
   session ID snippet when one exists.
 - The final action label now matches the old-TUI copy `Choose different
   settings` without an ellipsis.
-- On wide popups, `Choose different settings` now renders as a descriptive
-  old-TUI footer row (`label - description`), while narrow widths keep the
-  label-only fallback for readability.
 - Single-entry `QuickStart` popups now promote the lone agent/model summary
   into the popup title and start the action rows directly below
   `Branch: ...`, while multi-entry history keeps the grouped header rows.
@@ -97,6 +94,8 @@
   rendered grouped rows, so multi-entry history uses compact `Resume` /
   `Start new` copy consistently while single-entry history keeps the longer
   session-oriented wording.
+- The wizard popup now uses the border title as its only step-context chrome,
+  removing the redundant `Step N/M` row so content starts one line higher.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

@@ -237,9 +237,9 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-029**: The final `Choose different settings` action follows the last
   grouped `Start new` row directly without an extra separator line, so the
   `QuickStart` popup keeps the denser old-TUI rhythm.
-- **FR-030**: On wider popups, `Choose different settings` renders as an
-  old-TUI `label - description` row (`Open full setup`); on narrow widths it
-  falls back to the label-only row so the final action stays readable.
+- **FR-030**: The wizard popup does not render a separate `Step N/M`
+  progress row above the chrome; the popup border title is the only
+  step-context chrome so the content area keeps the reclaimed row.
 - **FR-031**: `QuickStart` action rows use the shorter old-TUI labels
   `Resume session` and `Start new session`, while still showing the resume
   session ID snippet when one exists.

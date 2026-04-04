@@ -89,6 +89,8 @@
    compact `Resume` / `Start new` labels while moving selection, and a
    single-entry Quick Start still uses `Resume session` /
    `Start new session`.
+35. Verify the wizard popup no longer shows a separate `Step N/M` row above
+   the chrome and still keeps the step title in the border.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -138,9 +140,6 @@
 - The grouped Quick Start actions now use the shorter old-TUI labels
   `Resume session` and `Start new session` while keeping the short
   resume-session hint where available.
-- The final `Choose different settings` row now explains itself on wide
-  popups via `label - description` formatting and keeps the old label-only
-  fallback on narrow widths.
 - Single-entry Quick Start popups now move the lone agent/model summary into
   the popup title so the body can start directly with the available actions
   under `Branch: ...`.
@@ -158,5 +157,7 @@
 - Quick Start state-derived option labels now match the rendered grouped rows,
   so multi-entry history stays on compact `Resume` / `Start new` copy while
   single-entry history keeps the longer session-oriented wording.
+- The popup no longer shows a separate `Step N/M` row above the chrome, so
+  the border title remains the only step-context chrome.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

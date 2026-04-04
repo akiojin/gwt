@@ -314,6 +314,17 @@ persisted agent session before activation.
    uses the compact labels while single-entry history keeps the longer
    `Resume session` / `Start new session` wording.
 
+### Phase 32: Wizard Progress Chrome Removal
+
+1. Remove the redundant `Step N/M` row above the wizard popup so the border
+   title remains the only step-context chrome and the content area regains
+   the reclaimed line.
+2. Preserve existing popup title, `[ESC]` hint, step flow, and content
+   rendering while shifting content and footer into the denser old-TUI
+   layout.
+3. Add focused RED/GREEN coverage proving the separate progress row is gone
+   while the popup title and branch-context content still render correctly.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

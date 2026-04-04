@@ -1680,19 +1680,11 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Progress indicator
             Constraint::Length(3), // Popup chrome
             Constraint::Min(0),    // Content
             Constraint::Length(1), // Hints
         ])
         .split(overlay);
-
-    // Progress bar
-    let step_idx = state.visible_step_index();
-    let total = state.visible_step_count();
-    let progress_text = format!(" Step {}/{}", step_idx, total);
-    let progress = Paragraph::new(progress_text).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(progress, chunks[0]);
 
     // Popup chrome
     let title_block = Block::default()
@@ -1706,10 +1698,10 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
             ),
         )
         .title_top(Line::from(" [ESC] ").right_aligned());
-    frame.render_widget(title_block, chunks[1]);
+    frame.render_widget(title_block, chunks[0]);
 
     // Content — either a list of options or a text input
-    render_step_content(state, frame, chunks[2]);
+    render_step_content(state, frame, chunks[1]);
 
     // Hints
     let hint = match state.step {
@@ -1729,7 +1721,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         _ => " Up/Down: select | Enter: next | Esc: back",
     };
     let hints = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hints, chunks[3]);
+    frame.render_widget(hints, chunks[2]);
 }
 
 /// Render the content area for the current wizard step.
@@ -2500,8 +2492,23 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        // Progress indicator should be visible
-        assert!(text.contains("Step") || text.contains("1/11") || buf.area.width > 0);
+        assert!(!text.contains("Step 1/"));
+        assert!(buf.area.width > 0);
+    }
+
+    #[test]
+    fn render_popup_chrome_omits_separate_progress_row() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(!text.contains("Step 1/"));
+        assert!(text.contains("Quick Start"));
+        assert!(text.contains("Branch: feature/test"));
     }
 
     #[test]
@@ -3049,7 +3056,7 @@ mod tests {
     fn render_version_step_shows_descriptions_and_overflow_indicators() {
         let mut state = WizardState::default();
         state.step = WizardStep::VersionSelect;
-        state.selected = 3;
+        state.selected = 4;
         state.version_options = vec![
             VersionOption {
                 label: "Installed (v1.0.0)".to_string(),
@@ -3093,13 +3100,13 @@ mod tests {
             },
         ];
 
-        let text = render_text(&state, 70, 16);
+        let text = render_text(&state, 70, 14);
 
         assert!(text.contains("Select Version"));
         assert!(text.contains("^ more above ^"));
         assert!(text.contains("v more below v"));
         assert!(text.contains("latest - Always use the latest version"));
-        assert!(text.contains("> 1.0.2 - Use cached version"));
+        assert!(text.contains("> 1.0.3 - Use cached version"));
     }
 
     #[test]

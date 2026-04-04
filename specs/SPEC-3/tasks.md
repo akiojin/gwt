@@ -229,3 +229,9 @@
 - [x] T120 [P] Write RED test: multi-entry `QuickStart` `current_options()` uses compact `Resume` / `Start new` labels and selected-row resume hints.
 - [x] T121 Update `wizard.rs` so multi-entry `current_options()` mirrors the rendered compact grouped-row copy while single-entry Quick Start keeps the longer labels.
 - [x] T122 Verify focused option-copy-alignment tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 32: Wizard Progress Chrome Removal
+
+- [x] T123 [P] Write RED test: the wizard popup omits the separate `Step N/M` row while keeping popup chrome and branch-context content visible.
+- [x] T124 Remove the redundant progress row from `wizard.rs` so the popup title remains the only step-context chrome and content regains the reclaimed line.
+- [x] T125 Verify focused wizard-layout tests, broad workspace checks, and refresh SPEC-3 artifacts.
