@@ -781,6 +781,14 @@ fn read_spec_body(repo_path: &Path, spec_id: &str) -> String {
         .unwrap_or_default()
 }
 
+fn issue_wizard_context(issue: &screens::issues::IssueItem) -> screens::wizard::SpecContext {
+    screens::wizard::SpecContext::new(
+        format!("Issue-{}", issue.number),
+        issue.title.clone(),
+        issue.body.clone(),
+    )
+}
+
 fn spec_sort_key(spec_id: &str) -> (u32, &str) {
     let numeric = spec_id
         .strip_prefix("SPEC-")
@@ -1402,13 +1410,28 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             let msg = match key.code {
                 KeyCode::Down => Some(IssuesMessage::MoveDown),
                 KeyCode::Up => Some(IssuesMessage::MoveUp),
-                KeyCode::Enter => Some(IssuesMessage::ToggleDetail),
+                KeyCode::Enter
+                    if !key.modifiers.contains(KeyModifiers::SHIFT)
+                        || !model.issues.detail_view =>
+                {
+                    Some(IssuesMessage::ToggleDetail)
+                }
                 KeyCode::Char('/') => Some(IssuesMessage::SearchStart),
                 KeyCode::Char('r') => Some(IssuesMessage::Refresh),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::issues::update(&mut model.issues, m);
+            } else if key.code == KeyCode::Enter
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+                && model.issues.detail_view
+            {
+                if let Some(issue) = model.issues.selected_issue().cloned() {
+                    open_wizard(model, Some(issue_wizard_context(&issue)));
+                    if let Some(wizard) = model.wizard.as_mut() {
+                        wizard.issue_id = issue.number.to_string();
+                    }
+                }
             } else if key.code == KeyCode::Esc && model.issues.detail_view {
                 screens::issues::update(&mut model.issues, IssuesMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
@@ -2747,7 +2770,7 @@ fn prepare_wizard_startup(
         },
         is_new_branch: starts_new_branch,
         gh_cli_available: gwt_core::process::command_exists("gh"),
-        ai_enabled: true,
+        ai_enabled: false,
         branch_name,
         spec_context,
         ..Default::default()
@@ -5874,6 +5897,27 @@ mod tests {
     }
 
     #[test]
+    fn prepare_wizard_startup_skips_ai_branch_suggest_in_new_branch_flow() {
+        let cache = VersionCache::new();
+        let (mut wizard, _) = prepare_wizard_startup(
+            Some(screens::wizard::SpecContext::new(
+                "SPEC-42",
+                "My Feature",
+                "",
+            )),
+            vec![],
+            &cache,
+        );
+
+        screens::wizard::update(&mut wizard, screens::wizard::WizardMessage::Select);
+        assert_eq!(wizard.step, screens::wizard::WizardStep::IssueSelect);
+
+        screens::wizard::update(&mut wizard, screens::wizard::WizardMessage::Select);
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchNameInput);
+        assert!(!wizard.ai_suggest.loading);
+    }
+
+    #[test]
     fn prepare_wizard_startup_uses_detected_version_when_cache_is_missing() {
         let cache = VersionCache::new();
         let detected = vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))];
@@ -7293,6 +7337,36 @@ CUSTOM_ENV = "enabled"
             model.issues.selected_issue().map(|issue| issue.number),
             Some(2)
         );
+    }
+
+    #[test]
+    fn route_key_to_management_issues_shift_enter_opens_prefilled_wizard() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+        model.issues.issues = vec![screens::issues::IssueItem {
+            number: 1776,
+            title: "Fix login freeze".into(),
+            state: "open".into(),
+            labels: vec!["bug".into()],
+            body: "Steps to reproduce...".into(),
+        }];
+        model.issues.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        let wizard = model.wizard.as_mut().expect("wizard should open");
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.issue_id, "1776");
+        assert_eq!(wizard.branch_name, "feature/issue-1776-fix-login-freeze");
+        assert!(!wizard.ai_enabled);
+
+        screens::wizard::update(wizard, screens::wizard::WizardMessage::Select);
+        assert_eq!(wizard.step, screens::wizard::WizardStep::IssueSelect);
+
+        screens::wizard::update(wizard, screens::wizard::WizardMessage::Select);
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchNameInput);
+        assert_eq!(wizard.issue_id, "1776");
     }
 
     #[test]

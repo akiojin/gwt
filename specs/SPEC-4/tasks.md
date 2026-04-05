@@ -77,3 +77,12 @@
 - [x] TEST: End-to-end test: Git View shows correct file status for a test repo (FUTURE: requires test repo fixtures)
 - [x] TEST: End-to-end test: PR dashboard shows PRs from a mock gh CLI response (FUTURE: requires test repo fixtures)
 - [x] TEST: Regression test: existing Issue tab functionality unaffected
+
+## Phase 4: Issue Detail Launch Agent
+
+- [x] TEST: Add regression test proving `Shift+Enter` on Issue detail opens
+  the wizard with issue-origin prefill.
+- [x] IMPL: Route Issue detail `Shift+Enter` through the shared wizard
+  startup path and prefill the selected issue number.
+- [x] VERIFY: Confirm Issue-origin launches follow the standard
+  `BranchType -> Issue -> Branch Name` flow without AI configuration.

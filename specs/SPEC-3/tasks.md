@@ -69,15 +69,15 @@
 
 - [x] T033 Write RED test: branch launch create-new path enters BranchTypeSelect instead of jumping directly to agent selection.
 - [x] T034 Write RED test: spec-prefilled wizard startup begins at BranchTypeSelect and preserves the SPEC branch seed.
-- [x] T035 Implement branch-first wizard ordering (Branch Type -> Issue -> AI naming -> Branch Name -> Agent) while keeping current Confirm handoff.
+- [x] T035 Implement branch-first wizard ordering (Branch Type -> Issue -> Branch Name -> Agent) while keeping current Confirm handoff and leaving AI naming dormant in the standard flow.
 - [x] T036 Restore old branch type and execution mode labels in the current wizard UI and update focused wizard tests.
 
 ## Phase 8: Old-TUI Wizard Step Machine Restoration
 
 - [x] T037 [P] Write RED test: existing-branch launches use `BranchAction` as the first actionable step and reach completion without a separate `Confirm` step.
-- [x] T038 [P] Write RED test: new-branch and spec-prefilled launches traverse `BranchType -> Issue -> AI Suggest -> BranchName -> Agent`.
+- [x] T038 [P] Write RED test: new-branch and spec-prefilled launches traverse `BranchType -> Issue -> BranchName -> Agent` in the standard flow.
 - [x] T039 [P] Write RED test: `Convert` execution mode routes through `ConvertAgentSelect` and `ConvertSessionSelect`.
-- [x] T040 Rewrite `WizardStep`, `next_step()`, and `prev_step()` to the old-TUI-aligned step machine while preserving version cache, AI suggestion, and session conversion state.
+- [x] T040 Rewrite `WizardStep`, `next_step()`, and `prev_step()` to the old-TUI-aligned step machine while preserving version cache, dormant AI suggestion support, and session conversion state.
 - [x] T041 Verify focused wizard tests, workspace checks, and refresh SPEC-3 artifacts.
 
 ## Phase 9: Old-TUI Wizard Option Formatting
@@ -311,3 +311,9 @@
 - [x] T163 Extract shared custom-agent config load/save helpers into `crates/gwt-tui/src/custom_agents.rs`, preserving unrelated settings and unknown nested custom-agent tables.
 - [x] T164 Implement Settings > Custom Agents selector/edit/action rows in `crates/gwt-tui/src/screens/settings.rs` and wire them to the shared helper.
 - [x] T165 Verify focused `custom_agents` and `screens::settings` tests, then refresh SPEC-3 artifacts.
+
+## Phase 45: Issue Detail Launch Agent Restoration
+
+- [x] T166 Write RED test: `Shift+Enter` on Issue detail opens the wizard with prefilled issue context and the standard new-branch flow.
+- [x] T167 Restore the Issues detail route in `app.rs` so `Shift+Enter` opens the wizard, seeds issue-derived branch context, and prefills `issue_id`.
+- [x] T168 Verify focused issue-launch tests, broad workspace checks, and refresh SPEC-3 artifacts.
