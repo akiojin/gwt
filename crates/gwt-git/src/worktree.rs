@@ -106,9 +106,9 @@ fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
         } else if let Some(b) = line.strip_prefix("branch ") {
             // Strip refs/heads/ prefix
             branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
-        } else if line == "locked" {
+        } else if matches_annotation(line, "locked") {
             locked = true;
-        } else if line == "prunable" {
+        } else if matches_annotation(line, "prunable") {
             prunable = true;
         }
     }
@@ -124,6 +124,13 @@ fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
     }
 
     worktrees
+}
+
+fn matches_annotation(line: &str, key: &str) -> bool {
+    line == key
+        || line
+            .strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
 #[cfg(test)]
@@ -163,6 +170,27 @@ prunable
         assert!(entries[1].locked);
         assert_eq!(entries[2].branch.as_deref(), Some("fix"));
         assert!(entries[2].prunable);
+    }
+
+    #[test]
+    fn parse_porcelain_reasoned_annotations() {
+        let output = "\
+worktree /repo
+branch refs/heads/main
+locked because maintenance is running
+
+worktree /repo/wt-1
+branch refs/heads/feature
+prunable gitdir file points to non-existent location
+";
+        let entries = parse_porcelain_output(output);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert!(entries[0].locked);
+        assert!(!entries[0].prunable);
+        assert_eq!(entries[1].branch.as_deref(), Some("feature"));
+        assert!(!entries[1].locked);
+        assert!(entries[1].prunable);
     }
 
     #[test]
