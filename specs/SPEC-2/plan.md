@@ -628,6 +628,21 @@ view by making the screen open on local branches instead of `All`.
 45.3: Verification (1 task)
 - Re-run broad workspace verification, snapshot verification, and refresh SPEC-2 progress artifacts.
 
+### Phase 46: Stabilize Branch Detail Prefetch (5 tasks)
+Fix the async Branch Detail preload so repeated refreshes do not leave detached workers behind
+and so Docker state is captured once per refresh instead of once per branch.
+
+46.1: Worker lifecycle safety (2 tasks)
+- Keep the active branch-detail preload worker tracked in the model.
+- When a newer preload is scheduled, cancel the superseded worker and reap finished worker handles so stale refreshes do not continue shelling out in the background.
+
+46.2: Per-refresh Docker snapshot (2 tasks)
+- Move Docker container discovery out of `load_branch_detail()` and into the refresh worker so each preload performs at most one Docker scan.
+- Pass the shared Docker snapshot into each branch-detail load while keeping the visible Branch Detail payload unchanged.
+
+46.3: Verification (1 task)
+- Add focused coverage for canceling superseded workers and for single-snapshot Docker loading, then rerun broad verification and refresh SPEC-2 artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

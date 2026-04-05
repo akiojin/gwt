@@ -2039,33 +2039,109 @@ fn refresh_branches(model: &mut Model) {
 fn schedule_branch_detail_prefetch(model: &mut Model) {
     let (generation, branches) = model.branches.begin_detail_refresh();
     let events = Arc::new(Mutex::new(VecDeque::new()));
-    model.branch_detail_events = Some(events.clone());
-    spawn_branch_detail_worker(events, generation, branches);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = spawn_branch_detail_worker(events.clone(), cancel.clone(), generation, branches);
+
+    if let Some(worker) = model.branch_detail_worker.as_mut() {
+        worker.replace(events, cancel, handle);
+    } else {
+        model.branch_detail_worker = Some(crate::model::BranchDetailWorker::new(
+            events, cancel, handle,
+        ));
+    }
 }
 
 fn spawn_branch_detail_worker(
     events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
-) {
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        for branch in branches {
-            let data = screens::branches::load_branch_detail(&branch);
-            if let Ok(mut queue) = events.lock() {
-                queue.push_back(screens::branches::BranchDetailLoadResult {
-                    generation,
-                    branch_name: branch.name.clone(),
-                    data,
-                });
-            }
+        if cancel.load(Ordering::SeqCst) {
+            return;
         }
-    });
+        let docker_containers = gwt_docker::list_containers().unwrap_or_default();
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        run_branch_detail_worker(
+            events,
+            cancel,
+            generation,
+            branches,
+            docker_containers,
+            screens::branches::load_branch_detail,
+        );
+    })
+}
+
+#[cfg(test)]
+fn spawn_branch_detail_worker_with_loader<F>(
+    events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
+    generation: u64,
+    branches: Vec<screens::branches::BranchItem>,
+    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    loader: F,
+) -> thread::JoinHandle<()>
+where
+    F: Fn(
+            &screens::branches::BranchItem,
+            &[gwt_docker::ContainerInfo],
+        ) -> screens::branches::BranchDetailData
+        + Send
+        + 'static,
+{
+    thread::spawn(move || {
+        run_branch_detail_worker(
+            events,
+            cancel,
+            generation,
+            branches,
+            docker_containers,
+            loader,
+        );
+    })
+}
+
+fn run_branch_detail_worker<F>(
+    events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
+    generation: u64,
+    branches: Vec<screens::branches::BranchItem>,
+    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    loader: F,
+) where
+    F: Fn(
+        &screens::branches::BranchItem,
+        &[gwt_docker::ContainerInfo],
+    ) -> screens::branches::BranchDetailData,
+{
+    for branch in branches {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let data = loader(&branch, &docker_containers);
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut queue) = events.lock() {
+            queue.push_back(screens::branches::BranchDetailLoadResult {
+                generation,
+                branch_name: branch.name.clone(),
+                data,
+            });
+        }
+    }
 }
 
 fn drain_branch_detail_events(model: &mut Model) {
-    let Some(events) = model.branch_detail_events.as_ref().cloned() else {
+    let Some(worker) = model.branch_detail_worker.as_mut() else {
         return;
     };
+    worker.reap_finished();
+    let events = worker.events();
 
     loop {
         let event = events.lock().ok().and_then(|mut queue| queue.pop_front());
@@ -5001,6 +5077,19 @@ mod tests {
         );
     }
 
+    fn git_create_branch(path: &std::path::Path, name: &str) {
+        let output = std::process::Command::new("git")
+            .args(["branch", name])
+            .current_dir(path)
+            .output()
+            .expect("create git branch");
+        assert!(
+            output.status.success(),
+            "git branch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn write_spec_fixture(
         repo_path: &std::path::Path,
         spec_dir_name: &str,
@@ -5306,6 +5395,43 @@ mod tests {
             );
 
             assert_eq!(model.branches.docker_containers[0].name, "web");
+        });
+    }
+
+    #[test]
+    fn load_initial_data_prefetches_docker_once_per_refresh() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+        git_create_branch(dir.path(), "feature/one");
+        git_create_branch(dir.path(), "feature/two");
+
+        let counter_path = dir.path().join("docker-count.txt");
+        fs::write(&counter_path, "0\n").expect("write docker counter");
+        let script = format!(
+            "#!/bin/sh\ncount_file=\"{}\"\ncount=$(cat \"$count_file\")\necho $((count + 1)) > \"$count_file\"\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n",
+            counter_path.display()
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+            load_initial_data(&mut model);
+
+            drive_ticks_until(
+                &mut model,
+                |model| !model.branches.docker_containers.is_empty(),
+                "branch detail preload docker snapshot",
+            );
+
+            let docker_calls = fs::read_to_string(&counter_path)
+                .expect("read docker counter")
+                .trim()
+                .parse::<usize>()
+                .expect("parse docker counter");
+            assert_eq!(
+                docker_calls, 1,
+                "branch detail preload should snapshot docker state once per refresh"
+            );
         });
     }
 
@@ -7761,6 +7887,63 @@ CUSTOM_ENV = "enabled"
             );
             assert_eq!(model.branches.selected, 1);
         });
+    }
+
+    #[test]
+    fn spawn_branch_detail_worker_with_loader_stops_after_cancel() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/a".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            },
+            screens::branches::BranchItem {
+                name: "feature/b".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            },
+        ];
+
+        let handle = spawn_branch_detail_worker_with_loader(
+            events,
+            cancel.clone(),
+            7,
+            branches,
+            Vec::new(),
+            move |branch, _docker_containers| {
+                started_tx
+                    .send(branch.name.clone())
+                    .expect("signal branch load start");
+                if branch.name == "feature/a" {
+                    release_rx.recv().expect("release first branch load");
+                }
+                screens::branches::BranchDetailData::default()
+            },
+        );
+
+        let first_branch = started_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .expect("first branch should start loading");
+        assert_eq!(first_branch, "feature/a");
+
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        release_tx.send(()).expect("release canceled worker");
+        handle.join().expect("join worker");
+
+        assert!(
+            started_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "canceled worker should not continue into later branches"
+        );
     }
 
     #[test]

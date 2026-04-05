@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `273/273` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T13:18:00Z`
+- Task progress: `278/278` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T13:57:31Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -54,6 +54,8 @@
 - Startup now synchronizes the live terminal frame size into the model before the default shell PTY is spawned, so the right-side session pane starts with the correct geometry instead of stale `80x24` dimensions.
 - The default `Branches` filter now opens in `Local`, and the `m` view-mode cycle continues through `Remote` and `All`, so the first management view is immediately scoped to worktree-focused branches.
 - Reviewer guidance and snapshots now show `View: Local` on the initial Branches surface, keeping the documented startup state aligned with the shipped UI.
+- Branch-detail preload workers are now tracked and cancelable, so a newer startup/refresh/docker-triggered preload no longer leaves detached stale workers shelling out against later branches.
+- Branch-detail preload now snapshots Docker container state once per refresh and fans that shared snapshot into each branch payload, removing the previous `docker ps -a` per-branch amplification.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

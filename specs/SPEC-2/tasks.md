@@ -458,3 +458,11 @@ banner in favor of pane-title chrome.
 - [x] T292 [P] Refresh reviewer guidance and snapshots so the initial Branches surface shows `View: Local`.
 - [x] T293 Update `branches.rs` so the default `ViewMode` is `Local` without changing the rest of the filter behavior.
 - [x] T294 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the default-local Branches filter.
+
+## Phase 46: Stabilize Branch Detail Prefetch
+
+- [x] T295 [P] Write RED test: canceling a superseded branch-detail preload worker stops it before it starts loading later branches.
+- [x] T296 [P] Write RED test: one branch-detail preload refresh performs exactly one Docker container discovery even when multiple branches are prefetched.
+- [x] T297 Update `app.rs` to track and cancel/reap branch-detail preload workers instead of replacing the completion queue and detaching stale workers.
+- [x] T298 Update `branches.rs` so branch-detail loading consumes a per-refresh Docker snapshot instead of calling Docker per branch.
+- [x] T299 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the stabilized Branch Detail preload path.

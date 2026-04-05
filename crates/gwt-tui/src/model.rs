@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -265,6 +267,95 @@ pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
 /// Shared queue of branch-detail preload results produced in the background.
 pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
+/// Tracked branch-detail preload worker state.
+pub(crate) struct BranchDetailWorker {
+    events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
+    active: Option<JoinHandle<()>>,
+    retired: Vec<JoinHandle<()>>,
+}
+
+impl BranchDetailWorker {
+    pub(crate) fn new(
+        events: BranchDetailQueue,
+        cancel: Arc<AtomicBool>,
+        active: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            events,
+            cancel,
+            active: Some(active),
+            retired: Vec::new(),
+        }
+    }
+
+    pub(crate) fn events(&self) -> BranchDetailQueue {
+        self.events.clone()
+    }
+
+    pub(crate) fn replace(
+        &mut self,
+        events: BranchDetailQueue,
+        cancel: Arc<AtomicBool>,
+        active: JoinHandle<()>,
+    ) {
+        self.cancel_active();
+        if let Some(handle) = self.active.take() {
+            self.retired.push(handle);
+        }
+        self.reap_finished();
+        self.events = events;
+        self.cancel = cancel;
+        self.active = Some(active);
+    }
+
+    pub(crate) fn reap_finished(&mut self) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            if let Some(handle) = self.active.take() {
+                let _ = handle.join();
+            }
+        }
+
+        let mut index = 0;
+        while index < self.retired.len() {
+            if self.retired[index].is_finished() {
+                let handle = self.retired.swap_remove(index);
+                let _ = handle.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn cancel_active(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for BranchDetailWorker {
+    fn drop(&mut self) {
+        self.cancel_active();
+        if let Some(handle) = self.active.take() {
+            self.retired.push(handle);
+        }
+        for handle in self.retired.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl std::fmt::Debug for BranchDetailWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BranchDetailWorker")
+            .field("retired", &self.retired.len())
+            .finish()
+    }
+}
+
 /// Result sent from the background Docker lifecycle worker back into the TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockerProgressResult {
@@ -391,8 +482,8 @@ pub struct Model {
     pub(crate) docker_progress: Option<DockerProgressState>,
     /// Background Docker lifecycle completion queue polled from the tick loop.
     pub(crate) docker_progress_events: Option<DockerProgressQueue>,
-    /// Background branch-detail completion queue polled from the tick loop.
-    pub(crate) branch_detail_events: Option<BranchDetailQueue>,
+    /// Tracked branch-detail preload worker and completion queue polled from the tick loop.
+    pub(crate) branch_detail_worker: Option<BranchDetailWorker>,
     /// Service selection overlay state.
     pub(crate) service_select: Option<ServiceSelectState>,
     /// Port conflict resolution overlay state.
@@ -472,7 +563,7 @@ impl Model {
             wizard: None,
             docker_progress: None,
             docker_progress_events: None,
-            branch_detail_events: None,
+            branch_detail_worker: None,
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),

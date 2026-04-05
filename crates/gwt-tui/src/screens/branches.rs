@@ -535,12 +535,14 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
 /// Load detail data (SPECs, git status, commits, docker state) for the branch.
 ///
 /// Best-effort: all errors are silently ignored.
-pub fn load_branch_detail(branch: &BranchItem) -> BranchDetailData {
-    let mut detail = BranchDetailData::default();
-
-    if let Ok(containers) = gwt_docker::list_containers() {
-        detail.docker_containers = containers;
-    }
+pub fn load_branch_detail(
+    branch: &BranchItem,
+    docker_containers: &[gwt_docker::ContainerInfo],
+) -> BranchDetailData {
+    let mut detail = BranchDetailData {
+        docker_containers: docker_containers.to_vec(),
+        ..BranchDetailData::default()
+    };
 
     let Some(wt_path) = branch.worktree_path.clone() else {
         return detail;
@@ -1030,10 +1032,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use std::fs;
-    use std::io::Write;
     use std::path::PathBuf;
-    use tempfile::TempDir;
 
     fn sample_branches() -> Vec<BranchItem> {
         vec![
@@ -1125,42 +1124,6 @@ mod tests {
                 ports: String::new(),
             },
         ]
-    }
-
-    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let script_path = dir.path().join("docker");
-        let mut file = fs::File::create(&script_path).expect("create fake docker");
-        file.write_all(script_body.as_bytes())
-            .expect("write fake docker");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata().expect("stat fake docker").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
-        }
-
-        (dir, script_path)
-    }
-
-    fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
-        let _guard = crate::DOCKER_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_dir, script_path) = write_fake_docker(script_body);
-        let previous = std::env::var_os("GWT_DOCKER_BIN");
-        std::env::set_var("GWT_DOCKER_BIN", &script_path);
-
-        let result = f();
-
-        match previous {
-            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
-            None => std::env::remove_var("GWT_DOCKER_BIN"),
-        }
-
-        result
     }
 
     fn buffer_to_lines(buf: &ratatui::buffer::Buffer) -> Vec<String> {
@@ -1750,28 +1713,23 @@ mod tests {
 
     #[test]
     fn load_branch_detail_populates_docker_containers() {
-        with_fake_docker(
-            "#!/bin/sh\nprintf 'abc123\\tweb\\trunning\\tnginx:latest\\t0.0.0.0:8080->80/tcp\\n'\n",
-            || {
-                let tmp = tempfile::tempdir().expect("create temp worktree");
-                let branch = BranchItem {
-                    name: "feature/docker".to_string(),
-                    is_head: true,
-                    is_local: true,
-                    category: BranchCategory::Feature,
-                    worktree_path: Some(tmp.path().to_path_buf()),
-                };
+        let tmp = tempfile::tempdir().expect("create temp worktree");
+        let branch = BranchItem {
+            name: "feature/docker".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(tmp.path().to_path_buf()),
+        };
 
-                let detail = load_branch_detail(&branch);
+        let detail = load_branch_detail(&branch, &sample_containers());
 
-                assert_eq!(detail.docker_containers.len(), 1);
-                let container = &detail.docker_containers[0];
-                assert_eq!(container.id, "abc123");
-                assert_eq!(container.name, "web");
-                assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
-                assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
-            },
-        );
+        assert_eq!(detail.docker_containers.len(), 2);
+        let container = &detail.docker_containers[0];
+        assert_eq!(container.id, "abc123");
+        assert_eq!(container.name, "web");
+        assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
+        assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
     }
 
     #[test]
