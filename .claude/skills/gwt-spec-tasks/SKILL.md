@@ -1,13 +1,11 @@
 ---
 name: gwt-spec-tasks
-description: "This skill should be used when the user wants to generate tasks from a SPEC plan, says 'generate tasks', 'create tasks.md', 'break down the plan into tasks', 'タスクを生成して', 'タスク分解して', or when plan.md is ready for task decomposition. It generates tasks.md grouped by phase and user story with exact file paths, [P] parallel markers, and test-first ordering."
-allowed-tools: Bash, Read, Glob, Grep, Edit, Write
-argument-hint: "[spec-id]"
+description: "Generate tasks.md for an existing SPEC from spec.md and plan.md, grouped by phase and user story with exact file paths, [P] parallel markers, and test-first ordering. Use directly or through gwt-spec-ops. Use when user says 'generate tasks', 'create tasks.md', 'break down the plan into tasks', or when plan.md is ready for task decomposition."
 ---
 
 # gwt SPEC Tasks
 
-Turn the approved spec and plan artifacts into executable work items grouped by phase and user story.
+Use this skill to turn the approved spec and plan artifacts into executable work items.
 
 - If `plan.md` is missing, use `gwt-spec-plan` first.
 - If clarification blockers remain in `spec.md`, use `gwt-spec-clarify` first.
@@ -61,7 +59,6 @@ Each task must include:
 
 6. **Write `tasks.md` and continue into analysis.**
    - Return the artifact to `gwt-spec-ops`, or proceed directly to `gwt-spec-analyze` when the flow is already active.
-   - The analysis step persists its report to `analysis.md`.
 
 ## Exit criteria
 

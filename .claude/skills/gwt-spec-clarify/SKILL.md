@@ -1,13 +1,11 @@
 ---
 name: gwt-spec-clarify
-description: "This skill should be used when the user wants to clarify or tighten a SPEC, says 'clarify this spec', 'resolve clarifications', 'tighten the spec', '仕様を明確にして', 'SPECのクラリフィケーション', or when spec.md has unresolved [NEEDS CLARIFICATION] markers. It resolves ambiguities, tightens user stories, and locks acceptance scenarios before planning."
-allowed-tools: Bash, Read, Glob, Grep, Edit, Write
-argument-hint: "[spec-id]"
+description: "Clarify an existing SPEC by resolving [NEEDS CLARIFICATION] markers, tightening user stories, and locking acceptance scenarios before planning. Use directly or through gwt-spec-ops. Use when user says 'clarify this spec', 'resolve clarifications', 'tighten the spec', or when spec.md has unresolved markers."
 ---
 
 # gwt SPEC Clarify
 
-Turn a draft `spec.md` artifact into a planning-ready specification by resolving ambiguities and locking acceptance scenarios.
+Use this skill to turn a draft `spec.md` artifact into a planning-ready specification.
 
 `gwt-spec-clarify` is a focused clarification step inside the wider SPEC workflow.
 

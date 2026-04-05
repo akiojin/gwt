@@ -1,8 +1,6 @@
 ---
 name: gwt-project-search
-description: "This skill should be used when the user wants to find source files related to a feature, bug, or concept, says 'search project files', 'find related files', 'which files handle X', 'この機能のファイルはどこ?', 'ファイルを探して', or asks to locate source code by semantic meaning. It performs semantic search over project source files using vector embeddings."
-allowed-tools: Bash, Read, Glob, Grep
-argument-hint: "[search query]"
+description: "Semantic search over project source files using vector embeddings. Use to find files related to a feature, bug, or concept. Use when user says 'search project files', 'find related files', 'which files handle X', or asks to locate source files related to a feature, bug, or concept."
 ---
 
 # Project Structure Index
@@ -18,7 +16,7 @@ Run in terminal to find files related to a feature or concept:
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action search \
   --db-path "$GWT_PROJECT_ROOT/.gwt/index" \
-  --query "<search terms>" \
+  --query "your search query" \
   --n-results 10
 ```
 

@@ -1,13 +1,11 @@
 ---
 name: gwt-spec-analyze
-description: "This skill should be used when the user wants to validate a SPEC before implementation, says 'analyze this spec', 'check spec completeness', 'run the analysis gate', 'SPECを分析して', 'SPECの整合性チェック', or before starting implementation on a spec. It analyzes completeness and consistency across spec.md, plan.md, tasks.md, detects missing traceability, unresolved clarifications, and constitution gaps, and distinguishes auto-fixable gaps from true decision blockers."
-allowed-tools: Bash, Read, Glob, Grep
-argument-hint: "[spec-id]"
+description: "Analyze a SPEC artifact set for completeness and consistency across spec.md, plan.md, tasks.md, and supporting artifacts. Detect missing traceability, unresolved clarifications, and constitution gaps before implementation, and distinguish auto-fixable gaps from true decision blockers. Use when user says 'analyze this spec', 'check spec completeness', 'run the analysis gate', or before starting implementation on a spec."
 ---
 
 # gwt SPEC Analyze
 
-Run the final readiness gate before implementation starts, validating completeness and consistency across all SPEC artifacts.
+Use this skill as the final gate before implementation starts.
 
 This skill is a **pre-implementation readiness gate only**. It does not certify that implementation is complete.
 
@@ -51,8 +49,6 @@ Optional but validated when present:
 
 ## Required output
 
-Persist the analysis result to `specs/SPEC-{id}/analysis.md` and use this shape:
-
 ```text
 ## Analysis Report: SPEC-<id>
 
@@ -81,7 +77,6 @@ Next:
 - Completion requires a post-implementation reconciliation pass in `gwt-spec-implement` against:
   - `spec.md`
   - `tasks.md`
-  - `analysis.md`
   - `checklists/acceptance.md`
   - `checklists/tdd.md`
   - latest progress files
@@ -94,11 +89,4 @@ python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
   --repo "." \
   --spec "<id>" \
   --list
-
-python3 ".claude/skills/gwt-spec-ops/scripts/spec_artifact.py" \
-  --repo "." \
-  --spec "<id>" \
-  --upsert \
-  --artifact "doc:analysis.md" \
-  --body-file /tmp/analysis.md
 ```

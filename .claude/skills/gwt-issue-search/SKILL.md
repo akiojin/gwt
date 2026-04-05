@@ -1,8 +1,6 @@
 ---
 name: gwt-issue-search
-description: "This skill should be used when the user wants to find existing Issues, says 'search issues', 'find related issues', 'check for duplicates', '既存Issueを探して', '関連Issueを検索', '重複チェック', or asks which issue owns a scope. It performs semantic search over all GitHub Issues using vector embeddings. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve."
-allowed-tools: Bash, Read, Glob, Grep
-argument-hint: "[search query]"
+description: "Semantic search over all GitHub Issues using vector embeddings. Use when searching for existing issues, finding related issues, checking for duplicate issues, or determining which issue owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. Use when user says 'search issues', 'find related issues', 'check for duplicates', or asks which issue owns a scope."
 ---
 
 # Issue Search
@@ -51,7 +49,7 @@ Then search Issues semantically:
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action search-issues \
   --db-path "$GWT_PROJECT_ROOT/.gwt/index" \
-  --query "<search terms>" \
+  --query "your search query" \
   --n-results 10
 ```
 

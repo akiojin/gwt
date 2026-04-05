@@ -1,8 +1,6 @@
 ---
 name: gwt-spec-search
-description: "This skill should be used when the user wants to find existing SPECs, says 'search specs', 'find related specs', 'check for duplicate specs', '既存SPECを探して', '関連SPECを検索', or asks which spec owns a scope. It performs semantic search over local SPEC files (specs/SPEC-{N}/) using vector embeddings. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve."
-allowed-tools: Bash, Read, Glob, Grep
-argument-hint: "[search query]"
+description: "Semantic search over local SPEC files (specs/SPEC-{N}/) using vector embeddings. Use when searching for existing specs, finding related specs, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. Use when user says 'search specs', 'find related specs', 'check for duplicate specs', or asks which spec owns a scope."
 ---
 
 # SPEC Search
@@ -34,7 +32,7 @@ Search SPECs semantically:
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action search-specs \
   --db-path "$GWT_PROJECT_ROOT/.gwt/index" \
-  --query "<search terms>" \
+  --query "your search query" \
   --n-results 10
 ```
 
