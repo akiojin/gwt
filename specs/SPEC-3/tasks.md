@@ -283,3 +283,9 @@
 - [x] T147 [P] Write RED test: multi-entry `QuickStart` render removes the agent prefix from the paired `Start new` row while keeping the inline-labeled `Resume` row.
 - [x] T148 [P] Write RED test: multi-entry `QuickStart` `current_options()` mirrors the same split between agent-labeled `Resume` and plain `Start new`.
 - [x] T149 Update `wizard.rs` so multi-entry `QuickStart` keeps the agent label only on `Resume` rows while `Start new` stays compact and plain.
+
+## Phase 41: QuickStart Start-New Neutral Styling
+
+- [x] T150 [P] Write RED test: non-selected multi-entry `QuickStart` `Start new` rows render with neutral styling instead of agent-colored text.
+- [x] T151 Update `wizard.rs` so multi-entry `Start new` rows use neutral styling while `Resume` rows keep inline agent identity.
+- [x] T152 Verify focused quick-start styling tests, broad workspace checks, and refresh SPEC-3 artifacts.

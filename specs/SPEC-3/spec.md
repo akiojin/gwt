@@ -270,6 +270,9 @@ As a developer, I want to convert an existing session to a different agent type 
   rendered grouped rows, so multi-entry history uses compact `Resume` /
   `Start new` labels in both the visual render and `current_options()`, and
   single-entry history now uses the same compact action wording.
+- **FR-039**: In multi-entry `QuickStart`, the plain `Start new` rows use a
+  neutral text color so agent identity stays anchored to the inline-labeled
+  `Resume` rows only.
 
 ## Non-Functional Requirements
 

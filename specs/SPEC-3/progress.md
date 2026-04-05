@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `155/155` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T23:56:10Z`
+- Task progress: `158/158` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T00:00:45Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -112,6 +112,9 @@
 - Multi-entry `QuickStart` now keeps the agent label on the `Resume` row
   only, while the paired `Start new` row falls back to the compact plain
   label.
+- Multi-entry `QuickStart` now renders those plain `Start new` rows in a
+  neutral color, leaving the inline `Resume` row as the only agent-colored
+  identity row in each entry block.
 - Existing-branch `AgentSelect` now uses the same compact branch-name line as
   `QuickStart`, and the first agent row starts directly below that context
   instead of after an extra spacer row.

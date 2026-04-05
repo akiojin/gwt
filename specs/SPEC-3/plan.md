@@ -403,6 +403,15 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving both render and `current_options()`
    use the same split between agent-labeled `Resume` and plain `Start new`.
 
+### Phase 41: QuickStart Start-New Neutral Styling
+
+1. In multi-entry `QuickStart`, keep the `Start new` rows visually neutral so
+   the inline agent identity remains anchored to the `Resume` rows only.
+2. Preserve selected-row highlight, single-entry behavior, and compact copy
+   while tightening only the non-selected multi-entry styling.
+3. Add focused RED/GREEN coverage proving the plain `Start new` rows now use
+   neutral styling.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

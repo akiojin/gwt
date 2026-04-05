@@ -77,21 +77,24 @@
    action rows where only the `Resume` row keeps the inline agent label
    (`Codex Resume`, `Claude Code Resume`), while the paired `Start new` rows
    stay plain and compact.
-31. Verify a branch with multiple persisted Quick Start entries now shows the
+31. Verify those plain multi-entry `Start new` rows now render in neutral
+   text color, so the colored agent identity remains on the paired
+   `Resume` rows only.
+32. Verify a branch with multiple persisted Quick Start entries now shows the
    short resume-session ID snippet only on the selected `Resume` row, while
    unselected resume rows keep the plain label.
-32. Verify a branch with multiple persisted Quick Start entries now renders
+33. Verify a branch with multiple persisted Quick Start entries now renders
    grouped action rows as `Resume` / `Start new`, while a single-entry Quick
    Start also uses the compact `Resume` / `Start new` copy.
-33. Verify the final Quick Start action now stays `Choose different`
+34. Verify the final Quick Start action now stays `Choose different`
    on both wide and narrow popups, without the rebuilt `Open full setup`
    description text.
-34. Verify a branch with multiple persisted Quick Start entries keeps the
+35. Verify a branch with multiple persisted Quick Start entries keeps the
    compact `Resume` / `Start new` labels while moving selection, and a
    single-entry Quick Start keeps the same compact action copy.
-35. Verify the wizard popup no longer shows a separate `Step N/M` row above
+36. Verify the wizard popup no longer shows a separate `Step N/M` row above
    the chrome and still keeps the step title in the border.
-36. Verify a single-entry Quick Start with no persisted model now promotes
+37. Verify a single-entry Quick Start with no persisted model now promotes
    only the agent label into the popup title (`Quick Start — Codex`) instead
    of inventing a `default` model placeholder.
 

@@ -1538,14 +1538,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                 &start_new_text,
                 list_area.width as usize,
             ))
-            .style(if single_entry {
-                wizard_row_style(state.selected == start_new_index)
-            } else {
-                wizard_row_style_with_fg(
-                    state.selected == start_new_index,
-                    quick_start_agent_color(&entry.agent_id),
-                )
-            }),
+            .style(wizard_row_style(state.selected == start_new_index)),
         );
     }
 
@@ -2716,6 +2709,20 @@ mod tests {
         assert!(!text.contains("  Claude Code Start new"));
         assert!(!text.contains("Start new session"));
         assert!(!text.contains("Resume session (sess-123...)"));
+    }
+
+    #[test]
+    fn render_quick_start_multi_entry_uses_neutral_color_for_plain_start_new_rows() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let buf = render_buffer(&state, 100, 24);
+        let (start_new_x, start_new_y) = find_text_position(&buf, "Start new").unwrap();
+
+        assert_eq!(buf[(start_new_x, start_new_y)].fg, Color::White);
     }
 
     #[test]
