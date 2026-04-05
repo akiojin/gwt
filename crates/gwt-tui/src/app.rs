@@ -216,12 +216,16 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Resize(w, h) => {
             model.terminal_size = (w, h);
-            // Propagate resize to all PTY processes and VtState parsers.
-            for pty in model.pty_handles.values() {
-                let _ = pty.resize(w, h);
-            }
-            for session in &mut model.sessions {
-                session.vt.resize(h, w);
+            // Propagate resize to all PTY processes and VtState parsers
+            // using the actual session pane content area, not the full
+            // terminal size.
+            if let Some(content) = active_session_content_area(model) {
+                for pty in model.pty_handles.values() {
+                    let _ = pty.resize(content.width, content.height);
+                }
+                for session in &mut model.sessions {
+                    session.vt.resize(content.height, content.width);
+                }
             }
         }
         Message::PtyOutput(pane_id, data) => {
@@ -1574,8 +1578,10 @@ fn check_branch_pending_actions(model: &mut Model) {
         model.branches.pending_launch_agent = false;
         if let Some(branch) = model.branches.selected_branch() {
             let branch_name = branch.name.clone();
+            let worktree_path = branch.worktree_path.clone();
             open_wizard(model, None);
             if let Some(ref mut wizard) = model.wizard {
+                wizard.worktree_path = worktree_path;
                 configure_existing_branch_wizard_with_sessions(
                     wizard,
                     &model.repo_path,
@@ -1588,17 +1594,39 @@ fn check_branch_pending_actions(model: &mut Model) {
     if model.branches.pending_open_shell {
         model.branches.pending_open_shell = false;
         if let Some(branch) = model.branches.selected_branch() {
-            if branch.worktree_path.is_some() {
+            if let Some(ref wt_path) = branch.worktree_path {
                 let idx = model.sessions.len();
+                let (cols, rows) = model.terminal_size;
                 let session = crate::model::SessionTab {
                     id: format!("shell-{idx}"),
                     name: format!("Shell: {}", branch.name),
                     tab_type: crate::model::SessionTabType::Shell,
-                    vt: crate::model::VtState::new(24, 80),
+                    vt: crate::model::VtState::new(rows, cols),
                 };
+                let session_id = session.id.clone();
                 model.sessions.push(session);
                 model.active_session = idx;
                 model.active_focus = FocusPane::Terminal;
+
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                let config = gwt_terminal::pty::SpawnConfig {
+                    command: shell,
+                    args: vec![],
+                    cols,
+                    rows,
+                    env: HashMap::new(),
+                    cwd: Some(wt_path.clone()),
+                };
+                if let Err(e) = spawn_pty_for_session(model, &session_id, config) {
+                    apply_notification(
+                        model,
+                        Notification::new(
+                            Severity::Error,
+                            "pty",
+                            format!("Branch shell spawn failed: {e}"),
+                        ),
+                    );
+                }
             }
         }
     }
@@ -2249,6 +2277,10 @@ fn build_launch_config_from_wizard_with_custom_agents(
 
     let mut builder = AgentLaunchBuilder::new(agent_id);
 
+    if let Some(ref wt) = wizard.worktree_path {
+        builder = builder.working_dir(wt);
+    }
+
     if !wizard.branch_name.is_empty() {
         builder = builder.branch(&wizard.branch_name);
     }
@@ -2331,7 +2363,7 @@ fn build_custom_launch_config_from_wizard(
         command,
         args,
         env_vars,
-        working_dir: None,
+        working_dir: wizard.worktree_path.clone(),
         branch: (!wizard.branch_name.is_empty()).then(|| wizard.branch_name.clone()),
         display_name: custom_agent.display_name.clone(),
         model: None,
@@ -2369,8 +2401,12 @@ fn materialize_pending_launch_with(
         return Ok(());
     };
 
+    let worktree = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| model.repo_path.clone());
     let mut session = AgentSession::new(
-        model.repo_path.clone(),
+        worktree,
         config.branch.clone().unwrap_or_default(),
         config.agent_id.clone(),
     );
@@ -2950,8 +2986,34 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Down => Some(b"\x1b[B".to_vec()),
         KeyCode::Right => Some(b"\x1b[C".to_vec()),
         KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Home => Some(b"\x1b[H".to_vec()),
+        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
+        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
+        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
+        KeyCode::F(n) => f_key_to_bytes(n),
         _ => None,
     }
+}
+
+fn f_key_to_bytes(n: u8) -> Option<Vec<u8>> {
+    let code = match n {
+        1 => "11",
+        2 => "12",
+        3 => "13",
+        4 => "14",
+        5 => "15",
+        6 => "17",
+        7 => "18",
+        8 => "19",
+        9 => "20",
+        10 => "21",
+        11 => "23",
+        12 => "24",
+        _ => return None,
+    };
+    Some(format!("\x1b[{code}~").into_bytes())
 }
 
 fn control_char_bytes(ch: char) -> Option<Vec<u8>> {

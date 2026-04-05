@@ -339,6 +339,8 @@ pub struct WizardState {
     pub cancelled: bool,
     /// Optional SPEC context for prefilling.
     pub spec_context: Option<SpecContext>,
+    /// Worktree path for the selected branch (None = use repo root).
+    pub worktree_path: Option<std::path::PathBuf>,
 }
 
 impl Default for WizardState {
@@ -369,6 +371,7 @@ impl Default for WizardState {
             completed: false,
             cancelled: false,
             spec_context: None,
+            worktree_path: None,
         }
     }
 }
