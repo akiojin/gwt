@@ -3,9 +3,10 @@
 ## Summary
 
 Implement the version cache feature and complete the session conversion UI.
-Agent detection, launch wizard, Quick Start, and custom agent CRUD are
-already implemented and tested. The remaining wizard work separates model
-selection from version selection and materializes launch state into a
+Agent detection, launch wizard, and Quick Start are already implemented and
+tested. Custom agent runtime integration is now config-backed, but full
+Settings CRUD remains follow-up work. The remaining wizard work separates
+model selection from version selection and materializes launch state into a
 persisted agent session before activation.
 
 ## Technical Context
@@ -13,7 +14,7 @@ persisted agent session before activation.
 - **Agent trait**: `crates/gwt-core/src/agent/` -- `AgentTrait::detect()`, agent registry
 - **Launch wizard**: `crates/gwt-tui/src/screens/` -- wizard step components
 - **Launch builder**: `crates/gwt-core/src/agent/launch.rs` -- `AgentLaunchBuilder`
-- **Custom agents**: `crates/gwt-tui/src/screens/settings.rs` -- CRUD UI
+- **Custom agents**: `crates/gwt-tui/src/app.rs` -- config-backed load/list/launch path; `crates/gwt-tui/src/screens/settings.rs` still needs CRUD UI
 - **Settings persistence**: `~/.gwt/config.toml` -- custom agent configuration
 - **Quick Start history**: `crates/gwt-core/src/` -- per-branch launch history
 
@@ -431,6 +432,15 @@ persisted agent session before activation.
    tightening the visual density of the grouped history rows.
 3. Add focused RED/GREEN coverage for wide and narrow render paths using the
    restored labels.
+
+### Phase 43: Config-Backed Custom Agent Runtime
+
+1. Parse valid `[tools.customCodingAgents.*]` entries from
+   `~/.gwt/config.toml` without reopening the broader global settings schema.
+2. Append those custom agents after the built-in wizard entries and resolve
+   availability for `command`, `path`, and `bunx` runners.
+3. Build launch configs from the configured custom agent definition so the
+   selected display name, mode args, and env vars reach the spawned session.
 
 ## Dependencies
 

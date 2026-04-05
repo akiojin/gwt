@@ -9,14 +9,15 @@ use std::thread;
 use std::time::Duration;
 
 use gwt_agent::{
-    AgentDetector, AgentId, AgentLaunchBuilder, DetectedAgent, LaunchConfig,
+    custom::{CustomAgentType, ModeArgs},
+    AgentDetector, AgentId, AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig,
     Session as AgentSession, SessionMode, VersionCache,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
-use gwt_skills::{distribute_to_worktree, generate_settings_local, update_git_exclude};
 use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
+use gwt_skills::{distribute_to_worktree, generate_settings_local, update_git_exclude};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -24,6 +25,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use serde::Deserialize;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -38,6 +40,139 @@ use crate::{
 };
 
 static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+const DISABLE_GLOBAL_CUSTOM_AGENTS_ENV: &str = "GWT_TUI_DISABLE_GLOBAL_CUSTOM_AGENTS";
+
+#[derive(Debug, Default, Deserialize)]
+struct CustomAgentSettingsFile {
+    #[serde(default)]
+    tools: CustomAgentToolsSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CustomAgentToolsSection {
+    #[serde(default, rename = "customCodingAgents", alias = "custom_coding_agents")]
+    custom_coding_agents: std::collections::BTreeMap<String, CustomAgentToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CustomAgentToml {
+    #[serde(default)]
+    id: String,
+    #[serde(alias = "displayName")]
+    display_name: String,
+    #[serde(rename = "type", alias = "agentType", default)]
+    agent_type: CustomAgentType,
+    command: String,
+    #[serde(default, alias = "defaultArgs")]
+    default_args: Vec<String>,
+    #[serde(default, alias = "modeArgs")]
+    mode_args: Option<ModeArgs>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+impl CustomAgentToml {
+    fn into_custom_agent(self, key: &str) -> Option<CustomCodingAgent> {
+        let agent = CustomCodingAgent {
+            id: if self.id.trim().is_empty() {
+                key.to_string()
+            } else {
+                self.id
+            },
+            display_name: self.display_name,
+            agent_type: self.agent_type,
+            command: self.command,
+            default_args: self.default_args,
+            mode_args: self.mode_args,
+            env: self.env,
+        };
+
+        agent.validate().then_some(agent)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PTY lifecycle helpers
+// ---------------------------------------------------------------------------
+
+/// Spawn a background thread that reads PTY output and sends it to the channel.
+fn spawn_pty_reader(
+    session_id: String,
+    mut reader: Box<dyn std::io::Read + Send>,
+    tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send((session_id.clone(), buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Spawn a PTY process, start a reader thread, and register the handle on
+/// the model.  On failure the error is returned so the caller can notify.
+pub fn spawn_pty_for_session(
+    model: &mut Model,
+    session_id: &str,
+    config: gwt_terminal::pty::SpawnConfig,
+) -> Result<(), String> {
+    tracing::info!(
+        session_id = session_id,
+        command = %config.command,
+        args = ?config.args,
+        "Spawning PTY"
+    );
+    let pty = gwt_terminal::PtyHandle::spawn(config).map_err(|e| {
+        tracing::error!(session_id = session_id, error = %e, "PTY spawn failed");
+        e.to_string()
+    })?;
+    let reader = pty.reader().map_err(|e| {
+        tracing::error!(session_id = session_id, error = %e, "PTY reader failed");
+        e.to_string()
+    })?;
+    spawn_pty_reader(session_id.to_string(), reader, model.pty_output_tx.clone());
+    model.pty_handles.insert(session_id.to_string(), pty);
+    tracing::info!(session_id = session_id, "PTY spawned successfully");
+    Ok(())
+}
+
+/// Drain buffered PTY input and write it to the corresponding PTY handles.
+fn drain_pending_pty_inputs(model: &mut Model) {
+    while let Some(input) = model.pending_pty_inputs.pop_front() {
+        if let Some(pty) = model.pty_handles.get(&input.session_id) {
+            if let Err(e) = pty.write_input(&input.bytes) {
+                tracing::warn!("PTY write error for {}: {e}", input.session_id);
+            }
+        }
+    }
+}
+
+/// Poll live PTY handles for process exit and notify the user.
+fn check_pty_exits(model: &mut Model) {
+    let exited: Vec<String> = model
+        .pty_handles
+        .iter()
+        .filter_map(|(id, pty)| match pty.try_wait() {
+            Ok(Some(_)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for id in exited {
+        model.pty_handles.remove(&id);
+        apply_notification(
+            model,
+            Notification::new(Severity::Info, "session", format!("Session {id} exited")),
+        );
+    }
+}
 
 /// Process a message and update the model (Elm: update).
 pub fn update(model: &mut Model, msg: Message) {
@@ -88,17 +223,39 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::NewShell => {
             let idx = model.sessions.len();
+            let (cols, rows) = model.terminal_size;
             let session = crate::model::SessionTab {
                 id: format!("shell-{idx}"),
                 name: format!("Shell {}", idx + 1),
                 tab_type: SessionTabType::Shell,
-                vt: crate::model::VtState::new(24, 80),
+                vt: crate::model::VtState::new(rows, cols),
             };
+            let session_id = session.id.clone();
             model.sessions.push(session);
             model.active_session = idx;
+
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let config = gwt_terminal::pty::SpawnConfig {
+                command: shell,
+                args: vec![],
+                cols,
+                rows,
+                env: HashMap::new(),
+                cwd: Some(model.repo_path.clone()),
+            };
+            if let Err(e) = spawn_pty_for_session(model, &session_id, config) {
+                apply_notification(
+                    model,
+                    Notification::new(Severity::Error, "pty", format!("Shell spawn failed: {e}")),
+                );
+            }
         }
         Message::CloseSession => {
             if model.sessions.len() > 1 {
+                let id = model.sessions[model.active_session].id.clone();
+                if let Some(pty) = model.pty_handles.remove(&id) {
+                    let _ = pty.kill();
+                }
                 model.sessions.remove(model.active_session);
                 if model.active_session >= model.sessions.len() {
                     model.active_session = model.sessions.len() - 1;
@@ -107,6 +264,13 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Resize(w, h) => {
             model.terminal_size = (w, h);
+            // Propagate resize to all PTY processes and VtState parsers.
+            for pty in model.pty_handles.values() {
+                let _ = pty.resize(w, h);
+            }
+            for session in &mut model.sessions {
+                session.vt.resize(h, w);
+            }
         }
         Message::PtyOutput(pane_id, data) => {
             if let Some(session) = model.session_tab_mut(&pane_id) {
@@ -149,6 +313,7 @@ pub fn update(model: &mut Model, msg: Message) {
             drain_notification_bus(model);
             drain_docker_progress_events(model);
             tick_notification(model);
+            check_pty_exits(model);
             // Forward tick to wizard (AI suggest spinner) when active
             if let Some(ref mut wizard) = model.wizard {
                 if wizard.ai_suggest.loading {
@@ -371,6 +536,10 @@ pub fn update(model: &mut Model, msg: Message) {
             model.wizard = None;
         }
     }
+
+    // Flush buffered PTY input after every message so keystrokes reach the PTY
+    // without waiting for the next Tick.
+    drain_pending_pty_inputs(model);
 }
 
 /// Load initial data from the repository into the model.
@@ -2102,6 +2271,21 @@ fn ai_client_from_settings(settings: &AISettings) -> Result<AIClient, String> {
 
 /// Build a LaunchConfig from the wizard's accumulated selections.
 fn build_launch_config_from_wizard(wizard: &screens::wizard::WizardState) -> LaunchConfig {
+    let custom_agents = load_custom_agents();
+    build_launch_config_from_wizard_with_custom_agents(wizard, &custom_agents)
+}
+
+fn build_launch_config_from_wizard_with_custom_agents(
+    wizard: &screens::wizard::WizardState,
+    custom_agents: &[CustomCodingAgent],
+) -> LaunchConfig {
+    if let Some(custom_agent) = custom_agents
+        .iter()
+        .find(|agent| agent.id == wizard.agent_id)
+    {
+        return build_custom_launch_config_from_wizard(wizard, custom_agent);
+    }
+
     let agent_id = match wizard.agent_id.as_str() {
         "claude" => AgentId::ClaudeCode,
         "codex" => AgentId::Codex,
@@ -2150,6 +2334,99 @@ fn build_launch_config_from_wizard(wizard: &screens::wizard::WizardState) -> Lau
     config
 }
 
+fn build_custom_launch_config_from_wizard(
+    wizard: &screens::wizard::WizardState,
+    custom_agent: &CustomCodingAgent,
+) -> LaunchConfig {
+    let session_mode = match wizard.mode.as_str() {
+        "continue" => SessionMode::Continue,
+        "resume" if wizard.resume_session_id.is_some() => SessionMode::Resume,
+        "resume" => SessionMode::Continue,
+        _ => SessionMode::Normal,
+    };
+
+    let mut args = custom_agent.default_args.clone();
+    if let Some(mode_args) = &custom_agent.mode_args {
+        match session_mode {
+            SessionMode::Normal => args.extend(mode_args.normal.clone()),
+            SessionMode::Continue => args.extend(mode_args.continue_mode.clone()),
+            SessionMode::Resume => args.extend(mode_args.resume.clone()),
+        }
+    }
+
+    let command = match custom_agent.agent_type {
+        CustomAgentType::Command | CustomAgentType::Path => custom_agent.command.clone(),
+        CustomAgentType::Bunx => {
+            if gwt_core::process::command_exists("bunx") {
+                args.insert(0, custom_agent.command.clone());
+                "bunx".to_string()
+            } else {
+                args.insert(0, custom_agent.command.clone());
+                args.insert(0, "--yes".to_string());
+                "npx".to_string()
+            }
+        }
+    };
+
+    let mut env_vars = HashMap::new();
+    env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
+    env_vars.extend(custom_agent.env.clone());
+
+    let agent_id = AgentId::Custom(custom_agent.id.clone());
+    LaunchConfig {
+        color: agent_id.default_color(),
+        agent_id,
+        command,
+        args,
+        env_vars,
+        working_dir: None,
+        branch: (!wizard.branch_name.is_empty()).then(|| wizard.branch_name.clone()),
+        display_name: custom_agent.display_name.clone(),
+        model: None,
+        tool_version: None,
+        reasoning_level: None,
+        session_mode,
+        resume_session_id: wizard.resume_session_id.clone(),
+        skip_permissions: wizard.skip_perms,
+    }
+}
+
+fn load_custom_agents() -> Vec<CustomCodingAgent> {
+    if std::env::var_os(DISABLE_GLOBAL_CUSTOM_AGENTS_ENV).is_some() {
+        return Vec::new();
+    }
+
+    let Some(path) = Settings::global_config_path() else {
+        return Vec::new();
+    };
+    if !path.exists() {
+        return Vec::new();
+    }
+
+    load_custom_agents_from_path(&path).unwrap_or_else(|err| {
+        tracing::warn!(path = %path.display(), error = %err, "failed to load custom agents");
+        Vec::new()
+    })
+}
+
+fn load_custom_agents_from_path(path: &Path) -> Result<Vec<CustomCodingAgent>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
+    let parsed: CustomAgentSettingsFile = toml::from_str(&content)
+        .map_err(|err| format!("failed to parse custom agents in {}: {err}", path.display()))?;
+
+    let mut agents = Vec::new();
+    for (key, raw_agent) in parsed.tools.custom_coding_agents {
+        if let Some(agent) = raw_agent.into_custom_agent(&key) {
+            agents.push(agent);
+        } else {
+            tracing::warn!(custom_agent = %key, "skipping invalid custom agent");
+        }
+    }
+
+    Ok(agents)
+}
+
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
 }
@@ -2192,6 +2469,7 @@ fn materialize_pending_launch_with(
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
 
+    let (cols, rows) = model.terminal_size;
     let tab = crate::model::SessionTab {
         id: session.id.clone(),
         name: config.display_name.clone(),
@@ -2199,17 +2477,35 @@ fn materialize_pending_launch_with(
             agent_id: config.agent_id.command().to_string(),
             color: tui_agent_color(config.color),
         },
-        vt: crate::model::VtState::new(24, 80),
+        vt: crate::model::VtState::new(rows, cols),
     };
+    let tab_id = tab.id.clone();
     model.sessions.push(tab);
     model.active_session = model.sessions.len().saturating_sub(1);
     model.active_layer = ActiveLayer::Main;
 
+    // Spawn PTY process for the agent session.
+    let pty_config = gwt_terminal::pty::SpawnConfig {
+        command: config.command.clone(),
+        args: config.args.clone(),
+        cols,
+        rows,
+        env: config.env_vars.clone(),
+        cwd: config.working_dir.clone(),
+    };
+    if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
+        apply_notification(
+            model,
+            Notification::new(
+                Severity::Error,
+                "pty",
+                format!("Agent PTY spawn failed: {e}"),
+            ),
+        );
+    }
+
     // Distribute embedded skills to the worktree (best-effort; never block launch).
-    let worktree = config
-        .working_dir
-        .as_deref()
-        .unwrap_or(&model.repo_path);
+    let worktree = config.working_dir.as_deref().unwrap_or(&model.repo_path);
     if let Err(e) = distribute_to_worktree(worktree) {
         tracing::warn!("skill distribution failed: {e}");
     }
@@ -2499,6 +2795,15 @@ fn build_wizard_agent_options(
     detected_agents: Vec<DetectedAgent>,
     cache: &VersionCache,
 ) -> (Vec<screens::wizard::AgentOption>, Vec<AgentId>) {
+    let custom_agents = load_custom_agents();
+    build_wizard_agent_options_with_custom_agents(detected_agents, cache, &custom_agents)
+}
+
+fn build_wizard_agent_options_with_custom_agents(
+    detected_agents: Vec<DetectedAgent>,
+    cache: &VersionCache,
+    custom_agents: &[CustomCodingAgent],
+) -> (Vec<screens::wizard::AgentOption>, Vec<AgentId>) {
     let mut refresh_targets = Vec::new();
     let mut options = Vec::new();
 
@@ -2525,9 +2830,28 @@ fn build_wizard_agent_options(
         });
     }
 
-    // TODO: Add custom agents from Settings here
+    for custom_agent in custom_agents {
+        options.push(screens::wizard::AgentOption {
+            id: custom_agent.id.clone(),
+            name: custom_agent.display_name.clone(),
+            available: custom_agent_available(custom_agent),
+            installed_version: None,
+            versions: Vec::new(),
+            cache_outdated: false,
+        });
+    }
 
     (options, refresh_targets)
+}
+
+fn custom_agent_available(agent: &CustomCodingAgent) -> bool {
+    match agent.agent_type {
+        CustomAgentType::Command => gwt_core::process::command_exists(&agent.command),
+        CustomAgentType::Path => Path::new(&agent.command).is_file(),
+        CustomAgentType::Bunx => {
+            gwt_core::process::command_exists("bunx") || gwt_core::process::command_exists("npx")
+        }
+    }
 }
 
 fn cached_agent_versions(cache: &VersionCache, agent_id: &AgentId) -> Vec<String> {
@@ -3509,7 +3833,11 @@ mod tests {
     use crossterm::event::{
         KeyEvent, KeyEventKind, KeyEventState, MouseButton, MouseEvent, MouseEventKind,
     };
-    use gwt_agent::{version_cache::VersionEntry, AgentId, DetectedAgent, VersionCache};
+    use gwt_agent::{
+        custom::{CustomAgentType, ModeArgs},
+        version_cache::VersionEntry,
+        AgentId, CustomCodingAgent, DetectedAgent, VersionCache,
+    };
     use gwt_git::pr_status::PrState as GitPrState;
     use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
@@ -3518,12 +3846,22 @@ mod tests {
     use ratatui::text::Line;
     use ratatui::widgets::Widget;
     use ratatui::{buffer::Buffer, Terminal};
+    use std::collections::HashMap;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::Once;
     use tempfile::TempDir;
 
+    fn disable_global_custom_agents_for_tests() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            std::env::set_var(DISABLE_GLOBAL_CUSTOM_AGENTS_ENV, "1");
+        });
+    }
+
     fn test_model() -> Model {
+        disable_global_custom_agents_for_tests();
         Model::new(PathBuf::from("/tmp/test"))
     }
 
@@ -3601,6 +3939,7 @@ mod tests {
     }
 
     fn detected_agent(agent_id: AgentId, version: Option<&str>) -> DetectedAgent {
+        disable_global_custom_agents_for_tests();
         DetectedAgent {
             agent_id,
             version: version.map(|value| value.to_string()),
@@ -3628,6 +3967,25 @@ mod tests {
         VersionEntry {
             versions: versions.iter().map(|value| value.to_string()).collect(),
             updated_at: Utc::now() - Duration::seconds(age_seconds),
+        }
+    }
+
+    fn sample_custom_agent(
+        agent_type: CustomAgentType,
+        command: impl Into<String>,
+    ) -> CustomCodingAgent {
+        CustomCodingAgent {
+            id: "my-agent".to_string(),
+            display_name: "My Agent".to_string(),
+            agent_type,
+            command: command.into(),
+            default_args: vec!["--flag".to_string()],
+            mode_args: Some(ModeArgs {
+                normal: vec!["--normal".to_string()],
+                continue_mode: vec!["--continue".to_string()],
+                resume: vec!["--resume".to_string()],
+            }),
+            env: HashMap::from([("CUSTOM_ENV".to_string(), "enabled".to_string())]),
         }
     }
 
@@ -5703,6 +6061,79 @@ mod tests {
     }
 
     #[test]
+    fn load_custom_agents_from_path_parses_spec_schema() {
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[tools.customCodingAgents.my-agent]
+id = "my-agent"
+displayName = "My Agent"
+agentType = "command"
+command = "my-agent-cli"
+defaultArgs = ["--flag"]
+
+[tools.customCodingAgents.my-agent.modeArgs]
+normal = ["--normal"]
+continue = ["--continue"]
+resume = ["--resume"]
+
+[tools.customCodingAgents.my-agent.env]
+CUSTOM_ENV = "enabled"
+"#,
+        )
+        .expect("write config");
+
+        let agents = load_custom_agents_from_path(&config_path).expect("load custom agents");
+
+        assert_eq!(agents.len(), 1);
+        let agent = &agents[0];
+        assert_eq!(agent.id, "my-agent");
+        assert_eq!(agent.display_name, "My Agent");
+        assert_eq!(agent.agent_type, CustomAgentType::Command);
+        assert_eq!(agent.command, "my-agent-cli");
+        assert_eq!(agent.default_args, vec!["--flag"]);
+        assert_eq!(
+            agent
+                .mode_args
+                .as_ref()
+                .map(|args| args.continue_mode.clone()),
+            Some(vec!["--continue".to_string()])
+        );
+        assert_eq!(
+            agent.env.get("CUSTOM_ENV").map(String::as_str),
+            Some("enabled")
+        );
+    }
+
+    #[test]
+    fn build_wizard_agent_options_with_custom_agents_appends_settings_agents() {
+        let dir = tempfile::tempdir().expect("temp custom path");
+        let custom_path = dir.path().join("my-agent");
+        fs::write(&custom_path, "#!/bin/sh\n").expect("write custom path");
+        let cache = VersionCache::new();
+
+        let (options, _) = build_wizard_agent_options_with_custom_agents(
+            vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))],
+            &cache,
+            &[sample_custom_agent(
+                CustomAgentType::Path,
+                custom_path.display().to_string(),
+            )],
+        );
+
+        assert_eq!(options.len(), BUILTIN_AGENTS.len() + 1);
+        let custom = options.last().expect("custom option");
+        assert_eq!(custom.id, "my-agent");
+        assert_eq!(custom.name, "My Agent");
+        assert!(custom.available);
+        assert!(custom.installed_version.is_none());
+        assert!(custom.versions.is_empty());
+        assert!(!custom.cache_outdated);
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_omits_default_model_selection() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -5717,6 +6148,42 @@ mod tests {
         assert_eq!(config.branch.as_deref(), Some("feature/spec-42"));
         assert!(config.model.is_none());
         assert!(!config.args.iter().any(|arg| arg.contains("--model")));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_with_custom_agents_uses_custom_command_and_display_name() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "my-agent".to_string(),
+            branch_name: "feature/custom-agent".to_string(),
+            mode: "continue".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard_with_custom_agents(
+            &wizard,
+            &[sample_custom_agent(
+                CustomAgentType::Command,
+                "my-agent-cli",
+            )],
+        );
+
+        assert_eq!(config.agent_id, AgentId::Custom("my-agent".to_string()));
+        assert_eq!(config.command, "my-agent-cli");
+        assert_eq!(
+            config.args,
+            vec!["--flag".to_string(), "--continue".to_string()]
+        );
+        assert_eq!(config.display_name, "My Agent");
+        assert_eq!(config.branch.as_deref(), Some("feature/custom-agent"));
+        assert_eq!(
+            config.env_vars.get("TERM").map(String::as_str),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            config.env_vars.get("CUSTOM_ENV").map(String::as_str),
+            Some("enabled")
+        );
+        assert!(matches!(config.session_mode, SessionMode::Continue));
     }
 
     #[test]
@@ -5841,6 +6308,35 @@ mod tests {
         assert_eq!(persisted.reasoning_level.as_deref(), Some("high"));
         assert!(persisted.skip_permissions);
         assert_eq!(persisted.agent_session_id.as_deref(), Some("sess-abc"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_spawn_failure_mentions_command() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut model = test_model();
+        let missing_command = "gwt-missing-custom-agent-command";
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Custom("my-agent".to_string()),
+            command: missing_command.to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/custom-agent".to_string()),
+            display_name: "My Agent".to_string(),
+            color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        assert_eq!(model.error_queue.len(), 1);
+        let notification = model.error_queue.front().expect("error notification");
+        assert!(notification.message.contains(missing_command));
     }
 
     #[test]
@@ -6253,11 +6749,12 @@ mod tests {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
 
-        update(
-            &mut model,
-            Message::KeyInput(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        );
+        // Call key_event_to_bytes + push directly to verify conversion,
+        // because update() now drains pending inputs immediately.
+        let bytes = key_event_to_bytes(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(bytes, Some(vec![0x03]));
 
+        push_input_to_active_session(&mut model, bytes.unwrap());
         let forwarded = model.pending_pty_inputs().back().unwrap();
         assert_eq!(forwarded.session_id, "shell-0");
         assert_eq!(forwarded.bytes, vec![0x03]);

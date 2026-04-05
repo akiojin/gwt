@@ -34,6 +34,7 @@ pub struct SpawnConfig {
 pub struct PtyHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
 impl PtyHandle {
@@ -68,22 +69,25 @@ impl PtyHandle {
                     reason: e.to_string(),
                 })?;
 
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| TerminalError::PtyCreationFailed {
+                reason: format!("take_writer: {e}"),
+            })?;
+
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
+            writer: Arc::new(Mutex::new(writer)),
         })
     }
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
-        let master = self.master.lock().map_err(|e| TerminalError::PtyIoError {
+        let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        let mut writer = master
-            .take_writer()
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })?;
         writer
             .write_all(data)
             .map_err(|e| TerminalError::PtyIoError {

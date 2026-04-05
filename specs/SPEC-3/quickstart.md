@@ -4,7 +4,8 @@
 1. Run `cargo run -p gwt-tui` and open the agent launch or conversion flow from the current session.
 2. Verify existing-branch launches start at branch action and spec-prefilled
    launches start at branch type selection before issue and AI naming.
-3. Verify built-in detection, custom agent listing, and the dedicated
+3. Verify built-in detection, config-backed custom agent listing from
+   `[tools.customCodingAgents]` in `~/.gwt/config.toml`, and the dedicated
    VersionSelect step in the wizard.
 4. For an npm-backed agent, confirm the version list shows the installed
    runner, `latest`, and cached semver entries without duplication.
@@ -29,72 +30,75 @@
 11. Launch the session from `Skip Permissions` and confirm a new agent tab
    appears with persisted session metadata while a default model label does
    not become a literal CLI override.
-12. Trigger session conversion and confirm the active session metadata changes
+12. Add a valid custom-agent entry to `~/.gwt/config.toml`, verify it appears
+   after the built-in agents, and confirm launching it preserves the
+   configured display name, mode args, and env vars.
+13. Trigger session conversion and confirm the active session metadata changes
    while repository context is preserved.
-13. Check the existing focused tests and notifications to confirm the original
+14. Check the existing focused tests and notifications to confirm the original
    session remains intact on conversion failure.
-14. Verify the wizard popup border uses the current step title and shows a
+15. Verify the wizard popup border uses the current step title and shows a
    right-aligned `[ESC]` hint.
-15. Verify `AgentSelect` from an existing branch shows the compact
+16. Verify `AgentSelect` from an existing branch shows the compact
    branch-name line above a name-only agent list with the old-TUI cyan
    selection highlight.
-16. Verify `BranchNameInput` and `IssueSelect` render inline prompt labels
+17. Verify `BranchNameInput` and `IssueSelect` render inline prompt labels
    inside the popup body and do not add nested titled boxes.
-17. Verify list-oriented steps such as `BranchAction`, `ModelSelect`,
+18. Verify list-oriented steps such as `BranchAction`, `ModelSelect`,
    `VersionSelect`, and AI suggestion loading/error use the popup chrome as
    the only box while keeping their row formatting and copy visible.
-18. Verify the AI suggestion candidate list also keeps `Context: ...`
+19. Verify the AI suggestion candidate list also keeps `Context: ...`
    visible above the suggestions and `Manual input`.
-19. Verify AI suggestion loading and error states render `Context: ...` as a
+20. Verify AI suggestion loading and error states render `Context: ...` as a
    standalone row above the body copy, matching the candidate-list layout.
-20. Verify AI suggestion loading and error body copy stays compact and does
+21. Verify AI suggestion loading and error body copy stays compact and does
    not repeat manual-input guidance that already appears in the footer hint
    row.
-21. Verify generic option lists such as `BranchAction` and `ModelSelect` use
+22. Verify generic option lists such as `BranchAction` and `ModelSelect` use
    the same cyan selected-row highlight as `QuickStart` and `AgentSelect`.
-22. Verify `BranchNameInput` and `IssueSelect` now render the prompt and the
+23. Verify `BranchNameInput` and `IssueSelect` now render the prompt and the
    yellow input value on separate rows instead of sharing a single inline
    paragraph.
-23. Verify `QuickStart` now starts the first grouped history entry directly
+24. Verify `QuickStart` now starts the first grouped history entry directly
    below the compact branch-name context line instead of leaving an extra
    blank row before the grouped list.
-24. Verify consecutive Quick Start agent groups now render without a blank
+25. Verify consecutive Quick Start agent groups now render without a blank
    spacer row between them while `Choose different` still follows
    the grouped history as the final footer action.
-25. Verify `Choose different` now appears directly below the last
+26. Verify `Choose different` now appears directly below the last
    grouped `Start new` row without an extra separator line.
-26. Verify the final Quick Start action now uses the label-only
+27. Verify the final Quick Start action now uses the label-only
    `Choose different` copy on wide and narrow popups.
-27. Verify the final action label no longer uses an ellipsis and now matches
+28. Verify the final action label no longer uses an ellipsis and now matches
    the old-TUI copy `Choose different`.
-28. Verify grouped Quick Start actions now read `Resume` / `Start new`,
+29. Verify grouped Quick Start actions now read `Resume` / `Start new`,
    while resume-capable entries still show the short session ID snippet.
-29. Verify a branch with exactly one persisted Quick Start entry now shows
+30. Verify a branch with exactly one persisted Quick Start entry now shows
    `Quick Start — Agent (Model)` in the popup title and starts the action
    rows immediately below the compact branch-name context line without a
    duplicated grouped header row.
-30. Verify a branch with multiple persisted Quick Start entries now renders
+31. Verify a branch with multiple persisted Quick Start entries now renders
    action rows where only the `Resume` row keeps the inline agent label
    (`Codex Resume`, `Claude Code Resume`), while the paired `Start new` rows
    stay plain and compact.
-31. Verify those plain multi-entry `Start new` rows now render in neutral
+32. Verify those plain multi-entry `Start new` rows now render in neutral
    text color, so the colored agent identity remains on the paired
    `Resume` rows only.
-32. Verify a branch with multiple persisted Quick Start entries now shows the
+33. Verify a branch with multiple persisted Quick Start entries now shows the
    short resume-session ID snippet only on the selected `Resume` row, while
    unselected resume rows keep the plain label.
-33. Verify a branch with multiple persisted Quick Start entries now renders
+34. Verify a branch with multiple persisted Quick Start entries now renders
    grouped action rows as `Resume` / `Start new`, while a single-entry Quick
    Start also uses the compact `Resume` / `Start new` copy.
-34. Verify the final Quick Start action now stays `Choose different`
+35. Verify the final Quick Start action now stays `Choose different`
    on both wide and narrow popups, without the rebuilt `Open full setup`
    description text.
-35. Verify a branch with multiple persisted Quick Start entries keeps the
+36. Verify a branch with multiple persisted Quick Start entries keeps the
    compact `Resume` / `Start new` labels while moving selection, and a
    single-entry Quick Start keeps the same compact action copy.
-36. Verify the wizard popup no longer shows a separate `Step N/M` row above
+37. Verify the wizard popup no longer shows a separate `Step N/M` row above
    the chrome and still keeps the step title in the border.
-37. Verify a single-entry Quick Start with no persisted model now promotes
+38. Verify a single-entry Quick Start with no persisted model now promotes
    only the agent label into the popup title (`Quick Start — Codex`) instead
    of inventing a `default` model placeholder.
 
@@ -110,6 +114,9 @@
 - `cargo test -p gwt-tui quick_start -- --nocapture`
 - `cargo test -p gwt-tui prepare_wizard_startup_starts_spec_prefill_at_branch_type_select -- --nocapture`
 - `cargo test -p gwt-tui build_launch_config_from_wizard -- --nocapture`
+- `cargo test -p gwt-tui load_custom_agents_from_path_parses_spec_schema -- --nocapture`
+- `cargo test -p gwt-tui build_wizard_agent_options_with_custom_agents_appends_settings_agents -- --nocapture`
+- `cargo test -p gwt-tui build_launch_config_from_wizard_with_custom_agents_uses_custom_command_and_display_name -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with -- --nocapture`
 - `cargo test -p gwt-tui session_conversion`
 
@@ -119,6 +126,9 @@
   the launch path without a trailing confirm screen.
 - Quick Start behaves like the old TUI for persisted branch history instead of
   acting as a static placeholder.
+- Config-backed custom agents now appear in `AgentSelect` after the built-in
+  entries and launch with their configured runner, display name, mode args,
+  and env vars.
 - AgentSelect and popup chrome now match the old-TUI visual contract for the
   restored branch-first flow.
 - Branch and issue input steps now follow that same contract with inline

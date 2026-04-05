@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `158/158` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T00:00:45Z`
+- Task progress: `166/166` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T04:20:08Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -121,7 +121,13 @@
 - Existing-branch `AgentSelect` now uses the same compact branch-name line as
   `QuickStart`, and the first agent row starts directly below that context
   instead of after an extra spacer row.
+- Wizard startup now reads valid `[tools.customCodingAgents.*]` entries from
+  `~/.gwt/config.toml`, appends them after the built-in AgentSelect entries,
+  and builds launches from the configured command/path/bunx runner plus mode
+  args and env vars.
 
 ## Next
+- Finish the `Settings > Custom Agents` CRUD UI so US-4 can move from
+  `PARTIALLY IMPLEMENTED` to `IMPLEMENTED`.
 - Run the manual reviewer flow in `quickstart.md` and close the remaining
   acceptance checklist items.

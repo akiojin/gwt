@@ -110,7 +110,7 @@ As a developer, I want to quickly re-launch a previous agent session configurati
 4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own compact action rows, `Resume`, `Start new`, and a final `Choose different` row in the old-TUI layout.
 5. Given the selected history entry has a persisted resume session ID, when I choose `Resume`, then launch configuration restores `Resume` mode with that session ID. When no resume session ID exists, the wizard falls back to `Continue`.
 
-### US-4: Manage Custom Agents (P1) -- IMPLEMENTED
+### US-4: Manage Custom Agents (P1) -- PARTIALLY IMPLEMENTED
 
 As a developer, I want to add, edit, and remove custom agents via Settings so that I can use agents not built into gwt.
 

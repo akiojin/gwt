@@ -295,3 +295,11 @@
 - [x] T153 [P] Write RED test: multi-entry `QuickStart` renders the plain `Start new` row two columns deeper than the paired `Resume` row.
 - [x] T154 Update `wizard.rs` so multi-entry `Start new` rows render with a child-action indent while single-entry rendering stays unchanged.
 - [x] T155 Verify focused quick-start indent tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 43: Config-Backed Custom Agent Runtime
+
+- [x] T156 [P] Write RED test: custom agent loader parses `[tools.customCodingAgents]` entries from config TOML.
+- [x] T157 [P] Write RED test: wizard AgentSelect appends config-backed custom agents after the built-in entries.
+- [x] T158 [P] Write RED test: custom-agent launch config uses the configured command, display name, mode args, and env vars.
+- [x] T159 Implement config-backed custom agent load/list/launch integration in `app.rs` without reopening the broader settings model.
+- [x] T160 Verify focused custom-agent tests and refresh SPEC-3 artifacts.

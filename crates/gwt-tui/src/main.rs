@@ -25,6 +25,16 @@ use gwt_tui::{
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
+    // Install a panic hook that restores the terminal before printing the
+    // backtrace.  Without this, panics leave the terminal in raw/alt-screen
+    // mode and the error message is invisible.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture,);
+        default_hook(info);
+    }));
+
     // Parse CLI args: optional repo path
     let repo_path = std::env::args()
         .nth(1)
@@ -89,6 +99,31 @@ fn run_app(
     if model.active_layer != ActiveLayer::Initialization {
         app::load_initial_data(&mut model);
     }
+
+    // Spawn PTY for the default shell-0 session.
+    if model.active_layer != ActiveLayer::Initialization {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let (cols, rows) = model.terminal_size();
+        let config = gwt_terminal::pty::SpawnConfig {
+            command: shell,
+            args: vec![],
+            cols,
+            rows,
+            env: std::collections::HashMap::new(),
+            cwd: Some(model.repo_path().to_path_buf()),
+        };
+        if let Err(e) = app::spawn_pty_for_session(&mut model, "shell-0", config) {
+            app::update(
+                &mut model,
+                Message::Notify(Notification::new(
+                    Severity::Error,
+                    "pty",
+                    format!("Default shell spawn failed: {e}"),
+                )),
+            );
+        }
+    }
+
     let mut keybinds = KeybindRegistry::new();
 
     loop {
@@ -117,7 +152,15 @@ fn run_app(
             // Update: process message
             app::update(&mut model, msg);
         }
+
+        // Drain PTY output from background reader threads
+        for (session_id, data) in model.drain_pty_output() {
+            app::update(&mut model, Message::PtyOutput(session_id, data));
+        }
     }
+
+    // Kill all live PTY processes on shutdown.
+    model.kill_all_pty();
 
     if model.active_layer != ActiveLayer::Initialization {
         let session_state_path = Model::session_state_path(model.repo_path());

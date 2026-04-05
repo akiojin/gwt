@@ -1,6 +1,6 @@
 //! Model — central application state for the Elm Architecture.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -331,7 +331,6 @@ impl VtState {
 }
 
 /// Central application state.
-#[derive(Debug)]
 pub struct Model {
     /// Active status-bar notification (Info/Warn surface).
     pub(crate) current_notification: Option<Notification>,
@@ -405,8 +404,27 @@ pub struct Model {
     pub(crate) voice_runtime: VoiceRuntimeState,
     /// Buffered PTY input generated from forwarded key events.
     pub(crate) pending_pty_inputs: VecDeque<PendingPtyInput>,
+    /// Live PTY handles keyed by session id.
+    pub(crate) pty_handles: HashMap<String, gwt_terminal::PtyHandle>,
+    /// Sender for PTY output from background reader threads.
+    pub(crate) pty_output_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
+    /// Receiver for PTY output drained in the event loop.
+    pub(crate) pty_output_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
     /// Initialization screen state (present when ActiveLayer::Initialization).
     pub(crate) initialization: Option<InitializationState>,
+}
+
+impl std::fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Model")
+            .field("active_layer", &self.active_layer)
+            .field("active_focus", &self.active_focus)
+            .field("sessions", &self.sessions.len())
+            .field("active_session", &self.active_session)
+            .field("pty_handles", &self.pty_handles.len())
+            .field("repo_path", &self.repo_path)
+            .finish()
+    }
 }
 
 impl Model {
@@ -419,6 +437,7 @@ impl Model {
             vt: VtState::new(24, 80),
         };
         let (notification_bus, notification_receiver) = NotificationBus::new();
+        let (pty_output_tx, pty_output_rx) = std::sync::mpsc::channel();
         Self {
             current_notification: None,
             current_notification_ttl: None,
@@ -456,6 +475,9 @@ impl Model {
             voice: VoiceInputState::default(),
             voice_runtime: VoiceRuntimeState::default(),
             pending_pty_inputs: VecDeque::new(),
+            pty_handles: HashMap::new(),
+            pty_output_tx,
+            pty_output_rx,
             initialization: None,
         }
     }
@@ -472,6 +494,10 @@ impl Model {
     ///
     /// Transitions to Management layer, discarding all previous state.
     pub fn reset(&mut self, repo_path: PathBuf) {
+        // Kill all live PTY processes before discarding handles.
+        for (_, pty) in self.pty_handles.drain() {
+            let _ = pty.kill();
+        }
         let terminal_size = self.terminal_size;
         *self = Self::new(repo_path);
         self.terminal_size = terminal_size;
@@ -504,6 +530,28 @@ impl Model {
         &self.pending_pty_inputs
     }
 
+    /// Current terminal size `(cols, rows)`.
+    pub fn terminal_size(&self) -> (u16, u16) {
+        self.terminal_size
+    }
+
+    /// Drain PTY output from background reader threads.
+    ///
+    /// Returns an iterator of `(session_id, data)` chunks ready for dispatch.
+    pub fn drain_pty_output(&self) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        while let Ok(item) = self.pty_output_rx.try_recv() {
+            out.push(item);
+        }
+        out
+    }
+
+    /// Kill and remove all live PTY handles.
+    pub fn kill_all_pty(&mut self) {
+        for (_, pty) in self.pty_handles.drain() {
+            let _ = pty.kill();
+        }
+    }
 
     /// Cloneable handle for sending notifications into the TUI.
     #[allow(dead_code)]

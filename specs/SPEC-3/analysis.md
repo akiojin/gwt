@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `161/161` completed items.
+- Task traceability snapshot: `tasks.md` now records `166/166` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -105,6 +105,12 @@ Status: CLEAR
 - Notes: Existing-branch `AgentSelect` now uses the same compact branch-name
   context line as `QuickStart`, which removes the rebuilt `Branch: ...`
   prefix and the extra spacer row before the agent list.
+- Notes: Valid `[tools.customCodingAgents.*]` entries in
+  `~/.gwt/config.toml` now load into the wizard and launch path, so config-
+  backed custom agents can be selected and started with their configured
+  command/path/bunx runner plus mode args and env vars.
+- Notes: US-4 remains `PARTIALLY IMPLEMENTED` because the Settings-side CRUD
+  UI still needs to move beyond the current placeholder category fields.
 
 ## Next
 - `gwt-spec-implement`
