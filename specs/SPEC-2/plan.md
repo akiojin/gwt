@@ -613,6 +613,21 @@ active tab alone.
 44.3: Verification (1 task)
 - Re-run focused and broad workspace verification, then refresh SPEC-2 artifacts and progress tracking.
 
+### Phase 45: Default Branches Filter To Local (5 tasks)
+Close the remaining mismatch between the intended branch-first workflow and the initial Branches
+view by making the screen open on local branches instead of `All`.
+
+45.1: Initial-view contract (2 tasks)
+- Change the default `Branches` filter from `All` to `Local`.
+- Keep the existing `m` / view-mode cycle semantics, but start the cycle from `Local`.
+
+45.2: Coverage and artifact sync (2 tasks)
+- Add RED coverage proving the default Branches state starts in `Local` and that the cycle still reaches `Remote` and `All`.
+- Refresh reviewer guidance and snapshots so the initial management render shows `View: Local`.
+
+45.3: Verification (1 task)
+- Re-run broad workspace verification, snapshot verification, and refresh SPEC-2 progress artifacts.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

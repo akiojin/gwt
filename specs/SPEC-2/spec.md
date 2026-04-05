@@ -124,6 +124,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006h**: When the management pane is too narrow to fit the full tab strip in the pane title, the title keeps the active management tab plus its nearest visible neighbors instead of collapsing to the active tab only. Hidden tabs are indicated with ellipsis so the current position in the strip stays legible without showing a truncated strip.
 - **FR-006i**: Branch list cursor movement is non-cyclic: `Up` on the first visible branch keeps the selection on the first row, and `Down` on the last visible branch keeps the selection on the last row.
 - **FR-006j**: In `Branches` view mode `All`, local branches are listed before remote branches. The active sort mode still applies within the local and remote groups.
+- **FR-006k**: The default `Branches` view filter is `Local`, so the initial management view opens on local branches without requiring an extra toggle from `All`.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-009**: Session navigation: Ctrl+G,] (next), Ctrl+G,[ (prev), Ctrl+G,1-9 (direct).

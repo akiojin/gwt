@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `262/262` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T12:35:33Z`
+- Task progress: `273/273` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T13:18:00Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -52,6 +52,8 @@
 - Branch Detail now prefetches detail data asynchronously and caches it per branch, so startup/refresh can repopulate details without putting Docker/git/spec filesystem reads on the cursor-move input path.
 - Management focus cycling now also accepts both real-world reverse-tab encodings: `BackTab` and `Tab` with the Shift modifier both move focus backward as documented.
 - Startup now synchronizes the live terminal frame size into the model before the default shell PTY is spawned, so the right-side session pane starts with the correct geometry instead of stale `80x24` dimensions.
+- The default `Branches` filter now opens in `Local`, and the `m` view-mode cycle continues through `Remote` and `All`, so the first management view is immediately scoped to worktree-focused branches.
+- Reviewer guidance and snapshots now show `View: Local` on the initial Branches surface, keeping the documented startup state aligned with the shipped UI.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

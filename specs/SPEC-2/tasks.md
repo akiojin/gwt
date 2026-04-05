@@ -450,3 +450,11 @@ banner in favor of pane-title chrome.
 - [x] T287 [P] Write RED test: standard-width management pane titles keep the active tab plus nearby tabs visible instead of collapsing to the active label only.
 - [x] T288 Update `branches.rs` and `app.rs` to stop Branches-list wraparound, apply local-first ordering in `All`, and render nearby-tab management titles with ellipsis when tabs are hidden.
 - [x] T289 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the Branches and management-title visibility fixes.
+
+## Phase 45: Default Branches Filter To Local
+
+- [x] T290 [P] Write RED test: Branches default state starts in `ViewMode::Local`.
+- [x] T291 [P] Write RED test: the Branches view-mode cycle now starts at `Local` and still reaches `Remote` and `All`.
+- [x] T292 [P] Refresh reviewer guidance and snapshots so the initial Branches surface shows `View: Local`.
+- [x] T293 Update `branches.rs` so the default `ViewMode` is `Local` without changing the rest of the filter behavior.
+- [x] T294 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the default-local Branches filter.

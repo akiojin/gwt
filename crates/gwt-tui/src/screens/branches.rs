@@ -42,8 +42,8 @@ impl SortMode {
 /// View mode filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    #[default]
     All,
+    #[default]
     Local,
     Remote,
 }
@@ -1179,7 +1179,7 @@ mod tests {
         assert!(state.branches.is_empty());
         assert_eq!(state.selected, 0);
         assert_eq!(state.sort_mode, SortMode::Default);
-        assert_eq!(state.view_mode, ViewMode::All);
+        assert_eq!(state.view_mode, ViewMode::Local);
         assert!(state.search_query.is_empty());
         assert!(!state.search_active);
     }
@@ -1188,6 +1188,7 @@ mod tests {
     fn move_down_stops_at_last_row() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         assert_eq!(state.selected, 0);
 
         update(&mut state, BranchesMessage::MoveDown);
@@ -1246,9 +1247,6 @@ mod tests {
     #[test]
     fn toggle_view_cycles() {
         let mut state = BranchesState::default();
-        assert_eq!(state.view_mode, ViewMode::All);
-
-        update(&mut state, BranchesMessage::ToggleView);
         assert_eq!(state.view_mode, ViewMode::Local);
 
         update(&mut state, BranchesMessage::ToggleView);
@@ -1256,6 +1254,9 @@ mod tests {
 
         update(&mut state, BranchesMessage::ToggleView);
         assert_eq!(state.view_mode, ViewMode::All);
+
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.view_mode, ViewMode::Local);
     }
 
     #[test]
@@ -1298,7 +1299,7 @@ mod tests {
         state.selected = 99;
         update(&mut state, BranchesMessage::SetBranches(sample_branches()));
         assert_eq!(state.branches.len(), 5);
-        assert_eq!(state.selected, 4); // clamped
+        assert_eq!(state.selected, 3); // clamped to last visible local row
     }
 
     #[test]
@@ -1332,6 +1333,7 @@ mod tests {
     fn filtered_branches_respects_search() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         state.search_query = "feature".to_string();
 
         let filtered = state.filtered_branches();
@@ -1388,6 +1390,7 @@ mod tests {
     fn sort_name_returns_alphabetical_order_within_local_and_remote_groups() {
         let mut state = BranchesState::default();
         state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
         state.sort_mode = SortMode::Name;
 
         let filtered = state.filtered_branches();
@@ -1407,6 +1410,7 @@ mod tests {
     fn sort_name_keeps_local_branches_before_remote_branches() {
         let mut state = BranchesState::default();
         state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
         state.sort_mode = SortMode::Name;
 
         let filtered = state.filtered_branches();
@@ -1426,6 +1430,7 @@ mod tests {
     fn sort_default_keeps_local_branches_before_remote_branches() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         state.sort_mode = SortMode::Default;
 
         let filtered = state.filtered_branches();
@@ -1446,6 +1451,7 @@ mod tests {
     fn sort_date_returns_alphabetical_fallback_within_local_and_remote_groups() {
         let mut state = BranchesState::default();
         state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
         state.sort_mode = SortMode::Date;
 
         let filtered = state.filtered_branches();
@@ -1465,6 +1471,7 @@ mod tests {
     fn sort_date_keeps_local_branches_before_remote_branches() {
         let mut state = BranchesState::default();
         state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
         state.sort_mode = SortMode::Date;
 
         let filtered = state.filtered_branches();
@@ -1484,6 +1491,7 @@ mod tests {
     fn search_then_navigate_selects_filtered_item() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
 
         // Search for "feature" — matches feature/login and origin/feature/api
         update(&mut state, BranchesMessage::SearchStart);
@@ -1520,6 +1528,7 @@ mod tests {
     fn view_toggle_clamps_selected() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         state.selected = 4; // last item (Other)
 
         // Switch to Remote — only 1 item

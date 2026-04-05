@@ -5,8 +5,8 @@
 2. Move across terminal tabs and split panes using the documented keybindings.
 3. Open the management panel and verify the visible tabs match the current product shell, including the Git View tab and without assuming a live Specs tab.
 4. Press `Ctrl+G,?`, confirm the help overlay lists the current registered shortcuts grouped by category, and dismiss it with `Esc`.
-5. Return to Branches with `Ctrl+G,b`, confirm focus lands on the branch list, and verify the footer now advertises `Enter`, `Shift+Enter`, `Space`, `Ctrl+C`, `m`, `v`, `f`, and `?`.
-6. On Branches, verify rows render as a flat list with inline worktree and HEAD indicators, then confirm `Enter` opens the wizard, `Shift+Enter` opens a shell for a worktree branch, `Space` moves focus to the detail pane, and `Ctrl+C` opens delete confirmation.
+5. Return to Branches with `Ctrl+G,b`, confirm focus lands on the branch list, verify the default view mode is `Local`, and verify the footer now advertises `Enter`, `Shift+Enter`, `Space`, `Ctrl+C`, `m`, `v`, `f`, and `?`.
+6. On Branches, verify rows render as a flat list with inline worktree and HEAD indicators, local branches are shown by default, and `Enter` opens the wizard, `Shift+Enter` opens a shell for a worktree branch, `Space` moves focus to the detail pane, and `Ctrl+C` opens delete confirmation.
 7. While still on Branches, verify `m` cycles the local view mode, `v` jumps directly to Git View, `f` opens search input, and both `?` and `h` open the help overlay.
 8. Open Git View, confirm recent commits are listed for a non-empty repository, and press `r` to refresh after making a working-tree change.
 9. Toggle split/grid, switch the active management tab, quit, and restart `gwt-tui`; confirm the layout and visible panel state restore from the saved session file.

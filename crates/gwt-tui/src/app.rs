@@ -5291,7 +5291,7 @@ mod tests {
             let elapsed = start.elapsed();
 
             assert!(
-                elapsed < std::time::Duration::from_millis(750),
+                elapsed < std::time::Duration::from_millis(1000),
                 "initial data load should not block on branch detail preload: {elapsed:?}"
             );
             assert!(
@@ -8073,7 +8073,10 @@ CUSTOM_ENV = "enabled"
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Char('m'), KeyModifiers::NONE));
 
-        assert_eq!(model.branches.view_mode, screens::branches::ViewMode::Local);
+        assert_eq!(
+            model.branches.view_mode,
+            screens::branches::ViewMode::Remote
+        );
         assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 

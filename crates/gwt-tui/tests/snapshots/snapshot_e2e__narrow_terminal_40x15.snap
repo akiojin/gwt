@@ -3,7 +3,7 @@ source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
 ┌ Branches │...────┐┌ ▶ Shell ─────────┐
-│ View: All │ Sort:││Session: Shell (80│
+│ View: Local │ Sor││Session: Shell (80│
 │No branches loaded││                  │
 │                  ││                  │
 │                  ││                  │

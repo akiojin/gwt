@@ -3,11 +3,11 @@ source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
 ┌ Branches │ Specs │ Issues │...───────┐┌ ▶ Shell ─────────────────────────────┐
-│ View: All │ Sort: Default            ││Session: Shell (80x24)                │
+│ View: Local │ Sort: Default          ││Session: Shell (80x24)                │
 │main ○ *                              ││                                      │
 │feature/api ○                         ││                                      │
 │feature/app-shell ○                   ││                                      │
-│origin/release/1.0 ○                  ││                                      │
+│                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
