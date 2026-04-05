@@ -1595,12 +1595,15 @@ fn check_branch_pending_actions(model: &mut Model) {
         if let Some(branch) = model.branches.selected_branch() {
             let branch_name = branch.name.clone();
             let worktree_path = branch.worktree_path.clone();
+            let quick_start_root = worktree_path
+                .clone()
+                .unwrap_or_else(|| model.repo_path.clone());
             open_wizard(model, None);
             if let Some(ref mut wizard) = model.wizard {
                 wizard.worktree_path = worktree_path;
                 configure_existing_branch_wizard_with_sessions(
                     wizard,
-                    &model.repo_path,
+                    &quick_start_root,
                     &gwt_sessions_dir(),
                     &branch_name,
                 );
@@ -3023,22 +3026,23 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
 }
 
 fn f_key_to_bytes(n: u8) -> Option<Vec<u8>> {
-    let code = match n {
-        1 => "11",
-        2 => "12",
-        3 => "13",
-        4 => "14",
-        5 => "15",
-        6 => "17",
-        7 => "18",
-        8 => "19",
-        9 => "20",
-        10 => "21",
-        11 => "23",
-        12 => "24",
-        _ => return None,
-    };
-    Some(format!("\x1b[{code}~").into_bytes())
+    match n {
+        // F1-F4: SS3 sequences (xterm PC-style default)
+        1 => Some(b"\x1bOP".to_vec()),
+        2 => Some(b"\x1bOQ".to_vec()),
+        3 => Some(b"\x1bOR".to_vec()),
+        4 => Some(b"\x1bOS".to_vec()),
+        // F5-F12: CSI sequences
+        5 => Some(b"\x1b[15~".to_vec()),
+        6 => Some(b"\x1b[17~".to_vec()),
+        7 => Some(b"\x1b[18~".to_vec()),
+        8 => Some(b"\x1b[19~".to_vec()),
+        9 => Some(b"\x1b[20~".to_vec()),
+        10 => Some(b"\x1b[21~".to_vec()),
+        11 => Some(b"\x1b[23~".to_vec()),
+        12 => Some(b"\x1b[24~".to_vec()),
+        _ => None,
+    }
 }
 
 fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
