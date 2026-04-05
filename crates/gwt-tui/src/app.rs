@@ -32,8 +32,8 @@ use crate::{
     input::voice::VoiceInputMessage,
     message::Message,
     model::{
-        ActiveLayer, DockerProgressQueue, DockerProgressResult, FocusPane, ManagementTab, Model,
-        PendingSessionConversion, SessionLayout, SessionTabType,
+        ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
+        ManagementTab, Model, PendingSessionConversion, SessionLayout, SessionTabType,
     },
     screens,
 };
@@ -284,6 +284,7 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Tick => {
             drain_notification_bus(model);
             drain_docker_progress_events(model);
+            drain_branch_detail_events(model);
             tick_notification(model);
             check_pty_exits(model);
             // Forward tick to wizard (AI suggest spinner) when active
@@ -587,9 +588,7 @@ pub fn load_initial_data(model: &mut Model) {
         }
     }
 
-    // Load detail for initially selected branch
-    let repo_path = model.repo_path.clone();
-    screens::branches::load_branch_detail(&mut model.branches, &repo_path);
+    schedule_branch_detail_prefetch(model);
 
     // -- Specs --
     load_specs(model);
@@ -1163,8 +1162,6 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Char('m') => {
             screens::branches::update(&mut model.branches, BranchesMessage::ToggleView);
-            let repo_path = model.repo_path.clone();
-            screens::branches::load_branch_detail(&mut model.branches, &repo_path);
             None
         }
         KeyCode::Char('v') => {
@@ -1248,7 +1245,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 }
             }
 
-            let is_cursor_move = matches!(key.code, KeyCode::Down | KeyCode::Up);
             let msg = match key.code {
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                     Some(BranchesMessage::OpenShell)
@@ -1281,17 +1277,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     return;
                 }
                 KeyCode::Char('r') => {
-                    load_initial_data(model);
+                    refresh_branches(model);
                     return;
                 }
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::branches::update(&mut model.branches, m);
-                if is_cursor_move {
-                    let repo_path = model.repo_path.clone();
-                    screens::branches::load_branch_detail(&mut model.branches, &repo_path);
-                }
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -1974,8 +1966,7 @@ fn drain_docker_progress_events(model: &mut Model) {
                 screens::docker_progress::DockerStage::Ready,
                 message.clone(),
             );
-            let repo_path = model.repo_path.clone();
-            screens::branches::load_branch_detail(&mut model.branches, &repo_path);
+            schedule_branch_detail_prefetch(model);
             update(
                 model,
                 Message::Notify(Notification::new(Severity::Info, "docker", message)),
@@ -1995,6 +1986,95 @@ fn drain_docker_progress_events(model: &mut Model) {
                 ),
             );
         }
+    }
+}
+
+fn refresh_branches(model: &mut Model) {
+    if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
+        let items: Vec<screens::branches::BranchItem> = branches
+            .iter()
+            .map(|branch| screens::branches::BranchItem {
+                name: branch.name.clone(),
+                is_head: branch.is_head,
+                is_local: branch.is_local,
+                category: screens::branches::categorize_branch(&branch.name),
+                worktree_path: None,
+            })
+            .collect();
+        screens::branches::update(
+            &mut model.branches,
+            screens::branches::BranchesMessage::SetBranches(items),
+        );
+    }
+
+    if let Ok(worktrees) = gwt_git::WorktreeManager::new(&model.repo_path).list() {
+        for wt in &worktrees {
+            if let Some(ref branch_name) = wt.branch {
+                if let Some(item) = model
+                    .branches
+                    .branches
+                    .iter_mut()
+                    .find(|branch| &branch.name == branch_name)
+                {
+                    item.worktree_path = Some(wt.path.clone());
+                }
+            }
+        }
+    }
+
+    let synced_branches = model.branches.branches.clone();
+    screens::branches::update(
+        &mut model.branches,
+        screens::branches::BranchesMessage::SetBranches(synced_branches),
+    );
+    schedule_branch_detail_prefetch(model);
+}
+
+fn schedule_branch_detail_prefetch(model: &mut Model) {
+    let (generation, branches) = model.branches.begin_detail_refresh();
+    let events = Arc::new(Mutex::new(VecDeque::new()));
+    model.branch_detail_events = Some(events.clone());
+    spawn_branch_detail_worker(events, generation, branches);
+}
+
+fn spawn_branch_detail_worker(
+    events: BranchDetailQueue,
+    generation: u64,
+    branches: Vec<screens::branches::BranchItem>,
+) {
+    thread::spawn(move || {
+        for branch in branches {
+            let data = screens::branches::load_branch_detail(&branch);
+            if let Ok(mut queue) = events.lock() {
+                queue.push_back(screens::branches::BranchDetailLoadResult {
+                    generation,
+                    branch_name: branch.name.clone(),
+                    data,
+                });
+            }
+        }
+    });
+}
+
+fn drain_branch_detail_events(model: &mut Model) {
+    let Some(events) = model.branch_detail_events.as_ref().cloned() else {
+        return;
+    };
+
+    loop {
+        let event = events.lock().ok().and_then(|mut queue| queue.pop_front());
+        let Some(event) = event else {
+            return;
+        };
+
+        if event.generation != model.branches.detail_generation {
+            continue;
+        }
+        if !model.branches.knows_branch(&event.branch_name) {
+            continue;
+        }
+
+        model.branches.cache_detail(event.branch_name, event.data);
     }
 }
 
@@ -4071,7 +4151,7 @@ mod tests {
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
         let _guard = crate::DOCKER_ENV_TEST_LOCK
             .lock()
-            .expect("lock docker tests");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_dir, script_path) = write_fake_docker(script_body);
         let previous = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", &script_path);
@@ -4096,6 +4176,18 @@ mod tests {
         }
 
         panic!("timed out waiting for docker worker: {context}");
+    }
+
+    fn drive_ticks_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
+        for _ in 0..80 {
+            update(model, Message::Tick);
+            if done(model) {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        panic!("timed out waiting for ticks: {context}");
     }
 
     #[test]
@@ -5092,6 +5184,40 @@ mod tests {
         assert_eq!(model.specs.specs[0].id, "SPEC-2");
         assert_eq!(model.specs.specs[1].id, "SPEC-9");
         assert_eq!(model.specs.specs[0].title, "Earlier spec");
+    }
+
+    #[test]
+    fn load_initial_data_prefetches_branch_detail_async() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+
+            let start = std::time::Instant::now();
+            load_initial_data(&mut model);
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(750),
+                "initial data load should not block on branch detail preload: {elapsed:?}"
+            );
+            assert!(
+                model.branches.docker_containers.is_empty(),
+                "branch detail docker data should arrive asynchronously"
+            );
+
+            drive_ticks_until(
+                &mut model,
+                |model| !model.branches.docker_containers.is_empty(),
+                "branch detail preload",
+            );
+
+            assert_eq!(model.branches.docker_containers[0].name, "web");
+        });
     }
 
     #[test]
@@ -7323,6 +7449,41 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn route_key_to_management_branches_refresh_does_not_block_on_detail_reload() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+            model.management_tab = ManagementTab::Branches;
+
+            let start = std::time::Instant::now();
+            route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(150),
+                "Branches refresh should not block on branch detail reload: {elapsed:?}"
+            );
+            assert!(
+                model.branches.docker_containers.is_empty(),
+                "detail refresh should update docker data asynchronously"
+            );
+
+            drive_ticks_until(
+                &mut model,
+                |model| !model.branches.docker_containers.is_empty(),
+                "branch detail refresh",
+            );
+
+            assert_eq!(model.branches.docker_containers[0].name, "web");
+        });
+    }
+
+    #[test]
     fn update_toggle_help_flips_overlay_visibility() {
         let mut model = test_model();
         assert!(!model.help_visible);
@@ -7472,6 +7633,45 @@ CUSTOM_ENV = "enabled"
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(model.branches.docker_selected, 0);
+    }
+
+    #[test]
+    fn route_key_to_management_branches_down_does_not_block_on_detail_reload() {
+        let wt_a = tempfile::tempdir().expect("worktree a");
+        let wt_b = tempfile::tempdir().expect("worktree b");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = test_model();
+            model.management_tab = ManagementTab::Branches;
+            model.active_focus = FocusPane::TabContent;
+            model.branches.branches = vec![
+                screens::branches::BranchItem {
+                    name: "feature/a".to_string(),
+                    is_head: false,
+                    is_local: true,
+                    category: screens::branches::BranchCategory::Feature,
+                    worktree_path: Some(wt_a.path().to_path_buf()),
+                },
+                screens::branches::BranchItem {
+                    name: "feature/b".to_string(),
+                    is_head: false,
+                    is_local: true,
+                    category: screens::branches::BranchCategory::Feature,
+                    worktree_path: Some(wt_b.path().to_path_buf()),
+                },
+            ];
+
+            let start = std::time::Instant::now();
+            route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(150),
+                "Branches cursor movement should not block on detail reload: {elapsed:?}"
+            );
+            assert_eq!(model.branches.selected, 1);
+        });
     }
 
     #[test]
@@ -7944,6 +8144,20 @@ CUSTOM_ENV = "enabled"
                     model.docker_progress_events.is_none() && model.current_notification.is_some()
                 },
                 "docker stop completion",
+            );
+
+            drive_ticks_until(
+                &mut model,
+                |model| {
+                    model
+                        .branches
+                        .docker_containers
+                        .first()
+                        .is_some_and(|container| {
+                            container.status == gwt_docker::ContainerStatus::Exited
+                        })
+                },
+                "branch detail refresh after docker stop",
             );
 
             assert_eq!(model.branches.docker_containers.len(), 1);

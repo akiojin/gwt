@@ -1,5 +1,7 @@
 //! Branches management screen.
 
+use std::collections::{HashMap, HashSet};
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -144,6 +146,23 @@ pub struct PendingDockerAction {
     pub action: DockerLifecycleAction,
 }
 
+/// Cached detail payload for a branch.
+#[derive(Debug, Clone, Default)]
+pub struct BranchDetailData {
+    pub specs: Vec<DetailSpecItem>,
+    pub files: Vec<String>,
+    pub commits: Vec<String>,
+    pub docker_containers: Vec<gwt_docker::ContainerInfo>,
+}
+
+/// Background detail-load result for a single branch.
+#[derive(Debug, Clone)]
+pub struct BranchDetailLoadResult {
+    pub generation: u64,
+    pub branch_name: String,
+    pub data: BranchDetailData,
+}
+
 /// Number of detail sections in the branch detail view.
 const DETAIL_SECTION_COUNT: usize = 4;
 
@@ -187,6 +206,12 @@ pub struct BranchesState {
     pub(crate) docker_selected: usize,
     /// Pending Docker action intent to be handled by the caller.
     pub(crate) pending_docker_action: Option<PendingDockerAction>,
+    /// Cached branch detail payloads keyed by branch name.
+    pub(crate) detail_cache: HashMap<String, BranchDetailData>,
+    /// Branches currently being loaded in the background.
+    pub(crate) loading_branches: HashSet<String>,
+    /// Monotonic generation used to discard stale async detail results.
+    pub(crate) detail_generation: u64,
 }
 
 impl BranchesState {
@@ -241,6 +266,92 @@ impl BranchesState {
     fn selected_docker_container(&self) -> Option<&gwt_docker::ContainerInfo> {
         self.docker_containers.get(self.docker_selected)
     }
+
+    fn selected_branch_name(&self) -> Option<String> {
+        self.selected_branch().map(|branch| branch.name.clone())
+    }
+
+    fn apply_detail_data(&mut self, data: &BranchDetailData, reset_docker_selection: bool) {
+        self.detail_specs = data.specs.clone();
+        self.detail_files = data.files.clone();
+        self.detail_commits = data.commits.clone();
+        self.docker_containers = data.docker_containers.clone();
+        if reset_docker_selection {
+            self.docker_selected = 0;
+        }
+        self.clamp_docker_selected();
+        self.pending_docker_action = None;
+    }
+
+    fn clear_visible_detail(&mut self) {
+        self.detail_specs.clear();
+        self.detail_files.clear();
+        self.detail_commits.clear();
+        self.docker_containers.clear();
+        self.docker_selected = 0;
+        self.pending_docker_action = None;
+    }
+
+    fn sync_selected_detail_from_cache(&mut self, reset_docker_selection: bool) {
+        let Some(branch_name) = self.selected_branch_name() else {
+            self.clear_visible_detail();
+            return;
+        };
+
+        let cached = self.detail_cache.get(&branch_name).cloned();
+        if let Some(data) = cached {
+            self.apply_detail_data(&data, reset_docker_selection);
+        } else {
+            self.clear_visible_detail();
+        }
+    }
+
+    fn prune_detail_cache(&mut self) {
+        let branch_names: HashSet<String> = self
+            .branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect();
+        self.detail_cache
+            .retain(|branch_name, _| branch_names.contains(branch_name));
+        self.loading_branches
+            .retain(|branch_name| branch_names.contains(branch_name));
+    }
+
+    pub(crate) fn begin_detail_refresh(&mut self) -> (u64, Vec<BranchItem>) {
+        self.detail_generation = self.detail_generation.wrapping_add(1);
+        self.loading_branches = self
+            .branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect();
+        self.sync_selected_detail_from_cache(false);
+        (self.detail_generation, self.branches.clone())
+    }
+
+    pub(crate) fn cache_detail(&mut self, branch_name: String, data: BranchDetailData) {
+        let selected_branch = self.selected_branch_name();
+        let is_selected = selected_branch.as_deref() == Some(branch_name.as_str());
+        self.loading_branches.remove(&branch_name);
+        self.detail_cache.insert(branch_name, data.clone());
+        if is_selected {
+            self.apply_detail_data(&data, false);
+        }
+    }
+
+    pub(crate) fn selected_detail_loading(&self) -> bool {
+        let Some(branch_name) = self.selected_branch_name() else {
+            return false;
+        };
+        self.loading_branches.contains(&branch_name)
+            && !self.detail_cache.contains_key(&branch_name)
+    }
+
+    pub(crate) fn knows_branch(&self, branch_name: &str) -> bool {
+        self.branches
+            .iter()
+            .any(|branch| branch.name == branch_name)
+    }
 }
 
 /// Messages specific to the branches screen.
@@ -286,11 +397,13 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             let len = state.filtered_branches().len();
             super::move_up(&mut state.selected, len);
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::MoveDown => {
             let len = state.filtered_branches().len();
             super::move_down(&mut state.selected, len);
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::Select => {
             if !state.filtered_branches().is_empty() {
@@ -300,11 +413,13 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::ToggleSort => {
             state.sort_mode = state.sort_mode.next();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::ToggleView => {
             state.view_mode = state.view_mode.next();
             state.clamp_selected();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::SearchStart => {
             state.search_active = true;
@@ -314,6 +429,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 state.search_query.push(ch);
                 state.clamp_selected();
                 state.detail_session_selected = 0;
+                state.sync_selected_detail_from_cache(true);
             }
         }
         BranchesMessage::SearchBackspace => {
@@ -321,6 +437,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 state.search_query.pop();
                 state.clamp_selected();
                 state.detail_session_selected = 0;
+                state.sync_selected_detail_from_cache(true);
             }
         }
         BranchesMessage::SearchClear => {
@@ -328,14 +445,17 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             state.search_active = false;
             state.clamp_selected();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::Refresh => {
             // Signal to reload branches — handled by caller
         }
         BranchesMessage::SetBranches(branches) => {
             state.branches = branches;
+            state.prune_detail_cache();
             state.clamp_selected();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::NextDetailSection => {
             state.detail_section = (state.detail_section + 1) % DETAIL_SECTION_COUNT;
@@ -393,28 +513,18 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     }
 }
 
-/// Load detail data (SPECs, git status, commits) for the selected branch.
+/// Load detail data (SPECs, git status, commits, docker state) for the branch.
 ///
 /// Best-effort: all errors are silently ignored.
-pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Path) {
-    state.detail_specs.clear();
-    state.detail_files.clear();
-    state.detail_commits.clear();
-    state.docker_containers.clear();
-    state.docker_selected = 0;
-    state.pending_docker_action = None;
+pub fn load_branch_detail(branch: &BranchItem) -> BranchDetailData {
+    let mut detail = BranchDetailData::default();
 
     if let Ok(containers) = gwt_docker::list_containers() {
-        state.docker_containers = containers;
-        state.clamp_docker_selected();
+        detail.docker_containers = containers;
     }
 
-    let worktree_path = state
-        .selected_branch()
-        .and_then(|b| b.worktree_path.clone());
-
-    let Some(wt_path) = worktree_path else {
-        return;
+    let Some(wt_path) = branch.worktree_path.clone() else {
+        return detail;
     };
 
     // Load SPECs from worktree specs/ directory
@@ -466,12 +576,12 @@ pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Pat
             });
         }
         specs.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
-        state.detail_specs = specs;
+        detail.specs = specs;
     }
 
     // Load git status
     if let Ok(entries) = gwt_git::diff::get_status(&wt_path) {
-        state.detail_files = entries
+        detail.files = entries
             .iter()
             .map(|e| {
                 let tag = match e.status {
@@ -486,11 +596,13 @@ pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Pat
 
     // Load recent commits
     if let Ok(commits) = gwt_git::commit::recent_commits(&wt_path, 5) {
-        state.detail_commits = commits
+        detail.commits = commits
             .iter()
             .map(|c| format!("{} {}", c.hash, c.subject))
             .collect();
     }
+
+    detail
 }
 
 fn spec_sort_key(spec_id: &str) -> (u64, String) {
@@ -658,7 +770,9 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
 
     lines.push(String::new());
     lines.push(" Docker status".to_string());
-    if state.docker_containers.is_empty() {
+    if state.selected_detail_loading() {
+        lines.push(" Loading branch details...".to_string());
+    } else if state.docker_containers.is_empty() {
         lines.push(" No containers found".to_string());
     } else if let Some(container) = state.selected_docker_container() {
         lines.push(format!(" Selected: {}", container.name));
@@ -715,6 +829,12 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
     }
 
     if state.detail_specs.is_empty() {
+        if state.selected_detail_loading() {
+            let paragraph = Paragraph::new(" Loading branch details...")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(paragraph, area);
+            return;
+        }
         let has_worktree = state
             .selected_branch()
             .and_then(|b| b.worktree_path.as_ref())
@@ -759,6 +879,13 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
     if state.selected_branch().is_none() {
         let paragraph =
             Paragraph::new(" No branch selected").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    if state.selected_detail_loading() {
+        let paragraph = Paragraph::new(" Loading branch details...")
+            .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
     }
@@ -969,7 +1096,7 @@ mod tests {
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
         let _guard = crate::DOCKER_ENV_TEST_LOCK
             .lock()
-            .expect("lock docker tests");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_dir, script_path) = write_fake_docker(script_body);
         let previous = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", &script_path);
@@ -1532,19 +1659,18 @@ mod tests {
             "#!/bin/sh\nprintf 'abc123\\tweb\\trunning\\tnginx:latest\\t0.0.0.0:8080->80/tcp\\n'\n",
             || {
                 let tmp = tempfile::tempdir().expect("create temp worktree");
-                let mut state = BranchesState::default();
-                state.branches = vec![BranchItem {
+                let branch = BranchItem {
                     name: "feature/docker".to_string(),
                     is_head: true,
                     is_local: true,
                     category: BranchCategory::Feature,
                     worktree_path: Some(tmp.path().to_path_buf()),
-                }];
+                };
 
-                load_branch_detail(&mut state, tmp.path());
+                let detail = load_branch_detail(&branch);
 
-                assert_eq!(state.docker_containers.len(), 1);
-                let container = &state.docker_containers[0];
+                assert_eq!(detail.docker_containers.len(), 1);
+                let container = &detail.docker_containers[0];
                 assert_eq!(container.id, "abc123");
                 assert_eq!(container.name, "web");
                 assert_eq!(container.status, gwt_docker::ContainerStatus::Running);

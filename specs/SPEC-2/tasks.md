@@ -426,3 +426,11 @@ banner in favor of pane-title chrome.
 - [x] T272 Update `app.rs` grid-session title rendering to include `n:` plus the session-type icon before the session label.
 - [x] T273 Refresh grid-layout snapshots and `SPEC-2` artifacts to describe split-grid title parity.
 - [x] T274 Verify focused tests, snapshot verification, broad workspace verification, and artifact sync.
+
+## Phase 42: Cache Branch Detail Data Off The Input Path
+
+- [x] T275 [P] Write RED test: `Branches` list navigation switches to cached detail immediately without synchronously reloading the newly selected branch.
+- [x] T276 [P] Write RED test: asynchronous branch-detail preload/refresh populates cached detail and updates the selected branch when results arrive.
+- [x] T277 Implement branch-detail cache plus asynchronous preload/refresh wiring in `app.rs` / `model.rs` / `branches.rs`.
+- [x] T278 Refresh `SPEC-2` artifacts and progress tracking to describe cached asynchronous branch-detail loading.
+- [x] T279 Verify focused tests, broad workspace verification, and artifact sync.

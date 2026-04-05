@@ -23,7 +23,7 @@ Complete the workspace shell with branch detail view, help overlay, session pers
 
 | Risk | Mitigation |
 |------|-----------|
-| Branch detail sections need data from multiple sources | Load on cursor move, cache per branch |
+| Branch detail sections need data from multiple sources | Prefetch asynchronously, cache per branch, refresh explicitly |
 | SPECs tab removal affects tab indexing and keybinds | Update all ManagementTab references |
 | Agent launch from detail needs simplified wizard | Reuse WizardState with branch pre-filled |
 | Worktree delete is destructive | Confirmation dialog required |
@@ -566,6 +566,21 @@ session identity cues that tab mode already exposes.
 41.3: Verification (1 task)
 - Re-run focused tests, snapshot verification, broad workspace verification, and refresh SPEC-2 artifacts.
 
+### Phase 42: Cache Branch Detail Data Off The Input Path (5 tasks)
+Remove synchronous branch-detail reloads from `Branches` navigation so the list stays responsive
+even when Docker, git status, git log, or worktree filesystem reads are slow.
+
+42.1: Cached detail contract (2 tasks)
+- Prefetch branch detail data asynchronously at startup and keep it in a branch-keyed cache.
+- Route `Branches` selection changes to cached detail only, and use `r` for asynchronous refresh.
+
+42.2: Focused coverage (2 tasks)
+- Add RED coverage that cached detail switches immediately on `Up` / `Down` without reloading from disk.
+- Add RED coverage that startup/refresh asynchronous loads populate or refresh the cache without blocking navigation.
+
+42.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and refresh SPEC-2 artifacts and progress evidence.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
@@ -577,4 +592,4 @@ session identity cues that tab mode already exposes.
 1. `cargo test -p gwt-tui` — all pass
 2. `cargo test -p gwt-tui --test snapshot_e2e` — all E2E pass
 3. `cargo clippy -p gwt-tui --all-targets -- -D warnings` — clean
-4. Manual: launch gwt-tui, navigate branches, verify detail panel updates on cursor move
+4. Manual: launch gwt-tui, navigate branches, verify cached detail switches immediately on cursor move and `r` refresh repopulates details asynchronously

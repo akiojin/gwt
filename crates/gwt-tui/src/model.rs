@@ -11,7 +11,7 @@ use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
 use serde::{Deserialize, Serialize};
 
 use crate::input::voice::VoiceInputState;
-use crate::screens::branches::BranchesState;
+use crate::screens::branches::{BranchDetailLoadResult, BranchesState};
 use crate::screens::confirm::ConfirmState;
 use crate::screens::docker_progress::DockerProgressState;
 use crate::screens::git_view::GitViewState;
@@ -262,6 +262,9 @@ pub struct PendingSessionConversion {
 /// Shared queue of terminal Docker lifecycle results produced in the background.
 pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
 
+/// Shared queue of branch-detail preload results produced in the background.
+pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
+
 /// Result sent from the background Docker lifecycle worker back into the TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockerProgressResult {
@@ -388,6 +391,8 @@ pub struct Model {
     pub(crate) docker_progress: Option<DockerProgressState>,
     /// Background Docker lifecycle completion queue polled from the tick loop.
     pub(crate) docker_progress_events: Option<DockerProgressQueue>,
+    /// Background branch-detail completion queue polled from the tick loop.
+    pub(crate) branch_detail_events: Option<BranchDetailQueue>,
     /// Service selection overlay state.
     pub(crate) service_select: Option<ServiceSelectState>,
     /// Port conflict resolution overlay state.
@@ -467,6 +472,7 @@ impl Model {
             wizard: None,
             docker_progress: None,
             docker_progress_events: None,
+            branch_detail_events: None,
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),

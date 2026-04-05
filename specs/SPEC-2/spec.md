@@ -104,7 +104,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006f**: When the user has explicitly focused a management list/pane, `Esc` still behaves like a supplemental-surface escape hatch: if no search/detail/edit flow claims it and no warn notification is pending, focus returns to `Terminal`; warn dismissal keeps priority when a warn toast is present.
 - **FR-006g**: Branch Detail content stays chrome-light: once the pane border already shows the active section and selected branch context, the inner detail renderer must not repeat nested section titles such as `Overview`, `SPECs`, `Git Status`, or `Sessions`.
 - **FR-006g**: Management focus cycling is tab-aware: `Branches` keeps the old three-surface cycle (`Terminal <-> TabContent <-> BranchDetail`), while every other management tab only cycles between `Terminal` and `TabContent` so focus never lands on a non-existent detail pane.
-- **FR-006a**: Branch Detail view: Branches tab is split vertically — top 50% branch list, bottom 50% detail of selected branch (always visible). Cursor movement in the list updates the detail. Sections:
+- **FR-006a**: Branch Detail view: Branches tab is split vertically — top 50% branch list, bottom 50% detail of selected branch (always visible). Cursor movement in the list updates the visible detail from cached branch-detail data without waiting on synchronous external commands. Branch detail data is prefetched asynchronously at startup and refreshed asynchronously via `r`. Sections:
   - **Overview**: Branch name, head status, worktree path, linked Issues, PR status
   - **SPECs**: SPEC list from the branch's worktree `specs/` directory (worktree-only)
   - **Git Status**: Staged/unstaged/untracked files, recent commits
@@ -147,6 +147,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **NFR-003**: Ctrl+G prefix state machine handles rapid input without missed keys.
 - **NFR-004**: Split grid layout recalculates within one frame on session add/remove.
 - **NFR-005**: Session persistence file size remains under 100KB for typical usage.
+- **NFR-006**: Branch list selection changes complete without synchronous `git` / Docker / filesystem detail reloads on the input path.
 
 ## Implementation Details
 

@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `253/253` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T10:46:17Z`
+- Task progress: `258/258` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T11:54:16Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -47,6 +47,7 @@
 - Branch Detail content now stays chrome-light: the pane border owns the active section and branch context, while inner Overview / SPECs / Git / Sessions renderers no longer repeat nested titles inside the body.
 - Compact session titles now keep the active `n/N` position visible alongside the active session label, so standard-width workspaces preserve multi-session context even after the full strip collapses.
 - Split/grid pane titles now keep old-TUI session identity cues as well: each pane shows its stable `n:` position plus the session-type icon before the session label.
+- Branch Detail now prefetches detail data asynchronously and caches it per branch, so startup/refresh can repopulate details without putting Docker/git/spec filesystem reads on the cursor-move input path.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.
