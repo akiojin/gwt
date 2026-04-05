@@ -1,8 +1,8 @@
 {
   "id": "11",
   "title": "gwt-spec: TUI theme system — semantic colors, border styles, icon constants",
-  "status": "open",
+  "status": "closed",
   "phase": "draft",
   "created_at": "2026-04-05T12:17:34.557535+00:00",
-  "updated_at": "2026-04-05T12:21:09.927791+00:00"
+  "updated_at": "2026-04-05T12:41:32.161129+00:00"
 }
