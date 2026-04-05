@@ -356,7 +356,7 @@ impl Default for WizardState {
             is_new_branch: false,
             base_branch_name: None,
             gh_cli_available: true,
-            ai_enabled: true,
+            ai_enabled: false,
             agent_id: String::new(),
             model: String::new(),
             reasoning: "medium".to_string(),
@@ -2046,6 +2046,17 @@ mod tests {
     }
 
     #[test]
+    fn issue_select_advances_to_branch_name_when_ai_suggest_is_disabled() {
+        let mut state = WizardState::default();
+        state.ai_enabled = false;
+
+        assert_eq!(
+            next_step(WizardStep::IssueSelect, &state),
+            Some(WizardStep::BranchNameInput)
+        );
+    }
+
+    #[test]
     fn branch_type_options_restore_old_prefixes() {
         let mut state = WizardState::default();
         state.step = WizardStep::BranchTypeSelect;
@@ -3206,6 +3217,7 @@ mod tests {
     #[test]
     fn ai_suggest_loading_on_enter_step() {
         let mut state = WizardState::default();
+        state.ai_enabled = true;
         state.step = WizardStep::IssueSelect;
         // Advance from IssueSelect to AIBranchSuggest via Select
         update(&mut state, WizardMessage::Select);
