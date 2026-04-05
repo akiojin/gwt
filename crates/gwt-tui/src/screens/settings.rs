@@ -952,10 +952,7 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
             };
 
             let line = Line::from(vec![
-                Span::styled(
-                    format!("[{}] ", type_indicator),
-                    theme::style::muted_text(),
-                ),
+                Span::styled(format!("[{}] ", type_indicator), theme::style::muted_text()),
                 Span::styled(format!("{}: ", field.label), label_style),
                 Span::styled(value_display, value_style),
             ]);
@@ -972,7 +969,9 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
     };
 
     let block = Block::default().title(format!("{}{}", state.category.label(), hints));
-    let list = List::new(items).block(block).highlight_style(theme::style::active_item());
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
 

@@ -128,9 +128,7 @@ pub mod style {
 
     /// Active/selected item: yellow + bold.
     pub const fn active_item() -> Style {
-        Style::new()
-            .fg(color::ACTIVE)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(color::ACTIVE).add_modifier(Modifier::BOLD)
     }
 
     /// List selection highlight: white on dark-gray + bold.
@@ -143,9 +141,7 @@ pub mod style {
 
     /// Section header: cyan + bold.
     pub const fn header() -> Style {
-        Style::new()
-            .fg(color::FOCUS)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(color::FOCUS).add_modifier(Modifier::BOLD)
     }
 
     /// Muted/disabled text.
@@ -155,16 +151,12 @@ pub mod style {
 
     /// Error text: red + bold.
     pub const fn error_text() -> Style {
-        Style::new()
-            .fg(color::ERROR)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(color::ERROR).add_modifier(Modifier::BOLD)
     }
 
     /// Active tab label.
     pub const fn tab_active() -> Style {
-        Style::new()
-            .fg(color::ACTIVE)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(color::ACTIVE).add_modifier(Modifier::BOLD)
     }
 
     /// Inactive tab label.
@@ -179,16 +171,12 @@ pub mod style {
 
     /// Success text: green + bold.
     pub const fn success_text() -> Style {
-        Style::new()
-            .fg(color::SUCCESS)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(color::SUCCESS).add_modifier(Modifier::BOLD)
     }
 
     /// Warning text: yellow + bold.
     pub const fn warning_text() -> Style {
-        Style::new()
-            .fg(color::WARNING)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(color::WARNING).add_modifier(Modifier::BOLD)
     }
 
     /// Primary text.

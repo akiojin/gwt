@@ -100,18 +100,15 @@ fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(
                     format!("{} ", tag.name),
-                    Style::default()
-                        .fg(theme::color::SUCCESS)
-                        .add_modifier(if idx == state.selected {
+                    Style::default().fg(theme::color::SUCCESS).add_modifier(
+                        if idx == state.selected {
                             Modifier::BOLD
                         } else {
                             Modifier::empty()
-                        }),
+                        },
+                    ),
                 ),
-                Span::styled(
-                    format!("({}) ", tag.date),
-                    theme::style::muted_text(),
-                ),
+                Span::styled(format!("({}) ", tag.date), theme::style::muted_text()),
                 Span::styled(tag.message.clone(), style),
             ]);
             ListItem::new(line)

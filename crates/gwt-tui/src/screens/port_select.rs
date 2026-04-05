@@ -115,8 +115,7 @@ pub fn render(state: &PortSelectState, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, dialog);
 
     if state.conflicts.is_empty() {
-        let empty =
-            Paragraph::new("No port conflicts").style(theme::style::muted_text());
+        let empty = Paragraph::new("No port conflicts").style(theme::style::muted_text());
         frame.render_widget(empty, inner);
         return;
     }

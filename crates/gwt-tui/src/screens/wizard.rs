@@ -1642,9 +1642,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(theme::border::modal())
         .border_style(Style::default().fg(theme::color::FOCUS))
-        .title_top(
-            Line::from(popup_title(state)).style(theme::style::header()),
-        )
+        .title_top(Line::from(popup_title(state)).style(theme::style::header()))
         .title_top(Line::from(" [ESC] ").right_aligned());
     frame.render_widget(title_block, chunks[0]);
 
@@ -1786,8 +1784,8 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
     }
 
     if let Some(ref err) = state.ai_suggest.error {
-        let text =
-            Paragraph::new(format!(" Error: {}", err)).style(Style::default().fg(theme::color::ERROR));
+        let text = Paragraph::new(format!(" Error: {}", err))
+            .style(Style::default().fg(theme::color::ERROR));
         frame.render_widget(text, body_area);
         return;
     }

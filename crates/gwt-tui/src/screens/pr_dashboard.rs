@@ -194,9 +194,9 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().title(title);
-    let list = List::new(items).block(block).highlight_style(
-        theme::style::active_item(),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);

@@ -210,7 +210,9 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
     }
 
     let block = Block::default().title(title);
-    let list = List::new(items).block(block).highlight_style(theme::style::active_item());
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -237,7 +239,10 @@ fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
                     format!("{} ", &commit.hash[..commit.hash.len().min(7)]),
                     Style::default().fg(theme::color::ACTIVE),
                 ),
-                Span::styled(commit.subject.clone(), Style::default().fg(theme::color::TEXT_PRIMARY)),
+                Span::styled(
+                    commit.subject.clone(),
+                    Style::default().fg(theme::color::TEXT_PRIMARY),
+                ),
                 Span::styled(
                     format!(" ({}, {})", commit.author, commit.date),
                     theme::style::muted_text(),
@@ -248,7 +253,9 @@ fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().title(title);
-    let list = List::new(items).block(block).highlight_style(theme::style::active_item());
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);

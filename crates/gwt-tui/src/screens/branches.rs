@@ -620,10 +620,17 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             } else {
                 theme::icon::WORKTREE_INACTIVE
             };
-            let head_indicator = if branch.is_head { theme::icon::HEAD_INDICATOR } else { "" };
+            let head_indicator = if branch.is_head {
+                theme::icon::HEAD_INDICATOR
+            } else {
+                ""
+            };
             let line = Line::from(vec![
                 super::selection_prefix(idx == state.selected),
-                Span::styled(&branch.name, Style::default().fg(theme::color::TEXT_PRIMARY)),
+                Span::styled(
+                    &branch.name,
+                    Style::default().fg(theme::color::TEXT_PRIMARY),
+                ),
                 Span::raw(" "),
                 Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
                 Span::styled(head_indicator, Style::default().fg(theme::color::SUCCESS)),
@@ -632,9 +639,9 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items).block(Block::default()).highlight_style(
-        theme::style::active_item(),
-    );
+    let list = List::new(items)
+        .block(Block::default())
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -675,7 +682,8 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
         ));
     }
 
-    let paragraph = Paragraph::new(lines.join("\n")).style(Style::default().fg(theme::color::TEXT_PRIMARY));
+    let paragraph =
+        Paragraph::new(lines.join("\n")).style(Style::default().fg(theme::color::TEXT_PRIMARY));
     frame.render_widget(paragraph, area);
 }
 
@@ -710,8 +718,7 @@ fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
 /// SPECs section: list loaded from the worktree.
 fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
     if state.selected_branch().is_none() {
-        let paragraph =
-            Paragraph::new(" No branch selected").style(theme::style::muted_text());
+        let paragraph = Paragraph::new(" No branch selected").style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -736,10 +743,7 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|spec| {
             let line = Line::from(vec![
-                Span::styled(
-                    format!(" {} ", spec.id),
-                    theme::style::header(),
-                ),
+                Span::styled(format!(" {} ", spec.id), theme::style::header()),
                 Span::styled(&spec.title, Style::default().fg(theme::color::TEXT_PRIMARY)),
                 Span::styled(
                     format!("  [{}]", spec.status),
@@ -757,8 +761,7 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
 /// Git Status section: files and recent commits from the worktree.
 fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect) {
     if state.selected_branch().is_none() {
-        let paragraph =
-            Paragraph::new(" No branch selected").style(theme::style::muted_text());
+        let paragraph = Paragraph::new(" No branch selected").style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -827,8 +830,7 @@ fn render_detail_sessions(
     selected_session: usize,
 ) {
     if sessions.is_empty() {
-        let paragraph =
-            Paragraph::new(" No active sessions").style(theme::style::muted_text());
+        let paragraph = Paragraph::new(" No active sessions").style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }

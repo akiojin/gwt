@@ -91,10 +91,7 @@ pub fn render_with_notification_and_hints(
             ),
             theme::status_separator(),
             Span::styled(
-                format!(
-                    " {} {branch_context} ",
-                    theme::icon::GIT_BRANCH
-                ),
+                format!(" {} {branch_context} ", theme::icon::GIT_BRANCH),
                 Style::default().fg(theme::color::SUCCESS),
             ),
             theme::status_separator(),
@@ -103,10 +100,7 @@ pub fn render_with_notification_and_hints(
                 Style::default().fg(theme::color::ACTIVE),
             ),
             theme::status_separator(),
-            Span::styled(
-                format!(" [{layer}] "),
-                theme::style::layer_badge(),
-            ),
+            Span::styled(format!(" [{layer}] "), theme::style::layer_badge()),
         ]
     };
 
@@ -115,7 +109,9 @@ pub fn render_with_notification_and_hints(
         spans.push(theme::status_separator());
         spans.push(Span::styled(
             format!(" {indicator} "),
-            Style::default().fg(theme::color::ERROR).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::color::ERROR)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 

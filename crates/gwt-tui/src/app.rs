@@ -3428,18 +3428,18 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
 fn branch_detail_title(model: &Model) -> Line<'static> {
     let detail_labels: Vec<&str> = screens::branches::detail_section_labels().to_vec();
     let mut title = screens::build_tab_title(&detail_labels, model.branches.detail_section);
-    title
-        .spans
-        .push(Span::styled(" · ", Style::default().fg(theme::color::SURFACE)));
+    title.spans.push(Span::styled(
+        " · ",
+        Style::default().fg(theme::color::SURFACE),
+    ));
     let branch_label = model
         .branches
         .selected_branch()
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "No branch selected".to_string());
-    title.spans.push(Span::styled(
-        branch_label,
-        theme::style::header(),
-    ));
+    title
+        .spans
+        .push(Span::styled(branch_label, theme::style::header()));
     title
 }
 
@@ -3492,10 +3492,7 @@ fn build_session_title(model: &Model, width: u16) -> Line<'static> {
                 active.tab_type.icon(),
                 active.name
             );
-            return Line::from(vec![Span::styled(
-                label,
-                theme::style::tab_active(),
-            )]);
+            return Line::from(vec![Span::styled(label, theme::style::tab_active())]);
         }
     }
 
@@ -3839,8 +3836,7 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
             let session_idx = start + col_idx;
             if let Some(session) = model.sessions.get(session_idx) {
                 let is_active = session_idx == model.active_session;
-                let is_focused =
-                    is_active && model.active_focus == FocusPane::Terminal;
+                let is_focused = is_active && model.active_focus == FocusPane::Terminal;
                 let (mut border_style, border_type) = theme::pane_border(is_focused);
                 if is_active && !is_focused {
                     border_style = Style::default().fg(theme::color::ACTIVE);
