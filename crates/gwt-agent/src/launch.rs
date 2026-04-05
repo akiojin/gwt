@@ -93,6 +93,7 @@ pub struct LaunchConfig {
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
     pub skip_permissions: bool,
+    pub codex_fast_mode: bool,
 }
 
 /// Permission mode for agent launch.
@@ -258,6 +259,7 @@ impl AgentLaunchBuilder {
             self.permission_mode,
             Some(PermissionMode::Auto | PermissionMode::BypassPermissions)
         );
+        let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
         LaunchConfig {
             agent_id,
@@ -274,6 +276,7 @@ impl AgentLaunchBuilder {
             session_mode,
             resume_session_id,
             skip_permissions,
+            codex_fast_mode,
         }
     }
 
@@ -345,7 +348,8 @@ impl AgentLaunchBuilder {
         }
 
         if self.fast_mode {
-            args.push("--full-auto".to_string());
+            args.push("-c".to_string());
+            args.push("service_tier=fast".to_string());
         }
 
         // Version-dependent flags
@@ -468,7 +472,11 @@ mod tests {
             .build();
 
         assert_eq!(config.command, "codex");
-        assert!(config.args.contains(&"--full-auto".to_string()));
+        assert!(config.args.contains(&"-c".to_string()));
+        assert!(config.args.contains(&"service_tier=fast".to_string()));
+        assert!(!config.args.contains(&"--full-auto".to_string()));
+        assert!(config.codex_fast_mode);
+        assert!(!config.skip_permissions);
     }
 
     #[test]

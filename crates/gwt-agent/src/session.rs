@@ -26,6 +26,8 @@ pub struct Session {
     pub reasoning_level: Option<String>,
     #[serde(default)]
     pub skip_permissions: bool,
+    #[serde(default)]
+    pub codex_fast_mode: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -52,6 +54,7 @@ impl Session {
             model: None,
             reasoning_level: None,
             skip_permissions: false,
+            codex_fast_mode: false,
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -122,6 +125,7 @@ mod tests {
         assert!(session.model.is_none());
         assert!(session.reasoning_level.is_none());
         assert!(!session.skip_permissions);
+        assert!(!session.codex_fast_mode);
     }
 
     #[test]
@@ -165,6 +169,7 @@ mod tests {
         session.agent_session_id = Some("agent-abc".into());
         session.reasoning_level = Some("high".into());
         session.skip_permissions = true;
+        session.codex_fast_mode = true;
 
         session.save(dir.path()).unwrap();
 
@@ -180,6 +185,7 @@ mod tests {
         assert_eq!(loaded.agent_session_id, Some("agent-abc".into()));
         assert_eq!(loaded.reasoning_level, Some("high".into()));
         assert!(loaded.skip_permissions);
+        assert!(loaded.codex_fast_mode);
         assert_eq!(loaded.display_name, "Gemini CLI");
     }
 

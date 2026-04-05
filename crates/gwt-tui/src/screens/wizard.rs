@@ -26,6 +26,7 @@ pub enum WizardStep {
     AIBranchSuggest,
     IssueSelect,
     SkipPermissions,
+    CodexFastMode,
 }
 
 impl WizardStep {
@@ -46,6 +47,7 @@ impl WizardStep {
             Self::AIBranchSuggest => "AI Branch Suggestion",
             Self::IssueSelect => "Link Issue",
             Self::SkipPermissions => "Skip Permissions",
+            Self::CodexFastMode => "Codex Fast Mode",
         }
     }
 }
@@ -123,7 +125,14 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::BranchNameInput)
             }
         }
-        WizardStep::SkipPermissions => None,
+        WizardStep::SkipPermissions => {
+            if state.agent_is_codex() {
+                Some(WizardStep::CodexFastMode)
+            } else {
+                None
+            }
+        }
+        WizardStep::CodexFastMode => None,
     }
 }
 
@@ -200,6 +209,7 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::ExecutionMode)
             }
         }
+        WizardStep::CodexFastMode => Some(WizardStep::SkipPermissions),
     }
 }
 
@@ -267,6 +277,7 @@ pub struct QuickStartEntry {
     pub version: Option<String>,
     pub resume_session_id: Option<String>,
     pub skip_permissions: bool,
+    pub codex_fast_mode: bool,
 }
 
 /// SPEC context for prefilling the wizard.
@@ -329,6 +340,7 @@ pub struct WizardState {
     pub branch_name: String,
     pub issue_id: String,
     pub skip_perms: bool,
+    pub codex_fast_mode: bool,
     pub convert_source_agents: Vec<String>,
     pub convert_sessions: Vec<String>,
     /// AI branch suggestion state.
@@ -365,6 +377,7 @@ impl Default for WizardState {
             branch_name: String::new(),
             issue_id: String::new(),
             skip_perms: false,
+            codex_fast_mode: false,
             convert_source_agents: Vec::new(),
             convert_sessions: Vec::new(),
             ai_suggest: AISuggestState::default(),
@@ -442,6 +455,10 @@ impl WizardState {
             self.version = version;
         }
         self.skip_perms = entry.skip_permissions;
+        self.codex_fast_mode = entry.codex_fast_mode;
+        if !self.agent_is_codex() {
+            self.codex_fast_mode = false;
+        }
 
         match action {
             QuickStartAction::ResumeWithPrevious => {
@@ -563,6 +580,10 @@ impl WizardState {
         } else {
             self.version.clear();
         }
+
+        if !self.agent_is_codex() {
+            self.codex_fast_mode = false;
+        }
     }
 
     /// Number of selectable options for the current step.
@@ -590,6 +611,7 @@ impl WizardState {
             }
             WizardStep::IssueSelect => 0,     // text input
             WizardStep::SkipPermissions => 2, // yes / no
+            WizardStep::CodexFastMode => 2,   // on / off
         }
     }
 
@@ -601,6 +623,7 @@ impl WizardState {
             WizardStep::ExecutionMode => vec!["Normal", "Continue", "Resume", "Convert"],
             WizardStep::BranchTypeSelect => vec!["feature/", "bugfix/", "hotfix/", "release/"],
             WizardStep::SkipPermissions => vec!["Yes", "No"],
+            WizardStep::CodexFastMode => vec!["On", "Off"],
             _ => vec![],
         }
     }
@@ -952,6 +975,9 @@ fn apply_selection(state: &mut WizardState) {
         WizardStep::SkipPermissions => {
             state.skip_perms = state.selected == 0;
         }
+        WizardStep::CodexFastMode => {
+            state.codex_fast_mode = state.selected == 0;
+        }
         _ => {}
     }
 }
@@ -1165,6 +1191,11 @@ const SKIP_PERMISSION_DISPLAY_OPTIONS: [(&str, &str); 2] = [
     ("No", "Show permission prompts"),
 ];
 
+const CODEX_FAST_MODE_DISPLAY_OPTIONS: [(&str, &str); 2] = [
+    ("On", "Use service_tier=fast"),
+    ("Off", "Use default service tier"),
+];
+
 fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOption] {
     match agent_id {
         "claude" => &CLAUDE_MODEL_DISPLAY_OPTIONS,
@@ -1333,6 +1364,20 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
 fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let available_width = area.width as usize;
     let items = SKIP_PERMISSION_DISPLAY_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text = format_fixed_width_line(marker, label, description, 6, available_width);
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
+        })
+        .collect();
+    render_list_content(frame, area, items);
+}
+
+fn render_codex_fast_mode_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width as usize;
+    let items = CODEX_FAST_MODE_DISPLAY_OPTIONS
         .iter()
         .enumerate()
         .map(|(idx, (label, description))| {
@@ -1674,7 +1719,11 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::AIBranchSuggest => {
             " Up/Down: select | Enter: accept | e: edit | Esc: manual input"
         }
+        WizardStep::SkipPermissions if state.agent_is_codex() => {
+            " Up/Down: select | Enter: next | Esc: back"
+        }
         WizardStep::SkipPermissions => " Up/Down: select | Enter: launch | Esc: back",
+        WizardStep::CodexFastMode => " Up/Down: select | Enter: launch | Esc: back",
         _ => " Up/Down: select | Enter: next | Esc: back",
     };
     let hints = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
@@ -1700,6 +1749,7 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::VersionSelect => render_version_step(state, frame, area),
         WizardStep::ExecutionMode => render_execution_mode_step(state, frame, area),
         WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, area),
+        WizardStep::CodexFastMode => render_codex_fast_mode_step(state, frame, area),
         _ => {
             render_option_list(state, frame, area);
         }
@@ -1885,6 +1935,7 @@ mod tests {
                 version: Some("latest".to_string()),
                 resume_session_id: Some("sess-12345678".to_string()),
                 skip_permissions: true,
+                codex_fast_mode: true,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -1894,6 +1945,7 @@ mod tests {
                 version: Some("1.0.54".to_string()),
                 resume_session_id: None,
                 skip_permissions: false,
+                codex_fast_mode: false,
             },
         ]
     }
@@ -1985,6 +2037,7 @@ mod tests {
         let mut state = WizardState::default();
         state.agent_id = "codex".to_string();
         // Codex: AgentSelect → ModelSelect → ReasoningLevel → VersionSelect → ExecutionMode
+        //        → SkipPermissions → CodexFastMode
         assert_eq!(
             next_step(WizardStep::AgentSelect, &state),
             Some(WizardStep::ModelSelect)
@@ -2001,6 +2054,15 @@ mod tests {
             next_step(WizardStep::VersionSelect, &state),
             Some(WizardStep::ExecutionMode)
         );
+        assert_eq!(
+            next_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::SkipPermissions)
+        );
+        assert_eq!(
+            next_step(WizardStep::SkipPermissions, &state),
+            Some(WizardStep::CodexFastMode)
+        );
+        assert_eq!(next_step(WizardStep::CodexFastMode, &state), None);
     }
 
     #[test]
@@ -2362,6 +2424,33 @@ mod tests {
     }
 
     #[test]
+    fn skip_permissions_for_codex_advances_to_fast_mode_step() {
+        let mut state = WizardState::default();
+        state.agent_id = "codex".to_string();
+        state.step = WizardStep::SkipPermissions;
+        state.selected = 1; // "No"
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::CodexFastMode);
+        assert!(!state.completed);
+        assert!(!state.skip_perms);
+    }
+
+    #[test]
+    fn codex_fast_mode_step_stores_selection_and_completes() {
+        let mut state = WizardState::default();
+        state.agent_id = "codex".to_string();
+        state.step = WizardStep::CodexFastMode;
+        state.selected = 0; // "On"
+
+        update(&mut state, WizardMessage::Select);
+
+        assert!(state.completed);
+        assert!(state.codex_fast_mode);
+    }
+
+    #[test]
     fn option_count_for_each_step() {
         let mut state = WizardState::default();
         assert_eq!(state.option_count(), 2); // QuickStart
@@ -2402,6 +2491,7 @@ mod tests {
         assert_eq!(state.mode, "resume");
         assert_eq!(state.resume_session_id.as_deref(), Some("sess-12345678"));
         assert!(state.skip_perms);
+        assert!(state.codex_fast_mode);
     }
 
     #[test]
@@ -2420,6 +2510,7 @@ mod tests {
         assert_eq!(state.mode, "continue");
         assert!(state.resume_session_id.is_none());
         assert!(!state.skip_perms);
+        assert!(!state.codex_fast_mode);
     }
 
     #[test]
@@ -2612,6 +2703,7 @@ mod tests {
             version: Some("latest".to_string()),
             resume_session_id: Some("sess-12345678".to_string()),
             skip_permissions: true,
+            codex_fast_mode: true,
         }];
 
         let text = render_text(&state, 100, 24);
@@ -2686,6 +2778,7 @@ mod tests {
                 version: Some("latest".to_string()),
                 resume_session_id: Some("sess-12345678".to_string()),
                 skip_permissions: true,
+                codex_fast_mode: true,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -2695,6 +2788,7 @@ mod tests {
                 version: Some("1.0.54".to_string()),
                 resume_session_id: Some("sess-abcdefgh".to_string()),
                 skip_permissions: false,
+                codex_fast_mode: false,
             },
         ];
         state.selected = 0;
@@ -3116,6 +3210,34 @@ mod tests {
     }
 
     #[test]
+    fn render_skip_permissions_for_codex_shows_next_hint() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::SkipPermissions;
+        state.agent_id = "codex".to_string();
+        state.selected = 1;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Skip Permissions"));
+        assert!(text.contains("Up/Down: select | Enter: next | Esc: back"));
+    }
+
+    #[test]
+    fn render_codex_fast_mode_step_shows_old_tui_descriptions() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::CodexFastMode;
+        state.agent_id = "codex".to_string();
+        state.selected = 1;
+
+        let text = render_text(&state, 90, 24);
+
+        assert!(text.contains("Codex Fast Mode"));
+        assert!(text.contains("  On     Use service_tier=fast"));
+        assert!(text.contains("> Off    Use default service tier"));
+        assert!(text.contains("Up/Down: select | Enter: launch | Esc: back"));
+    }
+
+    #[test]
     fn render_version_step_shows_descriptions_and_overflow_indicators() {
         let mut state = WizardState::default();
         state.step = WizardStep::VersionSelect;
@@ -3210,6 +3332,7 @@ mod tests {
             WizardStep::AIBranchSuggest,
             WizardStep::IssueSelect,
             WizardStep::SkipPermissions,
+            WizardStep::CodexFastMode,
         ];
         for step in all_steps {
             assert!(!step.title().is_empty(), "{:?} has empty title", step);

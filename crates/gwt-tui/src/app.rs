@@ -2482,6 +2482,10 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.reasoning_level(&wizard.reasoning);
     }
 
+    if wizard.agent_id == "codex" && wizard.codex_fast_mode {
+        builder = builder.fast_mode(true);
+    }
+
     if wizard.skip_perms {
         builder = builder.permission_mode(gwt_agent::launch::PermissionMode::Auto);
     }
@@ -2557,6 +2561,7 @@ fn build_custom_launch_config_from_wizard(
         session_mode,
         resume_session_id: wizard.resume_session_id.clone(),
         skip_permissions: wizard.skip_perms,
+        codex_fast_mode: false,
     }
 }
 
@@ -2603,6 +2608,7 @@ fn materialize_pending_launch_with(
     session.tool_version = config.tool_version.clone();
     session.agent_session_id = config.resume_session_id.clone();
     session.skip_permissions = config.skip_permissions;
+    session.codex_fast_mode = config.codex_fast_mode;
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
 
@@ -2742,6 +2748,7 @@ fn load_quick_start_entries(
             version: session.tool_version.clone(),
             resume_session_id: session.agent_session_id.clone(),
             skip_permissions: session.skip_permissions,
+            codex_fast_mode: session.codex_fast_mode,
         })
         .collect()
 }
@@ -4250,6 +4257,7 @@ mod tests {
         tool_version: Option<&str>,
         resume_session_id: Option<&str>,
         skip_permissions: bool,
+        codex_fast_mode: bool,
     ) {
         let mut session = AgentSession::new(repo_path, branch, agent_id);
         session.model = model.map(str::to_string);
@@ -4257,6 +4265,7 @@ mod tests {
         session.tool_version = tool_version.map(str::to_string);
         session.agent_session_id = resume_session_id.map(str::to_string);
         session.skip_permissions = skip_permissions;
+        session.codex_fast_mode = codex_fast_mode;
         session.updated_at = updated_at;
         session.created_at = updated_at;
         session.last_activity_at = updated_at;
@@ -6272,6 +6281,7 @@ mod tests {
             Some("0.5.0"),
             None,
             false,
+            false,
         );
         persist_agent_session(
             dir.path(),
@@ -6283,6 +6293,7 @@ mod tests {
             Some("high"),
             Some("latest"),
             Some("sess-new"),
+            true,
             true,
         );
         persist_agent_session(
@@ -6296,6 +6307,7 @@ mod tests {
             Some("1.0.54"),
             None,
             false,
+            false,
         );
         persist_agent_session(
             dir.path(),
@@ -6307,6 +6319,7 @@ mod tests {
             None,
             Some("latest"),
             Some("sess-other"),
+            false,
             false,
         );
 
@@ -6326,7 +6339,10 @@ mod tests {
             wizard.quick_start_entries[0].resume_session_id.as_deref(),
             Some("sess-new")
         );
+        assert!(wizard.quick_start_entries[0].skip_permissions);
+        assert!(wizard.quick_start_entries[0].codex_fast_mode);
         assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
+        assert!(!wizard.quick_start_entries[1].codex_fast_mode);
     }
 
     #[test]
@@ -6601,6 +6617,39 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_codex_fast_mode_adds_service_tier_flag() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            codex_fast_mode: true,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.args.contains(&"-c".to_string()));
+        assert!(config.args.contains(&"service_tier=fast".to_string()));
+        assert!(config.codex_fast_mode);
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_codex_skip_permissions_does_not_imply_fast_mode() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            skip_perms: true,
+            codex_fast_mode: false,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.skip_permissions);
+        assert!(!config.codex_fast_mode);
+        assert!(!config.args.contains(&"service_tier=fast".to_string()));
+    }
+
+    #[test]
     fn materialize_pending_launch_with_creates_agent_session_and_persists_metadata() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut model = test_model();
@@ -6655,6 +6704,7 @@ CUSTOM_ENV = "enabled"
             mode: "resume".to_string(),
             resume_session_id: Some("sess-abc".to_string()),
             skip_perms: true,
+            codex_fast_mode: true,
             ..Default::default()
         };
         model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
@@ -6670,6 +6720,7 @@ CUSTOM_ENV = "enabled"
         let persisted = AgentSession::load(&entry).expect("load persisted session");
         assert_eq!(persisted.reasoning_level.as_deref(), Some("high"));
         assert!(persisted.skip_permissions);
+        assert!(persisted.codex_fast_mode);
         assert_eq!(persisted.agent_session_id.as_deref(), Some("sess-abc"));
     }
 
@@ -6693,6 +6744,7 @@ CUSTOM_ENV = "enabled"
             session_mode: SessionMode::Normal,
             resume_session_id: None,
             skip_permissions: false,
+            codex_fast_mode: false,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");

@@ -43,7 +43,7 @@ session conversion.
 2. Given I choose to create a new branch, when I continue, then the wizard
    runs `BranchType -> Issue -> AI Suggest -> Branch Name -> Agent`.
 3. Given I select Codex, when I continue through the wizard, then the flow
-   includes `Model -> Reasoning -> Version -> Execution Mode -> Skip Permissions`
+   includes `Model -> Reasoning -> Version -> Execution Mode -> Skip Permissions -> Codex Fast Mode`
    without requiring a trailing confirm screen.
 4. Given I choose session conversion, when I pick `Convert` from execution
    mode, then the wizard routes through `ConvertAgentSelect` and
@@ -56,14 +56,15 @@ session conversion.
 
 As a developer, I want the wizard option lists to match the old-TUI visual
 format so that model, reasoning, version, execution mode, and skip
-permissions are easier to scan at a glance.
+permissions plus Codex fast-mode settings are easier to scan at a glance.
 
 **Acceptance Scenarios**
 
 1. Given I am on `ModelSelect`, when the list renders, then each row shows a
    concise label plus description in the old-TUI `label - description`
    format.
-2. Given I am on `ReasoningLevel`, `ExecutionMode`, or `SkipPermissions`,
+2. Given I am on `ReasoningLevel`, `ExecutionMode`, `SkipPermissions`, or
+   `CodexFastMode`,
    when the list renders, then each row uses the old-TUI fixed-width label
    plus description layout.
 3. Given `VersionSelect` has more options than fit in the popup, when I
@@ -166,7 +167,7 @@ As a developer, I want to convert an existing session to a different agent type 
 ## Functional Requirements
 
 - **FR-001**: `AgentTrait::detect()` checks PATH for agent binary and invokes `--version` to confirm availability.
-- **FR-002**: `AgentLaunchBuilder` constructs launch configuration including model, fast_mode, reasoning_level, and environment variables.
+- **FR-002**: `AgentLaunchBuilder` constructs launch configuration including model, `skip_permissions`, `codex_fast_mode`, reasoning_level, and environment variables.
 - **FR-003**: Wizard flow proceeds through dynamic steps chosen by branch
   context and agent capabilities: existing-branch launches start at
   `BranchAction`, new-branch launches run `Branch Type -> Issue -> AI Branch
@@ -195,11 +196,12 @@ As a developer, I want to convert an existing session to a different agent type 
   step set `QuickStart`, `BranchAction`, `AgentSelect`, `ModelSelect`,
   `ReasoningLevel`, `VersionSelect`, `ExecutionMode`,
   `ConvertAgentSelect`, `ConvertSessionSelect`, `SkipPermissions`,
+  `CodexFastMode`,
   `BranchTypeSelect`, `IssueSelect`, `AIBranchSuggest`, and
   `BranchNameInput`.
 - **FR-017**: `ModelSelect`, `ReasoningLevel`, `ExecutionMode`,
-  `SkipPermissions`, and `VersionSelect` use old-TUI-style row formatting
-  with descriptive text and version-list scroll indicators.
+  `SkipPermissions`, `CodexFastMode`, and `VersionSelect` use old-TUI-style
+  row formatting with descriptive text and version-list scroll indicators.
 - **FR-018**: `QuickStart` renders old-TUI-style history rows with
   a compact branch-name context line, colored per-agent action rows, two
   selectable rows per entry (`Resume` / `Start new`), and a trailing
@@ -277,6 +279,11 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-039**: In multi-entry `QuickStart`, the plain `Start new` rows use a
   neutral text color so agent identity stays anchored to the inline-labeled
   `Resume` rows only.
+- **FR-040**: `SkipPermissions` and `CodexFastMode` are independent controls:
+  `SkipPermissions` only controls approval behavior, while
+  `CodexFastMode` only controls Codex service-tier behavior.
+- **FR-041**: When `CodexFastMode=On`, Codex launch args include
+  `-c service_tier=fast`; when Off, that key is omitted.
 
 ## Non-Functional Requirements
 
@@ -350,12 +357,15 @@ As a developer, I want to convert an existing session to a different agent type 
 
 #### Codex
 
+Model list snapshot: **2026-04-05**.
+
 | Flag | Description |
 |------|-------------|
-| `--model <model>` | Default: `gpt-5.2-codex` |
+| `--model <model>` | Default: `gpt-5.4`; available: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` |
 | `-c model_reasoning_effort=<level>` | Reasoning level: low/medium/high |
+| `-c service_tier=fast` | Fast mode (Codex-only speed tier). Independent from skip-permission settings |
+| `--full-auto` | Approval/sandbox automation convenience alias (not a Fast mode toggle) |
 | `--dangerously-bypass-approvals-and-sandbox` | Skip permissions (v0.80.0+) |
-| `--yolo` | Skip permissions (v0.79.x) |
 | `--enable web_search` | Enable web search (v0.90.0+) |
 | `--enable collaboration_modes` | Enable collaboration (v0.91.0+) |
 | `-c shell_environment_policy=inherit` | Shell policy |
@@ -378,6 +388,7 @@ agent_label = "Claude Code"
 agent_session_id = "session-xxx"  # for resume
 tool_version = "1.0.0"
 model = "claude-sonnet-4-5"
+codex_fast_mode = false
 created_at = "2026-01-01T00:00:00Z"
 updated_at = "2026-01-01T00:00:00Z"
 last_activity_at = "2026-01-01T00:00:00Z"
