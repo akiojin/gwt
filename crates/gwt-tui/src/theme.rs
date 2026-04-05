@@ -4,7 +4,7 @@
 //! Screen and widget code should reference `theme::` constants instead of
 //! inline `Color::*` / `Modifier::*` values.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::BorderType;
 
@@ -39,8 +39,6 @@ pub mod color {
     pub const BORDER_FOCUSED: Color = Color::Cyan;
     /// Unfocused pane border.
     pub const BORDER_UNFOCUSED: Color = Color::Gray;
-    /// Error overlay border.
-    pub const BORDER_ERROR: Color = Color::Red;
     /// Metadata, alternative highlights.
     pub const ACCENT: Color = Color::Magenta;
     /// Agent-specific coloring.
@@ -192,16 +190,6 @@ pub mod style {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// Notification style by severity name.
-    pub fn notification(severity: &str) -> Style {
-        match severity {
-            "DEBUG" => Style::new().fg(color::SURFACE),
-            "INFO" => success_text(),
-            "WARN" => warning_text(),
-            "ERROR" => error_text(),
-            _ => Style::new().fg(color::TEXT_PRIMARY),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -223,17 +211,9 @@ pub fn pane_border(is_focused: bool) -> (Style, BorderType) {
     }
 }
 
-/// Modal overlay border style.
-pub fn modal_border(accent: Color) -> (Style, BorderType) {
-    (Style::default().fg(accent), border::modal())
-}
-
 /// Status bar section separator: ` │ ` in SURFACE color.
 pub fn status_separator() -> Span<'static> {
-    Span::styled(
-        format!(" {} ", icon::SEPARATOR_VERT),
-        Style::default().fg(color::SURFACE),
-    )
+    Span::styled(" \u{2502} ", Style::default().fg(color::SURFACE))
 }
 
 /// Decorative section divider: `─── Label ───` fitting the given width.
@@ -254,7 +234,7 @@ pub fn section_divider(label: &str, width: u16) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
 
     use super::*;
 
@@ -274,7 +254,6 @@ mod tests {
             color::TEXT_DISABLED,
             color::BORDER_FOCUSED,
             color::BORDER_UNFOCUSED,
-            color::BORDER_ERROR,
             color::ACCENT,
             color::AGENT,
         ];
