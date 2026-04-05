@@ -6,8 +6,7 @@
 use include_dir::{include_dir, Dir};
 
 /// All skill directories under `.claude/skills/`.
-pub static CLAUDE_SKILLS: Dir<'static> =
-    include_dir!("$CARGO_MANIFEST_DIR/../../.claude/skills");
+pub static CLAUDE_SKILLS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../.claude/skills");
 
 /// All command files under `.claude/commands/`.
 pub static CLAUDE_COMMANDS: Dir<'static> =
@@ -16,4 +15,3 @@ pub static CLAUDE_COMMANDS: Dir<'static> =
 /// All hook scripts under `.claude/hooks/scripts/`.
 pub static CLAUDE_HOOKS: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../../.claude/hooks/scripts");
-

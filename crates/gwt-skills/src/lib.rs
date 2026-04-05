@@ -478,7 +478,13 @@ mod tests {
         use crate::assets::CLAUDE_SKILLS;
         let dirs: Vec<&str> = CLAUDE_SKILLS
             .dirs()
-            .map(|d| d.path().file_name().unwrap_or_default().to_str().unwrap_or(""))
+            .map(|d| {
+                d.path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or("")
+            })
             .collect();
         assert!(dirs.contains(&"gwt-pr"), "missing gwt-pr skill dir");
         assert!(
@@ -496,7 +502,13 @@ mod tests {
         use crate::assets::CLAUDE_COMMANDS;
         let files: Vec<&str> = CLAUDE_COMMANDS
             .files()
-            .map(|f| f.path().file_name().unwrap_or_default().to_str().unwrap_or(""))
+            .map(|f| {
+                f.path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or("")
+            })
             .collect();
         assert!(files.contains(&"gwt-pr.md"), "missing gwt-pr.md command");
         assert!(
@@ -510,7 +522,13 @@ mod tests {
         use crate::assets::CLAUDE_HOOKS;
         let files: Vec<&str> = CLAUDE_HOOKS
             .files()
-            .map(|f| f.path().file_name().unwrap_or_default().to_str().unwrap_or(""))
+            .map(|f| {
+                f.path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or("")
+            })
             .collect();
         assert!(
             files.contains(&"gwt-forward-hook.mjs"),
@@ -545,7 +563,9 @@ mod tests {
         assert!(wt.join(".codex/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".claude/commands/gwt-pr.md").exists());
-        assert!(wt.join(".claude/hooks/scripts/gwt-forward-hook.mjs").exists());
+        assert!(wt
+            .join(".claude/hooks/scripts/gwt-forward-hook.mjs")
+            .exists());
     }
 
     // ── helpers ──

@@ -103,4 +103,3 @@ pub enum RegistryError {
     #[error("Parse error: {0}")]
     Parse(String),
 }
-

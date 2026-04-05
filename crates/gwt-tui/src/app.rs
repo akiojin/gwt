@@ -9,9 +9,8 @@ use std::thread;
 use std::time::Duration;
 
 use gwt_agent::{
-    custom::CustomAgentType,
-    AgentDetector, AgentId, AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig,
-    Session as AgentSession, SessionMode, VersionCache,
+    custom::CustomAgentType, AgentDetector, AgentId, AgentLaunchBuilder, CustomCodingAgent,
+    DetectedAgent, LaunchConfig, Session as AgentSession, SessionMode, VersionCache,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings, VoiceConfig};

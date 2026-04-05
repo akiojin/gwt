@@ -14,7 +14,9 @@ use ratatui::{
 use gwt_config::{ConfigError, Settings, VoiceConfig};
 use gwt_skills::assets::CLAUDE_SKILLS;
 
-use crate::custom_agents::{load_stored_custom_agents_from_path, save_stored_custom_agents_to_path, StoredCustomAgent};
+use crate::custom_agents::{
+    load_stored_custom_agents_from_path, save_stored_custom_agents_to_path, StoredCustomAgent,
+};
 
 /// Settings category tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -372,7 +374,9 @@ fn custom_agent_fields(state: &CustomAgentsState) -> Vec<SettingField> {
     } else {
         "(none)".to_string()
     };
-    let id = selected.map(|agent| agent.agent.id.clone()).unwrap_or_default();
+    let id = selected
+        .map(|agent| agent.agent.id.clone())
+        .unwrap_or_default();
     let display_name = selected
         .map(|agent| agent.agent.display_name.clone())
         .unwrap_or_default();
@@ -693,7 +697,8 @@ fn start_custom_agent_interaction(state: &mut SettingsState) {
         CUSTOM_AGENT_TYPE_LABEL => {
             if state.custom_agents.selected_agent().is_some() {
                 persist_custom_agents_update(state, |custom_agents| {
-                    if let Some(agent) = custom_agents.agents.get_mut(custom_agents.selected_agent) {
+                    if let Some(agent) = custom_agents.agents.get_mut(custom_agents.selected_agent)
+                    {
                         agent.agent.agent_type = next_custom_agent_type(agent.agent.agent_type);
                     }
                 });
@@ -701,7 +706,9 @@ fn start_custom_agent_interaction(state: &mut SettingsState) {
         }
         CUSTOM_AGENT_ADD_LABEL => {
             persist_custom_agents_update(state, |custom_agents| {
-                custom_agents.agents.push(default_custom_agent(&custom_agents.agents));
+                custom_agents
+                    .agents
+                    .push(default_custom_agent(&custom_agents.agents));
                 custom_agents.selected_agent = custom_agents.agents.len().saturating_sub(1);
             });
         }

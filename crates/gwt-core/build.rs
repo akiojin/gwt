@@ -48,11 +48,7 @@ fn validate_skill_frontmatter(skills_dir: &std::path::Path) {
         let content = fs::read_to_string(&skill_md).unwrap_or_default();
         if let Some(frontmatter) = extract_frontmatter(&content) {
             if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(frontmatter) {
-                panic!(
-                    "YAML frontmatter error in {}: {}",
-                    skill_md.display(),
-                    e
-                );
+                panic!("YAML frontmatter error in {}: {}", skill_md.display(), e);
             }
         }
     }

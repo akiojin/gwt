@@ -44,11 +44,7 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     )?;
 
     // Codex targets (skills only)
-    write_dir_assets(
-        &CLAUDE_SKILLS,
-        &worktree.join(".codex/skills"),
-        &mut report,
-    )?;
+    write_dir_assets(&CLAUDE_SKILLS, &worktree.join(".codex/skills"), &mut report)?;
 
     // Agent Skills standard (skills only)
     write_dir_assets(
@@ -126,7 +122,9 @@ mod tests {
     fn distribute_creates_claude_hooks() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
-        let hook = dir.path().join(".claude/hooks/scripts/gwt-forward-hook.mjs");
+        let hook = dir
+            .path()
+            .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
         assert!(hook.exists(), "expected {}", hook.display());
     }
 
