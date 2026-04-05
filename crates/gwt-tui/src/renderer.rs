@@ -45,6 +45,11 @@ pub fn detect_urls(text: &str) -> Vec<(usize, usize)> {
     let mut i = 0;
 
     while i < len {
+        // Skip to the next valid UTF-8 char boundary.
+        if !text.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
         // Look for "http://" or "https://"
         let remaining = &text[i..];
         let scheme_len = if remaining.starts_with("https://") {
@@ -52,7 +57,7 @@ pub fn detect_urls(text: &str) -> Vec<(usize, usize)> {
         } else if remaining.starts_with("http://") {
             7
         } else {
-            i += 1;
+            i += remaining.chars().next().map_or(1, |c| c.len_utf8());
             continue;
         };
 
@@ -388,6 +393,15 @@ mod tests {
     #[test]
     fn detect_urls_empty_string() {
         assert!(detect_urls("").is_empty());
+    }
+
+    #[test]
+    fn detect_urls_with_emoji_prefix() {
+        // Emoji like 🔍 is 4 bytes — must not panic on byte-boundary checks.
+        let text = "  🔍  Resolving https://example.com done";
+        let urls = detect_urls(text);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(&text[urls[0].0..urls[0].1], "https://example.com");
     }
 
     #[test]
