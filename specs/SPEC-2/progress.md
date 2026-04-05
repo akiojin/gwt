@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `258/258` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T11:54:16Z`
+- Task progress: `263/263` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T12:12:30Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -48,6 +48,8 @@
 - Compact session titles now keep the active `n/N` position visible alongside the active session label, so standard-width workspaces preserve multi-session context even after the full strip collapses.
 - Split/grid pane titles now keep old-TUI session identity cues as well: each pane shows its stable `n:` position plus the session-type icon before the session label.
 - Branch Detail now prefetches detail data asynchronously and caches it per branch, so startup/refresh can repopulate details without putting Docker/git/spec filesystem reads on the cursor-move input path.
+- Management focus cycling now also accepts both real-world reverse-tab encodings: `BackTab` and `Tab` with the Shift modifier both move focus backward as documented.
+- Startup now synchronizes the live terminal frame size into the model before the default shell PTY is spawned, so the right-side session pane starts with the correct geometry instead of stale `80x24` dimensions.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

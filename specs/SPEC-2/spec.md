@@ -136,7 +136,8 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-013e**: Non-Branches management footer hints are mode-aware instead of generic: tabs without sub-tabs omit `Ctrl+←→:sub-tab`, detail drill-downs advertise `Esc:back`, and form/edit modes advertise `Esc:cancel`.
 - **FR-013f**: Non-Branches management footer hints are also action-aware: each tab advertises only its real primary action surface instead of a generic `Enter:action`, such as `Issues` list showing `/:search` and `Enter:detail`, `Git View` showing `Enter:expand`, `Versions` showing refresh-only, and `PR Dashboard` detail showing `Enter:close`.
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion. The current default split is responsive: wide terminals (`>=120 cols`) use `40% management / 60% session`, while standard or narrower terminals fall back to `50% / 50%` so management chrome remains legible.
-- **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Tab`/`Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
+- **FR-014a**: Session PTY geometry is initialized from the actual visible session-pane size at startup. The default shell must not stay on the stale `80x24` model default until a later terminal resize event arrives.
+- **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Tab`/`Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border. Reverse focus cycling must work whether the terminal reports `Shift+Tab` as `BackTab` or as `Tab` with the Shift modifier.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 
@@ -148,6 +149,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **NFR-004**: Split grid layout recalculates within one frame on session add/remove.
 - **NFR-005**: Session persistence file size remains under 100KB for typical usage.
 - **NFR-006**: Branch list selection changes complete without synchronous `git` / Docker / filesystem detail reloads on the input path.
+- **NFR-007**: Startup PTY geometry matches the visible session pane without requiring a manual terminal resize.
 
 ## Implementation Details
 
@@ -167,6 +169,7 @@ Tab →  Tab Content (list) → Terminal → ...
 
 - Focused pane: **blue** border (`Color::Cyan`)
 - Unfocused pane: **white** border (`Color::Gray`)
+- Reverse focus cycling accepts both `BackTab` and `Shift+Tab` key encodings
 - Management tabs are rendered in the Block title of the management panel (Left/Right switches tabs within TabContent focus)
 - Session tabs are rendered in the Block title of the terminal content area (active session highlighted yellow/bold, inactive gray)
 - Ctrl+G,g toggles management panel visibility (same as before)
@@ -295,3 +298,5 @@ agent_id = "claude"  # only for agent type
 - **SC-004**: Session restore recreates previous layout after quit and restart.
 - **SC-005**: Management panel tabs all render content and preserve state between switches.
 - **SC-006**: Status bar updates within one frame of session or branch change.
+- **SC-007**: `Shift+Tab` moves focus backward on both Branches and non-Branches management tabs even when the terminal emits `Tab` with the Shift modifier instead of `BackTab`.
+- **SC-008**: On startup, the default shell PTY sees the same row/column geometry as the visible session pane before any manual terminal resize occurs.

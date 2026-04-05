@@ -308,16 +308,13 @@ pub fn update(model: &mut Model, msg: Message) {
             } else if model.active_layer == ActiveLayer::Management {
                 // Focus cycling with Tab/BackTab (before pane-specific dispatch)
                 if !is_in_text_input_mode(model) {
-                    match key.code {
-                        KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            model.active_focus = next_management_focus(model, false);
-                            return;
-                        }
-                        KeyCode::BackTab => {
-                            model.active_focus = next_management_focus(model, true);
-                            return;
-                        }
-                        _ => {}
+                    if is_forward_focus_cycle_key(&key) {
+                        model.active_focus = next_management_focus(model, false);
+                        return;
+                    }
+                    if is_reverse_focus_cycle_key(&key) {
+                        model.active_focus = next_management_focus(model, true);
+                        return;
                     }
                 }
 
@@ -1763,6 +1760,15 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
         KeyCode::Char(ch) => Some(ch),
         _ => None,
     }
+}
+
+fn is_forward_focus_cycle_key(key: &crossterm::event::KeyEvent) -> bool {
+    key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+fn is_reverse_focus_cycle_key(key: &crossterm::event::KeyEvent) -> bool {
+    key.code == KeyCode::BackTab
+        || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
@@ -8319,6 +8325,36 @@ CUSTOM_ENV = "enabled"
         );
 
         assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_key_input_shift_tab_modifier_on_non_branches_management_skips_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Logs;
+        model.active_focus = FocusPane::Terminal;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::SHIFT)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_key_input_shift_tab_modifier_on_branches_cycles_backward_into_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::Terminal;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::SHIFT)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 
     #[test]

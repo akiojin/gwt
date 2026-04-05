@@ -581,6 +581,22 @@ even when Docker, git status, git log, or worktree filesystem reads are slow.
 42.3: Verification (1 task)
 - Re-run focused tests, broad workspace verification, and refresh SPEC-2 artifacts and progress evidence.
 
+### Phase 43: Normalize Reverse Focus Keys And Startup PTY Geometry (5 tasks)
+Close two remaining usability regressions in the workspace shell: reverse focus cycling must honor
+all real `Shift+Tab` encodings, and the default shell PTY must start at the actual session-pane size
+instead of waiting for a later resize event.
+
+43.1: Input and geometry contract (2 tasks)
+- Accept both `BackTab` and `Tab`+`Shift` as reverse pane-focus navigation across Branches and non-Branches management tabs.
+- Seed startup PTY geometry from the live terminal frame size before the default shell is spawned so the right-side session pane is not born as `80x24`.
+
+43.2: Focused coverage (2 tasks)
+- Add RED coverage for reverse focus cycling when the key arrives as `KeyCode::Tab` plus the Shift modifier.
+- Add RED coverage for startup terminal-size synchronization so the initial shell geometry matches the computed session pane before any later resize event.
+
+43.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and refresh SPEC-2 artifacts and progress evidence.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
@@ -593,3 +609,4 @@ even when Docker, git status, git log, or worktree filesystem reads are slow.
 2. `cargo test -p gwt-tui --test snapshot_e2e` — all E2E pass
 3. `cargo clippy -p gwt-tui --all-targets -- -D warnings` — clean
 4. Manual: launch gwt-tui, navigate branches, verify cached detail switches immediately on cursor move and `r` refresh repopulates details asynchronously
+5. Manual: verify `Shift+Tab` moves focus backward and the initial right-side session pane starts at the expected size without requiring a window resize

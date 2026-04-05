@@ -434,3 +434,11 @@ banner in favor of pane-title chrome.
 - [x] T277 Implement branch-detail cache plus asynchronous preload/refresh wiring in `app.rs` / `model.rs` / `branches.rs`.
 - [x] T278 Refresh `SPEC-2` artifacts and progress tracking to describe cached asynchronous branch-detail loading.
 - [x] T279 Verify focused tests, broad workspace verification, and artifact sync.
+
+## Phase 43: Normalize Reverse Focus Keys And Startup PTY Geometry
+
+- [x] T280 [P] Write RED test: `Shift+Tab` arriving as `KeyCode::Tab` + `KeyModifiers::SHIFT` still moves focus backward on management panes.
+- [x] T281 [P] Write RED test: startup terminal-size synchronization seeds the initial shell geometry from the live terminal frame instead of the stale `80x24` default.
+- [x] T282 Update `app.rs` focus routing to normalize reverse-tab key encodings before pane cycling decisions.
+- [x] T283 Update `main.rs` startup initialization so the model receives the live terminal size before computing the default shell PTY rows/cols.
+- [x] T284 Refresh `SPEC-2` artifacts, progress evidence, and verification results for the reverse-focus and startup-geometry fixes.
