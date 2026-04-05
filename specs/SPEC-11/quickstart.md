@@ -46,4 +46,4 @@ Verify:
 - Pane borders use rounded corners (`╭╮╰╯`)
 - Focused pane has thick/double border
 - Branch icons show `◆`/`◇` instead of `●`/`○`
-- Session tabs show `›`/`◈` instead of `��`/`⭐`
+- Session tabs show `›`/`◈` instead of `▶`/`⭐`

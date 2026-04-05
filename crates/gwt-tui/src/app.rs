@@ -3839,14 +3839,15 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
             let session_idx = start + col_idx;
             if let Some(session) = model.sessions.get(session_idx) {
                 let is_active = session_idx == model.active_session;
-                let border_style = if is_active {
-                    Style::default().fg(theme::color::ACTIVE)
-                } else {
-                    Style::default().fg(theme::color::SURFACE)
-                };
+                let is_focused =
+                    is_active && model.active_focus == FocusPane::Terminal;
+                let (mut border_style, border_type) = theme::pane_border(is_focused);
+                if is_active && !is_focused {
+                    border_style = Style::default().fg(theme::color::ACTIVE);
+                }
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .border_type(theme::border::default())
+                    .border_type(border_type)
                     .border_style(border_style)
                     .title(grid_session_title(session_idx, session));
                 frame.render_widget(block, *col_area);
