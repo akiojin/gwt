@@ -231,9 +231,24 @@ impl BranchesState {
             .collect();
 
         match self.sort_mode {
-            SortMode::Default => {} // insertion order
+            SortMode::Default => {
+                if self.view_mode == ViewMode::All {
+                    let (mut local, remote): (Vec<&BranchItem>, Vec<&BranchItem>) =
+                        result.into_iter().partition(|branch| branch.is_local);
+                    local.extend(remote);
+                    result = local;
+                }
+            }
             // Date has no dedicated field yet; fall back to alphabetical like Name.
-            SortMode::Name | SortMode::Date => result.sort_by(|a, b| a.name.cmp(&b.name)),
+            SortMode::Name | SortMode::Date => result.sort_by(|a, b| {
+                if self.view_mode == ViewMode::All {
+                    b.is_local
+                        .cmp(&a.is_local)
+                        .then_with(|| a.name.cmp(&b.name))
+                } else {
+                    a.name.cmp(&b.name)
+                }
+            }),
         }
 
         result
@@ -395,13 +410,17 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     match msg {
         BranchesMessage::MoveUp => {
             let len = state.filtered_branches().len();
-            super::move_up(&mut state.selected, len);
+            super::clamp_index(&mut state.selected, len);
+            state.selected = state.selected.saturating_sub(1);
             state.detail_session_selected = 0;
             state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::MoveDown => {
             let len = state.filtered_branches().len();
-            super::move_down(&mut state.selected, len);
+            super::clamp_index(&mut state.selected, len);
+            if len > 0 && state.selected + 1 < len {
+                state.selected += 1;
+            }
             state.detail_session_selected = 0;
             state.sync_selected_detail_from_cache(true);
         }
@@ -1056,6 +1075,39 @@ mod tests {
         ]
     }
 
+    fn sample_branches_with_early_remote() -> Vec<BranchItem> {
+        vec![
+            BranchItem {
+                name: "origin/aaa-remote".to_string(),
+                is_head: false,
+                is_local: false,
+                category: BranchCategory::Feature,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "zeta-local".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Other,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "yellow-local".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Other,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "origin/zzz-remote".to_string(),
+                is_head: false,
+                is_local: false,
+                category: BranchCategory::Feature,
+                worktree_path: None,
+            },
+        ]
+    }
+
     fn sample_containers() -> Vec<gwt_docker::ContainerInfo> {
         vec![
             gwt_docker::ContainerInfo {
@@ -1133,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn move_down_wraps() {
+    fn move_down_stops_at_last_row() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
         assert_eq!(state.selected, 0);
@@ -1142,21 +1194,20 @@ mod tests {
         assert_eq!(state.selected, 1);
 
         // Move to last
-        for _ in 0..4 {
+        for _ in 0..10 {
             update(&mut state, BranchesMessage::MoveDown);
         }
-        // Should wrap to 0
-        assert_eq!(state.selected, 0);
+        assert_eq!(state.selected, 4);
     }
 
     #[test]
-    fn move_up_wraps() {
+    fn move_up_stops_at_first_row() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
         assert_eq!(state.selected, 0);
 
         update(&mut state, BranchesMessage::MoveUp);
-        assert_eq!(state.selected, 4); // wraps to last
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
@@ -1334,9 +1385,9 @@ mod tests {
     }
 
     #[test]
-    fn sort_name_returns_alphabetical_order() {
+    fn sort_name_returns_alphabetical_order_within_local_and_remote_groups() {
         let mut state = BranchesState::default();
-        state.branches = sample_branches(); // main, develop, feature/login, origin/feature/api, hotfix/crash
+        state.branches = sample_branches_with_early_remote();
         state.sort_mode = SortMode::Name;
 
         let filtered = state.filtered_branches();
@@ -1344,38 +1395,35 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "develop",
-                "feature/login",
-                "hotfix/crash",
-                "main",
-                "origin/feature/api",
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
             ]
         );
     }
 
     #[test]
-    fn sort_date_returns_alphabetical_fallback() {
+    fn sort_name_keeps_local_branches_before_remote_branches() {
         let mut state = BranchesState::default();
-        state.branches = sample_branches();
-        state.sort_mode = SortMode::Date;
+        state.branches = sample_branches_with_early_remote();
+        state.sort_mode = SortMode::Name;
 
         let filtered = state.filtered_branches();
         let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
-        // Date falls back to alphabetical since no date field exists
         assert_eq!(
             names,
             vec![
-                "develop",
-                "feature/login",
-                "hotfix/crash",
-                "main",
-                "origin/feature/api",
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
             ]
         );
     }
 
     #[test]
-    fn sort_default_preserves_insertion_order() {
+    fn sort_default_keeps_local_branches_before_remote_branches() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
         state.sort_mode = SortMode::Default;
@@ -1388,8 +1436,46 @@ mod tests {
                 "main",
                 "develop",
                 "feature/login",
-                "origin/feature/api",
                 "hotfix/crash",
+                "origin/feature/api",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_date_returns_alphabetical_fallback_within_local_and_remote_groups() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches_with_early_remote();
+        state.sort_mode = SortMode::Date;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_date_keeps_local_branches_before_remote_branches() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches_with_early_remote();
+        state.sort_mode = SortMode::Date;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
             ]
         );
     }

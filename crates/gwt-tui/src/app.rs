@@ -3422,20 +3422,14 @@ fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
 
 /// Build the management tab title line for embedding in a pane border.
 fn management_tab_title(model: &Model, width: u16) -> Line<'static> {
-    if should_compact_management_tab_title(width) {
-        return Line::from(vec![Span::styled(
-            format!(" {} ", model.management_tab.label()),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]);
-    }
-
     let labels: Vec<&str> = ManagementTab::ALL.iter().map(|t| t.label()).collect();
     let active_idx = ManagementTab::ALL
         .iter()
         .position(|t| *t == model.management_tab)
         .unwrap_or(0);
+    if should_compact_management_tab_title(width) {
+        return compact_management_tab_title(&labels, active_idx, width);
+    }
     screens::build_tab_title(&labels, active_idx)
 }
 
@@ -3447,6 +3441,77 @@ fn should_compact_management_tab_title(width: u16) -> bool {
         .sum::<usize>()
         + ManagementTab::ALL.len().saturating_sub(1);
     full_strip_width > available_title_width
+}
+
+fn compact_management_tab_title(labels: &[&str], active_idx: usize, width: u16) -> Line<'static> {
+    let available_title_width = width.saturating_sub(2) as usize;
+
+    for window_len in (1..=labels.len().min(3)).rev() {
+        let start = compact_tab_window_start(labels.len(), active_idx, window_len);
+        let candidate =
+            compact_management_tab_title_window(labels, active_idx, start, start + window_len);
+        if title_line_width(&candidate) <= available_title_width {
+            return candidate;
+        }
+    }
+
+    compact_management_tab_title_window(labels, active_idx, active_idx, active_idx + 1)
+}
+
+fn compact_tab_window_start(total_tabs: usize, active_idx: usize, window_len: usize) -> usize {
+    if total_tabs <= window_len {
+        return 0;
+    }
+    active_idx.saturating_sub(1).min(total_tabs - window_len)
+}
+
+fn compact_management_tab_title_window(
+    labels: &[&str],
+    active_idx: usize,
+    start: usize,
+    end: usize,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    if start > 0 {
+        spans.push(Span::styled("...", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::raw("│"));
+    }
+
+    for (idx, label) in labels[start..end].iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw("│"));
+        }
+        let tab_idx = start + idx;
+        if tab_idx == active_idx {
+            spans.push(Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!(" {} ", label),
+                Style::default().fg(Color::Gray),
+            ));
+        }
+    }
+
+    if end < labels.len() {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled("...", Style::default().fg(Color::DarkGray)));
+    }
+
+    Line::from(spans)
+}
+
+fn title_line_width(title: &Line<'_>) -> usize {
+    title
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
 }
 
 /// Render the management panes (left side — 2 stacked for Branches, 1 for others).
@@ -4472,7 +4537,7 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_standard_width_branches_title_collapses_to_active_tab() {
+    fn render_model_text_standard_width_branches_title_keeps_nearby_tabs_visible() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Branches;
@@ -4483,13 +4548,21 @@ mod tests {
 
         assert!(first_line.contains("Branches"));
         assert!(
-            !first_line.contains("Specs"),
-            "standard-width management title should collapse to the active tab instead of a truncated tab strip"
+            first_line.contains("Specs"),
+            "standard-width Branches title should keep the next nearby tab visible"
+        );
+        assert!(
+            first_line.contains("Issues"),
+            "standard-width Branches title should keep multiple nearby tabs visible"
+        );
+        assert!(
+            !first_line.contains("Settings"),
+            "standard-width Branches title should not try to render the full strip"
         );
     }
 
     #[test]
-    fn render_model_text_standard_width_non_branches_title_collapses_to_active_tab() {
+    fn render_model_text_standard_width_non_branches_title_keeps_nearby_tabs_visible() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Issues;
@@ -4498,15 +4571,20 @@ mod tests {
         let rendered = render_model_text(&model, 80, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
+        assert!(first_line.contains("Specs"));
         assert!(first_line.contains("Issues"));
         assert!(
-            !first_line.contains("Branches"),
-            "standard-width non-Branches title should also collapse to the active tab"
+            first_line.contains("PRs"),
+            "standard-width non-Branches title should keep the next nearby tab visible"
+        );
+        assert!(
+            !first_line.contains("Versions"),
+            "standard-width non-Branches title should not try to render distant tabs"
         );
     }
 
     #[test]
-    fn render_model_text_medium_width_management_title_still_collapses_to_active_tab() {
+    fn render_model_text_medium_width_management_title_still_prefers_nearby_tabs() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Issues;
@@ -4515,10 +4593,15 @@ mod tests {
         let rendered = render_model_text(&model, 120, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
+        assert!(first_line.contains("Specs"));
         assert!(first_line.contains("Issues"));
         assert!(
-            !first_line.contains("Branches"),
-            "when the full tab strip does not fit, medium-width panes should still collapse to the active tab"
+            first_line.contains("PRs"),
+            "when the full tab strip does not fit, medium-width panes should still keep nearby tabs visible"
+        );
+        assert!(
+            !first_line.contains("Logs"),
+            "medium-width panes should still omit distant tabs until the full strip fits"
         );
     }
 

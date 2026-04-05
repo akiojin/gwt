@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `263/263` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T12:12:30Z`
+- Task progress: `262/262` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T12:35:33Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -39,7 +39,9 @@
 - The redundant standalone management banner is gone; pane titles now carry the management context so the left-side list/detail surfaces reclaim one full row of content.
 - Terminal-focused footer hints now use compact grouped notation so `Ctrl+G:b/i/s g c []/1-9 z ?`, `Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
 - Management and Branch Detail footers now compact both context and hint text at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of truncating at the right edge.
-- Narrow management pane titles now collapse to the active tab label whenever the full tab strip would truncate, so standard-width terminals keep the current management surface legible instead of showing a cut-off strip.
+- Branches list navigation now stops at the first and last visible rows instead of wrapping, so daily branch scanning no longer overshoots at the edges.
+- `Branches` `All` view now keeps local branches ahead of remotes while still honoring the active sort mode inside each group, so worktree-focused branches stay at the top of the list.
+- Narrow management pane titles now keep the active tab plus nearby tabs visible with ellipsis whenever the full tab strip would truncate, so standard-width terminals preserve tab context instead of collapsing to a single label.
 - Narrow session pane titles now collapse to the active session label whenever the full session strip would truncate, so standard-width multi-session workspaces keep the current workstream legible instead of showing a cut-off strip.
 - Non-Branches management footer hints now mirror the actual routing contract: detail views advertise `Esc:back`, form/edit modes advertise `Esc:cancel`, and only Settings/Logs keep `Ctrl+←→:sub-tab`.
 - Branch Detail `Esc:back` is now consumed before warn-dismiss fallback runs, so a visible warn toast no longer hijacks the detail back action.

@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Git View ────────────────────────────┐┌ ▶ Shell ─────────────────────────────┐
+┌...│ Profiles │ Git View │...─────────┐┌ ▶ Shell ─────────────────────────────┐
 │Files (0)                             ││Session: Shell (80x24)                │
 │No changed files                      ││                                      │
 │                                      ││                                      │

@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Versions ────────────────────────────┐┌ ▶ Shell ─────────────────────────────┐
+┌...│ Git View │ Versions │...─────────┐┌ ▶ Shell ─────────────────────────────┐
 │Versions                              ││Session: Shell (80x24)                │
 │No version tags found                 ││                                      │
 │                                      ││                                      │

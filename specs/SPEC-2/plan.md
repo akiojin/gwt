@@ -597,6 +597,22 @@ instead of waiting for a later resize event.
 43.3: Verification (1 task)
 - Re-run focused tests, broad workspace verification, and refresh SPEC-2 artifacts and progress evidence.
 
+### Phase 44: Stop Branch List Wrap, Prefer Local Branches, And Keep Nearby Tabs Visible (5 tasks)
+Tighten the daily Branches workflow by removing list wraparound, promoting local branches in the
+mixed list, and making narrow management titles preserve nearby tab context instead of showing the
+active tab alone.
+
+44.1: Branch list movement contract (2 tasks)
+- Make Branches list `Up`/`Down` stop at the first/last visible row instead of wrapping around.
+- Keep this change scoped to the Branches list so other management lists keep their current behavior.
+
+44.2: Branch ordering and title-context coverage (2 tasks)
+- In `ViewMode::All`, keep local branches ahead of remote branches while preserving the active sort mode inside each group.
+- Change narrow management titles from active-only collapse to a nearby-tab window that keeps the active tab and adjacent tabs visible, using ellipsis when tabs remain hidden off-screen.
+
+44.3: Verification (1 task)
+- Re-run focused and broad workspace verification, then refresh SPEC-2 artifacts and progress tracking.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

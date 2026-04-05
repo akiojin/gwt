@@ -442,3 +442,11 @@ banner in favor of pane-title chrome.
 - [x] T282 Update `app.rs` focus routing to normalize reverse-tab key encodings before pane cycling decisions.
 - [x] T283 Update `main.rs` startup initialization so the model receives the live terminal size before computing the default shell PTY rows/cols.
 - [x] T284 Refresh `SPEC-2` artifacts, progress evidence, and verification results for the reverse-focus and startup-geometry fixes.
+
+## Phase 44: Stop Branch List Wrap, Prefer Local Branches, And Keep Nearby Tabs Visible
+
+- [x] T285 [P] Write RED test: Branches list `Up` on the first row and `Down` on the last row stop at the edge instead of wrapping.
+- [x] T286 [P] Write RED test: `ViewMode::All` keeps local branches ahead of remote branches for default and name/date sort modes.
+- [x] T287 [P] Write RED test: standard-width management pane titles keep the active tab plus nearby tabs visible instead of collapsing to the active label only.
+- [x] T288 Update `branches.rs` and `app.rs` to stop Branches-list wraparound, apply local-first ordering in `All`, and render nearby-tab management titles with ellipsis when tabs are hidden.
+- [x] T289 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the Branches and management-title visibility fixes.
