@@ -144,7 +144,11 @@ fn run_app(
             // (skip keybind processing when in Initialization layer)
             let msg = match msg {
                 Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
-                    keybinds.process_key(key).unwrap_or(Message::KeyInput(key))
+                    let terminal_focused =
+                        model.active_focus == gwt_tui::model::FocusPane::Terminal;
+                    keybinds
+                        .process_key_with_focus(key, terminal_focused)
+                        .unwrap_or(Message::KeyInput(key))
                 }
                 other => other,
             };
