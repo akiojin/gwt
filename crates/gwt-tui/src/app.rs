@@ -2747,7 +2747,7 @@ fn prepare_wizard_startup(
         },
         is_new_branch: starts_new_branch,
         gh_cli_available: gwt_core::process::command_exists("gh"),
-        ai_enabled: true,
+        ai_enabled: false,
         branch_name,
         spec_context,
         ..Default::default()
@@ -5871,6 +5871,27 @@ mod tests {
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
         assert_eq!(wizard.branch_name, "feature/spec-42-my-feature");
+    }
+
+    #[test]
+    fn prepare_wizard_startup_skips_ai_branch_suggest_in_new_branch_flow() {
+        let cache = VersionCache::new();
+        let (mut wizard, _) = prepare_wizard_startup(
+            Some(screens::wizard::SpecContext::new(
+                "SPEC-42",
+                "My Feature",
+                "",
+            )),
+            vec![],
+            &cache,
+        );
+
+        screens::wizard::update(&mut wizard, screens::wizard::WizardMessage::Select);
+        assert_eq!(wizard.step, screens::wizard::WizardStep::IssueSelect);
+
+        screens::wizard::update(&mut wizard, screens::wizard::WizardMessage::Select);
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchNameInput);
+        assert!(!wizard.ai_suggest.loading);
     }
 
     #[test]

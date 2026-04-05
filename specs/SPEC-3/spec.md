@@ -33,15 +33,15 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
 
 As a developer, I want the new ratatui wizard to follow the old-TUI launch
 flow so that the daily launch UX matches existing muscle memory while
-preserving new capabilities such as version cache, AI branch suggestion, and
-session conversion.
+preserving version cache and session conversion while leaving AI branch
+suggestion dormant in the standard new-branch flow.
 
 **Acceptance Scenarios**
 
 1. Given I launch from an existing branch, when the wizard opens, then I see
    `BranchAction` before any agent configuration step.
 2. Given I choose to create a new branch, when I continue, then the wizard
-   runs `BranchType -> Issue -> AI Suggest -> Branch Name -> Agent`.
+   runs `BranchType -> Issue -> Branch Name -> Agent`.
 3. Given I select Codex, when I continue through the wizard, then the flow
    includes `Model -> Reasoning -> Version -> Execution Mode -> Skip Permissions`
    without requiring a trailing confirm screen.
@@ -196,7 +196,9 @@ As a developer, I want to convert an existing session to a different agent type 
   `ReasoningLevel`, `VersionSelect`, `ExecutionMode`,
   `ConvertAgentSelect`, `ConvertSessionSelect`, `SkipPermissions`,
   `BranchTypeSelect`, `IssueSelect`, `AIBranchSuggest`, and
-  `BranchNameInput`.
+  `BranchNameInput`, while the standard new-branch path currently routes
+  `BranchTypeSelect -> IssueSelect -> BranchNameInput` without entering
+  `AIBranchSuggest`.
 - **FR-017**: `ModelSelect`, `ReasoningLevel`, `ExecutionMode`,
   `SkipPermissions`, and `VersionSelect` use old-TUI-style row formatting
   with descriptive text and version-list scroll indicators.
