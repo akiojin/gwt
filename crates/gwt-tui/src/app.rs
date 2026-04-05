@@ -3221,7 +3221,12 @@ fn open_url(url: &str) -> Result<(), String> {
         })
 }
 
-fn render_session_surface(session: &crate::model::SessionTab, frame: &mut Frame, area: Rect) {
+fn render_session_surface(
+    session: &crate::model::SessionTab,
+    frame: &mut Frame,
+    area: Rect,
+    show_cursor: bool,
+) {
     if session.vt.screen().contents().trim().is_empty() {
         let placeholder = Paragraph::new(format!(
             "Session: {} ({}x{})",
@@ -3236,6 +3241,16 @@ fn render_session_surface(session: &crate::model::SessionTab, frame: &mut Frame,
             crate::widgets::terminal_view::TerminalView::new(session.vt.screen()),
             area,
         );
+    }
+
+    // Show the vt100 cursor when this session has terminal focus.
+    if show_cursor && !session.vt.screen().hide_cursor() {
+        let (cursor_row, cursor_col) = session.vt.screen().cursor_position();
+        let x = area.x + cursor_col;
+        let y = area.y + cursor_row;
+        if x < area.right() && y < area.bottom() {
+            frame.set_cursor_position((x, y));
+        }
     }
 }
 
@@ -3406,7 +3421,7 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
                 let block = pane_block(title, terminal_focused);
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
-                render_session_surface(session, frame, inner);
+                render_session_surface(session, frame, inner, terminal_focused);
             }
         }
         SessionLayout::Grid => {
