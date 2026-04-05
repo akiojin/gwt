@@ -487,14 +487,8 @@ mod tests {
             })
             .collect();
         assert!(dirs.contains(&"gwt-pr"), "missing gwt-pr skill dir");
-        assert!(
-            dirs.contains(&"gwt-design"),
-            "missing gwt-design skill dir"
-        );
-        assert!(
-            dirs.contains(&"gwt-build"),
-            "missing gwt-build skill dir"
-        );
+        assert!(dirs.contains(&"gwt-design"), "missing gwt-design skill dir");
+        assert!(dirs.contains(&"gwt-build"), "missing gwt-build skill dir");
     }
 
     #[test]
