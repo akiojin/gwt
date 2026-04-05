@@ -95,6 +95,15 @@ pub fn spawn_pty_for_session(
     Ok(())
 }
 
+/// Compute the session pane content size `(cols, rows)` for PTY/VtState
+/// initialization.  Falls back to `model.terminal_size` when the layout
+/// geometry is not yet available (e.g. during early startup).
+pub fn session_content_size(model: &Model) -> (u16, u16) {
+    active_session_content_area(model)
+        .map(|r| (r.width, r.height))
+        .unwrap_or(model.terminal_size)
+}
+
 /// Drain buffered PTY input and write it to the corresponding PTY handles.
 fn drain_pending_pty_inputs(model: &mut Model) {
     while let Some(input) = model.pending_pty_inputs.pop_front() {
@@ -175,16 +184,23 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::NewShell => {
             let idx = model.sessions.len();
-            let (cols, rows) = model.terminal_size;
             let session = crate::model::SessionTab {
                 id: format!("shell-{idx}"),
                 name: format!("Shell {}", idx + 1),
                 tab_type: SessionTabType::Shell,
-                vt: crate::model::VtState::new(rows, cols),
+                vt: crate::model::VtState::new(24, 80),
             };
             let session_id = session.id.clone();
             model.sessions.push(session);
             model.active_session = idx;
+
+            // Use actual pane content area for PTY size.
+            let (cols, rows) = session_content_size(model);
+
+            // Resize VtState to match.
+            if let Some(s) = model.sessions.last_mut() {
+                s.vt.resize(rows, cols);
+            }
 
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
             let config = gwt_terminal::pty::SpawnConfig {
@@ -1596,17 +1612,21 @@ fn check_branch_pending_actions(model: &mut Model) {
         if let Some(branch) = model.branches.selected_branch() {
             if let Some(ref wt_path) = branch.worktree_path {
                 let idx = model.sessions.len();
-                let (cols, rows) = model.terminal_size;
                 let session = crate::model::SessionTab {
                     id: format!("shell-{idx}"),
                     name: format!("Shell: {}", branch.name),
                     tab_type: crate::model::SessionTabType::Shell,
-                    vt: crate::model::VtState::new(rows, cols),
+                    vt: crate::model::VtState::new(24, 80),
                 };
                 let session_id = session.id.clone();
                 model.sessions.push(session);
                 model.active_session = idx;
                 model.active_focus = FocusPane::Terminal;
+
+                let (cols, rows) = session_content_size(model);
+                if let Some(s) = model.sessions.last_mut() {
+                    s.vt.resize(rows, cols);
+                }
 
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
                 let config = gwt_terminal::pty::SpawnConfig {
@@ -2421,7 +2441,6 @@ fn materialize_pending_launch_with(
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
 
-    let (cols, rows) = model.terminal_size;
     let tab = crate::model::SessionTab {
         id: session.id.clone(),
         name: config.display_name.clone(),
@@ -2429,12 +2448,18 @@ fn materialize_pending_launch_with(
             agent_id: config.agent_id.command().to_string(),
             color: tui_agent_color(config.color),
         },
-        vt: crate::model::VtState::new(rows, cols),
+        vt: crate::model::VtState::new(24, 80),
     };
     let tab_id = tab.id.clone();
     model.sessions.push(tab);
     model.active_session = model.sessions.len().saturating_sub(1);
     model.active_layer = ActiveLayer::Main;
+
+    // Use actual pane content area for PTY size.
+    let (cols, rows) = session_content_size(model);
+    if let Some(s) = model.sessions.last_mut() {
+        s.vt.resize(rows, cols);
+    }
 
     // Spawn PTY process for the agent session.
     let pty_config = gwt_terminal::pty::SpawnConfig {
