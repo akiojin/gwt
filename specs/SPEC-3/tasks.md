@@ -303,3 +303,11 @@
 - [x] T158 [P] Write RED test: custom-agent launch config uses the configured command, display name, mode args, and env vars.
 - [x] T159 Implement config-backed custom agent load/list/launch integration in `app.rs` without reopening the broader settings model.
 - [x] T160 Verify focused custom-agent tests and refresh SPEC-3 artifacts.
+
+## Phase 44: Settings-Backed Custom Agent CRUD
+
+- [x] T161 [P] Write RED test: Settings > Custom Agents loads persisted custom-agent fields from `~/.gwt/config.toml`.
+- [x] T162 [P] Write RED test: add/edit/delete interactions in Settings persist immediately without an explicit save step.
+- [x] T163 Extract shared custom-agent config load/save helpers into `crates/gwt-tui/src/custom_agents.rs`, preserving unrelated settings and unknown nested custom-agent tables.
+- [x] T164 Implement Settings > Custom Agents selector/edit/action rows in `crates/gwt-tui/src/screens/settings.rs` and wire them to the shared helper.
+- [x] T165 Verify focused `custom_agents` and `screens::settings` tests, then refresh SPEC-3 artifacts.

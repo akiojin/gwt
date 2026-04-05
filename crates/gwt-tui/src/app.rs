@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use gwt_agent::{
-    custom::{CustomAgentType, ModeArgs},
+    custom::CustomAgentType,
     AgentDetector, AgentId, AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig,
     Session as AgentSession, SessionMode, VersionCache,
 };
@@ -25,11 +25,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use serde::Deserialize;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::{
+    custom_agents::load_custom_agents,
     input::voice::VoiceInputMessage,
     message::Message,
     model::{
@@ -39,57 +39,10 @@ use crate::{
     screens,
 };
 
+#[cfg(test)]
+use crate::custom_agents::{load_custom_agents_from_path, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV};
+
 static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-const DISABLE_GLOBAL_CUSTOM_AGENTS_ENV: &str = "GWT_TUI_DISABLE_GLOBAL_CUSTOM_AGENTS";
-
-#[derive(Debug, Default, Deserialize)]
-struct CustomAgentSettingsFile {
-    #[serde(default)]
-    tools: CustomAgentToolsSection,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CustomAgentToolsSection {
-    #[serde(default, rename = "customCodingAgents", alias = "custom_coding_agents")]
-    custom_coding_agents: std::collections::BTreeMap<String, CustomAgentToml>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CustomAgentToml {
-    #[serde(default)]
-    id: String,
-    #[serde(alias = "displayName")]
-    display_name: String,
-    #[serde(rename = "type", alias = "agentType", default)]
-    agent_type: CustomAgentType,
-    command: String,
-    #[serde(default, alias = "defaultArgs")]
-    default_args: Vec<String>,
-    #[serde(default, alias = "modeArgs")]
-    mode_args: Option<ModeArgs>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-}
-
-impl CustomAgentToml {
-    fn into_custom_agent(self, key: &str) -> Option<CustomCodingAgent> {
-        let agent = CustomCodingAgent {
-            id: if self.id.trim().is_empty() {
-                key.to_string()
-            } else {
-                self.id
-            },
-            display_name: self.display_name,
-            agent_type: self.agent_type,
-            command: self.command,
-            default_args: self.default_args,
-            mode_args: self.mode_args,
-            env: self.env,
-        };
-
-        agent.validate().then_some(agent)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -2389,42 +2342,6 @@ fn build_custom_launch_config_from_wizard(
         resume_session_id: wizard.resume_session_id.clone(),
         skip_permissions: wizard.skip_perms,
     }
-}
-
-fn load_custom_agents() -> Vec<CustomCodingAgent> {
-    if std::env::var_os(DISABLE_GLOBAL_CUSTOM_AGENTS_ENV).is_some() {
-        return Vec::new();
-    }
-
-    let Some(path) = Settings::global_config_path() else {
-        return Vec::new();
-    };
-    if !path.exists() {
-        return Vec::new();
-    }
-
-    load_custom_agents_from_path(&path).unwrap_or_else(|err| {
-        tracing::warn!(path = %path.display(), error = %err, "failed to load custom agents");
-        Vec::new()
-    })
-}
-
-fn load_custom_agents_from_path(path: &Path) -> Result<Vec<CustomCodingAgent>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
-    let parsed: CustomAgentSettingsFile = toml::from_str(&content)
-        .map_err(|err| format!("failed to parse custom agents in {}: {err}", path.display()))?;
-
-    let mut agents = Vec::new();
-    for (key, raw_agent) in parsed.tools.custom_coding_agents {
-        if let Some(agent) = raw_agent.into_custom_agent(&key) {
-            agents.push(agent);
-        } else {
-            tracing::warn!(custom_agent = %key, "skipping invalid custom agent");
-        }
-    }
-
-    Ok(agents)
 }
 
 fn is_explicit_model_selection(model: &str) -> bool {

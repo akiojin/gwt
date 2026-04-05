@@ -5,12 +5,12 @@
 gwt detects and launches coding agents (Claude Code, Codex, Gemini,
 OpenCode, Copilot) with a dynamic wizard. Agents are detected via PATH
 lookup combined with `--version` invocation. Custom agents are configurable
-via the Settings management tab. The current ratatui wizard already restored
-the branch-first launch flow, version cache, and session conversion, but its
-step machine and popup UX still lag behind the old TUI (`v6.30.3`). This
-SPEC covers the complete agent management domain including detection, wizard
-flow, custom agents, version cache, launch resolution, and the remaining
-old-TUI wizard restoration work.
+via the Settings management tab. The current ratatui wizard now restores the
+branch-first launch flow, old-TUI-aligned step machine and popup chrome,
+version cache, session conversion, and Settings-backed custom-agent CRUD.
+This SPEC covers the complete agent management domain including detection,
+wizard flow, custom agents, version cache, launch resolution, and the
+reviewer-facing acceptance contract for that restored UX.
 
 ## User Stories
 
@@ -110,7 +110,7 @@ As a developer, I want to quickly re-launch a previous agent session configurati
 4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own compact action rows, `Resume`, `Start new`, and a final `Choose different` row in the old-TUI layout.
 5. Given the selected history entry has a persisted resume session ID, when I choose `Resume`, then launch configuration restores `Resume` mode with that session ID. When no resume session ID exists, the wizard falls back to `Continue`.
 
-### US-4: Manage Custom Agents (P1) -- PARTIALLY IMPLEMENTED
+### US-4: Manage Custom Agents (P1) -- IMPLEMENTED
 
 As a developer, I want to add, edit, and remove custom agents via Settings so that I can use agents not built into gwt.
 

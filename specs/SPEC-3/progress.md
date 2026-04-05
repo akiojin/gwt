@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `166/166` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T04:20:08Z`
+- Task progress: `171/171` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T04:40:11Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -125,9 +125,13 @@
   `~/.gwt/config.toml`, appends them after the built-in AgentSelect entries,
   and builds launches from the configured command/path/bunx runner plus mode
   args and env vars.
+- Settings > Custom Agents now loads persisted entries from
+  `~/.gwt/config.toml`, supports add/edit/delete directly in the TUI, and
+  persists each change immediately without a separate save step.
+- Shared custom-agent config helpers now preserve unrelated settings and
+  unknown nested custom-agent sections such as `models`, so Settings edits do
+  not erase GUI-era configuration value.
 
 ## Next
-- Finish the `Settings > Custom Agents` CRUD UI so US-4 can move from
-  `PARTIALLY IMPLEMENTED` to `IMPLEMENTED`.
 - Run the manual reviewer flow in `quickstart.md` and close the remaining
-  acceptance checklist items.
+  acceptance checklist items for the restored wizard and custom-agent UX.

@@ -4,6 +4,7 @@
 //! Built with ratatui + crossterm.
 
 pub mod app;
+pub(crate) mod custom_agents;
 pub mod event;
 pub mod input;
 pub mod message;

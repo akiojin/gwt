@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `166/166` completed items.
+- Task traceability snapshot: `tasks.md` now records `171/171` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -109,9 +109,14 @@ Status: CLEAR
   `~/.gwt/config.toml` now load into the wizard and launch path, so config-
   backed custom agents can be selected and started with their configured
   command/path/bunx runner plus mode args and env vars.
-- Notes: US-4 remains `PARTIALLY IMPLEMENTED` because the Settings-side CRUD
-  UI still needs to move beyond the current placeholder category fields.
+- Notes: Settings > Custom Agents now loads persisted agents, supports
+  immediate add/edit/delete interactions, and reuses the same
+  config-backed schema as the wizard runtime path.
+- Notes: Shared custom-agent save logic preserves unrelated settings and
+  unknown nested custom-agent tables such as `models`, preventing Settings
+  edits from silently dropping GUI-era value.
 
 ## Next
-- `gwt-spec-implement`
+- Run the manual reviewer flow in `quickstart.md` to close the final
+  acceptance loop for the restored wizard and custom-agent UX.
 - This report is a readiness gate, not a completion certificate.

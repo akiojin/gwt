@@ -3,18 +3,17 @@
 ## Summary
 
 Implement the version cache feature and complete the session conversion UI.
-Agent detection, launch wizard, and Quick Start are already implemented and
-tested. Custom agent runtime integration is now config-backed, but full
-Settings CRUD remains follow-up work. The remaining wizard work separates
-model selection from version selection and materializes launch state into a
-persisted agent session before activation.
+Agent detection, launch wizard, Quick Start, config-backed custom-agent
+runtime integration, and Settings-backed custom-agent CRUD are implemented
+and tested. The remaining work is reviewer confirmation of the restored
+wizard UX and end-to-end custom-agent behavior.
 
 ## Technical Context
 
 - **Agent trait**: `crates/gwt-core/src/agent/` -- `AgentTrait::detect()`, agent registry
 - **Launch wizard**: `crates/gwt-tui/src/screens/` -- wizard step components
 - **Launch builder**: `crates/gwt-core/src/agent/launch.rs` -- `AgentLaunchBuilder`
-- **Custom agents**: `crates/gwt-tui/src/app.rs` -- config-backed load/list/launch path; `crates/gwt-tui/src/screens/settings.rs` still needs CRUD UI
+- **Custom agents**: `crates/gwt-tui/src/custom_agents.rs` -- config-backed load/save helpers; `crates/gwt-tui/src/app.rs` -- load/list/launch path; `crates/gwt-tui/src/screens/settings.rs` -- CRUD UI
 - **Settings persistence**: `~/.gwt/config.toml` -- custom agent configuration
 - **Quick Start history**: `crates/gwt-core/src/` -- per-branch launch history
 
@@ -441,6 +440,16 @@ persisted agent session before activation.
    availability for `command`, `path`, and `bunx` runners.
 3. Build launch configs from the configured custom agent definition so the
    selected display name, mode args, and env vars reach the spawned session.
+
+### Phase 44: Settings-Backed Custom Agent CRUD
+
+1. Reuse a shared custom-agent config helper so wizard runtime loading and
+   Settings CRUD serialize the same `[tools.customCodingAgents.*]` schema.
+2. Replace the Custom Agents placeholder category with selector/edit/action
+   rows for agent choice, id, display name, type, command, add, and delete.
+3. Persist add/edit/delete operations immediately to `~/.gwt/config.toml`
+   while preserving unrelated settings and unknown nested custom-agent
+   sections such as `models`.
 
 ## Dependencies
 
