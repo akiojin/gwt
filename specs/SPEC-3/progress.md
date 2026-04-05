@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `171/171` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T04:40:11Z`
+- Artifact refresh: `2026-04-05T12:06:42Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -18,7 +18,8 @@
   creation.
 - Wizard launch now follows a branch-first flow again: existing-branch
   launches begin at branch action, while spec-prefilled launches begin at
-  branch type selection before issue and AI naming.
+  branch type selection before issue and manual branch input, with the AI
+  suggestion step left dormant in the standard flow.
 - The current ratatui wizard now uses the old-TUI-aligned step machine:
   `BranchAction`, `ConvertAgentSelect`, and `ConvertSessionSelect` are
   restored, and `SkipPermissions` now completes directly without `Confirm`.

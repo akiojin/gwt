@@ -67,8 +67,9 @@ wizard UX and end-to-end custom-agent behavior.
 
 1. Restore the branch-first wizard flow so existing-branch launches begin at
    branch action and spec-prefilled launches begin at branch type selection.
-2. Reorder new-branch setup to run Branch Type -> Issue -> AI naming ->
-   Branch Name before agent selection while keeping the current Confirm step.
+2. Reorder new-branch setup to run Branch Type -> Issue -> Branch Name
+   before agent selection, while leaving AI naming dormant in the standard
+   flow and keeping the current Confirm step.
 3. Restore the old branch type and execution mode labels in the current
    ratatui wizard without regressing version selection or spec-context AI
    prompts.
@@ -84,8 +85,8 @@ wizard UX and end-to-end custom-agent behavior.
    `BranchTypeSelect`, `IssueSelect`, `AIBranchSuggest`, and
    `BranchNameInput`.
 2. Rewrite `next_step()` and `prev_step()` to follow the old-TUI transition
-   table while preserving the current backend hooks for version cache, AI
-   branch suggestions, and session conversion.
+   table while preserving the current backend hooks for version cache,
+   dormant AI branch suggestions, and session conversion.
 3. Remove the separate `Confirm` step so that the final selection step
    completes directly.
 4. Add focused RED/GREEN coverage for the new step transitions before

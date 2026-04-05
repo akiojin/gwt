@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `49/49` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T13:05:00Z`
+- Artifact refresh: `2026-04-05T12:06:42Z`
 
 ## Done
 - Supporting artifacts now reflect the current split between the incomplete
@@ -19,6 +19,9 @@
 - File paste now also parses `file://` and `file://localhost/` clipboard payloads, improving macOS-style file URL handling when the clipboard exposes file URLs as text.
 - AI branch suggestion parsing now enforces `3..=5` git-safe names before the wizard displays them.
 - The wizard AI suggestion step now keeps an explicit `Manual input` option at the bottom of the list.
+- The standard Launch Agent new-branch flow now skips the AI suggestion step
+  and opens manual branch input directly, so AI settings are no longer
+  required just to type a branch name.
 - The wizard now has a render-content regression test for the AI suggestion list, and the voice hotkey chord has its own keybinding test.
 - The gwt-voice, gwt-clipboard, and gwt-ai suites now provide focused
   verification evidence for the currently implemented slices.

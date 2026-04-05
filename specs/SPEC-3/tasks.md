@@ -69,15 +69,15 @@
 
 - [x] T033 Write RED test: branch launch create-new path enters BranchTypeSelect instead of jumping directly to agent selection.
 - [x] T034 Write RED test: spec-prefilled wizard startup begins at BranchTypeSelect and preserves the SPEC branch seed.
-- [x] T035 Implement branch-first wizard ordering (Branch Type -> Issue -> AI naming -> Branch Name -> Agent) while keeping current Confirm handoff.
+- [x] T035 Implement branch-first wizard ordering (Branch Type -> Issue -> Branch Name -> Agent) while keeping current Confirm handoff and leaving AI naming dormant in the standard flow.
 - [x] T036 Restore old branch type and execution mode labels in the current wizard UI and update focused wizard tests.
 
 ## Phase 8: Old-TUI Wizard Step Machine Restoration
 
 - [x] T037 [P] Write RED test: existing-branch launches use `BranchAction` as the first actionable step and reach completion without a separate `Confirm` step.
-- [x] T038 [P] Write RED test: new-branch and spec-prefilled launches traverse `BranchType -> Issue -> AI Suggest -> BranchName -> Agent`.
+- [x] T038 [P] Write RED test: new-branch and spec-prefilled launches traverse `BranchType -> Issue -> BranchName -> Agent` in the standard flow.
 - [x] T039 [P] Write RED test: `Convert` execution mode routes through `ConvertAgentSelect` and `ConvertSessionSelect`.
-- [x] T040 Rewrite `WizardStep`, `next_step()`, and `prev_step()` to the old-TUI-aligned step machine while preserving version cache, AI suggestion, and session conversion state.
+- [x] T040 Rewrite `WizardStep`, `next_step()`, and `prev_step()` to the old-TUI-aligned step machine while preserving version cache, dormant AI suggestion support, and session conversion state.
 - [x] T041 Verify focused wizard tests, workspace checks, and refresh SPEC-3 artifacts.
 
 ## Phase 9: Old-TUI Wizard Option Formatting
