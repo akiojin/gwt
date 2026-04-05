@@ -35,10 +35,10 @@ As a developer, I want gwt to bundle all embedded skills, commands, and hooks in
 
 **Acceptance Scenarios**
 
-1. Given an agent is launched from gwt, when the launch completes, then `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.codex/skills/`, and `.agents/skills/` are written to the target worktree with the bundled skill files.
+1. Given an agent is launched from gwt, when the launch completes, then `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.codex/skills/` are written to the target worktree with the bundled skill files.
 2. Given the target worktree already has older skill files, when an agent is launched, then all gwt-managed skill files are overwritten with the latest bundled versions.
 3. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` is generated with gwt-managed hooks, preserving any existing user-defined hooks via merge logic.
-4. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.agents/skills/gwt-*`, `.claude/settings.local.json`).
+4. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.claude/settings.local.json`).
 5. Given the gwt binary is built, when build.rs runs, then all SKILL.md files are validated for YAML frontmatter syntax errors, and the build fails with a clear error if any SKILL.md has malformed YAML.
 6. Given all skills are bundled, when the binary starts, then no runtime file I/O is needed to read skill definitions — skills are embedded in the binary via `include_dir`.
 
@@ -103,7 +103,6 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
   - `.claude/commands/gwt-*.md` — Claude Code slash commands
   - `.claude/hooks/scripts/gwt-*.mjs` — Claude Code hooks
   - `.codex/skills/gwt-*/` — Codex skill definitions (same content as Claude)
-  - `.agents/skills/gwt-*/` — Agent Skills standard directory (same content)
 - **FR-013**: Distribution uses full overwrite: all gwt-managed files are replaced unconditionally on each agent launch.
 - **FR-014**: `.claude/settings.local.json` is generated on each agent launch. gwt-managed hooks are merged using `hooks.rs` merge logic, preserving user-defined hooks.
 - **FR-015**: `.git/info/exclude` is updated on each agent launch to exclude gwt-managed asset paths. Existing user entries are preserved; gwt-managed entries are delimited by `# gwt-managed-begin` / `# gwt-managed-end` markers.
@@ -186,6 +185,52 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - `postinstall.js`: detects OS/arch, downloads binary from GitHub Release, places in `bin/`
 - Supported: macOS arm64/x86_64, Linux x86_64, Windows x86_64
 
+### US-5: Methodology-Based Skill Consolidation (P1) -- NOT IMPLEMENTED
+
+As a developer using gwt, I want the skill system consolidated from 22 skills to 8 methodology-based skills so that I can easily understand which skill to use in each situation.
+
+**Acceptance Scenarios**
+
+1. Given I want to design a feature, when I call `gwt-design`, then it runs DDD-based intake, domain discovery, SPEC registration, and clarification in a single flow.
+2. Given I have a clarified spec.md, when I call `gwt-plan`, then it generates SDD architecture, plan.md, tasks.md, and runs the quality gate.
+3. Given I want to implement code, when I call `gwt-build` without a SPEC, then it runs TDD Red-Green-Refactor in standalone mode.
+4. Given I want to improve code quality, when I call `gwt-review`, then it generates a prioritized architecture improvement report.
+5. Given I call any of the 8 new skills, when invoked standalone, then it works without requiring other skills as dependencies.
+6. Given the design-plan-build-review chain, when each skill completes, then it suggests the next skill in the feedback loop.
+
+### US-6: DDD Integration in Design Phase (P1) -- NOT IMPLEMENTED
+
+As a developer, I want the design phase to include Domain-Driven Design methodology so that SPEC scope is bounded by domain contexts and avoids cross-boundary complexity.
+
+**Acceptance Scenarios**
+
+1. Given a rough feature request, when `gwt-design` runs Phase 2 (Domain Discovery), then it identifies Bounded Contexts, maps entities, and defines Ubiquitous Language.
+2. Given a proposed SPEC scope crosses multiple Bounded Contexts, when the granularity gate runs, then it recommends splitting the SPEC.
+
+### US-7: Architecture Feedback Loop (P1) -- NOT IMPLEMENTED
+
+As a developer, I want a codebase review skill that closes the feedback loop so that code quality improves over time instead of degrading.
+
+**Acceptance Scenarios**
+
+1. Given any repository, when I call `gwt-review`, then it analyzes domain boundaries, module depth, testability, and agent-friendliness.
+2. Given the review report, when improvements are identified, then it suggests creating improvement SPECs via `gwt-design`.
+
+## Functional Requirements (Phase 4: Skill Consolidation)
+
+- **FR-024**: gwt-design runs DDD domain discovery (Bounded Context identification, entity relationships, Ubiquitous Language) in Phase 2.
+- **FR-025**: gwt-design uses BC boundary check for SPEC granularity judgment.
+- **FR-026**: gwt-plan runs SDD architecture design (component design, interface contracts, sequence descriptions) in Phase 2.
+- **FR-027**: gwt-build provides TDD Red-Green-Refactor loop outside the SPEC pipeline (standalone mode).
+- **FR-028**: gwt-review generates codebase analysis report (domain boundaries, module depth, testability, agent-friendliness).
+- **FR-029**: gwt-review suggests gwt-design for improvement SPECs, closing the feedback loop.
+- **FR-030**: gwt-issue auto-detects register/resolve mode from arguments.
+- **FR-031**: gwt-pr auto-detects create/check/fix mode from current branch PR state.
+- **FR-032**: gwt-search provides unified search across SPECs, Issues, and project files.
+- **FR-033**: gwt-agent auto-detects discover/read/send/lifecycle mode from arguments.
+- **FR-034**: All 8 skills work standalone without requiring other skills as dependencies.
+- **FR-035**: design → plan → build → review automatic chain suggests the next skill on completion.
+
 ## Success Criteria
 
 - **SC-001**: GitHub Release produces downloadable binaries for all 4 target platforms.
@@ -194,7 +239,7 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - **SC-004**: Service Select screen lists services from a test docker-compose.yml.
 - **SC-005**: Port Select screen detects and resolves a simulated port conflict.
 - **SC-006**: Container start/stop/restart commands execute and report status.
-- **SC-007**: After agent launch, all embedded skill files exist in `.claude/skills/`, `.codex/skills/`, and `.agents/skills/` in the target worktree.
+- **SC-007**: After agent launch, all embedded skill files exist in `.claude/skills/` and `.codex/skills/` in the target worktree.
 - **SC-011**: build.rs rejects a SKILL.md with malformed YAML frontmatter and produces a clear error message.
 - **SC-012**: `.git/info/exclude` contains gwt-managed markers and excludes all distributed asset paths.
 - **SC-013**: `.claude/settings.local.json` is generated with gwt-managed hooks and preserves user hooks across consecutive agent launches.
@@ -203,3 +248,8 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - **SC-008**: hooks.json merge preserves user hooks across 10 consecutive gwt-managed updates.
 - **SC-009**: hooks.json corruption recovery creates backup and restores functionality.
 - **SC-010**: All carried-over hooks merge tests from SPEC-1786 continue to pass.
+- **SC-016**: `gwt-design` creates a SPEC with DDD domain model through the full intake-to-clarification flow.
+- **SC-017**: `gwt-build` runs TDD Red-Green-Refactor in standalone mode without a SPEC.
+- **SC-018**: All 8 skills are callable standalone and produce correct results.
+- **SC-019**: `gwt-review` generates an architecture improvement report on the gwt repository.
+- **SC-020**: The design → plan → build → review chain suggests the next skill at each completion point.

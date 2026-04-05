@@ -67,7 +67,7 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 1. **gwt-skills**: Add `distribute` module with:
    - `distribute_to_worktree(worktree_path: &Path) -> Result<DistributeReport>` — writes all bundled files to target.
-   - Distribution targets: `.claude/skills/gwt-*/`, `.claude/commands/gwt-*.md`, `.claude/hooks/scripts/gwt-*.mjs`, `.codex/skills/gwt-*/`, `.agents/skills/gwt-*/`.
+   - Distribution targets: `.claude/skills/gwt-*/`, `.claude/commands/gwt-*.md`, `.claude/hooks/scripts/gwt-*.mjs`, `.codex/skills/gwt-*/`.
    - Full overwrite strategy: all gwt-managed files are replaced unconditionally.
 
 2. **gwt-skills**: Add `git_exclude` module:

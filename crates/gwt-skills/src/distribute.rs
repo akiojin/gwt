@@ -22,7 +22,6 @@ pub struct DistributeReport {
 /// - `.claude/commands/gwt-*.md`
 /// - `.claude/hooks/scripts/gwt-*.mjs`
 /// - `.codex/skills/gwt-*/`  (same skill content)
-/// - `.agents/skills/gwt-*/` (same skill content)
 pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
 
@@ -45,13 +44,6 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
 
     // Codex targets (skills only)
     write_dir_assets(&CLAUDE_SKILLS, &worktree.join(".codex/skills"), &mut report)?;
-
-    // Agent Skills standard (skills only)
-    write_dir_assets(
-        &CLAUDE_SKILLS,
-        &worktree.join(".agents/skills"),
-        &mut report,
-    )?;
 
     Ok(report)
 }
@@ -99,14 +91,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
         let skill_md = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
-        assert!(skill_md.exists(), "expected {}", skill_md.display());
-    }
-
-    #[test]
-    fn distribute_creates_agents_skills() {
-        let dir = tempfile::tempdir().unwrap();
-        distribute_to_worktree(dir.path()).unwrap();
-        let skill_md = dir.path().join(".agents/skills/gwt-pr/SKILL.md");
         assert!(skill_md.exists(), "expected {}", skill_md.display());
     }
 

@@ -488,12 +488,12 @@ mod tests {
             .collect();
         assert!(dirs.contains(&"gwt-pr"), "missing gwt-pr skill dir");
         assert!(
-            dirs.contains(&"gwt-agent-discover"),
-            "missing gwt-agent-discover skill dir"
+            dirs.contains(&"gwt-design"),
+            "missing gwt-design skill dir"
         );
         assert!(
-            dirs.contains(&"gwt-spec-brainstorm"),
-            "missing gwt-spec-brainstorm skill dir"
+            dirs.contains(&"gwt-build"),
+            "missing gwt-build skill dir"
         );
     }
 
@@ -512,8 +512,8 @@ mod tests {
             .collect();
         assert!(files.contains(&"gwt-pr.md"), "missing gwt-pr.md command");
         assert!(
-            files.contains(&"gwt-agent-discover.md"),
-            "missing gwt-agent-discover.md command"
+            files.contains(&"gwt-design.md"),
+            "missing gwt-design.md command"
         );
     }
 
@@ -561,7 +561,7 @@ mod tests {
         // Verify all distribution targets exist
         assert!(wt.join(".claude/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".codex/skills/gwt-pr/SKILL.md").exists());
-        assert!(wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
+        assert!(!wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".claude/commands/gwt-pr.md").exists());
         assert!(wt
             .join(".claude/hooks/scripts/gwt-forward-hook.mjs")
