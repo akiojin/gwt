@@ -24,7 +24,7 @@ gwt-notification = { workspace = true }
 gwt-skills = { workspace = true }
 gwt-terminal = { workspace = true }
 gwt-voice = { workspace = true }
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 tokio = { workspace = true }
 vt100 = "0.15"
