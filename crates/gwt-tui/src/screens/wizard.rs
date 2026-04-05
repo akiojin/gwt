@@ -1453,6 +1453,20 @@ fn quick_start_action_label(
     label
 }
 
+fn quick_start_start_new_marker(is_selected: bool, single_entry: bool) -> &'static str {
+    if single_entry {
+        if is_selected {
+            "> "
+        } else {
+            "  "
+        }
+    } else if is_selected {
+        ">   "
+    } else {
+        "    "
+    }
+}
+
 fn popup_title(state: &WizardState) -> String {
     if state.step == WizardStep::QuickStart && state.quick_start_entries.len() == 1 {
         format!(
@@ -1526,11 +1540,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         let start_new_index = resume_index + 1;
         let start_new_text = format!(
             "{}{}",
-            if state.selected == start_new_index {
-                "> "
-            } else {
-                "  "
-            },
+            quick_start_start_new_marker(state.selected == start_new_index, single_entry),
             quick_start_action_label(entry, "Start new", false, false)
         );
         items.push(
@@ -2723,6 +2733,21 @@ mod tests {
         let (start_new_x, start_new_y) = find_text_position(&buf, "Start new").unwrap();
 
         assert_eq!(buf[(start_new_x, start_new_y)].fg, Color::White);
+    }
+
+    #[test]
+    fn render_quick_start_multi_entry_indents_start_new_under_resume_row() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.branch_name = "feature/test".to_string();
+        state.quick_start_entries = sample_quick_start_entries();
+
+        let buf = render_buffer(&state, 100, 24);
+        let (resume_x, _) = find_text_position(&buf, "Codex Resume").unwrap();
+        let (start_new_x, _) = find_text_position(&buf, "Start new").unwrap();
+
+        assert_eq!(start_new_x, resume_x + 2);
     }
 
     #[test]

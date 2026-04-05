@@ -289,3 +289,9 @@
 - [x] T150 [P] Write RED test: non-selected multi-entry `QuickStart` `Start new` rows render with neutral styling instead of agent-colored text.
 - [x] T151 Update `wizard.rs` so multi-entry `Start new` rows use neutral styling while `Resume` rows keep inline agent identity.
 - [x] T152 Verify focused quick-start styling tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 42: QuickStart Start-New Hierarchy Indent
+
+- [x] T153 [P] Write RED test: multi-entry `QuickStart` renders the plain `Start new` row two columns deeper than the paired `Resume` row.
+- [x] T154 Update `wizard.rs` so multi-entry `Start new` rows render with a child-action indent while single-entry rendering stays unchanged.
+- [x] T155 Verify focused quick-start indent tests, broad workspace checks, and refresh SPEC-3 artifacts.

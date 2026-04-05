@@ -115,6 +115,9 @@
 - Multi-entry `QuickStart` now renders those plain `Start new` rows in a
   neutral color, leaving the inline `Resume` row as the only agent-colored
   identity row in each entry block.
+- Multi-entry `QuickStart` now indents those plain `Start new` rows beneath
+  the paired `Resume` row, restoring the old-TUI primary/secondary action
+  hierarchy without reintroducing standalone headers.
 - Existing-branch `AgentSelect` now uses the same compact branch-name line as
   `QuickStart`, and the first agent row starts directly below that context
   instead of after an extra spacer row.

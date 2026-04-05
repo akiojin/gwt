@@ -412,6 +412,16 @@ persisted agent session before activation.
 3. Add focused RED/GREEN coverage proving the plain `Start new` rows now use
    neutral styling.
 
+### Phase 42: QuickStart Start-New Hierarchy Indent
+
+1. In multi-entry `QuickStart`, indent the plain `Start new` rows one level
+   deeper than the paired `Resume` rows so the old-TUI primary/secondary
+   action hierarchy reads clearly again.
+2. Preserve single-entry rendering, selected-row highlight, and
+   `current_options()` labels while tightening only the rendered row layout.
+3. Add focused RED/GREEN coverage proving the rendered `Start new` row now
+   begins two columns deeper than the paired `Resume` row.
+
 ### Phase 24: QuickStart Action Label Restoration
 
 1. Restore the old-TUI action copy so grouped Quick Start rows say

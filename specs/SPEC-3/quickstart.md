@@ -182,5 +182,8 @@
 - Existing-branch AgentSelect now uses that same compact branch-name line and
   places the first agent row directly below it instead of leaving an extra
   spacer row after a `Branch: ...` prefix.
+- Multi-entry Quick Start now indents the plain `Start new` rows beneath the
+  paired `Resume` rows so the old-TUI primary/secondary action hierarchy is
+  visible again without adding standalone headers back.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

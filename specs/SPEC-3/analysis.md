@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` now records `158/158` completed items.
+- Task traceability snapshot: `tasks.md` now records `161/161` completed items.
 - Notes: Session-conversion wording now matches the implemented
   metadata-driven agent switch and its focused tests.
 - Notes: Version selection and launch materialization semantics are now
@@ -99,6 +99,9 @@ Status: CLEAR
 - Notes: Multi-entry Quick Start now renders the plain `Start new` rows with
   neutral styling, leaving the inline-labeled `Resume` rows as the only
   agent-colored identity rows in each entry block.
+- Notes: Multi-entry Quick Start now indents the plain `Start new` rows
+  beneath the paired `Resume` row, restoring the old-TUI primary/secondary
+  action hierarchy without bringing back standalone headers.
 - Notes: Existing-branch `AgentSelect` now uses the same compact branch-name
   context line as `QuickStart`, which removes the rebuilt `Branch: ...`
   prefix and the extra spacer row before the agent list.
