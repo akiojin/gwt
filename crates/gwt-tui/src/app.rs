@@ -3212,6 +3212,7 @@ fn active_grid_session_content_area(model: &Model, area: Rect) -> Option<Rect> {
     Some(
         Block::default()
             .borders(Borders::ALL)
+            .border_type(theme::border::default())
             .title(session.name.as_str())
             .inner(col_chunks[target_col]),
     )
@@ -3822,6 +3823,7 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
                 };
                 let block = Block::default()
                     .borders(Borders::ALL)
+                    .border_type(theme::border::default())
                     .border_style(border_style)
                     .title(grid_session_title(session_idx, session));
                 frame.render_widget(block, *col_area);

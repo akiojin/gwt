@@ -100,6 +100,14 @@ pub mod icon {
     pub const CIRCLE_EMPTY: &str = "\u{25CB}"; // ○
     /// Block cursor for text input.
     pub const BLOCK_CURSOR: &str = "\u{2588}"; // █
+    /// Checkmark (completed/resolved).
+    pub const CHECKMARK: &str = "\u{2714}"; // ✔
+    /// Warning badge.
+    pub const WARNING_BADGE: &str = "\u{26A0}"; // ⚠
+    /// Bullet list marker.
+    pub const BULLET: &str = "\u{2022}"; // •
+    /// Vertical separator pipe.
+    pub const SEPARATOR_VERT: &str = "\u{2502}"; // │
 }
 
 // ---------------------------------------------------------------------------

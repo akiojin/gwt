@@ -193,7 +193,8 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
     let mut tab_title = super::build_tab_title(&labels, active_idx);
     // Append debug visibility indicator
     tab_title.spans.push(Span::raw(format!(
-        " \u{2502} Debug: {}",
+        " {} Debug: {}",
+        theme::icon::SEPARATOR_VERT,
         if state.show_debug { "on" } else { "off" }
     )));
 

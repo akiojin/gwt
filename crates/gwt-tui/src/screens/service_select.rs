@@ -132,7 +132,7 @@ pub fn render(state: &ServiceSelectState, frame: &mut Frame, area: Rect) {
                 Style::default().fg(theme::color::TEXT_PRIMARY)
             };
             let icon = if i == state.selected {
-                concat!("\u{25B6}", " ") // theme::icon::ARROW_RIGHT + space
+                concat!("\u{25B6}", " ") // ▶ (theme::icon::ARROW_RIGHT with space)
             } else {
                 "  "
             };

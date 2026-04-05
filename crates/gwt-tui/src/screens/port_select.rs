@@ -155,7 +155,11 @@ pub fn render(state: &PortSelectState, frame: &mut Frame, area: Rect) {
             } else {
                 Style::default().fg(theme::color::TEXT_PRIMARY)
             };
-            let icon = if resolved { "\u{2714}" } else { "\u{26A0}" };
+            let icon = if resolved {
+                theme::icon::CHECKMARK
+            } else {
+                theme::icon::WARNING_BADGE
+            };
             ListItem::new(Line::from(Span::styled(
                 format!(
                     "{icon} :{:<6} :{:<6} :{:<6}",

@@ -175,7 +175,7 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
     let input_text = format!("{}{}", state.url_input, cursor);
     let input = Paragraph::new(input_text)
         .style(input_style)
-        .block(Block::default().borders(Borders::ALL));
+        .block(Block::default().borders(Borders::ALL).border_type(theme::border::default()));
     frame.render_widget(input, chunks[3]);
 
     // Status / help

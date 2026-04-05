@@ -203,7 +203,10 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )
         } else if stage.index() < state.stage.index() || state.stage == DockerStage::Ready {
-            ("\u{2714} ", Style::default().fg(theme::color::SUCCESS)) // check mark
+            (
+                concat!("\u{2714}", " "), // theme::icon::CHECKMARK + space
+                Style::default().fg(theme::color::SUCCESS),
+            )
         } else {
             (
                 concat!("\u{25CB}", " "), // theme::icon::CIRCLE_EMPTY + space

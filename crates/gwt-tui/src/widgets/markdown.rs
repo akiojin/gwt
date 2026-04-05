@@ -81,7 +81,7 @@ fn style_line(line: &str) -> Line<'static> {
         ))
     } else if line.starts_with("- ") || line.starts_with("* ") {
         Line::from(Span::styled(
-            format!("  \u{2022} {}", &line[2..]),
+            format!("  {} {}", theme::icon::BULLET, &line[2..]),
             Style::default().fg(theme::color::TEXT_PRIMARY),
         ))
     } else {
