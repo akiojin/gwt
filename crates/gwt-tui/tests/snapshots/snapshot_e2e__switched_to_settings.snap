@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Settings ────────────────────────────┐┌ ▶ Shell ─────────────────────────────┐
-│ General │ Worktree │ Agent │ Custom A││Session: Shell (80x24)                │
-│General Enter: edit | Space: toggle bo││                                      │
-│[T] Theme: dark                       ││                                      │
-│[T] Language: en                      ││                                      │
-│[B] Auto-save: true                   ││                                      │
-│[T] Log level: info                   ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-└──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  Tab pane  Esc term
+┏ Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭ › Shell ─────────────────────────────╮
+┃ General │ Worktree │ Agent │ Custom A┃│Session: Shell (80x24)                │
+┃General Enter: edit | Space: toggle bo┃│                                      │
+┃[T] Theme: dark                       ┃│                                      │
+┃[T] Language: en                      ┃│                                      │
+┃[B] Auto-save: true                   ┃│                                      │
+┃[T] Log level: info                   ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┃                                      ┃│                                      │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────────────────────╯
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  Tab pane  E

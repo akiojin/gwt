@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// A single port conflict entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,13 +108,14 @@ pub fn render(state: &PortSelectState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Port Conflicts")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_type(theme::border::default())
+        .border_style(Style::default().fg(theme::color::ACTIVE));
 
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
 
     if state.conflicts.is_empty() {
-        let empty = Paragraph::new("No port conflicts").style(Style::default().fg(Color::DarkGray));
+        let empty = Paragraph::new("No port conflicts").style(theme::style::muted_text());
         frame.render_widget(empty, inner);
         return;
     }
@@ -124,9 +127,7 @@ pub fn render(state: &PortSelectState, frame: &mut Frame, area: Rect) {
     let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
     let header = Paragraph::new(Line::from(vec![Span::styled(
         "Container  Host  Suggested",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        theme::style::header(),
     )]));
     frame.render_widget(header, header_area);
 
@@ -145,15 +146,19 @@ pub fn render(state: &PortSelectState, frame: &mut Frame, area: Rect) {
             let resolved = c.host_port == c.suggested;
             let style = if i == state.selected {
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
+                    .fg(theme::color::TEXT_PRIMARY)
+                    .bg(theme::color::AGENT)
                     .add_modifier(Modifier::BOLD)
             } else if resolved {
-                Style::default().fg(Color::Green)
+                Style::default().fg(theme::color::SUCCESS)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme::color::TEXT_PRIMARY)
             };
-            let icon = if resolved { "\u{2714}" } else { "\u{26A0}" };
+            let icon = if resolved {
+                theme::icon::CHECKMARK
+            } else {
+                theme::icon::WARNING_BADGE
+            };
             ListItem::new(Line::from(Span::styled(
                 format!(
                     "{icon} :{:<6} :{:<6} :{:<6}",

@@ -1,9 +1,10 @@
 //! Help overlay for displaying registered keybindings.
 
 use crate::input::keybind::{Keybinding, KeybindingCategory};
+use crate::theme;
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -19,7 +20,8 @@ pub fn render(bindings: &[Keybinding], frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Help")
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_type(theme::border::modal())
+        .border_style(Style::default().fg(theme::color::FOCUS));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
 
@@ -32,7 +34,7 @@ pub fn render(bindings: &[Keybinding], frame: &mut Frame, area: Rect) {
 
     let mut lines = vec![Line::from(Span::styled(
         "Press Esc or Ctrl+G,? to close",
-        Style::default().fg(Color::DarkGray),
+        theme::style::muted_text(),
     ))];
 
     for category in category_order {
@@ -45,23 +47,18 @@ pub fn render(bindings: &[Keybinding], frame: &mut Frame, area: Rect) {
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            category.label(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(theme::section_divider(category.label(), inner.width));
 
         for binding in category_bindings {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{:<12}", binding.keys),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::color::FOCUS),
                 ),
                 Span::raw(" "),
                 Span::styled(
                     binding.description.clone(),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(theme::color::TEXT_PRIMARY),
                 ),
             ]));
         }

@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -12,6 +12,7 @@ use gwt_notification::{Notification, Severity};
 
 use crate::input::voice;
 use crate::model::{ActiveLayer, Model, SessionLayout, SessionTabType};
+use crate::theme;
 
 /// Render the status bar.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
@@ -48,8 +49,8 @@ pub fn render_with_notification_and_hints(
     let compact_footer = notification.is_none() && hints.is_some() && area.width <= 80;
 
     let layout_icon = match model.session_layout {
-        SessionLayout::Tab => "\u{25A3}",
-        SessionLayout::Grid => "\u{25A6}",
+        SessionLayout::Tab => theme::icon::LAYOUT_TAB,
+        SessionLayout::Grid => theme::icon::LAYOUT_GRID,
     };
 
     let layer = match model.active_layer {
@@ -65,75 +66,83 @@ pub fn render_with_notification_and_hints(
                     " {layout_icon} {} ",
                     compact_session_type_label(&session_type)
                 ),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme::color::TEXT_PRIMARY),
             ),
+            theme::status_separator(),
             Span::styled(
-                format!(" br:{} ", compact_branch_context(&branch_context, 8)),
-                Style::default().fg(Color::Green),
+                format!(
+                    " {}{} ",
+                    theme::icon::GIT_BRANCH,
+                    compact_branch_context(&branch_context, 8)
+                ),
+                Style::default().fg(theme::color::SUCCESS),
             ),
+            theme::status_separator(),
             Span::styled(
                 format!(" [{}] ", compact_layer_label(layer)),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                theme::style::layer_badge(),
             ),
         ]
     } else {
         vec![
             Span::styled(
                 format!(" {layout_icon} {session_name} "),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme::color::TEXT_PRIMARY),
             ),
+            theme::status_separator(),
             Span::styled(
-                format!(" branch: {branch_context} "),
-                Style::default().fg(Color::Green),
+                format!(" {} {branch_context} ", theme::icon::GIT_BRANCH),
+                Style::default().fg(theme::color::SUCCESS),
             ),
+            theme::status_separator(),
             Span::styled(
                 format!(" type: {session_type} "),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::color::ACTIVE),
             ),
-            Span::styled(
-                format!(" [{layer}] "),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            theme::status_separator(),
+            Span::styled(format!(" [{layer}] "), theme::style::layer_badge()),
         ]
     };
 
     // Voice indicator (when active)
     if let Some(indicator) = voice::render_indicator(&model.voice) {
+        spans.push(theme::status_separator());
         spans.push(Span::styled(
             format!(" {indicator} "),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::color::ERROR)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
     if let Some(notification) = notification {
+        spans.push(theme::status_separator());
         spans.push(notification_span(notification));
     }
 
     if !compact_footer {
+        spans.push(theme::status_separator());
         spans.push(Span::styled(
             format!(" {} ", model.repo_path.display()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::color::SURFACE),
         ));
     }
+    spans.push(theme::status_separator());
     if let Some(hints) = hints.filter(|value| !value.is_empty()) {
         spans.push(Span::styled(
             format!(" {hints} "),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::color::SURFACE),
         ));
     } else {
         spans.push(Span::styled(
             " Ctrl+G,? Help ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::color::SURFACE),
         ));
     }
 
     let status = Line::from(spans);
 
-    let bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
+    let bar = Paragraph::new(status).style(Style::default().bg(theme::color::SURFACE));
     frame.render_widget(bar, area);
 }
 
@@ -196,14 +205,10 @@ fn session_type_label(tab_type: &SessionTabType) -> String {
 
 fn notification_span(notification: &Notification) -> Span<'static> {
     let style = match notification.severity {
-        Severity::Debug => Style::default().fg(Color::DarkGray),
-        Severity::Info => Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-        Severity::Warn => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        Severity::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Severity::Debug => Style::default().fg(theme::color::SURFACE),
+        Severity::Info => theme::style::success_text(),
+        Severity::Warn => theme::style::warning_text(),
+        Severity::Error => theme::style::error_text(),
     };
 
     let summary = match notification.detail.as_deref() {
@@ -336,7 +341,7 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(text.contains("branch: feature/status-bar"));
+        assert!(text.contains("feature/status-bar"));
         assert!(text.contains("type: Shell"));
     }
 
@@ -375,7 +380,7 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(text.contains("branch: feature/agent-context"));
+        assert!(text.contains("feature/agent-context"));
         assert!(text.contains("type: Codex"));
     }
 }

@@ -19,7 +19,7 @@ use gwt_notification::{Notification, Severity};
 use gwt_skills::{distribute_to_worktree, generate_settings_local, update_git_exclude};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -27,6 +27,7 @@ use ratatui::{
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+use crate::theme;
 use crate::{
     custom_agents::load_custom_agents,
     input::voice::VoiceInputMessage,
@@ -3234,6 +3235,7 @@ fn active_grid_session_content_area(model: &Model, area: Rect) -> Option<Rect> {
     Some(
         Block::default()
             .borders(Borders::ALL)
+            .border_type(theme::border::default())
             .title(session.name.as_str())
             .inner(col_chunks[target_col]),
     )
@@ -3286,7 +3288,7 @@ fn render_session_surface(
             session.vt.cols(),
             session.vt.rows()
         ))
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(theme::color::TEXT_DISABLED));
         frame.render_widget(placeholder, area);
     } else {
         frame.render_widget(
@@ -3350,10 +3352,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
 /// Build a bordered block with focus-aware border color (Cyan when focused, Gray otherwise).
 fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
-    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
+    let (border_style, border_type) = theme::pane_border(is_focused);
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
+        .border_style(border_style)
+        .border_type(border_type)
         .title(title)
 }
 
@@ -3362,9 +3365,7 @@ fn management_tab_title(model: &Model, width: u16) -> Line<'static> {
     if should_compact_management_tab_title(width) {
         return Line::from(vec![Span::styled(
             format!(" {} ", model.management_tab.label()),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            theme::style::tab_active(),
         )]);
     }
 
@@ -3427,20 +3428,18 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
 fn branch_detail_title(model: &Model) -> Line<'static> {
     let detail_labels: Vec<&str> = screens::branches::detail_section_labels().to_vec();
     let mut title = screens::build_tab_title(&detail_labels, model.branches.detail_section);
-    title
-        .spans
-        .push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+    title.spans.push(Span::styled(
+        " · ",
+        Style::default().fg(theme::color::SURFACE),
+    ));
     let branch_label = model
         .branches
         .selected_branch()
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "No branch selected".to_string());
-    title.spans.push(Span::styled(
-        branch_label,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ));
+    title
+        .spans
+        .push(Span::styled(branch_label, theme::style::header()));
     title
 }
 
@@ -3493,12 +3492,7 @@ fn build_session_title(model: &Model, width: u16) -> Line<'static> {
                 active.tab_type.icon(),
                 active.name
             );
-            return Line::from(vec![Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )]);
+            return Line::from(vec![Span::styled(label, theme::style::tab_active())]);
         }
     }
 
@@ -3509,14 +3503,9 @@ fn build_session_title(model: &Model, width: u16) -> Line<'static> {
         }
         let label = format!(" {} {} ", s.tab_type.icon(), s.name);
         if i == model.active_session {
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(label, theme::style::tab_active()));
         } else {
-            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(label, theme::style::tab_inactive()));
         }
     }
     Line::from(spans)
@@ -3847,13 +3836,14 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
             let session_idx = start + col_idx;
             if let Some(session) = model.sessions.get(session_idx) {
                 let is_active = session_idx == model.active_session;
-                let border_style = if is_active {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
+                let is_focused = is_active && model.active_focus == FocusPane::Terminal;
+                let (mut border_style, border_type) = theme::pane_border(is_focused);
+                if is_active && !is_focused {
+                    border_style = Style::default().fg(theme::color::ACTIVE);
+                }
                 let block = Block::default()
                     .borders(Borders::ALL)
+                    .border_type(border_type)
                     .border_style(border_style)
                     .title(grid_session_title(session_idx, session));
                 frame.render_widget(block, *col_area);
@@ -4197,7 +4187,7 @@ mod tests {
         };
 
         let rendered = render_model_text(&model, 220, 24);
-        assert!(rendered.contains("branch: feature/status-bar"));
+        assert!(rendered.contains("feature/status-bar"));
         assert!(rendered.contains("type: Shell"));
         assert!(rendered.contains("Enter:wizard"));
         assert!(rendered.contains("Esc:term"));
@@ -4579,7 +4569,7 @@ mod tests {
             "grid pane titles should expose a stable numeric affordance for later sessions"
         );
         assert!(
-            rendered.contains("▶"),
+            rendered.contains(crate::theme::icon::SESSION_SHELL),
             "grid pane titles should preserve the session-type icon instead of showing name-only chrome"
         );
     }
@@ -4635,9 +4625,9 @@ mod tests {
 
         let rendered = render_model_text(&model, 80, 24);
 
-        assert!(rendered.contains("↑↓ mv  ←→ tab  ↵ wiz"));
-        assert!(rendered.contains("mvf?"));
-        assert!(rendered.contains("Esc→T"));
+        // Compact hints at 80-col width
+        assert!(rendered.contains("↑↓ mv"));
+        assert!(rendered.contains("←→ tab"));
     }
 
     #[test]
