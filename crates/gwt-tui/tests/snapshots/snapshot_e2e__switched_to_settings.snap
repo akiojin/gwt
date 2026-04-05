@@ -25,4 +25,4 @@ expression: output
 ┃                                      ┃│                                      │
 ┃                                      ┃│                                      │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────────────────────╯
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  Tab pane  Esc term
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  Tab pane  E

@@ -25,4 +25,4 @@ expression: output
 ┃                                      ┃│                                      │
 ┃                                      ┃│                                      │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────────────────────╯
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ↵ dtl  r rfsh  Tab pane  Esc term  ?
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ dtl  r rfsh  Tab pane  Esc term  ?

@@ -94,6 +94,18 @@ pub fn build_tab_title(labels: &[&str], active: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Selection prefix: accent bar when selected, space otherwise.
+pub fn selection_prefix(is_selected: bool) -> Span<'static> {
+    if is_selected {
+        Span::styled(
+            crate::theme::icon::LEFT_ACCENT,
+            Style::default().fg(crate::theme::color::ACTIVE),
+        )
+    } else {
+        Span::raw(" ")
+    }
+}
+
 /// Render an empty list placeholder (borderless).
 pub fn render_empty_list(frame: &mut Frame, area: Rect, has_data: bool, noun: &str) {
     let msg = if has_data {

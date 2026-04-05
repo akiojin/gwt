@@ -5,6 +5,7 @@
 //! inline `Color::*` / `Modifier::*` values.
 
 use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::BorderType;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,12 @@ pub mod icon {
     pub const BULLET: &str = "\u{2022}"; // •
     /// Vertical separator pipe.
     pub const SEPARATOR_VERT: &str = "\u{2502}"; // │
+    /// Git branch symbol.
+    pub const GIT_BRANCH: &str = "\u{2387}"; // ⎇
+    /// Left accent bar for selected items.
+    pub const LEFT_ACCENT: &str = "\u{258E}"; // ▎
+    /// Horizontal rule character.
+    pub const HRULE: char = '\u{2500}'; // ─
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +196,14 @@ pub mod style {
         Style::new().fg(color::TEXT_PRIMARY)
     }
 
+    /// Layer badge: reverse video (SURFACE on FOCUS + bold).
+    pub const fn layer_badge() -> Style {
+        Style::new()
+            .fg(color::SURFACE)
+            .bg(color::FOCUS)
+            .add_modifier(Modifier::BOLD)
+    }
+
     /// Notification style by severity name.
     pub fn notification(severity: &str) -> Style {
         match severity {
@@ -223,6 +238,30 @@ pub fn pane_border(is_focused: bool) -> (Style, BorderType) {
 /// Modal overlay border style.
 pub fn modal_border(accent: Color) -> (Style, BorderType) {
     (Style::default().fg(accent), border::modal())
+}
+
+/// Status bar section separator: ` │ ` in SURFACE color.
+pub fn status_separator() -> Span<'static> {
+    Span::styled(
+        format!(" {} ", icon::SEPARATOR_VERT),
+        Style::default().fg(color::SURFACE),
+    )
+}
+
+/// Decorative section divider: `─── Label ───` fitting the given width.
+pub fn section_divider(label: &str, width: u16) -> Line<'static> {
+    let label_with_pad = format!(" {} ", label);
+    let label_len = label_with_pad.chars().count();
+    let remaining = (width as usize).saturating_sub(label_len);
+    let left = remaining / 2;
+    let right = remaining.saturating_sub(left);
+    let left_rule: String = std::iter::repeat_n(icon::HRULE, left).collect();
+    let right_rule: String = std::iter::repeat_n(icon::HRULE, right).collect();
+    Line::from(vec![
+        Span::styled(left_rule, style::muted_text()),
+        Span::styled(label_with_pad, style::header()),
+        Span::styled(right_rule, style::muted_text()),
+    ])
 }
 
 #[cfg(test)]

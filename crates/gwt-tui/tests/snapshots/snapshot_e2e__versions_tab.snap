@@ -25,4 +25,4 @@ expression: output
 ┃No tag selected                       ┃│                                      │
 ┃                                      ┃│                                      │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────────────────────╯
- ▣ Sh  br:n/a  [G]  ↑↓ mv  r rfsh  Tab pane  Esc term  ?
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ mv  r rfsh  Tab pane  Esc term  ?

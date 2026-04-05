@@ -1,9 +1,13 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 347
 expression: output
 ---
 
        ╔═══════════════ gwt — Bare Repository Detected ════════════════╗
+       ║                           ╭─ gwt ─╮                           ║
+       ║                           │ ◆ ◇ ◆ │                           ║
+       ║                           ╰───────╯                           ║
        ║                                                               ║
        ║        This directory contains a bare Git repository.         ║
        ║                                                               ║

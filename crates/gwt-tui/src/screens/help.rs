@@ -47,10 +47,7 @@ pub fn render(bindings: &[Keybinding], frame: &mut Frame, area: Rect) {
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            category.label(),
-            theme::style::active_item(),
-        )));
+        lines.push(theme::section_divider(category.label(), inner.width));
 
         for binding in category_bindings {
             lines.push(Line::from(vec![

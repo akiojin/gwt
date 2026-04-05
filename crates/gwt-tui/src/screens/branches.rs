@@ -613,7 +613,8 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
 
     let items: Vec<ListItem> = filtered
         .iter()
-        .map(|branch| {
+        .enumerate()
+        .map(|(idx, branch)| {
             let worktree_icon = if branch.worktree_path.is_some() {
                 theme::icon::WORKTREE_ACTIVE
             } else {
@@ -621,6 +622,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             };
             let head_indicator = if branch.is_head { theme::icon::HEAD_INDICATOR } else { "" };
             let line = Line::from(vec![
+                super::selection_prefix(idx == state.selected),
                 Span::styled(&branch.name, Style::default().fg(theme::color::TEXT_PRIMARY)),
                 Span::raw(" "),
                 Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
@@ -782,10 +784,10 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
             Style::default().fg(theme::color::SUCCESS),
         )));
     } else {
-        lines.push(Line::from(Span::styled(
-            format!(" Changed files ({})", state.detail_files.len()),
-            theme::style::active_item(),
-        )));
+        lines.push(theme::section_divider(
+            &format!("Changed files ({})", state.detail_files.len()),
+            area.width,
+        ));
         for file in &state.detail_files {
             let color = if file.starts_with("[S]") {
                 theme::color::SUCCESS
@@ -804,10 +806,7 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
     // Commits section
     if !state.detail_commits.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " Recent commits",
-            theme::style::header(),
-        )));
+        lines.push(theme::section_divider("Recent commits", area.width));
         for commit in &state.detail_commits {
             lines.push(Line::from(Span::styled(
                 format!("  {commit}"),
@@ -837,7 +836,11 @@ fn render_detail_sessions(
     let mut lines = Vec::new();
     let selected_session = selected_session.min(sessions.len().saturating_sub(1));
     for (index, session) in sessions.iter().enumerate() {
-        let selected_marker = if index == selected_session { ">" } else { " " };
+        let selected_marker = if index == selected_session {
+            theme::icon::LEFT_ACCENT
+        } else {
+            " "
+        };
         let marker = if session.active { "●" } else { " " };
         let kind_style = match session.kind {
             "Agent" => Style::default().fg(theme::color::FOCUS),
@@ -1710,7 +1713,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("> ● Shell  Shell: develop")),
+                .any(|line| line.contains("\u{258E} \u{25CF} Shell  Shell: develop")),
             "Sessions pane should show the selected-row marker on the current row"
         );
     }

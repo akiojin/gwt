@@ -68,15 +68,19 @@ pub fn render_with_notification_and_hints(
                 ),
                 Style::default().fg(theme::color::TEXT_PRIMARY),
             ),
+            theme::status_separator(),
             Span::styled(
-                format!(" br:{} ", compact_branch_context(&branch_context, 8)),
+                format!(
+                    " {}{} ",
+                    theme::icon::GIT_BRANCH,
+                    compact_branch_context(&branch_context, 8)
+                ),
                 Style::default().fg(theme::color::SUCCESS),
             ),
+            theme::status_separator(),
             Span::styled(
                 format!(" [{}] ", compact_layer_label(layer)),
-                Style::default()
-                    .fg(theme::color::FOCUS)
-                    .add_modifier(Modifier::BOLD),
+                theme::style::layer_badge(),
             ),
         ]
     } else {
@@ -85,25 +89,30 @@ pub fn render_with_notification_and_hints(
                 format!(" {layout_icon} {session_name} "),
                 Style::default().fg(theme::color::TEXT_PRIMARY),
             ),
+            theme::status_separator(),
             Span::styled(
-                format!(" branch: {branch_context} "),
+                format!(
+                    " {} {branch_context} ",
+                    theme::icon::GIT_BRANCH
+                ),
                 Style::default().fg(theme::color::SUCCESS),
             ),
+            theme::status_separator(),
             Span::styled(
                 format!(" type: {session_type} "),
                 Style::default().fg(theme::color::ACTIVE),
             ),
+            theme::status_separator(),
             Span::styled(
                 format!(" [{layer}] "),
-                Style::default()
-                    .fg(theme::color::FOCUS)
-                    .add_modifier(Modifier::BOLD),
+                theme::style::layer_badge(),
             ),
         ]
     };
 
     // Voice indicator (when active)
     if let Some(indicator) = voice::render_indicator(&model.voice) {
+        spans.push(theme::status_separator());
         spans.push(Span::styled(
             format!(" {indicator} "),
             Style::default().fg(theme::color::ERROR).add_modifier(Modifier::BOLD),
@@ -111,15 +120,18 @@ pub fn render_with_notification_and_hints(
     }
 
     if let Some(notification) = notification {
+        spans.push(theme::status_separator());
         spans.push(notification_span(notification));
     }
 
     if !compact_footer {
+        spans.push(theme::status_separator());
         spans.push(Span::styled(
             format!(" {} ", model.repo_path.display()),
             Style::default().fg(theme::color::SURFACE),
         ));
     }
+    spans.push(theme::status_separator());
     if let Some(hints) = hints.filter(|value| !value.is_empty()) {
         spans.push(Span::styled(
             format!(" {hints} "),
@@ -333,7 +345,7 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(text.contains("branch: feature/status-bar"));
+        assert!(text.contains("feature/status-bar"));
         assert!(text.contains("type: Shell"));
     }
 
@@ -372,7 +384,7 @@ mod tests {
         let text: String = (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(text.contains("branch: feature/agent-context"));
+        assert!(text.contains("feature/agent-context"));
         assert!(text.contains("type: Codex"));
     }
 }

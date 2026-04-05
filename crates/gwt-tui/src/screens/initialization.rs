@@ -15,6 +15,12 @@ use ratatui::{
 
 use crate::theme;
 
+const GWT_LOGO: [&str; 3] = [
+    "\u{256D}\u{2500} gwt \u{2500}\u{256E}",
+    "\u{2502} \u{25C6} \u{25C7} \u{25C6} \u{2502}",
+    "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}",
+];
+
 /// Clone operation status.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CloneStatus {
@@ -127,7 +133,7 @@ pub fn render(state: &InitializationState, frame: &mut Frame, area: Rect) {
 /// Render the clone wizard UI.
 fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rect) {
     // Center a dialog box
-    let dialog = centered_rect(60, 14, area);
+    let dialog = centered_rect(60, 17, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -141,6 +147,7 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(4), // Logo + spacing
             Constraint::Length(2), // Instructions
             Constraint::Length(1), // Spacer
             Constraint::Length(1), // Label
@@ -150,15 +157,23 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
         ])
         .split(inner);
 
+    // Logo
+    let logo_lines: Vec<Line> = GWT_LOGO
+        .iter()
+        .map(|line| Line::from(Span::styled(*line, theme::style::header())))
+        .collect();
+    let logo = Paragraph::new(logo_lines).alignment(Alignment::Center);
+    frame.render_widget(logo, chunks[0]);
+
     // Instructions
     let instructions = Paragraph::new("Enter a repository URL to clone into this directory.")
         .style(Style::default().fg(theme::color::TEXT_PRIMARY))
         .alignment(Alignment::Center);
-    frame.render_widget(instructions, chunks[0]);
+    frame.render_widget(instructions, chunks[1]);
 
     // Label
     let label = Paragraph::new("Repository URL:").style(theme::style::active_item());
-    frame.render_widget(label, chunks[2]);
+    frame.render_widget(label, chunks[3]);
 
     // Input field
     let input_style = match &state.clone_status {
@@ -176,7 +191,7 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
     let input = Paragraph::new(input_text)
         .style(input_style)
         .block(Block::default().borders(Borders::ALL).border_type(theme::border::default()));
-    frame.render_widget(input, chunks[3]);
+    frame.render_widget(input, chunks[4]);
 
     // Status / help
     let status: Paragraph = match &state.clone_status {
@@ -210,12 +225,12 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
             Paragraph::new(lines).alignment(Alignment::Center)
         }
     };
-    frame.render_widget(status, chunks[5]);
+    frame.render_widget(status, chunks[6]);
 }
 
 /// Render the bare repository migration instructions.
 fn render_bare_migration(frame: &mut Frame, area: Rect) {
-    let dialog = centered_rect(65, 16, area);
+    let dialog = centered_rect(65, 19, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -227,6 +242,9 @@ fn render_bare_migration(frame: &mut Frame, area: Rect) {
     frame.render_widget(block, dialog);
 
     let lines = vec![
+        Line::from(Span::styled(GWT_LOGO[0], theme::style::header())),
+        Line::from(Span::styled(GWT_LOGO[1], theme::style::header())),
+        Line::from(Span::styled(GWT_LOGO[2], theme::style::header())),
         Line::from(""),
         Line::from(Span::styled(
             "This directory contains a bare Git repository.",

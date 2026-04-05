@@ -41,4 +41,4 @@ expression: output
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 ╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────╯
- ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:deta
+ ▣ Shell  │  ⎇ n/a  │  type: Shell  │  [Mgmt]  │  /tmp/test-repo  │  ↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  S

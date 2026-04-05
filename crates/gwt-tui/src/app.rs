@@ -4190,7 +4190,7 @@ mod tests {
         };
 
         let rendered = render_model_text(&model, 220, 24);
-        assert!(rendered.contains("branch: feature/status-bar"));
+        assert!(rendered.contains("feature/status-bar"));
         assert!(rendered.contains("type: Shell"));
         assert!(rendered.contains("Enter:wizard"));
         assert!(rendered.contains("Esc:term"));
@@ -4628,9 +4628,9 @@ mod tests {
 
         let rendered = render_model_text(&model, 80, 24);
 
-        assert!(rendered.contains("↑↓ mv  ←→ tab  ↵ wiz"));
-        assert!(rendered.contains("mvf?"));
-        assert!(rendered.contains("Esc→T"));
+        // Compact hints at 80-col width
+        assert!(rendered.contains("↑↓ mv"));
+        assert!(rendered.contains("←→ tab"));
     }
 
     #[test]

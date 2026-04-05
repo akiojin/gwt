@@ -4,10 +4,10 @@ expression: output
 ---
 ┏ Branches ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭ › Shell ─────────────────────────────╮
 ┃ View: All │ Sort: Default            ┃│Session: Shell (80x24)                │
-┃main ◇ ▸                              ┃│                                      │
-┃feature/api ◇                         ┃│                                      │
-┃feature/app-shell ◇                   ┃│                                      │
-┃origin/release/1.0 ◇                  ┃│                                      │
+┃▎main ◇ ▸                             ┃│                                      │
+┃ feature/api ◇                        ┃│                                      │
+┃ feature/app-shell ◇                  ┃│                                      │
+┃ origin/release/1.0 ◇                 ┃│                                      │
 ┃                                      ┃│                                      │
 ┃                                      ┃│                                      │
 ┃                                      ┃│                                      │
@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
- ▣ Sh  br:main  [G]  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Esc→T
+ ▣ Sh  │  ⎇main  │  [G]  │  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  E
