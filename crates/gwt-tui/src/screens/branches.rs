@@ -1,214 +1,43 @@
-//! Branches screen — branch list with PR/agent status (gwt-cli migration)
+//! Branches management screen.
 
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::path::Path;
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, List, ListItem, Paragraph},
+    Frame,
+};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
-
-use gwt_core::git::issue_cache::IssueExactCache;
-use gwt_core::git::issue_linkage::WorktreeIssueLinkStore;
-use gwt_core::git::{Branch, PrCache};
-use gwt_core::worktree::{Worktree, WorktreeManager, WorktreeStatus as CoreWorktreeStatus};
-
-// ---------------------------------------------------------------------------
-// Safety status
-// ---------------------------------------------------------------------------
-
-/// Safety status for branch cleanup assessment.
+/// Sort mode for the branch list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SafetyStatus {
+pub enum SortMode {
     #[default]
-    Unknown,
-    Safe,
-    Warning,
-    Danger,
-    Disabled,
+    Default,
+    Name,
+    Date,
 }
 
-impl SafetyStatus {
-    pub fn icon(self) -> &'static str {
+impl SortMode {
+    /// Cycle to the next sort mode.
+    pub fn next(self) -> Self {
         match self {
-            SafetyStatus::Safe => "o",
-            SafetyStatus::Warning => "!",
-            SafetyStatus::Danger => "x",
-            SafetyStatus::Unknown => "?",
-            SafetyStatus::Disabled => "-",
+            Self::Default => Self::Name,
+            Self::Name => Self::Date,
+            Self::Date => Self::Default,
         }
     }
 
-    pub fn color(self) -> Color {
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
         match self {
-            SafetyStatus::Safe => Color::Green,
-            SafetyStatus::Warning => Color::Yellow,
-            SafetyStatus::Danger => Color::Red,
-            SafetyStatus::Unknown => Color::DarkGray,
-            SafetyStatus::Disabled => Color::DarkGray,
+            Self::Default => "Default",
+            Self::Name => "Name",
+            Self::Date => "Date",
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Branch item
-// ---------------------------------------------------------------------------
-
-/// A single branch entry with metadata for display.
-#[derive(Debug, Clone)]
-pub struct BranchItem {
-    pub name: String,
-    pub is_current: bool,
-    pub has_worktree: bool,
-    pub worktree_path: Option<String>,
-    pub session_count: usize,
-    pub running_session_count: usize,
-    pub stopped_session_count: usize,
-    pub worktree_indicator: char,
-    pub has_changes: bool,
-    pub has_unpushed: bool,
-    pub is_protected: bool,
-    pub last_tool_usage: Option<String>,
-    pub last_tool_id: Option<String>,
-    pub quick_start_available: bool,
-    pub linked_issue_number: Option<u64>,
-    pub linked_issue_state: Option<String>,
-    pub pr_title: Option<String>,
-    pub pr_number: Option<u64>,
-    pub pr_state: Option<String>,
-    pub safety_status: SafetyStatus,
-    pub is_remote: bool,
-    pub last_commit_timestamp: Option<i64>,
-}
-
-impl BranchItem {
-    /// Create a BranchItem from a gwt-core Branch.
-    pub fn from_branch(branch: &Branch) -> Self {
-        let is_remote = infer_is_remote(branch);
-        let is_protected = is_protected_branch(&branch.name, is_remote);
-        let safety = if is_protected || branch.is_current {
-            SafetyStatus::Disabled
-        } else {
-            SafetyStatus::Unknown
-        };
-
-        Self {
-            name: branch.name.clone(),
-            is_current: branch.is_current,
-            has_worktree: false,
-            worktree_path: None,
-            session_count: 0,
-            running_session_count: 0,
-            stopped_session_count: 0,
-            worktree_indicator: '.',
-            has_changes: false,
-            has_unpushed: branch.ahead > 0,
-            is_protected,
-            last_tool_usage: None,
-            last_tool_id: None,
-            quick_start_available: false,
-            linked_issue_number: None,
-            linked_issue_state: None,
-            pr_title: None,
-            pr_number: None,
-            pr_state: None,
-            safety_status: safety,
-            is_remote,
-            last_commit_timestamp: branch.commit_timestamp,
-        }
-    }
-
-    /// Get agent display color based on tool_id.
-    pub fn agent_color(&self) -> Color {
-        match self.last_tool_id.as_deref() {
-            Some(id) => {
-                let lower = id.to_lowercase();
-                if lower.contains("claude") {
-                    Color::Yellow
-                } else if lower.contains("codex") {
-                    Color::Cyan
-                } else if lower.contains("gemini") {
-                    Color::Magenta
-                } else if lower.contains("opencode") {
-                    Color::Green
-                } else {
-                    Color::White
-                }
-            }
-            None => Color::DarkGray,
-        }
-    }
-
-    /// Short display name for the agent.
-    pub fn agent_label(&self) -> &str {
-        self.last_tool_usage.as_deref().unwrap_or("")
-    }
-
-    /// Matches filter query against branch name and PR title.
-    pub fn matches_filter(&self, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-        let q = query.to_lowercase();
-        if self.name.to_lowercase().contains(&q) {
-            return true;
-        }
-        if let Some(ref title) = self.pr_title {
-            if title.to_lowercase().contains(&q) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
-fn infer_is_remote(branch: &Branch) -> bool {
-    branch.name.starts_with("remotes/")
-        || (branch.has_remote && branch.upstream.is_none() && branch.name.contains('/'))
-}
-
-fn normalize_branch_name(name: &str) -> &str {
-    if let Some(stripped) = name.strip_prefix("remotes/") {
-        if let Some((_, rest)) = stripped.split_once('/') {
-            return rest;
-        }
-        return stripped;
-    }
-    if let Some(stripped) = name.strip_prefix("origin/") {
-        return stripped;
-    }
-    if let Some(stripped) = name.strip_prefix("upstream/") {
-        return stripped;
-    }
-    name
-}
-
-/// Check if a branch name is protected (main/master/develop).
-fn is_protected_branch(name: &str, is_remote: bool) -> bool {
-    let short = remote_short_name(name, is_remote);
-    matches!(short, "main" | "master" | "develop" | "dev")
-}
-
-fn remote_short_name(name: &str, is_remote: bool) -> &str {
-    if let Some(stripped) = name
-        .strip_prefix("remotes/")
-        .and_then(|s| s.split_once('/').map(|(_, r)| r))
-    {
-        return stripped;
-    }
-    if is_remote {
-        if let Some((_, rest)) = name.split_once('/') {
-            return rest;
-        }
-    }
-    name
-}
-
-// ---------------------------------------------------------------------------
-// View / Sort modes
-// ---------------------------------------------------------------------------
-
-/// View mode filter for the branch list.
+/// View mode filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
     #[default]
@@ -218,1433 +47,1718 @@ pub enum ViewMode {
 }
 
 impl ViewMode {
+    /// Cycle to the next view mode.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Local,
+            Self::Local => Self::Remote,
+            Self::Remote => Self::All,
+        }
+    }
+
+    /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
-            ViewMode::All => "All",
-            ViewMode::Local => "Local",
-            ViewMode::Remote => "Remote",
-        }
-    }
-
-    pub fn cycle(self) -> Self {
-        match self {
-            ViewMode::All => ViewMode::Local,
-            ViewMode::Local => ViewMode::Remote,
-            ViewMode::Remote => ViewMode::All,
+            Self::All => "All",
+            Self::Local => "Local",
+            Self::Remote => "Remote",
         }
     }
 }
 
-/// Sort mode for the branch list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SortMode {
-    #[default]
-    Default,
-    Name,
-    Updated,
+/// Branch category derived from name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BranchCategory {
+    Main,
+    Develop,
+    Feature,
+    Other,
 }
 
-impl SortMode {
+impl BranchCategory {
+    /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
-            SortMode::Default => "Default",
-            SortMode::Name => "Name",
-            SortMode::Updated => "Updated",
-        }
-    }
-
-    pub fn cycle(self) -> Self {
-        match self {
-            SortMode::Default => SortMode::Name,
-            SortMode::Name => SortMode::Updated,
-            SortMode::Updated => SortMode::Default,
+            Self::Main => "Main",
+            Self::Develop => "Develop",
+            Self::Feature => "Feature",
+            Self::Other => "Other",
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Branch list state
-// ---------------------------------------------------------------------------
-
-/// State for the branch list screen.
-#[derive(Debug)]
-pub struct BranchListState {
-    pub branches: Vec<BranchItem>,
-    pub selected: usize,
-    pub filter_query: String,
-    pub filter_mode: bool,
-    pub view_mode: ViewMode,
-    pub sort_mode: SortMode,
-    pub scroll_offset: usize,
-    pub loading: bool,
-}
-
-impl Default for BranchListState {
-    fn default() -> Self {
-        Self {
-            branches: Vec::new(),
-            selected: 0,
-            filter_query: String::new(),
-            filter_mode: false,
-            view_mode: ViewMode::All,
-            sort_mode: SortMode::Default,
-            scroll_offset: 0,
-            loading: false,
-        }
-    }
-}
-
-impl BranchListState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Return indices of branches that match the current filter and view mode.
-    pub fn filtered_indices(&self) -> Vec<usize> {
-        self.branches
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| {
-                let view_ok = match self.view_mode {
-                    ViewMode::All => true,
-                    ViewMode::Local => !b.is_remote,
-                    ViewMode::Remote => b.is_remote,
-                };
-                view_ok && b.matches_filter(&self.filter_query)
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    /// Return filtered and sorted branch indices.
-    pub fn visible_indices(&self) -> Vec<usize> {
-        let mut indices = self.filtered_indices();
-        let branches = &self.branches;
-        let sort_mode = self.sort_mode;
-
-        indices.sort_by(|&a, &b| {
-            let ba = &branches[a];
-            let bb = &branches[b];
-
-            // Current branch always first.
-            if ba.is_current && !bb.is_current {
-                return Ordering::Less;
-            }
-            if !ba.is_current && bb.is_current {
-                return Ordering::Greater;
-            }
-
-            match sort_mode {
-                SortMode::Default => {
-                    // Protected first, then by name type, then worktree, then timestamp.
-                    let type_a = branch_sort_priority(&ba.name, ba.is_remote);
-                    let type_b = branch_sort_priority(&bb.name, bb.is_remote);
-                    if type_a != type_b {
-                        return type_a.cmp(&type_b);
-                    }
-                    if ba.has_worktree != bb.has_worktree {
-                        return if ba.has_worktree {
-                            Ordering::Less
-                        } else {
-                            Ordering::Greater
-                        };
-                    }
-                    compare_timestamps(ba, bb)
-                        .unwrap_or_else(|| ba.name.to_lowercase().cmp(&bb.name.to_lowercase()))
-                }
-                SortMode::Name => ba.name.to_lowercase().cmp(&bb.name.to_lowercase()),
-                SortMode::Updated => compare_timestamps(ba, bb)
-                    .unwrap_or_else(|| ba.name.to_lowercase().cmp(&bb.name.to_lowercase())),
-            }
-        });
-
-        indices
-    }
-
-    /// Count of visible branches.
-    pub fn visible_count(&self) -> usize {
-        self.visible_indices().len()
-    }
-
-    /// Clamp selected index to visible range.
-    pub fn clamp_selection(&mut self) {
-        let count = self.visible_count();
-        if count == 0 {
-            self.selected = 0;
-        } else if self.selected >= count {
-            self.selected = count - 1;
-        }
-    }
-
-    /// Move selection down.
-    pub fn select_next(&mut self) {
-        let count = self.visible_count();
-        if count == 0 {
-            return;
-        }
-        self.selected = (self.selected + 1).min(count - 1);
-    }
-
-    /// Move selection up.
-    pub fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    /// Get the currently selected BranchItem, if any.
-    pub fn selected_branch(&self) -> Option<&BranchItem> {
-        let indices = self.visible_indices();
-        indices
-            .get(self.selected)
-            .and_then(|&i| self.branches.get(i))
-    }
-
-    pub fn selected_branch_name(&self) -> Option<String> {
-        self.selected_branch().map(|b| b.name.clone())
-    }
-
-    /// Set branches and reset selection.
-    pub fn set_branches(&mut self, branches: Vec<BranchItem>) {
-        self.branches = branches;
-        self.clamp_selection();
-        self.loading = false;
-    }
-
-    /// Toggle filter input mode.
-    pub fn toggle_filter(&mut self) {
-        self.filter_mode = !self.filter_mode;
-        if !self.filter_mode {
-            // Keep filter text when exiting filter mode.
-        }
-    }
-
-    /// Clear filter text and exit filter mode.
-    pub fn clear_filter(&mut self) {
-        self.filter_query.clear();
-        self.filter_mode = false;
-        self.clamp_selection();
-    }
-
-    /// Cycle view mode (All -> Local -> Remote -> All).
-    pub fn cycle_view_mode(&mut self) {
-        self.view_mode = self.view_mode.cycle();
-        self.clamp_selection();
-    }
-
-    /// Cycle sort mode.
-    pub fn cycle_sort_mode(&mut self) {
-        self.sort_mode = self.sort_mode.cycle();
-    }
-
-    /// Ensure scroll_offset keeps the selected item visible within a viewport.
-    pub fn ensure_visible(&mut self, viewport_height: usize) {
-        if viewport_height == 0 {
-            return;
-        }
-        if self.selected < self.scroll_offset {
-            self.scroll_offset = self.selected;
-        } else if self.selected >= self.scroll_offset + viewport_height {
-            self.scroll_offset = self.selected - viewport_height + 1;
-        }
-    }
-}
-
-/// Priority for branch name sorting (lower = higher priority).
-fn branch_sort_priority(name: &str, is_remote: bool) -> u8 {
-    let short = remote_short_name(name, is_remote).to_lowercase();
-    if short == "main" || short == "master" {
-        0
-    } else if short == "develop" || short == "dev" {
-        1
-    } else if short.starts_with("feature/") {
-        2
-    } else if short.starts_with("bugfix/") || short.starts_with("hotfix/") {
-        3
-    } else if short.starts_with("release/") {
-        4
+/// Categorize a branch by its name.
+pub fn categorize_branch(name: &str) -> BranchCategory {
+    let base = name.strip_prefix("origin/").unwrap_or(name);
+    if base == "main" || base == "master" {
+        BranchCategory::Main
+    } else if base == "develop" || base == "development" {
+        BranchCategory::Develop
+    } else if base.starts_with("feature/") || base.starts_with("feat/") {
+        BranchCategory::Feature
     } else {
-        5
+        BranchCategory::Other
     }
 }
 
-/// Compare two branch items by timestamp (newer first).
-fn compare_timestamps(a: &BranchItem, b: &BranchItem) -> Option<Ordering> {
-    match (a.last_commit_timestamp, b.last_commit_timestamp) {
-        (Some(ta), Some(tb)) if ta != tb => Some(tb.cmp(&ta)),
-        (Some(_), None) => Some(Ordering::Less),
-        (None, Some(_)) => Some(Ordering::Greater),
-        _ => None,
+/// A single branch entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchItem {
+    pub name: String,
+    pub is_head: bool,
+    pub is_local: bool,
+    pub category: BranchCategory,
+    pub worktree_path: Option<std::path::PathBuf>,
+}
+
+/// A SPEC entry loaded from a branch worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailSpecItem {
+    pub id: String,
+    pub title: String,
+    pub phase: String,
+    pub status: String,
+}
+
+/// A lightweight summary of an active session associated with the selected branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailSessionSummary {
+    pub kind: &'static str,
+    pub name: String,
+    pub detail: Option<String>,
+    pub active: bool,
+}
+
+/// Lifecycle action requested for a Docker container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockerLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// Pending Docker action selected in the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDockerAction {
+    pub container_id: String,
+    pub action: DockerLifecycleAction,
+}
+
+/// Number of detail sections in the branch detail view.
+const DETAIL_SECTION_COUNT: usize = 4;
+
+/// Labels for the detail sections.
+const DETAIL_SECTION_LABELS: [&str; DETAIL_SECTION_COUNT] =
+    ["Overview", "SPECs", "Git", "Sessions"];
+
+/// Public accessor for detail section labels (used by app.rs for pane titles).
+pub fn detail_section_labels() -> &'static [&'static str] {
+    &DETAIL_SECTION_LABELS
+}
+
+/// State for the branches screen.
+#[derive(Debug, Clone, Default)]
+pub struct BranchesState {
+    pub(crate) branches: Vec<BranchItem>,
+    pub(crate) selected: usize,
+    pub(crate) sort_mode: SortMode,
+    pub(crate) view_mode: ViewMode,
+    pub(crate) search_query: String,
+    pub(crate) search_active: bool,
+    /// Active detail section: 0=Overview, 1=SPECs, 2=Git, 3=Sessions.
+    pub(crate) detail_section: usize,
+    /// Selected row within the Sessions detail section.
+    pub(crate) detail_session_selected: usize,
+    /// Flag: caller should open agent selection.
+    pub(crate) pending_launch_agent: bool,
+    /// Flag: caller should spawn shell in worktree cwd.
+    pub(crate) pending_open_shell: bool,
+    /// Flag: caller should show worktree delete confirmation.
+    pub(crate) pending_delete_worktree: bool,
+    /// SPECs loaded from the selected branch worktree.
+    pub(crate) detail_specs: Vec<DetailSpecItem>,
+    /// Git status files for the selected branch worktree.
+    pub(crate) detail_files: Vec<String>,
+    /// Recent commits for the selected branch worktree.
+    pub(crate) detail_commits: Vec<String>,
+    /// Docker containers available for the selected branch context.
+    pub(crate) docker_containers: Vec<gwt_docker::ContainerInfo>,
+    /// Selected Docker container index in the overview area.
+    pub(crate) docker_selected: usize,
+    /// Pending Docker action intent to be handled by the caller.
+    pub(crate) pending_docker_action: Option<PendingDockerAction>,
+}
+
+impl BranchesState {
+    /// Return branches filtered by current view mode and search query,
+    /// then sorted according to the active `sort_mode`.
+    pub fn filtered_branches(&self) -> Vec<&BranchItem> {
+        let query_lower = self.search_query.to_lowercase();
+        let mut result: Vec<&BranchItem> = self
+            .branches
+            .iter()
+            .filter(|b| match self.view_mode {
+                ViewMode::All => true,
+                ViewMode::Local => b.is_local,
+                ViewMode::Remote => !b.is_local,
+            })
+            .filter(|b| query_lower.is_empty() || b.name.to_lowercase().contains(&query_lower))
+            .collect();
+
+        match self.sort_mode {
+            SortMode::Default => {} // insertion order
+            // Date has no dedicated field yet; fall back to alphabetical like Name.
+            SortMode::Name | SortMode::Date => result.sort_by(|a, b| a.name.cmp(&b.name)),
+        }
+
+        result
+    }
+
+    /// Get the currently selected branch (from filtered list).
+    pub fn selected_branch(&self) -> Option<&BranchItem> {
+        let filtered = self.filtered_branches();
+        filtered.get(self.selected).copied()
+    }
+
+    /// Clamp selected index to filtered length.
+    fn clamp_selected(&mut self) {
+        let len = self.filtered_branches().len();
+        super::clamp_index(&mut self.selected, len);
+    }
+
+    /// Clamp selected Docker container index to available containers.
+    fn clamp_docker_selected(&mut self) {
+        let len = self.docker_containers.len();
+        super::clamp_index(&mut self.docker_selected, len);
+    }
+
+    /// Clamp the session-row selection for the Sessions detail section.
+    pub(crate) fn clamp_detail_session_selected(&mut self, len: usize) {
+        super::clamp_index(&mut self.detail_session_selected, len);
+    }
+
+    /// Return the currently selected Docker container, if any.
+    fn selected_docker_container(&self) -> Option<&gwt_docker::ContainerInfo> {
+        self.docker_containers.get(self.docker_selected)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
-
-/// Messages for the branches screen.
-#[derive(Debug)]
+/// Messages specific to the branches screen.
+#[derive(Debug, Clone)]
 pub enum BranchesMessage {
+    MoveUp,
+    MoveDown,
+    Select,
+    ToggleSort,
+    ToggleView,
+    SearchStart,
+    SearchInput(char),
+    SearchBackspace,
+    SearchClear,
     Refresh,
-    SelectNext,
-    SelectPrev,
-    ToggleFilter,
-    FilterInput(char),
-    FilterBackspace,
-    FilterClear,
-    CycleViewMode,
-    CycleSortMode,
-    Enter,
-    Delete,
-    Loaded(Vec<BranchItem>),
+    SetBranches(Vec<BranchItem>),
+    /// Cycle to the next detail section.
+    NextDetailSection,
+    /// Cycle to the previous detail section.
+    PrevDetailSection,
+    /// Launch agent action.
+    LaunchAgent,
+    /// Open shell action.
+    OpenShell,
+    /// Delete worktree action.
+    DeleteWorktree,
+    /// Move to the next Docker container in the overview area.
+    DockerContainerDown,
+    /// Move to the previous Docker container in the overview area.
+    DockerContainerUp,
+    /// Request a start lifecycle action for the selected Docker container.
+    DockerContainerStart,
+    /// Request a stop lifecycle action for the selected Docker container.
+    DockerContainerStop,
+    /// Request a restart lifecycle action for the selected Docker container.
+    DockerContainerRestart,
 }
 
-// ---------------------------------------------------------------------------
-// Key handling
-// ---------------------------------------------------------------------------
-
-/// Handle a key event for the branches screen.
-pub fn handle_key(state: &BranchListState, key: &KeyEvent) -> Option<BranchesMessage> {
-    if state.filter_mode {
-        return handle_filter_key(key);
-    }
-
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(BranchesMessage::SelectNext),
-        KeyCode::Char('k') | KeyCode::Up => Some(BranchesMessage::SelectPrev),
-        KeyCode::Char('/') => Some(BranchesMessage::ToggleFilter),
-        KeyCode::Char('v') => Some(BranchesMessage::CycleViewMode),
-        KeyCode::Char('s') => Some(BranchesMessage::CycleSortMode),
-        KeyCode::Char('r') => Some(BranchesMessage::Refresh),
-        KeyCode::Char('d') => Some(BranchesMessage::Delete),
-        KeyCode::Enter => Some(BranchesMessage::Enter),
-        _ => None,
-    }
-}
-
-/// Handle key events while in filter input mode.
-fn handle_filter_key(key: &KeyEvent) -> Option<BranchesMessage> {
-    match key.code {
-        KeyCode::Esc => Some(BranchesMessage::ToggleFilter),
-        KeyCode::Enter => Some(BranchesMessage::ToggleFilter),
-        KeyCode::Backspace => Some(BranchesMessage::FilterBackspace),
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(BranchesMessage::FilterClear)
-        }
-        KeyCode::Char(c) => Some(BranchesMessage::FilterInput(c)),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Update
-// ---------------------------------------------------------------------------
-
-/// Apply a BranchesMessage to the BranchListState.
-pub fn update(state: &mut BranchListState, msg: BranchesMessage) {
+/// Update branches state in response to a message.
+pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     match msg {
-        BranchesMessage::SelectNext => state.select_next(),
-        BranchesMessage::SelectPrev => state.select_prev(),
-        BranchesMessage::ToggleFilter => state.toggle_filter(),
-        BranchesMessage::FilterInput(c) => {
-            state.filter_query.push(c);
-            state.clamp_selection();
+        BranchesMessage::MoveUp => {
+            let len = state.filtered_branches().len();
+            super::move_up(&mut state.selected, len);
+            state.detail_session_selected = 0;
         }
-        BranchesMessage::FilterBackspace => {
-            state.filter_query.pop();
-            state.clamp_selection();
+        BranchesMessage::MoveDown => {
+            let len = state.filtered_branches().len();
+            super::move_down(&mut state.selected, len);
+            state.detail_session_selected = 0;
         }
-        BranchesMessage::FilterClear => state.clear_filter(),
-        BranchesMessage::CycleViewMode => state.cycle_view_mode(),
-        BranchesMessage::CycleSortMode => state.cycle_sort_mode(),
+        BranchesMessage::Select => {
+            if !state.filtered_branches().is_empty() {
+                state.pending_launch_agent = true;
+            }
+        }
+        BranchesMessage::ToggleSort => {
+            state.sort_mode = state.sort_mode.next();
+            state.detail_session_selected = 0;
+        }
+        BranchesMessage::ToggleView => {
+            state.view_mode = state.view_mode.next();
+            state.clamp_selected();
+            state.detail_session_selected = 0;
+        }
+        BranchesMessage::SearchStart => {
+            state.search_active = true;
+        }
+        BranchesMessage::SearchInput(ch) => {
+            if state.search_active {
+                state.search_query.push(ch);
+                state.clamp_selected();
+                state.detail_session_selected = 0;
+            }
+        }
+        BranchesMessage::SearchBackspace => {
+            if state.search_active {
+                state.search_query.pop();
+                state.clamp_selected();
+                state.detail_session_selected = 0;
+            }
+        }
+        BranchesMessage::SearchClear => {
+            state.search_query.clear();
+            state.search_active = false;
+            state.clamp_selected();
+            state.detail_session_selected = 0;
+        }
         BranchesMessage::Refresh => {
-            state.loading = true;
+            // Signal to reload branches — handled by caller
         }
-        BranchesMessage::Loaded(branches) => {
-            state.set_branches(branches);
+        BranchesMessage::SetBranches(branches) => {
+            state.branches = branches;
+            state.clamp_selected();
+            state.detail_session_selected = 0;
         }
-        BranchesMessage::Enter | BranchesMessage::Delete => {
-            // Handled at app level.
+        BranchesMessage::NextDetailSection => {
+            state.detail_section = (state.detail_section + 1) % DETAIL_SECTION_COUNT;
+        }
+        BranchesMessage::PrevDetailSection => {
+            state.detail_section = if state.detail_section == 0 {
+                DETAIL_SECTION_COUNT - 1
+            } else {
+                state.detail_section - 1
+            };
+        }
+        BranchesMessage::LaunchAgent => {
+            state.pending_launch_agent = true;
+        }
+        BranchesMessage::OpenShell => {
+            state.pending_open_shell = true;
+        }
+        BranchesMessage::DeleteWorktree => {
+            state.pending_delete_worktree = true;
+        }
+        BranchesMessage::DockerContainerDown => {
+            if !state.docker_containers.is_empty() {
+                super::move_down(&mut state.docker_selected, state.docker_containers.len());
+            }
+        }
+        BranchesMessage::DockerContainerUp => {
+            if !state.docker_containers.is_empty() {
+                super::move_up(&mut state.docker_selected, state.docker_containers.len());
+            }
+        }
+        BranchesMessage::DockerContainerStart => {
+            if let Some(container) = state.selected_docker_container() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    container_id: container.id.clone(),
+                    action: DockerLifecycleAction::Start,
+                });
+            }
+        }
+        BranchesMessage::DockerContainerStop => {
+            if let Some(container) = state.selected_docker_container() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    container_id: container.id.clone(),
+                    action: DockerLifecycleAction::Stop,
+                });
+            }
+        }
+        BranchesMessage::DockerContainerRestart => {
+            if let Some(container) = state.selected_docker_container() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    container_id: container.id.clone(),
+                    action: DockerLifecycleAction::Restart,
+                });
+            }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Load branches from gwt-core
-// ---------------------------------------------------------------------------
+/// Load detail data (SPECs, git status, commits) for the selected branch.
+///
+/// Best-effort: all errors are silently ignored.
+pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Path) {
+    state.detail_specs.clear();
+    state.detail_files.clear();
+    state.detail_commits.clear();
+    state.docker_containers.clear();
+    state.docker_selected = 0;
+    state.pending_docker_action = None;
 
-/// Load branches from the repository at `repo_root`.
-pub fn load_branches(repo_root: &Path) -> Vec<BranchItem> {
-    let local = Branch::list(repo_root).unwrap_or_default();
-    let remote = Branch::list_remote(repo_root).unwrap_or_default();
+    if let Ok(containers) = gwt_docker::list_containers() {
+        state.docker_containers = containers;
+        state.clamp_docker_selected();
+    }
 
-    // Get tool usage map for agent info.
-    let tool_map = gwt_core::config::get_last_tool_usage_map(repo_root);
+    let worktree_path = state
+        .selected_branch()
+        .and_then(|b| b.worktree_path.clone());
 
-    let mut items: Vec<BranchItem> = Vec::with_capacity(local.len() + remote.len());
+    let Some(wt_path) = worktree_path else {
+        return;
+    };
 
-    for branch in &local {
-        let mut item = BranchItem::from_branch(branch);
-        // Enrich with tool usage data.
-        if let Some(entry) = tool_map.get(&branch.name) {
-            item.last_tool_usage = Some(entry.format_tool_usage());
-            item.last_tool_id = Some(entry.tool_id.clone());
-            item.quick_start_available = entry.session_id.is_some();
+    // Load SPECs from worktree specs/ directory
+    if let Ok(entries) = std::fs::read_dir(wt_path.join("specs")) {
+        let mut specs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !dir_name.starts_with("SPEC-") {
+                continue;
+            }
+            let metadata_path = path.join("metadata.json");
+            let Ok(content) = std::fs::read_to_string(&metadata_path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            let id = value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(dir_name)
+                .to_string();
+            let title = value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let phase = value
+                .get("phase")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let status = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            specs.push(DetailSpecItem {
+                id,
+                title,
+                phase,
+                status,
+            });
         }
-        items.push(item);
+        specs.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
+        state.detail_specs = specs;
     }
 
-    for branch in &remote {
-        items.push(BranchItem::from_branch(branch));
+    // Load git status
+    if let Ok(entries) = gwt_git::diff::get_status(&wt_path) {
+        state.detail_files = entries
+            .iter()
+            .map(|e| {
+                let tag = match e.status {
+                    gwt_git::FileStatus::Staged => "[S]",
+                    gwt_git::FileStatus::Unstaged => "[U]",
+                    gwt_git::FileStatus::Untracked => "[?]",
+                };
+                format!("{} {}", tag, e.path.display())
+            })
+            .collect();
     }
 
-    items
+    // Load recent commits
+    if let Ok(commits) = gwt_git::commit::recent_commits(&wt_path, 5) {
+        state.detail_commits = commits
+            .iter()
+            .map(|c| format!("{} {}", c.hash, c.subject))
+            .collect();
+    }
 }
 
-pub fn load_branches_enriched(repo_root: &Path) -> Vec<BranchItem> {
-    let mut items = load_branches(repo_root);
-
-    let worktrees = WorktreeManager::new(repo_root)
-        .and_then(|manager| manager.list())
-        .unwrap_or_default();
-    apply_worktree_metadata(&mut items, &worktrees);
-
-    let issue_links = WorktreeIssueLinkStore::load(repo_root);
-    let issue_cache = IssueExactCache::load(repo_root);
-    apply_issue_metadata(&mut items, &issue_links, &issue_cache);
-
-    let mut pr_cache = PrCache::new();
-    pr_cache.populate(repo_root);
-    apply_pr_metadata(&mut items, &pr_cache);
-
-    items
+fn spec_sort_key(spec_id: &str) -> (u64, String) {
+    let numeric = spec_id
+        .strip_prefix("SPEC-")
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    (numeric, spec_id.to_string())
 }
 
-fn apply_worktree_metadata(items: &mut [BranchItem], worktrees: &[Worktree]) {
-    let worktree_map: HashMap<String, &Worktree> = worktrees
+/// Which sub-pane of the branches screen is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchesFocus {
+    List,
+    Detail,
+    None,
+}
+
+/// Render the branch list pane content (header + list, no borders).
+///
+/// Called by app.rs which provides the bordered pane. This renders borderless
+/// content into the inner area of the top management pane.
+pub fn render_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let list_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Header: view/sort/search (no border)
+            Constraint::Min(0),    // Branch list
+        ])
+        .split(area);
+
+    render_header(state, frame, list_chunks[0]);
+    render_branch_list(state, frame, list_chunks[1]);
+}
+
+/// Render the branch detail content (no borders, no title).
+///
+/// Called by app.rs which provides the bordered pane. This renders borderless
+/// content into the inner area of the bottom detail pane.
+/// `sessions` contains branch-scoped active session summaries for this branch.
+pub fn render_detail_content(
+    state: &BranchesState,
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[DetailSessionSummary],
+) {
+    match state.detail_section {
+        0 => render_detail_overview(state, frame, area),
+        1 => render_detail_specs(state, frame, area),
+        2 => render_detail_git_status(state, frame, area),
+        3 => render_detail_sessions(frame, area, sessions, state.detail_session_selected),
+        _ => {}
+    }
+}
+
+/// Render the branches screen (legacy entry point).
+///
+/// In the lazygit layout, app.rs calls render_list / render_detail_content directly.
+pub fn render(state: &BranchesState, frame: &mut Frame, area: Rect, _focus: BranchesFocus) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let list_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(main_chunks[0]);
+
+    render_header(state, frame, list_chunks[0]);
+    render_branch_list(state, frame, list_chunks[1]);
+    render_detail_content(state, frame, main_chunks[1], &[]);
+}
+
+/// Render the header bar with view mode, sort mode, and search (plain bar, no borders).
+fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let search_display = if state.search_active {
+        format!("  Search: {}_", state.search_query)
+    } else if !state.search_query.is_empty() {
+        format!("  Search: {}", state.search_query)
+    } else {
+        String::new()
+    };
+
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" View: {} ", state.view_mode.label()),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" Sort: {} ", state.sort_mode.label()),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(search_display, Style::default().fg(Color::Yellow)),
+    ]);
+
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the branch list (borderless, old-TUI style inline indicators).
+fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let filtered = state.filtered_branches();
+
+    if filtered.is_empty() {
+        let msg = if !state.branches.is_empty() {
+            "No matching branches"
+        } else {
+            "No branches loaded"
+        };
+        let p = Paragraph::new(msg)
+            .block(Block::default())
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(p, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = filtered
         .iter()
-        .filter_map(|worktree| {
-            worktree
-                .branch
-                .as_ref()
-                .map(|branch| (normalize_branch_name(branch).to_string(), worktree))
+        .map(|branch| {
+            let worktree_icon = if branch.worktree_path.is_some() {
+                "\u{25CF}"
+            } else {
+                "\u{25CB}"
+            };
+            let head_indicator = if branch.is_head { " *" } else { "" };
+            let line = Line::from(vec![
+                Span::styled(&branch.name, Style::default().fg(Color::White)),
+                Span::raw(" "),
+                Span::styled(worktree_icon, Style::default().fg(Color::Cyan)),
+                Span::styled(head_indicator, Style::default().fg(Color::Green)),
+            ]);
+            ListItem::new(line)
         })
         .collect();
 
-    for item in items {
-        let key = normalize_branch_name(&item.name).to_string();
-        let Some(worktree) = worktree_map.get(&key).copied() else {
-            apply_safety_status(item);
-            continue;
-        };
-
-        item.worktree_path = Some(worktree.path.display().to_string());
-        item.has_worktree = matches!(worktree.status, CoreWorktreeStatus::Active);
-        item.has_changes = worktree.has_changes;
-        item.has_unpushed = worktree.has_unpushed;
-        item.worktree_indicator = match worktree.status {
-            CoreWorktreeStatus::Active => 'w',
-            CoreWorktreeStatus::Locked => 'l',
-            CoreWorktreeStatus::Prunable | CoreWorktreeStatus::Missing => 'x',
-        };
-        apply_safety_status(item);
-    }
-}
-
-fn apply_pr_metadata(items: &mut [BranchItem], pr_cache: &PrCache) {
-    for item in items {
-        let key = normalize_branch_name(&item.name);
-        if let Some(pr) = pr_cache.get(key) {
-            item.pr_title = Some(pr.title.clone());
-            item.pr_number = Some(pr.number);
-            item.pr_state = Some(pr.state.to_lowercase());
-        }
-    }
-}
-
-fn apply_issue_metadata(
-    items: &mut [BranchItem],
-    issue_links: &WorktreeIssueLinkStore,
-    issue_cache: &IssueExactCache,
-) {
-    for item in items {
-        let key = normalize_branch_name(&item.name);
-        if let Some(link) = issue_links.get_link(key) {
-            item.linked_issue_number = Some(link.issue_number);
-            item.linked_issue_state = issue_cache
-                .get(link.issue_number)
-                .map(|entry| entry.state.to_lowercase());
-        }
-    }
-}
-
-fn apply_safety_status(item: &mut BranchItem) {
-    item.safety_status = if item.is_protected || item.is_current {
-        SafetyStatus::Disabled
-    } else if item.has_changes {
-        SafetyStatus::Danger
-    } else if item.has_unpushed {
-        SafetyStatus::Warning
-    } else {
-        SafetyStatus::Safe
-    };
-}
-
-fn branch_runtime_summary(branch: &BranchItem) -> Option<String> {
-    let mut parts = Vec::new();
-    if branch.running_session_count > 0 {
-        parts.push(format!("●{}", branch.running_session_count));
-    }
-    if branch.stopped_session_count > 0 {
-        parts.push(format!("○{}", branch.stopped_session_count));
-    }
-    if let Some(tool) = branch.last_tool_usage.as_deref() {
-        if !tool.is_empty() {
-            parts.push(tool.to_string());
-        }
-    }
-    if branch.quick_start_available {
-        parts.push("↺".to_string());
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" "))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
-/// Render the branches screen.
-pub fn render(state: &BranchListState, buf: &mut Buffer, area: Rect) {
-    if area.height < 3 || area.width < 10 {
-        return;
-    }
-
-    // Layout: header (2 lines) + list + footer (1 line if filter mode)
-    let footer_height = if state.filter_mode { 1 } else { 0 };
-    let header_height = 2u16;
-    let list_height = area.height.saturating_sub(header_height + footer_height);
-
-    let header_area = Rect::new(area.x, area.y, area.width, header_height);
-    let list_area = Rect::new(area.x, area.y + header_height, area.width, list_height);
-    let footer_area = Rect::new(
-        area.x,
-        area.y + header_height + list_height,
-        area.width,
-        footer_height,
+    let list = List::new(items).block(Block::default()).highlight_style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     );
-
-    render_header(state, buf, header_area);
-    render_list(state, buf, list_area);
-    if state.filter_mode {
-        render_filter_bar(state, buf, footer_area);
-    }
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(state.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-/// Render the header with view/sort mode and stats.
-fn render_header(state: &BranchListState, buf: &mut Buffer, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
+/// Overview section: branch name, HEAD indicator, category, worktree path.
+fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    let mut lines = Vec::new();
 
-    // Line 1: Title
-    let visible = state.visible_count();
-    let total = state.branches.len();
-    let title = if state.loading {
-        " Branches (loading...)".to_string()
-    } else if visible == total {
-        format!(" Branches ({total})")
-    } else {
-        format!(" Branches ({visible}/{total})")
-    };
-
-    let title_span = Span::styled(title, Style::default().fg(Color::White).bold());
-    let line1 = Line::from(vec![title_span]);
-    buf.set_line(area.x, area.y, &line1, area.width);
-
-    if area.height < 2 {
-        return;
-    }
-
-    // Line 2: View mode + Sort mode + keyhints
-    let mode_line = Line::from(vec![
-        Span::styled(
-            format!(" [v] {}", state.view_mode.label()),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            format!("[s] {}", state.sort_mode.label()),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled("[/] Filter", Style::default().fg(Color::DarkGray)),
-        Span::styled("  ", Style::default()),
-        Span::styled("[r] Refresh", Style::default().fg(Color::DarkGray)),
-    ]);
-    buf.set_line(area.x, area.y + 1, &mode_line, area.width);
-}
-
-/// Render the branch list rows.
-fn render_list(state: &BranchListState, buf: &mut Buffer, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
-
-    let indices = state.visible_indices();
-
-    if indices.is_empty() {
-        let msg = if state.filter_query.is_empty() {
-            "No branches found"
-        } else {
-            "No matching branches"
-        };
-        let para = Paragraph::new(msg)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray));
-        let y = area.y + area.height / 2;
-        let text_area = Rect::new(area.x, y, area.width, 1);
-        ratatui::widgets::Widget::render(para, text_area, buf);
-        return;
-    }
-
-    let viewport = area.height as usize;
-
-    // Determine scroll range.
-    let offset = if state.selected < state.scroll_offset {
-        state.selected
-    } else if state.selected >= state.scroll_offset + viewport {
-        state.selected - viewport + 1
-    } else {
-        state.scroll_offset
-    };
-
-    for (row, vis_idx) in indices.iter().skip(offset).take(viewport).enumerate() {
-        let branch = &state.branches[*vis_idx];
-        let is_selected = row + offset == state.selected;
-        let y = area.y + row as u16;
-
-        render_branch_row(branch, is_selected, buf, area.x, y, area.width);
-    }
-}
-
-/// Render a single branch row.
-fn render_branch_row(
-    branch: &BranchItem,
-    is_selected: bool,
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    width: u16,
-) {
-    let mut spans: Vec<Span> = Vec::new();
-
-    // Selection indicator
-    let sel_char = if is_selected { ">" } else { " " };
-    let sel_style = if is_selected {
-        Style::default().fg(Color::White).bold()
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    spans.push(Span::styled(sel_char, sel_style));
-
-    // Current branch marker
-    let current_char = if branch.is_current { "*" } else { " " };
-    spans.push(Span::styled(
-        current_char,
-        Style::default().fg(Color::Green),
-    ));
-
-    // Branch name (truncated)
-    let name_color = if branch.is_current {
-        Color::Green
-    } else if branch.has_worktree {
-        Color::White
-    } else {
-        Color::DarkGray
-    };
-    let max_name_len = 30.min(width as usize / 3);
-    let display_name = if branch.name.len() > max_name_len {
-        format!("{}...", &branch.name[..max_name_len - 3])
-    } else {
-        branch.name.clone()
-    };
-    spans.push(Span::styled(
-        format!(" {display_name:<max_name_len$}"),
-        Style::default().fg(name_color),
-    ));
-
-    spans.push(Span::styled(
-        format!(" {}", branch.worktree_indicator),
-        Style::default().fg(match branch.worktree_indicator {
-            'w' => Color::Green,
-            'l' => Color::Yellow,
-            'x' => Color::Red,
-            _ => Color::DarkGray,
-        }),
-    ));
-
-    // Changes indicator
-    let changes_char = if branch.has_changes { "*" } else { " " };
-    spans.push(Span::styled(
-        format!(" {changes_char}"),
-        Style::default().fg(if branch.has_changes {
-            Color::Yellow
-        } else {
-            Color::DarkGray
-        }),
-    ));
-
-    // Safety status
-    spans.push(Span::styled(
-        format!(" {}", branch.safety_status.icon()),
-        Style::default().fg(branch.safety_status.color()),
-    ));
-
-    spans.push(Span::styled(
-        format!(" s:{}", branch.session_count),
-        Style::default().fg(if branch.session_count > 0 {
-            Color::Cyan
-        } else {
-            Color::DarkGray
-        }),
-    ));
-
-    if let Some(number) = branch.linked_issue_number {
-        let issue_color = match branch.linked_issue_state.as_deref() {
-            Some(state) if state.eq_ignore_ascii_case("open") => Color::Green,
-            Some(state) if state.eq_ignore_ascii_case("closed") => Color::Red,
-            _ => Color::DarkGray,
-        };
-        let state_label = branch
-            .linked_issue_state
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase();
-        let issue_text = if state_label.is_empty() {
-            format!(" #{number}")
-        } else {
-            format!(" #{number} {state_label}")
-        };
-        spans.push(Span::styled(issue_text, Style::default().fg(issue_color)));
-    }
-
-    // PR info
-    if let (Some(number), Some(ref pr_state)) = (branch.pr_number, &branch.pr_state) {
-        let pr_color = match pr_state.as_str() {
-            "open" => Color::Green,
-            "merged" => Color::Magenta,
-            "closed" => Color::Red,
-            _ => Color::DarkGray,
-        };
-        spans.push(Span::styled(
-            format!(" #{number} {pr_state}"),
-            Style::default().fg(pr_color),
-        ));
-
-        // PR title (fill remaining space)
-        if let Some(ref title) = branch.pr_title {
-            let remaining =
-                width as usize - spans.iter().map(|s| s.content.len()).sum::<usize>() - 1;
-            if remaining > 5 {
-                let display_title = if title.len() > remaining {
-                    format!("{}...", &title[..remaining - 3])
-                } else {
-                    title.clone()
-                };
-                spans.push(Span::styled(
-                    format!(" {display_title}"),
-                    Style::default().fg(Color::DarkGray),
-                ));
+    match state.selected_branch() {
+        Some(branch) => {
+            let head = if branch.is_head { " (HEAD)" } else { "" };
+            let locality = if branch.is_local { "Local" } else { "Remote" };
+            lines.push(format!(" Branch: {}{}", branch.name, head));
+            lines.push(format!(" Category: {}", branch.category.label()));
+            lines.push(format!(" Type: {}", locality));
+            if let Some(worktree) = branch.worktree_path.as_ref() {
+                lines.push(format!(" Worktree: {}", worktree.display()));
             }
         }
+        None => lines.push(" No branch selected".to_string()),
     }
 
-    let right_summary = branch_runtime_summary(branch);
-    if let Some(summary) = right_summary.as_deref() {
-        let used = spans.iter().map(|s| s.content.len()).sum::<usize>();
-        let summary_width = summary.len() + 1;
-        let available_gap = width as usize;
-        if available_gap > used + summary_width {
-            let gap = available_gap - used - summary_width;
-            spans.push(Span::styled(" ".repeat(gap), Style::default()));
-            spans.push(Span::styled(
-                format!(" {summary}"),
-                Style::default().fg(Color::Gray),
-            ));
-        } else {
-            spans.push(Span::styled(
-                format!(" {summary}"),
-                Style::default().fg(Color::Gray),
-            ));
-        }
+    lines.push(String::new());
+    lines.push(" Docker status".to_string());
+    if state.docker_containers.is_empty() {
+        lines.push(" No containers found".to_string());
+    } else if let Some(container) = state.selected_docker_container() {
+        lines.push(format!(" Selected: {}", container.name));
+        lines.push(format!(
+            " Status: {}",
+            docker_status_label(container.status)
+        ));
+        lines.push(format!(" Ports: {}", docker_ports_label(&container.ports)));
+        lines.push(format!(
+            " Controls: {}",
+            docker_controls_hint(container.status)
+        ));
     }
 
-    let line = Line::from(spans);
-
-    // Background highlight for selected row.
-    if is_selected {
-        for col in x..x + width {
-            buf[(col, y)].set_style(Style::default().bg(Color::Rgb(40, 40, 60)));
-        }
-    }
-
-    buf.set_line(x, y, &line, width);
+    let paragraph = Paragraph::new(lines.join("\n")).style(Style::default().fg(Color::White));
+    frame.render_widget(paragraph, area);
 }
 
-/// Render the filter input bar at the bottom.
-fn render_filter_bar(state: &BranchListState, buf: &mut Buffer, area: Rect) {
-    if area.height == 0 {
+fn docker_status_label(status: gwt_docker::ContainerStatus) -> &'static str {
+    match status {
+        gwt_docker::ContainerStatus::Created => "Created",
+        gwt_docker::ContainerStatus::Running => "Running",
+        gwt_docker::ContainerStatus::Paused => "Paused",
+        gwt_docker::ContainerStatus::Stopped => "Stopped",
+        gwt_docker::ContainerStatus::Exited => "Exited",
+    }
+}
+
+fn docker_ports_label(ports: &str) -> &str {
+    if ports.is_empty() {
+        "No published ports"
+    } else {
+        ports
+    }
+}
+
+fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
+    match status {
+        gwt_docker::ContainerStatus::Running => "Up/Down select  T stop  R restart",
+        gwt_docker::ContainerStatus::Paused => "Up/Down select  S start  T stop  R restart",
+        gwt_docker::ContainerStatus::Created
+        | gwt_docker::ContainerStatus::Stopped
+        | gwt_docker::ContainerStatus::Exited => "Up/Down select  S start  R restart",
+    }
+}
+
+/// SPECs section: list loaded from the worktree.
+fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    if state.selected_branch().is_none() {
+        let paragraph =
+            Paragraph::new(" No branch selected").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
         return;
     }
-    let line = Line::from(vec![
-        Span::styled(" /", Style::default().fg(Color::Cyan).bold()),
-        Span::styled(&state.filter_query, Style::default().fg(Color::White)),
-        Span::styled(
-            "_",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::SLOW_BLINK),
-        ),
-    ]);
-    buf.set_line(area.x, area.y, &line, area.width);
+
+    if state.detail_specs.is_empty() {
+        let has_worktree = state
+            .selected_branch()
+            .and_then(|b| b.worktree_path.as_ref())
+            .is_some();
+        let msg = if has_worktree {
+            " No SPECs found in worktree"
+        } else {
+            " No worktree (no SPECs available)"
+        };
+        let paragraph = Paragraph::new(msg).style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .detail_specs
+        .iter()
+        .map(|spec| {
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {} ", spec.id),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(&spec.title, Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("  [{}]", spec.status),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, area);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+/// Git Status section: files and recent commits from the worktree.
+fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect) {
+    if state.selected_branch().is_none() {
+        let paragraph =
+            Paragraph::new(" No branch selected").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let has_worktree = state
+        .selected_branch()
+        .and_then(|b| b.worktree_path.as_ref())
+        .is_some();
+
+    if !has_worktree {
+        let paragraph = Paragraph::new(" No worktree (no git status available)")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Files section
+    if state.detail_files.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " Working tree clean",
+            Style::default().fg(Color::Green),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(" Changed files ({})", state.detail_files.len()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for file in &state.detail_files {
+            let color = if file.starts_with("[S]") {
+                Color::Green
+            } else if file.starts_with("[?]") {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {file}"),
+                Style::default().fg(color),
+            )));
+        }
+    }
+
+    // Commits section
+    if !state.detail_commits.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Recent commits",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for commit in &state.detail_commits {
+            lines.push(Line::from(Span::styled(
+                format!("  {commit}"),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).style(Style::default().fg(Color::White));
+    frame.render_widget(paragraph, area);
+}
+
+/// Sessions section: shows branch-scoped active session summaries.
+fn render_detail_sessions(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[DetailSessionSummary],
+    selected_session: usize,
+) {
+    if sessions.is_empty() {
+        let paragraph =
+            Paragraph::new(" No active sessions").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let mut lines = Vec::new();
+    let selected_session = selected_session.min(sessions.len().saturating_sub(1));
+    for (index, session) in sessions.iter().enumerate() {
+        let selected_marker = if index == selected_session { ">" } else { " " };
+        let marker = if session.active { "●" } else { " " };
+        let kind_style = match session.kind {
+            "Agent" => Style::default().fg(Color::Cyan),
+            "Shell" => Style::default().fg(Color::Green),
+            _ => Style::default().fg(Color::White),
+        };
+        let name_style = if index == selected_session || session.active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {selected_marker} {marker} "),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(session.kind, kind_style),
+            Span::raw("  "),
+            Span::styled(&session.name, name_style),
+        ]));
+        if let Some(detail) = session.detail.as_ref() {
+            lines.push(Line::from(Span::styled(
+                format!("   {detail}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, area);
+}
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
 
-    fn make_branch(name: &str, is_current: bool) -> BranchItem {
-        BranchItem {
-            name: name.to_string(),
-            is_current,
-            has_worktree: false,
-            worktree_path: None,
-            session_count: 0,
-            running_session_count: 0,
-            stopped_session_count: 0,
-            worktree_indicator: '.',
-            has_changes: false,
-            has_unpushed: false,
-            is_protected: is_protected_branch(name, false),
-            last_tool_usage: None,
-            last_tool_id: None,
-            quick_start_available: false,
-            linked_issue_number: None,
-            linked_issue_state: None,
-            pr_title: None,
-            pr_number: None,
-            pr_state: None,
-            safety_status: SafetyStatus::Unknown,
-            is_remote: false,
-            last_commit_timestamp: None,
-        }
-    }
-
-    fn make_branch_with_agent(name: &str, tool_label: &str, tool_id: &str) -> BranchItem {
-        let mut b = make_branch(name, false);
-        b.last_tool_usage = Some(tool_label.to_string());
-        b.last_tool_id = Some(tool_id.to_string());
-        b
-    }
-
-    fn make_branch_with_pr(name: &str, pr_number: u64, state: &str, title: &str) -> BranchItem {
-        let mut b = make_branch(name, false);
-        b.pr_number = Some(pr_number);
-        b.pr_state = Some(state.to_string());
-        b.pr_title = Some(title.to_string());
-        b
-    }
-
-    // -- BranchItem tests --
-
-    #[test]
-    fn branch_item_matches_filter_by_name() {
-        let b = make_branch("feature/cool-thing", false);
-        assert!(b.matches_filter("cool"));
-        assert!(b.matches_filter("FEATURE"));
-        assert!(!b.matches_filter("hotfix"));
-    }
-
-    #[test]
-    fn branch_item_matches_filter_by_pr_title() {
-        let b = make_branch_with_pr("feat/x", 42, "open", "Add login page");
-        assert!(b.matches_filter("login"));
-        assert!(b.matches_filter("Login")); // case-insensitive
-        assert!(!b.matches_filter("payment")); // not in name or title
-    }
-
-    #[test]
-    fn branch_item_empty_filter_matches_all() {
-        let b = make_branch("any-branch", false);
-        assert!(b.matches_filter(""));
-    }
-
-    #[test]
-    fn from_branch_marks_origin_prefixed_refs_as_remote() {
-        let branch = Branch {
-            name: "origin/main".to_string(),
-            is_current: false,
-            has_remote: true,
-            upstream: None,
-            commit: "abc1234".to_string(),
-            ahead: 0,
-            behind: 0,
-            commit_timestamp: None,
-            is_gone: false,
-        };
-
-        let item = BranchItem::from_branch(&branch);
-        assert!(item.is_remote);
-        assert!(item.is_protected);
-    }
-
-    #[test]
-    fn from_branch_keeps_local_refs_local() {
-        let branch = Branch {
-            name: "feature/auth".to_string(),
-            is_current: false,
-            has_remote: true,
-            upstream: Some("origin/feature/auth".to_string()),
-            commit: "abc1234".to_string(),
-            ahead: 0,
-            behind: 0,
-            commit_timestamp: None,
-            is_gone: false,
-        };
-
-        let item = BranchItem::from_branch(&branch);
-        assert!(!item.is_remote);
-        assert!(!item.is_protected);
-    }
-
-    #[test]
-    fn agent_color_maps_correctly() {
-        let claude = make_branch_with_agent("b", "Claude Code", "claude-code");
-        assert_eq!(claude.agent_color(), Color::Yellow);
-
-        let codex = make_branch_with_agent("b", "Codex", "codex-cli");
-        assert_eq!(codex.agent_color(), Color::Cyan);
-
-        let gemini = make_branch_with_agent("b", "Gemini", "gemini-cli");
-        assert_eq!(gemini.agent_color(), Color::Magenta);
-
-        let none = make_branch("b", false);
-        assert_eq!(none.agent_color(), Color::DarkGray);
-    }
-
-    #[test]
-    fn safety_status_icon_and_color() {
-        assert_eq!(SafetyStatus::Safe.icon(), "o");
-        assert_eq!(SafetyStatus::Safe.color(), Color::Green);
-        assert_eq!(SafetyStatus::Danger.icon(), "x");
-        assert_eq!(SafetyStatus::Danger.color(), Color::Red);
-        assert_eq!(SafetyStatus::Warning.icon(), "!");
-        assert_eq!(SafetyStatus::Warning.color(), Color::Yellow);
-    }
-
-    // -- BranchListState tests --
-
-    #[test]
-    fn state_filtered_indices_respects_view_mode() {
-        let mut state = BranchListState::new();
-        state.branches = vec![
-            make_branch("main", true),
-            {
-                let mut b = make_branch("remotes/origin/main", false);
-                b.is_remote = true;
-                b
+    fn sample_branches() -> Vec<BranchItem> {
+        vec![
+            BranchItem {
+                name: "main".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Main,
+                worktree_path: None,
             },
-            make_branch("feature/x", false),
-        ];
+            BranchItem {
+                name: "develop".to_string(),
+                is_head: true,
+                is_local: true,
+                category: BranchCategory::Develop,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "feature/login".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Feature,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "origin/feature/api".to_string(),
+                is_head: false,
+                is_local: false,
+                category: BranchCategory::Feature,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "hotfix/crash".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Other,
+                worktree_path: None,
+            },
+        ]
+    }
 
-        state.view_mode = ViewMode::All;
-        assert_eq!(state.filtered_indices().len(), 3);
+    fn sample_containers() -> Vec<gwt_docker::ContainerInfo> {
+        vec![
+            gwt_docker::ContainerInfo {
+                id: "abc123".to_string(),
+                name: "web".to_string(),
+                status: gwt_docker::ContainerStatus::Running,
+                image: "nginx:latest".to_string(),
+                ports: "0.0.0.0:8080->80/tcp".to_string(),
+            },
+            gwt_docker::ContainerInfo {
+                id: "def456".to_string(),
+                name: "db".to_string(),
+                status: gwt_docker::ContainerStatus::Stopped,
+                image: "postgres:16".to_string(),
+                ports: String::new(),
+            },
+        ]
+    }
+
+    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let script_path = dir.path().join("docker");
+        let mut file = fs::File::create(&script_path).expect("create fake docker");
+        file.write_all(script_body.as_bytes())
+            .expect("write fake docker");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata().expect("stat fake docker").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
+        }
+
+        (dir, script_path)
+    }
+
+    fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::DOCKER_ENV_TEST_LOCK
+            .lock()
+            .expect("lock docker tests");
+        let (_dir, script_path) = write_fake_docker(script_body);
+        let previous = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", &script_path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        result
+    }
+
+    fn buffer_to_lines(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn default_state() {
+        let state = BranchesState::default();
+        assert!(state.branches.is_empty());
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.sort_mode, SortMode::Default);
+        assert_eq!(state.view_mode, ViewMode::All);
+        assert!(state.search_query.is_empty());
+        assert!(!state.search_active);
+    }
+
+    #[test]
+    fn move_down_wraps() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        assert_eq!(state.selected, 0);
+
+        update(&mut state, BranchesMessage::MoveDown);
+        assert_eq!(state.selected, 1);
+
+        // Move to last
+        for _ in 0..4 {
+            update(&mut state, BranchesMessage::MoveDown);
+        }
+        // Should wrap to 0
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn move_up_wraps() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        assert_eq!(state.selected, 0);
+
+        update(&mut state, BranchesMessage::MoveUp);
+        assert_eq!(state.selected, 4); // wraps to last
+    }
+
+    #[test]
+    fn move_on_empty_is_noop() {
+        let mut state = BranchesState::default();
+        update(&mut state, BranchesMessage::MoveDown);
+        assert_eq!(state.selected, 0);
+        update(&mut state, BranchesMessage::MoveUp);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn select_returns_selected_branch() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.selected = 2;
+        let branch = state.selected_branch().unwrap();
+        assert_eq!(branch.name, "feature/login");
+    }
+
+    #[test]
+    fn toggle_sort_cycles() {
+        let mut state = BranchesState::default();
+        assert_eq!(state.sort_mode, SortMode::Default);
+
+        update(&mut state, BranchesMessage::ToggleSort);
+        assert_eq!(state.sort_mode, SortMode::Name);
+
+        update(&mut state, BranchesMessage::ToggleSort);
+        assert_eq!(state.sort_mode, SortMode::Date);
+
+        update(&mut state, BranchesMessage::ToggleSort);
+        assert_eq!(state.sort_mode, SortMode::Default);
+    }
+
+    #[test]
+    fn toggle_view_cycles() {
+        let mut state = BranchesState::default();
+        assert_eq!(state.view_mode, ViewMode::All);
+
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.view_mode, ViewMode::Local);
+
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.view_mode, ViewMode::Remote);
+
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.view_mode, ViewMode::All);
+    }
+
+    #[test]
+    fn search_start_activates() {
+        let mut state = BranchesState::default();
+        update(&mut state, BranchesMessage::SearchStart);
+        assert!(state.search_active);
+    }
+
+    #[test]
+    fn search_input_appends() {
+        let mut state = BranchesState::default();
+        update(&mut state, BranchesMessage::SearchStart);
+        update(&mut state, BranchesMessage::SearchInput('f'));
+        update(&mut state, BranchesMessage::SearchInput('e'));
+        assert_eq!(state.search_query, "fe");
+    }
+
+    #[test]
+    fn search_input_ignored_when_inactive() {
+        let mut state = BranchesState::default();
+        update(&mut state, BranchesMessage::SearchInput('x'));
+        assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn search_clear_resets() {
+        let mut state = BranchesState::default();
+        state.search_active = true;
+        state.search_query = "test".to_string();
+
+        update(&mut state, BranchesMessage::SearchClear);
+        assert!(!state.search_active);
+        assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn set_branches_populates() {
+        let mut state = BranchesState::default();
+        state.selected = 99;
+        update(&mut state, BranchesMessage::SetBranches(sample_branches()));
+        assert_eq!(state.branches.len(), 5);
+        assert_eq!(state.selected, 4); // clamped
+    }
+
+    #[test]
+    fn toggle_sort_and_view_reset_detail_session_selection() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_session_selected = 3;
+
+        update(&mut state, BranchesMessage::ToggleSort);
+        assert_eq!(state.detail_session_selected, 0);
+
+        state.detail_session_selected = 2;
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.detail_session_selected, 0);
+    }
+
+    #[test]
+    fn filtered_branches_respects_view_mode() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
 
         state.view_mode = ViewMode::Local;
-        assert_eq!(state.filtered_indices().len(), 2);
+        assert_eq!(state.filtered_branches().len(), 4);
 
         state.view_mode = ViewMode::Remote;
-        assert_eq!(state.filtered_indices().len(), 1);
+        assert_eq!(state.filtered_branches().len(), 1);
+        assert_eq!(state.filtered_branches()[0].name, "origin/feature/api");
     }
 
     #[test]
-    fn state_filtered_indices_respects_filter_query() {
-        let mut state = BranchListState::new();
-        state.branches = vec![
-            make_branch("main", true),
-            make_branch("feature/auth", false),
-            make_branch("feature/payments", false),
-        ];
+    fn filtered_branches_respects_search() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.search_query = "feature".to_string();
 
-        state.filter_query = "auth".to_string();
-        let indices = state.filtered_indices();
-        assert_eq!(indices.len(), 1);
-        assert_eq!(state.branches[indices[0]].name, "feature/auth");
+        let filtered = state.filtered_branches();
+        assert_eq!(filtered.len(), 2);
     }
 
     #[test]
-    fn state_sort_default_current_first() {
-        let mut state = BranchListState::new();
-        state.branches = vec![
-            make_branch("feature/z", false),
-            make_branch("main", true),
-            make_branch("feature/a", false),
-        ];
-
-        let indices = state.visible_indices();
-        assert_eq!(state.branches[indices[0]].name, "main");
+    fn categorize_branch_works() {
+        assert_eq!(categorize_branch("main"), BranchCategory::Main);
+        assert_eq!(categorize_branch("master"), BranchCategory::Main);
+        assert_eq!(categorize_branch("develop"), BranchCategory::Develop);
+        assert_eq!(categorize_branch("feature/login"), BranchCategory::Feature);
+        assert_eq!(
+            categorize_branch("origin/feature/x"),
+            BranchCategory::Feature
+        );
+        assert_eq!(categorize_branch("hotfix/crash"), BranchCategory::Other);
     }
 
     #[test]
-    fn state_sort_by_name() {
-        let mut state = BranchListState::new();
-        state.sort_mode = SortMode::Name;
-        state.branches = vec![
-            make_branch("feature/z", false),
-            make_branch("feature/a", false),
-            make_branch("feature/m", false),
-        ];
-
-        let indices = state.visible_indices();
-        assert_eq!(state.branches[indices[0]].name, "feature/a");
-        assert_eq!(state.branches[indices[1]].name, "feature/m");
-        assert_eq!(state.branches[indices[2]].name, "feature/z");
-    }
-
-    #[test]
-    fn state_sort_by_updated() {
-        let mut state = BranchListState::new();
-        state.sort_mode = SortMode::Updated;
-        state.branches = vec![
-            {
-                let mut b = make_branch("old", false);
-                b.last_commit_timestamp = Some(100);
-                b
-            },
-            {
-                let mut b = make_branch("new", false);
-                b.last_commit_timestamp = Some(300);
-                b
-            },
-            {
-                let mut b = make_branch("mid", false);
-                b.last_commit_timestamp = Some(200);
-                b
-            },
-        ];
-
-        let indices = state.visible_indices();
-        assert_eq!(state.branches[indices[0]].name, "new");
-        assert_eq!(state.branches[indices[1]].name, "mid");
-        assert_eq!(state.branches[indices[2]].name, "old");
-    }
-
-    #[test]
-    fn state_select_next_prev() {
-        let mut state = BranchListState::new();
-        state.branches = vec![
-            make_branch("a", false),
-            make_branch("b", false),
-            make_branch("c", false),
-        ];
-        assert_eq!(state.selected, 0);
-
-        state.select_next();
-        assert_eq!(state.selected, 1);
-
-        state.select_next();
-        assert_eq!(state.selected, 2);
-
-        // Stays at end.
-        state.select_next();
-        assert_eq!(state.selected, 2);
-
-        state.select_prev();
-        assert_eq!(state.selected, 1);
-
-        state.select_prev();
-        assert_eq!(state.selected, 0);
-
-        // Stays at start.
-        state.select_prev();
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn state_clamp_selection() {
-        let mut state = BranchListState::new();
-        state.selected = 5;
-        state.branches = vec![make_branch("a", false), make_branch("b", false)];
-        state.clamp_selection();
-        assert_eq!(state.selected, 1);
-    }
-
-    #[test]
-    fn state_toggle_filter() {
-        let mut state = BranchListState::new();
-        assert!(!state.filter_mode);
-        state.toggle_filter();
-        assert!(state.filter_mode);
-        state.toggle_filter();
-        assert!(!state.filter_mode);
-    }
-
-    #[test]
-    fn state_clear_filter() {
-        let mut state = BranchListState::new();
-        state.filter_query = "test".to_string();
-        state.filter_mode = true;
-        state.clear_filter();
-        assert!(state.filter_query.is_empty());
-        assert!(!state.filter_mode);
-    }
-
-    #[test]
-    fn state_cycle_view_mode() {
-        let mut state = BranchListState::new();
-        assert_eq!(state.view_mode, ViewMode::All);
-        state.cycle_view_mode();
-        assert_eq!(state.view_mode, ViewMode::Local);
-        state.cycle_view_mode();
-        assert_eq!(state.view_mode, ViewMode::Remote);
-        state.cycle_view_mode();
-        assert_eq!(state.view_mode, ViewMode::All);
-    }
-
-    #[test]
-    fn state_cycle_sort_mode() {
-        let mut state = BranchListState::new();
-        assert_eq!(state.sort_mode, SortMode::Default);
-        state.cycle_sort_mode();
-        assert_eq!(state.sort_mode, SortMode::Name);
-        state.cycle_sort_mode();
-        assert_eq!(state.sort_mode, SortMode::Updated);
-        state.cycle_sort_mode();
-        assert_eq!(state.sort_mode, SortMode::Default);
-    }
-
-    #[test]
-    fn state_ensure_visible() {
-        let mut state = BranchListState::new();
-        state.selected = 20;
-        state.scroll_offset = 0;
-        state.ensure_visible(10);
-        assert_eq!(state.scroll_offset, 11);
-
-        state.selected = 5;
-        state.ensure_visible(10);
-        // 5 is within [11..21), so it's above viewport
-        assert_eq!(state.scroll_offset, 5);
-    }
-
-    // -- Key handling tests --
-
-    #[test]
-    fn handle_key_navigation() {
-        let state = BranchListState::new();
-
-        let key_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key_j),
-            Some(BranchesMessage::SelectNext)
-        ));
-
-        let key_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key_k),
-            Some(BranchesMessage::SelectPrev)
-        ));
-
-        let key_slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key_slash),
-            Some(BranchesMessage::ToggleFilter)
-        ));
-    }
-
-    #[test]
-    fn handle_key_filter_mode_input() {
-        let mut state = BranchListState::new();
-        state.filter_mode = true;
-
-        let key_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key_a),
-            Some(BranchesMessage::FilterInput('a'))
-        ));
-
-        let key_bs = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key_bs),
-            Some(BranchesMessage::FilterBackspace)
-        ));
-
-        let key_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key_esc),
-            Some(BranchesMessage::ToggleFilter)
-        ));
-    }
-
-    // -- Update tests --
-
-    #[test]
-    fn update_select_next_prev() {
-        let mut state = BranchListState::new();
-        state.branches = vec![make_branch("a", false), make_branch("b", false)];
-
-        update(&mut state, BranchesMessage::SelectNext);
-        assert_eq!(state.selected, 1);
-
-        update(&mut state, BranchesMessage::SelectPrev);
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn update_filter_input() {
-        let mut state = BranchListState::new();
-        state.branches = vec![make_branch("a", false)];
-        state.filter_mode = true;
-
-        update(&mut state, BranchesMessage::FilterInput('h'));
-        update(&mut state, BranchesMessage::FilterInput('i'));
-        assert_eq!(state.filter_query, "hi");
-
-        update(&mut state, BranchesMessage::FilterBackspace);
-        assert_eq!(state.filter_query, "h");
-
-        update(&mut state, BranchesMessage::FilterClear);
-        assert!(state.filter_query.is_empty());
-        assert!(!state.filter_mode);
-    }
-
-    #[test]
-    fn update_loaded_sets_branches() {
-        let mut state = BranchListState::new();
-        state.loading = true;
-        state.selected = 99;
-
-        let branches = vec![make_branch("main", true), make_branch("dev", false)];
-        update(&mut state, BranchesMessage::Loaded(branches));
-
-        assert!(!state.loading);
-        assert_eq!(state.branches.len(), 2);
-        assert_eq!(state.selected, 1); // clamped
-    }
-
-    // -- Render tests --
-
-    #[test]
-    fn render_empty_state() {
-        let state = BranchListState::new();
+    fn render_with_branches_does_not_panic() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f.buffer_mut(), area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
-    }
-
-    #[test]
-    fn render_with_branches() {
-        let mut state = BranchListState::new();
-        state.branches = vec![
-            make_branch("main", true),
-            make_branch_with_agent("feature/auth", "Claude Code", "claude-code"),
-            make_branch_with_pr("feature/pay", 42, "open", "Add payments"),
-        ];
-
-        let backend = TestBackend::new(100, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f.buffer_mut(), area);
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn render_branch_row_shows_session_count() {
-        let mut state = BranchListState::new();
-        let mut branch = make_branch("feature/demo", false);
-        branch.session_count = 2;
-        branch.running_session_count = 1;
-        branch.stopped_session_count = 1;
-        branch.worktree_indicator = 'w';
-        branch.last_tool_usage = Some("Codex@1.2.3".to_string());
-        branch.quick_start_available = true;
-        branch.linked_issue_number = Some(42);
-        branch.linked_issue_state = Some("open".to_string());
-        state.branches = vec![branch];
-
-        let backend = TestBackend::new(80, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f.buffer_mut(), area);
-            })
-            .unwrap();
-
-        let row_text: String = (0..80)
-            .map(|x| {
-                terminal
-                    .backend()
-                    .buffer()
-                    .cell((x, 2))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(
-            row_text.contains("s:2"),
-            "expected session count in row, got: {row_text:?}"
-        );
-        assert!(row_text.contains("●1"), "expected running summary in row");
-        assert!(row_text.contains("○1"), "expected stopped summary in row");
-        assert!(
-            row_text.contains(" w"),
-            "expected worktree indicator in row"
-        );
-        assert!(
-            row_text.contains("Codex@1.2.3"),
-            "expected tool summary in row"
-        );
-        assert!(row_text.contains("↺"), "expected quick-start marker in row");
-        assert!(
-            row_text.contains("#42 open"),
-            "expected linked issue in row"
+        // Header bar shows view/sort info (no bordered block title)
+        assert!(text.contains("View:"));
+    }
+
+    #[test]
+    fn render_empty_does_not_panic() {
+        let state = BranchesState::default();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn sort_name_returns_alphabetical_order() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches(); // main, develop, feature/login, origin/feature/api, hotfix/crash
+        state.sort_mode = SortMode::Name;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "develop",
+                "feature/login",
+                "hotfix/crash",
+                "main",
+                "origin/feature/api",
+            ]
         );
     }
 
     #[test]
-    fn branch_runtime_summary_formats_runtime_state() {
-        let mut branch = make_branch("feature/demo", false);
-        branch.running_session_count = 2;
-        branch.stopped_session_count = 1;
-        branch.last_tool_usage = Some("Claude@1.0.0".to_string());
-        branch.quick_start_available = true;
+    fn sort_date_returns_alphabetical_fallback() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.sort_mode = SortMode::Date;
 
-        let summary = branch_runtime_summary(&branch).expect("summary");
-        assert!(summary.contains("●2"));
-        assert!(summary.contains("○1"));
-        assert!(summary.contains("Claude@1.0.0"));
-        assert!(summary.contains("↺"));
-    }
-
-    #[test]
-    fn apply_worktree_metadata_updates_safety_and_worktree_flags() {
-        let mut item = make_branch("feature/demo", false);
-        let worktrees = vec![Worktree {
-            path: std::path::PathBuf::from("/tmp/demo"),
-            branch: Some("feature/demo".to_string()),
-            commit: "abc1234".to_string(),
-            status: CoreWorktreeStatus::Active,
-            is_main: false,
-            has_changes: true,
-            has_unpushed: false,
-        }];
-
-        apply_worktree_metadata(std::slice::from_mut(&mut item), &worktrees);
-
-        assert!(item.has_worktree);
-        assert_eq!(item.worktree_indicator, 'w');
-        assert_eq!(item.safety_status, SafetyStatus::Danger);
-    }
-
-    #[test]
-    fn apply_issue_metadata_sets_linked_issue_fields() {
-        let mut items = vec![make_branch("feature/issue-42-demo", false)];
-        let mut store = WorktreeIssueLinkStore::default();
-        store.set_link(
-            "feature/issue-42-demo",
-            42,
-            gwt_core::git::issue_linkage::LinkSource::BranchParse,
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        // Date falls back to alphabetical since no date field exists
+        assert_eq!(
+            names,
+            vec![
+                "develop",
+                "feature/login",
+                "hotfix/crash",
+                "main",
+                "origin/feature/api",
+            ]
         );
-        let mut cache = IssueExactCache::default();
-        cache.upsert(gwt_core::git::issue_cache::IssueExactCacheEntry {
-            number: 42,
-            title: "Issue 42".to_string(),
-            url: "https://example.com/issues/42".to_string(),
-            state: "OPEN".to_string(),
-            labels: vec![],
-            updated_at: "2026-04-02T00:00:00Z".to_string(),
-            fetched_at: 0,
-        });
-
-        apply_issue_metadata(&mut items, &store, &cache);
-
-        assert_eq!(items[0].linked_issue_number, Some(42));
-        assert_eq!(items[0].linked_issue_state.as_deref(), Some("open"));
     }
 
     #[test]
-    fn render_with_filter_mode() {
-        let mut state = BranchListState::new();
-        state.branches = vec![make_branch("main", true)];
-        state.filter_mode = true;
-        state.filter_query = "test".to_string();
+    fn sort_default_preserves_insertion_order() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.sort_mode = SortMode::Default;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "main",
+                "develop",
+                "feature/login",
+                "origin/feature/api",
+                "hotfix/crash",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_then_navigate_selects_filtered_item() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+
+        // Search for "feature" — matches feature/login and origin/feature/api
+        update(&mut state, BranchesMessage::SearchStart);
+        update(&mut state, BranchesMessage::SearchInput('f'));
+        update(&mut state, BranchesMessage::SearchInput('e'));
+        update(&mut state, BranchesMessage::SearchInput('a'));
+        update(&mut state, BranchesMessage::SearchInput('t'));
+
+        let filtered = state.filtered_branches();
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(state.selected, 0);
+
+        // MoveDown should navigate within filtered list
+        update(&mut state, BranchesMessage::MoveDown);
+        assert_eq!(state.selected, 1);
+
+        let branch = state.selected_branch().unwrap();
+        assert_eq!(branch.name, "origin/feature/api");
+    }
+
+    #[test]
+    fn select_returns_correct_branch_after_sort() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.sort_mode = SortMode::Name;
+
+        // After sort by name: develop, feature/login, hotfix/crash, main, origin/feature/api
+        state.selected = 3;
+        let branch = state.selected_branch().unwrap();
+        assert_eq!(branch.name, "main");
+    }
+
+    #[test]
+    fn view_toggle_clamps_selected() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.selected = 4; // last item (Other)
+
+        // Switch to Remote — only 1 item
+        update(&mut state, BranchesMessage::ToggleView);
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.view_mode, ViewMode::Remote);
+        assert_eq!(state.selected, 0); // clamped
+    }
+
+    // ---- Branch detail tests ----
+
+    #[test]
+    fn detail_section_defaults_to_zero() {
+        let state = BranchesState::default();
+        assert_eq!(state.detail_section, 0);
+    }
+
+    #[test]
+    fn next_detail_section_cycles_through_all() {
+        let mut state = BranchesState::default();
+        for expected in 1..=3 {
+            update(&mut state, BranchesMessage::NextDetailSection);
+            assert_eq!(state.detail_section, expected);
+        }
+        // Wraps back to 0
+        update(&mut state, BranchesMessage::NextDetailSection);
+        assert_eq!(state.detail_section, 0);
+    }
+
+    #[test]
+    fn prev_detail_section_wraps_from_zero() {
+        let mut state = BranchesState::default();
+        assert_eq!(state.detail_section, 0);
+        update(&mut state, BranchesMessage::PrevDetailSection);
+        assert_eq!(state.detail_section, 3);
+    }
+
+    #[test]
+    fn prev_detail_section_decrements() {
+        let mut state = BranchesState::default();
+        state.detail_section = 3;
+        update(&mut state, BranchesMessage::PrevDetailSection);
+        assert_eq!(state.detail_section, 2);
+    }
+
+    #[test]
+    fn launch_agent_sets_flag() {
+        let mut state = BranchesState::default();
+        assert!(!state.pending_launch_agent);
+        update(&mut state, BranchesMessage::LaunchAgent);
+        assert!(state.pending_launch_agent);
+    }
+
+    #[test]
+    fn open_shell_sets_flag() {
+        let mut state = BranchesState::default();
+        assert!(!state.pending_open_shell);
+        update(&mut state, BranchesMessage::OpenShell);
+        assert!(state.pending_open_shell);
+    }
+
+    #[test]
+    fn delete_worktree_sets_flag() {
+        let mut state = BranchesState::default();
+        assert!(!state.pending_delete_worktree);
+        update(&mut state, BranchesMessage::DeleteWorktree);
+        assert!(state.pending_delete_worktree);
+    }
+
+    #[test]
+    fn render_with_detail_split_does_not_panic() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        // Header bar shows view/sort info (no bordered block title)
+        assert!(text.contains("View:"));
+    }
+
+    #[test]
+    fn render_branch_list_uses_inline_indicators_without_headers_or_locality_badges() {
+        let mut state = BranchesState::default();
+        state.branches = vec![
+            BranchItem {
+                name: "main".to_string(),
+                is_head: true,
+                is_local: true,
+                category: BranchCategory::Main,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "feature/worktree".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/worktree")),
+            },
+        ];
+
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_list(&state, f, f.area());
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        let joined = lines.join("\n");
+
+        assert!(!joined.contains("── Main ──"));
+        assert!(!joined.contains("[L]"));
+        assert!(!joined.contains("[R]"));
+        assert!(joined.contains("main ○ *"));
+        assert!(joined.contains("feature/worktree ●"));
+    }
+
+    #[test]
+    fn render_detail_overview_omits_redundant_inner_title() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 0; // Overview
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut found_branch_info = false;
+        let mut found_inner_title = false;
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains(" Branch: main") {
+                found_branch_info = true;
+            }
+            if line.contains("Overview") {
+                found_inner_title = true;
+            }
+        }
+        assert!(
+            found_branch_info,
+            "Detail panel should still contain branch overview body text"
+        );
+        assert!(
+            !found_inner_title,
+            "Detail panel body should not repeat the redundant inner 'Overview' title"
+        );
+    }
+
+    #[test]
+    fn render_detail_overview_shows_docker_status_area() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 0; // Overview
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let mut found_docker_status = false;
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains("Docker status") {
+                found_docker_status = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_docker_status,
+            "Detail panel should contain a Docker status area"
+        );
+    }
+
+    #[test]
+    fn render_detail_overview_shows_no_containers_message() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 0;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("No containers found")),
+            "Detail panel should explain when there are no Docker containers"
+        );
+    }
+
+    #[test]
+    fn load_branch_detail_populates_docker_containers() {
+        with_fake_docker(
+            "#!/bin/sh\nprintf 'abc123\\tweb\\trunning\\tnginx:latest\\t0.0.0.0:8080->80/tcp\\n'\n",
+            || {
+                let tmp = tempfile::tempdir().expect("create temp worktree");
+                let mut state = BranchesState::default();
+                state.branches = vec![BranchItem {
+                    name: "feature/docker".to_string(),
+                    is_head: true,
+                    is_local: true,
+                    category: BranchCategory::Feature,
+                    worktree_path: Some(tmp.path().to_path_buf()),
+                }];
+
+                load_branch_detail(&mut state, tmp.path());
+
+                assert_eq!(state.docker_containers.len(), 1);
+                let container = &state.docker_containers[0];
+                assert_eq!(container.id, "abc123");
+                assert_eq!(container.name, "web");
+                assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
+                assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
+            },
+        );
+    }
+
+    #[test]
+    fn docker_selection_and_lifecycle_intent_update_state() {
+        let mut state = BranchesState::default();
+        state.docker_containers = sample_containers();
+
+        update(&mut state, BranchesMessage::DockerContainerDown);
+        assert_eq!(state.docker_selected, 1);
+
+        update(&mut state, BranchesMessage::DockerContainerUp);
+        assert_eq!(state.docker_selected, 0);
+
+        update(&mut state, BranchesMessage::DockerContainerRestart);
+        assert_eq!(
+            state.pending_docker_action,
+            Some(PendingDockerAction {
+                container_id: "abc123".to_string(),
+                action: DockerLifecycleAction::Restart,
+            })
+        );
+    }
+
+    #[test]
+    fn render_detail_overview_shows_selected_docker_container_details() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.docker_containers = sample_containers();
+        state.docker_selected = 1;
+        state.detail_section = 0;
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f.buffer_mut(), area);
+                render(&state, f, area, BranchesFocus::List);
             })
             .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("Selected: db")),
+            "Detail panel should show the selected Docker container"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Status: Stopped")),
+            "Detail panel should show Docker status"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Ports: No published ports")),
+            "Detail panel should show Docker ports"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Controls: Up/Down select  S start  R restart")),
+            "Detail panel should show Docker control hints"
+        );
     }
 
     #[test]
-    fn render_small_area_does_not_panic() {
-        let state = BranchListState::new();
-        let backend = TestBackend::new(5, 2);
+    fn render_detail_sessions_shows_typed_session_rows_and_active_marker() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 3;
+        let sessions = vec![
+            DetailSessionSummary {
+                kind: "Agent",
+                name: "Codex".to_string(),
+                detail: Some("gpt-5.3-codex · high".to_string()),
+                active: true,
+            },
+            DetailSessionSummary {
+                kind: "Shell",
+                name: "Shell: develop".to_string(),
+                detail: None,
+                active: false,
+            },
+        ];
+
+        let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(&state, f.buffer_mut(), area);
+                render_detail_content(&state, f, area, &sessions);
             })
             .unwrap();
-    }
 
-    // -- Protected branch detection --
-
-    #[test]
-    fn is_protected_branch_detection() {
-        assert!(is_protected_branch("main", false));
-        assert!(is_protected_branch("master", false));
-        assert!(is_protected_branch("develop", false));
-        assert!(is_protected_branch("dev", false));
-        assert!(is_protected_branch("remotes/origin/main", true));
-        assert!(is_protected_branch("origin/main", true));
-        assert!(!is_protected_branch("feature/cool", false));
-    }
-
-    // -- ViewMode / SortMode --
-
-    #[test]
-    fn view_mode_label() {
-        assert_eq!(ViewMode::All.label(), "All");
-        assert_eq!(ViewMode::Local.label(), "Local");
-        assert_eq!(ViewMode::Remote.label(), "Remote");
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("● Agent  Codex")),
+            "Sessions pane should show the active agent row"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Shell  Shell: develop")),
+            "Sessions pane should show branch shell rows"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("gpt-5.3-codex · high")),
+            "Sessions pane should show session detail metadata when available"
+        );
     }
 
     #[test]
-    fn sort_mode_label() {
-        assert_eq!(SortMode::Default.label(), "Default");
-        assert_eq!(SortMode::Name.label(), "Name");
-        assert_eq!(SortMode::Updated.label(), "Updated");
+    fn render_detail_sessions_preserves_empty_state() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 3;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &[]);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("No active sessions")),
+            "Sessions pane should keep the empty-state fallback"
+        );
+    }
+
+    #[test]
+    fn render_detail_sessions_shows_selection_marker_for_current_row() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 3;
+        state.detail_session_selected = 1;
+        let sessions = vec![
+            DetailSessionSummary {
+                kind: "Agent",
+                name: "Codex".to_string(),
+                detail: None,
+                active: false,
+            },
+            DetailSessionSummary {
+                kind: "Shell",
+                name: "Shell: develop".to_string(),
+                detail: None,
+                active: true,
+            },
+        ];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &sessions);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("> ● Shell  Shell: develop")),
+            "Sessions pane should show the selected-row marker on the current row"
+        );
+    }
+
+    #[test]
+    fn detail_section_labels_are_correct() {
+        // Detail section tab labels are now rendered by app.rs in the pane border.
+        // Verify the labels returned by detail_section_labels().
+        let labels = detail_section_labels();
+        assert!(labels.contains(&"Overview"));
+        assert!(labels.contains(&"SPECs"));
+        assert!(labels.contains(&"Git"));
+        assert!(labels.contains(&"Sessions"));
+    }
+
+    #[test]
+    fn render_no_selected_branch_shows_placeholder() {
+        let state = BranchesState::default(); // empty branches
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area, BranchesFocus::List);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut found_no_branch = false;
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains("No branch selected") {
+                found_no_branch = true;
+                break;
+            }
+        }
+        assert!(
+            found_no_branch,
+            "Should show 'No branch selected' when empty"
+        );
     }
 }

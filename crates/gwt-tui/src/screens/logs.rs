@@ -1,1177 +1,658 @@
-//! Logs screen — log viewer with filtering, search, and detail view
-//!
-//! Migrated from gwt-cli reference with Elm Architecture adaptation.
+//! Logs viewer screen.
 
-use chrono::{DateTime, Local};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::logging::LogReader;
-use ratatui::prelude::*;
-use ratatui::widgets::*;
-use std::collections::BTreeMap;
-use std::path::Path;
+use gwt_notification::Severity;
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, List, ListItem, Paragraph},
+    Frame,
+};
 
-// ---------------------------------------------------------------------------
-// Log entry
-// ---------------------------------------------------------------------------
+pub use gwt_notification::Notification as LogEntry;
 
-/// A single parsed log entry.
-#[derive(Debug, Clone)]
-pub struct LogEntry {
-    pub timestamp: String,
-    pub level: String,
-    pub message: String,
-    pub target: String,
-    pub category: Option<String>,
-    pub event: Option<String>,
-    pub result: Option<String>,
-    pub workspace: Option<String>,
-    pub error_code: Option<String>,
-    pub error_detail: Option<String>,
-    pub extra: BTreeMap<String, String>,
-}
-
-impl LogEntry {
-    pub fn from_core_entry(
-        entry: gwt_core::logging::LogEntry,
-        workspace_hint: Option<&str>,
-    ) -> Self {
-        let message = entry.message().to_string();
-        let category = entry.category().map(ToString::to_string);
-        let event = entry.event().map(ToString::to_string);
-        let result = entry.result().map(ToString::to_string);
-        let workspace = entry
-            .workspace()
-            .map(ToString::to_string)
-            .or_else(|| workspace_hint.map(ToString::to_string));
-        let error_code = entry.error_code().map(ToString::to_string);
-        let error_detail = entry.error_detail().map(ToString::to_string);
-        let extra = entry
-            .fields
-            .extra
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    serde_json::to_string(value).unwrap_or_default(),
-                )
-            })
-            .collect();
-
-        Self {
-            timestamp: entry.timestamp,
-            level: entry.level,
-            message,
-            target: entry.target,
-            category,
-            event,
-            result,
-            workspace,
-            error_code,
-            error_detail,
-            extra,
-        }
-    }
-
-    pub fn searchable_text(&self) -> String {
-        let mut fields = vec![
-            self.timestamp.as_str(),
-            self.level.as_str(),
-            self.message.as_str(),
-            self.target.as_str(),
-        ];
-
-        if let Some(category) = &self.category {
-            fields.push(category);
-        }
-        if let Some(event) = &self.event {
-            fields.push(event);
-        }
-        if let Some(result) = &self.result {
-            fields.push(result);
-        }
-        if let Some(workspace) = &self.workspace {
-            fields.push(workspace);
-        }
-        if let Some(error_code) = &self.error_code {
-            fields.push(error_code);
-        }
-        if let Some(error_detail) = &self.error_detail {
-            fields.push(error_detail);
-        }
-
-        let mut out = fields.join("\n");
-        for (key, value) in &self.extra {
-            out.push('\n');
-            out.push_str(key);
-            out.push('=');
-            out.push_str(value);
-        }
-        out
-    }
-
-    fn summary_context(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(category) = &self.category {
-            if let Some(event) = &self.event {
-                parts.push(format!("{category}/{event}"));
-            } else {
-                parts.push(category.clone());
-            }
-        } else if let Some(event) = &self.event {
-            parts.push(event.clone());
-        }
-        if let Some(result) = &self.result {
-            parts.push(result.clone());
-        }
-        if let Some(error_code) = &self.error_code {
-            parts.push(error_code.clone());
-        }
-        parts.join(" ")
-    }
-
-    fn summary_message(&self) -> String {
-        if !self.message.trim().is_empty() {
-            self.message.clone()
-        } else if let Some(event) = &self.event {
-            event.replace('_', " ")
-        } else {
-            self.target.clone()
-        }
-    }
-
-    /// Format for clipboard copy.
-    pub fn to_clipboard_string(&self) -> String {
-        let mut json = serde_json::json!({
-            "timestamp": self.timestamp,
-            "level": self.level,
-            "target": self.target,
-            "message": self.message,
-        });
-
-        if let Some(ref cat) = self.category {
-            json["category"] = serde_json::json!(cat);
-        }
-        if let Some(ref event) = self.event {
-            json["event"] = serde_json::json!(event);
-        }
-        if let Some(ref result) = self.result {
-            json["result"] = serde_json::json!(result);
-        }
-        if let Some(ref workspace) = self.workspace {
-            json["workspace"] = serde_json::json!(workspace);
-        }
-        if let Some(ref error_code) = self.error_code {
-            json["error_code"] = serde_json::json!(error_code);
-        }
-        if let Some(ref error_detail) = self.error_detail {
-            json["error_detail"] = serde_json::json!(error_detail);
-        }
-        if !self.extra.is_empty() {
-            json["extra"] = serde_json::json!(self.extra);
-        }
-
-        serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", self))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Log level filter
-// ---------------------------------------------------------------------------
-
+/// Log severity filter level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LogLevelFilter {
+pub enum FilterLevel {
     #[default]
     All,
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
+    ErrorOnly,
+    WarnUp,
+    InfoUp,
+    DebugUp,
 }
 
-impl LogLevelFilter {
-    fn matches(&self, level: &str) -> bool {
+impl FilterLevel {
+    /// All filter levels in display order.
+    pub const ALL: [FilterLevel; 5] = [
+        FilterLevel::All,
+        FilterLevel::ErrorOnly,
+        FilterLevel::WarnUp,
+        FilterLevel::InfoUp,
+        FilterLevel::DebugUp,
+    ];
+
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
         match self {
-            LogLevelFilter::All => true,
-            LogLevelFilter::Error => level == "ERROR",
-            LogLevelFilter::Warn => level == "WARN" || level == "ERROR",
-            LogLevelFilter::Info => level == "INFO" || level == "WARN" || level == "ERROR",
-            LogLevelFilter::Debug => level != "TRACE",
-            LogLevelFilter::Trace => true,
+            Self::All => "All",
+            Self::ErrorOnly => "Error",
+            Self::WarnUp => "Warn+",
+            Self::InfoUp => "Info+",
+            Self::DebugUp => "Debug+",
         }
     }
 
-    fn name(&self) -> &'static str {
+    /// Minimum severity required for an entry to remain visible.
+    fn minimum_severity(self) -> Option<Severity> {
         match self {
-            LogLevelFilter::All => "All",
-            LogLevelFilter::Error => "Error",
-            LogLevelFilter::Warn => "Warn+",
-            LogLevelFilter::Info => "Info+",
-            LogLevelFilter::Debug => "Debug+",
-            LogLevelFilter::Trace => "Trace",
+            Self::All => None,
+            Self::DebugUp => Some(Severity::Debug),
+            Self::InfoUp => Some(Severity::Info),
+            Self::WarnUp => Some(Severity::Warn),
+            Self::ErrorOnly => Some(Severity::Error),
+        }
+    }
+
+    /// Cycle to the next filter level.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::ErrorOnly,
+            Self::ErrorOnly => Self::WarnUp,
+            Self::WarnUp => Self::InfoUp,
+            Self::InfoUp => Self::DebugUp,
+            Self::DebugUp => Self::All,
+        }
+    }
+
+    /// Cycle to the previous filter level.
+    pub fn prev(self) -> Self {
+        match self {
+            Self::All => Self::DebugUp,
+            Self::ErrorOnly => Self::All,
+            Self::WarnUp => Self::ErrorOnly,
+            Self::InfoUp => Self::WarnUp,
+            Self::DebugUp => Self::InfoUp,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Timestamp formatting
-// ---------------------------------------------------------------------------
-
-fn format_timestamp_local(timestamp: &str) -> String {
-    if let Ok(utc_time) = DateTime::parse_from_rfc3339(timestamp) {
-        let local_time: DateTime<Local> = utc_time.with_timezone(&Local);
-        local_time.format("%H:%M:%S").to_string()
-    } else {
-        if let Some(t_pos) = timestamp.find('T') {
-            let time_part = &timestamp[t_pos + 1..];
-            if time_part.len() >= 8 {
-                return time_part[..8].to_string();
-            }
-        }
-        timestamp.to_string()
-    }
-}
-
-fn format_full_timestamp_local(timestamp: &str) -> String {
-    if let Ok(utc_time) = DateTime::parse_from_rfc3339(timestamp) {
-        let local_time: DateTime<Local> = utc_time.with_timezone(&Local);
-        local_time.format("%Y-%m-%d %H:%M:%S %Z").to_string()
-    } else {
-        timestamp.to_string()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// LogsState
-// ---------------------------------------------------------------------------
-
-/// Central state for the Logs screen.
-#[derive(Debug, Default)]
+/// State for the logs screen.
+#[derive(Debug, Clone)]
 pub struct LogsState {
-    pub entries: Vec<LogEntry>,
-    pub selected: usize,
-    pub offset: usize,
-    pub filter: LogLevelFilter,
-    pub search: String,
-    pub is_searching: bool,
-    pub show_detail: bool,
+    pub(crate) entries: Vec<LogEntry>,
+    pub(crate) selected: usize,
+    pub(crate) filter_level: FilterLevel,
+    pub(crate) detail_view: bool,
+    pub(crate) show_debug: bool,
+}
+
+impl Default for LogsState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            selected: 0,
+            filter_level: FilterLevel::default(),
+            detail_view: false,
+            show_debug: true,
+        }
+    }
 }
 
 impl LogsState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_entries(mut self, mut entries: Vec<LogEntry>) -> Self {
-        // Sort newest first
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        self.entries = entries;
-        self
-    }
-
-    /// Get filtered entries based on current level filter and search.
+    /// Return entries filtered by the current filter level.
     pub fn filtered_entries(&self) -> Vec<&LogEntry> {
-        self.entries
-            .iter()
-            .filter(|e| self.filter.matches(&e.level))
-            .filter(|e| {
-                if self.search.is_empty() {
-                    true
-                } else {
-                    let search_lower = self.search.to_lowercase();
-                    e.searchable_text().to_lowercase().contains(&search_lower)
-                }
-            })
-            .collect()
-    }
-
-    pub fn select_prev(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-            self.ensure_visible();
+        match self.filter_level.minimum_severity() {
+            Some(min_severity) => self
+                .entries
+                .iter()
+                .filter(|entry| entry.severity >= min_severity)
+                .filter(|entry| self.show_debug || entry.severity != Severity::Debug)
+                .collect(),
+            None => self
+                .entries
+                .iter()
+                .filter(|entry| self.show_debug || entry.severity != Severity::Debug)
+                .collect(),
         }
     }
 
-    pub fn select_next(&mut self) {
-        let filtered = self.filtered_entries();
-        if !filtered.is_empty() && self.selected < filtered.len() - 1 {
-            self.selected += 1;
-            self.ensure_visible();
-        }
-    }
-
-    pub fn page_up(&mut self, page_size: usize) {
-        self.selected = self.selected.saturating_sub(page_size);
-        self.ensure_visible();
-    }
-
-    pub fn page_down(&mut self, page_size: usize) {
-        let filtered = self.filtered_entries();
-        if !filtered.is_empty() {
-            self.selected = (self.selected + page_size).min(filtered.len() - 1);
-            self.ensure_visible();
-        }
-    }
-
-    pub fn go_home(&mut self) {
-        self.selected = 0;
-        self.offset = 0;
-    }
-
-    pub fn go_end(&mut self) {
-        let filtered = self.filtered_entries();
-        if !filtered.is_empty() {
-            self.selected = filtered.len() - 1;
-        }
-        self.ensure_visible();
-    }
-
-    pub fn cycle_filter(&mut self) {
-        self.filter = match self.filter {
-            LogLevelFilter::All => LogLevelFilter::Error,
-            LogLevelFilter::Error => LogLevelFilter::Warn,
-            LogLevelFilter::Warn => LogLevelFilter::Info,
-            LogLevelFilter::Info => LogLevelFilter::Debug,
-            LogLevelFilter::Debug => LogLevelFilter::Trace,
-            LogLevelFilter::Trace => LogLevelFilter::All,
-        };
-        self.selected = 0;
-        self.offset = 0;
-    }
-
-    pub fn toggle_search(&mut self) {
-        self.is_searching = !self.is_searching;
-        if !self.is_searching {
-            self.search.clear();
-            self.selected = 0;
-            self.offset = 0;
-        }
-    }
-
-    fn ensure_visible(&mut self) {
-        let visible_window = 10;
-        if self.selected < self.offset {
-            self.offset = self.selected;
-        } else if self.selected >= self.offset + visible_window {
-            self.offset = self.selected.saturating_sub(visible_window - 1);
-        }
-    }
-
+    /// Get the currently selected entry from the filtered list.
     pub fn selected_entry(&self) -> Option<&LogEntry> {
         let filtered = self.filtered_entries();
         filtered.get(self.selected).copied()
     }
 
-    pub fn toggle_detail(&mut self) {
-        if self.selected_entry().is_some() {
-            self.show_detail = !self.show_detail;
-        }
-    }
-
-    pub fn close_detail(&mut self) {
-        self.show_detail = false;
+    /// Clamp selected index to filtered length.
+    fn clamp_selected(&mut self) {
+        let len = self.filtered_entries().len();
+        super::clamp_index(&mut self.selected, len);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
-
-/// Messages specific to the Logs screen.
-#[derive(Debug)]
+/// Messages specific to the logs screen.
+#[derive(Debug, Clone)]
 pub enum LogsMessage {
-    Refresh,
-    SelectPrev,
-    SelectNext,
-    PageUp,
-    PageDown,
-    GoHome,
-    GoEnd,
-    CycleFilter,
-    ToggleSearch,
+    MoveUp,
+    MoveDown,
     ToggleDetail,
-    CloseDetail,
-    SearchChar(char),
-    SearchBackspace,
+    CycleFilter,
+    ToggleDebugVisibility,
+    SetFilter(FilterLevel),
+    Refresh,
+    SetEntries(Vec<LogEntry>),
 }
 
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
-/// Render the logs screen into the given area.
-pub fn render(state: &LogsState, buf: &mut Buffer, area: Rect) {
-    // Detail view overlay
-    if state.show_detail {
-        if let Some(entry) = state.selected_entry() {
-            render_detail_view(entry, buf, area);
-            return;
+/// Update logs state in response to a message.
+pub fn update(state: &mut LogsState, msg: LogsMessage) {
+    match msg {
+        LogsMessage::MoveUp => {
+            let len = state.filtered_entries().len();
+            super::move_up(&mut state.selected, len);
+        }
+        LogsMessage::MoveDown => {
+            let len = state.filtered_entries().len();
+            super::move_down(&mut state.selected, len);
+        }
+        LogsMessage::ToggleDetail => {
+            state.detail_view = !state.detail_view;
+        }
+        LogsMessage::CycleFilter => {
+            state.filter_level = state.filter_level.next();
+            state.clamp_selected();
+        }
+        LogsMessage::ToggleDebugVisibility => {
+            state.show_debug = !state.show_debug;
+            state.clamp_selected();
+        }
+        LogsMessage::SetFilter(level) => {
+            state.filter_level = level;
+            state.clamp_selected();
+        }
+        LogsMessage::Refresh => {
+            // Signal to reload logs — handled by caller
+        }
+        LogsMessage::SetEntries(entries) => {
+            state.entries = entries;
+            state.clamp_selected();
         }
     }
+}
 
-    let search_bar_height = if state.is_searching { 3 } else { 0 };
+/// Render the logs screen.
+/// Render the logs screen (borderless — outer pane border is handled by app.rs).
+pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
+    // Filter sub-tab header line
+    let active_idx = FilterLevel::ALL
+        .iter()
+        .position(|f| *f == state.filter_level)
+        .unwrap_or(0);
+    let labels: Vec<&str> = FilterLevel::ALL.iter().map(|f| f.label()).collect();
+    let mut tab_title = super::build_tab_title(&labels, active_idx);
+    // Append debug visibility indicator
+    tab_title.spans.push(Span::raw(format!(
+        " \u{2502} Debug: {}",
+        if state.show_debug { "on" } else { "off" }
+    )));
 
-    let chunks = Layout::vertical([
-        Constraint::Length(3),                 // Header/filter
-        Constraint::Min(0),                    // Log entries
-        Constraint::Length(search_bar_height), // Search bar
-    ])
-    .split(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
 
-    render_header(state, buf, chunks[0]);
-    render_entries(state, buf, chunks[1]);
+    let header = Paragraph::new(tab_title);
+    frame.render_widget(header, chunks[0]);
 
-    if state.is_searching {
-        render_search_bar(state, buf, chunks[2]);
+    if state.detail_view {
+        render_detail(state, frame, chunks[1]);
+    } else {
+        render_log_list(state, frame, chunks[1]);
     }
 }
 
-fn render_header(state: &LogsState, buf: &mut Buffer, area: Rect) {
-    let filtered = state.filtered_entries();
-    let title = format!(
-        " Logs ({}/{}) | Filter: {} ",
-        filtered.len(),
-        state.entries.len(),
-        state.filter.name()
-    );
-
-    let header = Paragraph::new("").block(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .title(title)
-            .title_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-    );
-    Widget::render(header, area, buf);
-}
-
-fn render_entries(state: &LogsState, buf: &mut Buffer, area: Rect) {
-    let is_empty = state.entries.is_empty();
+/// Render the log entry list.
+fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_entries();
 
     if filtered.is_empty() {
-        let text = if is_empty {
-            "No log entries. Logs are loaded from ~/.gwt/logs/"
+        let block = Block::default();
+        let msg = if state.entries.is_empty() {
+            "No log entries"
         } else {
-            "No entries match current filter"
+            "No entries match filter"
         };
-        let paragraph = Paragraph::new(text)
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
-        Widget::render(paragraph, area, buf);
+        let paragraph = Paragraph::new(msg)
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
         return;
     }
 
-    let visible_height = area.height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
-        .skip(state.offset)
-        .take(visible_height)
-        .map(|(i, entry)| render_log_entry(entry, i == state.selected))
+        .map(|(idx, entry)| {
+            let style = super::list_item_style(idx == state.selected);
+            let severity = format!("[{:5}]", entry.severity);
+
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{:<32}", entry.timestamp),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:<8}", severity),
+                    Style::default().fg(severity_color(entry.severity)),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:<12}", entry.source),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(" "),
+                Span::styled(entry.message.clone(), style),
+            ]);
+            ListItem::new(line)
+        })
         .collect();
 
-    let list_block = Block::default().borders(Borders::ALL);
-    let list = List::new(items)
-        .block(list_block)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    Widget::render(list, area, buf);
-
-    // Scrollbar
-    if filtered.len() > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("^"))
-            .end_symbol(Some("v"));
-        let mut scrollbar_state = ScrollbarState::new(filtered.len()).position(state.selected);
-        scrollbar.render(
-            area.inner(Margin {
-                vertical: 1,
-                horizontal: 0,
-            }),
-            buf,
-            &mut scrollbar_state,
-        );
-    }
-}
-
-fn render_log_entry(entry: &LogEntry, is_selected: bool) -> ListItem<'static> {
-    let level_style = match entry.level.as_str() {
-        "ERROR" => Style::default().fg(Color::Red),
-        "WARN" => Style::default().fg(Color::Yellow),
-        "INFO" => Style::default().fg(Color::Green),
-        "DEBUG" => Style::default().fg(Color::Blue),
-        "TRACE" => Style::default().fg(Color::DarkGray),
-        _ => Style::default(),
-    };
-
-    let time_display = format_timestamp_local(&entry.timestamp);
-
-    let context = entry.summary_context();
-    let message = entry.summary_message();
-
-    let mut spans = vec![
-        Span::styled(
-            format!("[{}]", time_display),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw(" "),
-        Span::styled(format!("{:5}", entry.level), level_style),
-    ];
-    if !context.is_empty() {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(context, Style::default().fg(Color::Cyan)));
-    }
-    spans.push(Span::raw(" "));
-    spans.push(Span::raw(message));
-
-    let style = if is_selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
+    let block = Block::default().title(" Enter: detail | r: refresh");
+    let list = List::new(items).block(block).highlight_style(
         Style::default()
-    };
-
-    ListItem::new(Line::from(spans)).style(style)
-}
-
-fn render_search_bar(state: &LogsState, buf: &mut Buffer, area: Rect) {
-    let display_text = if state.search.is_empty() {
-        "Type to search..."
-    } else {
-        &state.search
-    };
-
-    let text_style = if state.search.is_empty() {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default()
-    };
-
-    let search = Paragraph::new(display_text).style(text_style).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(" Search "),
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     );
-    Widget::render(search, area, buf);
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(state.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-fn render_detail_view(entry: &LogEntry, buf: &mut Buffer, area: Rect) {
-    let level_style = match entry.level.as_str() {
-        "ERROR" => Style::default().fg(Color::Red),
-        "WARN" => Style::default().fg(Color::Yellow),
-        "INFO" => Style::default().fg(Color::Green),
-        "DEBUG" => Style::default().fg(Color::Blue),
-        "TRACE" => Style::default().fg(Color::DarkGray),
-        _ => Style::default(),
-    };
+/// Render the detail view for the selected entry.
+fn render_detail(state: &LogsState, frame: &mut Frame, area: Rect) {
+    let entry = state.selected_entry();
+    let block = Block::default().title("Log Detail — Esc: back");
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format_full_timestamp_local(&entry.timestamp)),
-        ]),
-        Line::from(vec![
-            Span::styled("Level:     ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(entry.level.clone(), level_style),
-        ]),
-        Line::from(vec![
-            Span::styled("Target:    ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(entry.target.clone()),
-        ]),
-    ];
-
-    if let Some(ref category) = entry.category {
-        lines.push(Line::from(vec![
-            Span::styled("Category:  ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(category.clone(), Style::default().fg(Color::Cyan)),
-        ]));
-    }
-    if let Some(ref event) = entry.event {
-        lines.push(Line::from(vec![
-            Span::styled("Event:     ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(event.clone()),
-        ]));
-    }
-    if let Some(ref result) = entry.result {
-        lines.push(Line::from(vec![
-            Span::styled("Result:    ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(result.clone()),
-        ]));
-    }
-    if let Some(ref workspace) = entry.workspace {
-        lines.push(Line::from(vec![
-            Span::styled("Workspace: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(workspace.clone()),
-        ]));
-    }
-    if let Some(ref error_code) = entry.error_code {
-        lines.push(Line::from(vec![
-            Span::styled("ErrorCode: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(error_code.clone(), Style::default().fg(Color::Red)),
-        ]));
-    }
-    if let Some(ref error_detail) = entry.error_detail {
-        lines.push(Line::from(vec![
-            Span::styled("Error:     ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(error_detail.clone()),
-        ]));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Message:",
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(entry.message.clone()));
-
-    if !entry.extra.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Extra Fields:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        for (key, value) in &entry.extra {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {}: ", key), Style::default().fg(Color::DarkGray)),
-                Span::raw(value.clone()),
-            ]));
-        }
-    }
-
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Log Detail ")
-            .title_bottom(" [Esc] Close "),
-    );
-    Widget::render(paragraph, area, buf);
-}
-
-// ---------------------------------------------------------------------------
-// Key handling
-// ---------------------------------------------------------------------------
-
-/// Handle a key event in the logs screen.
-pub fn handle_key(state: &LogsState, key: &KeyEvent) -> Option<LogsMessage> {
-    // Detail view mode
-    if state.show_detail {
-        return match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(LogsMessage::CloseDetail),
-            _ => None,
-        };
-    }
-
-    // Search mode
-    if state.is_searching {
-        return match key.code {
-            KeyCode::Esc => Some(LogsMessage::ToggleSearch),
-            KeyCode::Backspace => Some(LogsMessage::SearchBackspace),
-            KeyCode::Char(c) => Some(LogsMessage::SearchChar(c)),
-            KeyCode::Enter => Some(LogsMessage::ToggleSearch),
-            _ => None,
-        };
-    }
-
-    // Normal mode
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => Some(LogsMessage::SelectPrev),
-        KeyCode::Down | KeyCode::Char('j') => Some(LogsMessage::SelectNext),
-        KeyCode::PageUp => Some(LogsMessage::PageUp),
-        KeyCode::PageDown => Some(LogsMessage::PageDown),
-        KeyCode::Home | KeyCode::Char('g') => Some(LogsMessage::GoHome),
-        KeyCode::End | KeyCode::Char('G') => Some(LogsMessage::GoEnd),
-        KeyCode::Char('f') => Some(LogsMessage::CycleFilter),
-        KeyCode::Char('/') => Some(LogsMessage::ToggleSearch),
-        KeyCode::Enter => Some(LogsMessage::ToggleDetail),
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(LogsMessage::Refresh)
-        }
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Log file loading
-// ---------------------------------------------------------------------------
-
-const MAX_LOG_ENTRIES: usize = 1000;
-const MAX_LOG_FILES: usize = 14;
-const MAX_LOG_FILE_LINES: usize = 10_000;
-
-/// Load log entries from the current workspace's `~/.gwt/logs/{workspace}/` directory.
-pub fn load_log_entries(repo_root: &Path) -> Vec<LogEntry> {
-    let Some(log_root) = dirs::home_dir().map(|h| h.join(".gwt").join("logs")) else {
-        return Vec::new();
-    };
-    let workspace_name = repo_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(ToString::to_string);
-    load_log_entries_from_root(&log_root, workspace_name.as_deref())
-}
-
-fn load_log_entries_from_root(log_root: &Path, workspace_name: Option<&str>) -> Vec<LogEntry> {
-    if !log_root.is_dir() {
-        return Vec::new();
-    }
-
-    let mut entries = Vec::new();
-
-    if let Some(workspace_name) = workspace_name {
-        let workspace_dir = log_root.join(workspace_name);
-        entries.extend(load_entries_from_dir(&workspace_dir, Some(workspace_name)));
-    }
-
-    if entries.is_empty() {
-        let read_dir = match std::fs::read_dir(log_root) {
-            Ok(read_dir) => read_dir,
-            Err(_) => return entries,
-        };
-
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let hint = path.file_name().and_then(|name| name.to_str());
-                entries.extend(load_entries_from_dir(&path, hint));
+    match entry {
+        Some(e) => {
+            let mut text = format!(
+                " Timestamp: {}\n Severity:  {}\n Source:    {}\n Message:   {}\n ID:        {}",
+                e.timestamp, e.severity, e.source, e.message, e.id
+            );
+            if let Some(detail) = e.detail.as_deref() {
+                text.push_str(&format!("\n Detail:    {}", detail));
             }
+            let paragraph = Paragraph::new(text)
+                .block(block)
+                .style(Style::default().fg(Color::White));
+            frame.render_widget(paragraph, area);
+        }
+        None => {
+            let paragraph = Paragraph::new("No entry selected")
+                .block(block)
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(paragraph, area);
         }
     }
-
-    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    entries.truncate(MAX_LOG_ENTRIES);
-    entries
 }
 
-fn load_entries_from_dir(log_dir: &Path, workspace_hint: Option<&str>) -> Vec<LogEntry> {
-    if !log_dir.is_dir() {
-        return Vec::new();
+fn severity_color(severity: Severity) -> Color {
+    match severity {
+        Severity::Error => Color::Red,
+        Severity::Warn => Color::Yellow,
+        Severity::Info => Color::Green,
+        Severity::Debug => Color::DarkGray,
     }
-
-    let reader = LogReader::new(log_dir);
-    let files = match reader.list_files() {
-        Ok(files) => files,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut entries = Vec::new();
-    for file in files.into_iter().take(MAX_LOG_FILES) {
-        let Ok((file_entries, _)) = LogReader::read_entries(&file, 0, MAX_LOG_FILE_LINES) else {
-            continue;
-        };
-        entries.extend(
-            file_entries
-                .into_iter()
-                .map(|entry| LogEntry::from_core_entry(entry, workspace_hint)),
-        );
-    }
-    entries
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::fs;
-    use tempfile::TempDir;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
-    fn create_test_entries() -> Vec<LogEntry> {
+    fn sample_entries() -> Vec<LogEntry> {
         vec![
-            LogEntry {
-                timestamp: "2024-01-01T12:00:00Z".to_string(),
-                level: "INFO".to_string(),
-                message: "Test message 1".to_string(),
-                target: "test".to_string(),
-                category: Some("worktree".to_string()),
-                event: Some("refresh".to_string()),
-                result: Some("success".to_string()),
-                workspace: Some("feature-1776".to_string()),
-                error_code: None,
-                error_detail: None,
-                extra: BTreeMap::new(),
-            },
-            LogEntry {
-                timestamp: "2024-01-01T12:00:01Z".to_string(),
-                level: "ERROR".to_string(),
-                message: "Error message".to_string(),
-                target: "test".to_string(),
-                category: Some("ui".to_string()),
-                event: Some("open_spec_detail".to_string()),
-                result: Some("failure".to_string()),
-                workspace: Some("feature-1776".to_string()),
-                error_code: Some("SPEC_READ_FAILED".to_string()),
-                error_detail: Some("missing spec.md".to_string()),
-                extra: BTreeMap::new(),
-            },
-            LogEntry {
-                timestamp: "2024-01-01T12:00:02Z".to_string(),
-                level: "DEBUG".to_string(),
-                message: "Debug message".to_string(),
-                target: "test".to_string(),
-                category: Some("git".to_string()),
-                event: Some("refresh_logs".to_string()),
-                result: Some("start".to_string()),
-                workspace: Some("feature-1776".to_string()),
-                error_code: None,
-                error_detail: None,
-                extra: BTreeMap::new(),
-            },
+            LogEntry::new(Severity::Error, "core", "Failed to connect")
+                .with_detail("connection timed out"),
+            LogEntry::new(Severity::Warn, "tui", "Slow render"),
+            LogEntry::new(Severity::Info, "core", "Started session"),
+            LogEntry::new(Severity::Debug, "pty", "Buffer flush"),
         ]
     }
 
-    fn parse_core_log(line: &str, workspace_hint: Option<&str>) -> LogEntry {
-        let entry: gwt_core::logging::LogEntry = serde_json::from_str(line).unwrap();
-        LogEntry::from_core_entry(entry, workspace_hint)
+    #[test]
+    fn default_state() {
+        let state = LogsState::default();
+        assert!(state.entries.is_empty());
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.filter_level, FilterLevel::All);
+        assert!(!state.detail_view);
+        assert!(state.show_debug);
     }
 
     #[test]
-    fn test_log_filtering_all() {
-        let state = LogsState::new().with_entries(create_test_entries());
+    fn move_down_wraps() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        update(&mut state, LogsMessage::MoveDown);
+        assert_eq!(state.selected, 1);
+        update(&mut state, LogsMessage::MoveDown);
+        update(&mut state, LogsMessage::MoveDown);
+        update(&mut state, LogsMessage::MoveDown);
+        assert_eq!(state.selected, 0); // wraps
+    }
+
+    #[test]
+    fn move_up_wraps() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        update(&mut state, LogsMessage::MoveUp);
+        assert_eq!(state.selected, 3); // wraps to last
+    }
+
+    #[test]
+    fn move_on_empty_is_noop() {
+        let mut state = LogsState::default();
+        update(&mut state, LogsMessage::MoveDown);
+        assert_eq!(state.selected, 0);
+        update(&mut state, LogsMessage::MoveUp);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn toggle_detail() {
+        let mut state = LogsState::default();
+        assert!(!state.detail_view);
+        update(&mut state, LogsMessage::ToggleDetail);
+        assert!(state.detail_view);
+        update(&mut state, LogsMessage::ToggleDetail);
+        assert!(!state.detail_view);
+    }
+
+    #[test]
+    fn set_filter_clamps() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.selected = 3; // DEBUG entry
+
+        update(&mut state, LogsMessage::SetFilter(FilterLevel::ErrorOnly));
+        assert_eq!(state.filter_level, FilterLevel::ErrorOnly);
+        assert_eq!(state.selected, 0); // clamped (only 1 error entry)
+    }
+
+    #[test]
+    fn filter_level_next_cycles_through_all_levels() {
+        assert_eq!(FilterLevel::All.next(), FilterLevel::ErrorOnly);
+        assert_eq!(FilterLevel::ErrorOnly.next(), FilterLevel::WarnUp);
+        assert_eq!(FilterLevel::WarnUp.next(), FilterLevel::InfoUp);
+        assert_eq!(FilterLevel::InfoUp.next(), FilterLevel::DebugUp);
+        assert_eq!(FilterLevel::DebugUp.next(), FilterLevel::All);
+    }
+
+    #[test]
+    fn filter_level_prev_cycles_through_all_levels() {
+        assert_eq!(FilterLevel::All.prev(), FilterLevel::DebugUp);
+        assert_eq!(FilterLevel::DebugUp.prev(), FilterLevel::InfoUp);
+        assert_eq!(FilterLevel::InfoUp.prev(), FilterLevel::WarnUp);
+        assert_eq!(FilterLevel::WarnUp.prev(), FilterLevel::ErrorOnly);
+        assert_eq!(FilterLevel::ErrorOnly.prev(), FilterLevel::All);
+    }
+
+    #[test]
+    fn cycle_filter_advances_through_levels() {
+        let mut state = LogsState::default();
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::ErrorOnly);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::WarnUp);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::InfoUp);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::DebugUp);
+        update(&mut state, LogsMessage::CycleFilter);
+        assert_eq!(state.filter_level, FilterLevel::All);
+    }
+
+    #[test]
+    fn toggle_debug_visibility_hides_and_restores_debug_entries() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        assert_eq!(state.filtered_entries().len(), 4);
+
+        update(&mut state, LogsMessage::ToggleDebugVisibility);
         assert_eq!(state.filtered_entries().len(), 3);
+        assert!(state
+            .filtered_entries()
+            .iter()
+            .all(|entry| entry.severity != Severity::Debug));
+
+        update(&mut state, LogsMessage::ToggleDebugVisibility);
+        assert_eq!(state.filtered_entries().len(), 4);
     }
 
     #[test]
-    fn test_log_filtering_error() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.filter = LogLevelFilter::Error;
-        assert_eq!(state.filtered_entries().len(), 1);
-        assert_eq!(state.filtered_entries()[0].level, "ERROR");
+    fn set_entries_populates() {
+        let mut state = LogsState::default();
+        state.selected = 99;
+        update(&mut state, LogsMessage::SetEntries(sample_entries()));
+        assert_eq!(state.entries.len(), 4);
+        assert_eq!(state.selected, 3); // clamped
     }
 
     #[test]
-    fn test_log_filtering_warn_includes_error() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.filter = LogLevelFilter::Warn;
-        assert_eq!(state.filtered_entries().len(), 1); // only ERROR, no WARN entries
-    }
-
-    #[test]
-    fn test_log_navigation() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        assert_eq!(state.selected, 0);
-
-        state.select_next();
-        assert_eq!(state.selected, 1);
-
-        state.select_next();
-        assert_eq!(state.selected, 2);
-
-        state.select_next();
-        assert_eq!(state.selected, 2); // clamped
-
-        state.select_prev();
-        assert_eq!(state.selected, 1);
-    }
-
-    #[test]
-    fn test_page_navigation() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.page_down(10);
-        assert_eq!(state.selected, 2); // clamped to end
-
-        state.page_up(10);
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn test_home_end() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.go_end();
-        assert_eq!(state.selected, 2);
-
-        state.go_home();
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn test_filter_cycle() {
-        let mut state = LogsState::new();
-        assert_eq!(state.filter, LogLevelFilter::All);
-
-        state.cycle_filter();
-        assert_eq!(state.filter, LogLevelFilter::Error);
-
-        state.cycle_filter();
-        assert_eq!(state.filter, LogLevelFilter::Warn);
-
-        state.cycle_filter();
-        assert_eq!(state.filter, LogLevelFilter::Info);
-
-        state.cycle_filter();
-        assert_eq!(state.filter, LogLevelFilter::Debug);
-
-        state.cycle_filter();
-        assert_eq!(state.filter, LogLevelFilter::Trace);
-
-        state.cycle_filter();
-        assert_eq!(state.filter, LogLevelFilter::All);
-    }
-
-    #[test]
-    fn test_search_filter() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.search = "Error".to_string();
+    fn filtered_entries_error_only() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.filter_level = FilterLevel::ErrorOnly;
         let filtered = state.filtered_entries();
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].level, "ERROR");
+        assert_eq!(filtered[0].severity, Severity::Error);
     }
 
     #[test]
-    fn test_toggle_search() {
-        let mut state = LogsState::new();
-        assert!(!state.is_searching);
-
-        state.toggle_search();
-        assert!(state.is_searching);
-
-        state.search = "test".to_string();
-        state.toggle_search();
-        assert!(!state.is_searching);
-        assert!(state.search.is_empty());
+    fn filtered_entries_warn_up() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.filter_level = FilterLevel::WarnUp;
+        let filtered = state.filtered_entries();
+        assert_eq!(filtered.len(), 2); // ERROR + WARN
     }
 
     #[test]
-    fn test_detail_toggle() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        assert!(!state.show_detail);
-
-        state.toggle_detail();
-        assert!(state.show_detail);
-
-        state.close_detail();
-        assert!(!state.show_detail);
+    fn filtered_entries_all() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.filter_level = FilterLevel::All;
+        assert_eq!(state.filtered_entries().len(), 4);
     }
 
     #[test]
-    fn test_selected_entry() {
-        let state = LogsState::new().with_entries(create_test_entries());
-        assert!(state.selected_entry().is_some());
-
-        let empty = LogsState::new();
-        assert!(empty.selected_entry().is_none());
+    fn selected_entry_returns_correct() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.selected = 2;
+        let entry = state.selected_entry().unwrap();
+        assert_eq!(entry.severity, Severity::Info);
     }
 
     #[test]
-    fn test_to_clipboard_string() {
-        let entry = LogEntry {
-            timestamp: "2024-01-01T12:00:00Z".to_string(),
-            level: "INFO".to_string(),
-            message: "Test message".to_string(),
-            target: "test".to_string(),
-            category: Some("worktree".to_string()),
-            event: Some("refresh".to_string()),
-            result: Some("success".to_string()),
-            workspace: Some("feature-1776".to_string()),
-            error_code: None,
-            error_detail: None,
-            extra: BTreeMap::new(),
-        };
-
-        let json = entry.to_clipboard_string();
-        assert!(json.contains("Test message"));
-        assert!(json.contains("worktree"));
-        assert!(json.contains("feature-1776"));
+    fn render_with_entries_does_not_panic() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("Debug: on"));
     }
 
     #[test]
-    fn test_from_core_entry_preserves_structured_fields() {
-        let line = r#"{"timestamp":"2024-01-01T12:00:00Z","level":"INFO","target":"test","fields":{"message":"hello","category":"git"}}"#;
-        let entry = parse_core_log(line, Some("feature-1776"));
-        assert_eq!(entry.level, "INFO");
-        assert_eq!(entry.message, "hello");
-        assert_eq!(entry.category, Some("git".to_string()));
-        assert_eq!(entry.workspace, Some("feature-1776".to_string()));
+    fn render_empty_does_not_panic() {
+        let state = LogsState::default();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
     }
 
     #[test]
-    fn test_search_filter_matches_event_and_error_code() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.search = "SPEC_READ_FAILED".to_string();
-        assert_eq!(state.filtered_entries().len(), 1);
-        state.search = "open_spec_detail".to_string();
-        assert_eq!(state.filtered_entries().len(), 1);
+    fn render_detail_view_does_not_panic() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.detail_view = true;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
     }
 
     #[test]
-    fn test_entries_sorted_newest_first() {
-        let state = LogsState::new().with_entries(create_test_entries());
-        assert_eq!(state.entries[0].timestamp, "2024-01-01T12:00:02Z");
-        assert_eq!(state.entries[2].timestamp, "2024-01-01T12:00:00Z");
+    fn severity_colors_mapped() {
+        assert_eq!(severity_color(Severity::Error), Color::Red);
+        assert_eq!(severity_color(Severity::Warn), Color::Yellow);
+        assert_eq!(severity_color(Severity::Info), Color::Green);
+        assert_eq!(severity_color(Severity::Debug), Color::DarkGray);
     }
 
     #[test]
-    fn render_smoke_test() {
-        let state = LogsState::new();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
+    fn selected_entry_includes_notification_detail() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.selected = 0;
+        let entry = state.selected_entry().unwrap();
+        assert_eq!(entry.detail.as_deref(), Some("connection timed out"));
     }
 
     #[test]
-    fn render_with_entries_smoke_test() {
-        let state = LogsState::new().with_entries(create_test_entries());
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
+    fn render_detail_includes_detail_text() {
+        let mut state = LogsState::default();
+        state.entries = sample_entries();
+        state.detail_view = true;
+        state.selected = 0;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Log Detail"));
+        assert!(text.contains("connection timed out"));
     }
 
     #[test]
-    fn render_detail_view_smoke_test() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.show_detail = true;
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
+    fn render_log_list_uses_stable_columns() {
+        let mut state = LogsState::default();
+        let entries = sample_entries();
+        let expected_timestamp = format!("{}", entries[1].timestamp);
+        state.entries = entries;
+        state.filter_level = FilterLevel::WarnUp;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let mut found = None;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if row.contains("Slow render") {
+                found = Some(row);
+                break;
+            }
+        }
+
+        let row = found.expect("rendered log row");
+        let row = row.trim_start_matches('│').trim_start();
+        assert!(row.contains(&expected_timestamp), "{row:?}");
+        assert!(row.contains("[WARN]"));
+        assert!(row.contains("tui"));
+        assert!(row.contains("Slow render"));
+        let time_pos = row.find(&expected_timestamp).unwrap();
+        let severity_pos = row.find("[WARN]").unwrap();
+        let source_pos = row.find("tui").unwrap();
+        let message_pos = row.find("Slow render").unwrap();
+        assert!(time_pos < severity_pos);
+        assert!(severity_pos < source_pos);
+        assert!(source_pos < message_pos);
     }
 
     #[test]
-    fn render_search_smoke_test() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.is_searching = true;
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
+    fn render_filter_tabs_show_active_warn_filter() {
+        let mut state = LogsState::default();
+        state.filter_level = FilterLevel::WarnUp;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Warn+"));
+        assert!(text.contains("Debug: on"));
     }
 
     #[test]
-    fn handle_key_navigation() {
-        let state = LogsState::new();
-        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key),
-            Some(LogsMessage::SelectNext)
-        ));
-
-        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key),
-            Some(LogsMessage::SelectPrev)
-        ));
-    }
-
-    #[test]
-    fn handle_key_filter() {
-        let state = LogsState::new();
-        let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key),
-            Some(LogsMessage::CycleFilter)
-        ));
-    }
-
-    #[test]
-    fn handle_key_search() {
-        let state = LogsState::new();
-        let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key),
-            Some(LogsMessage::ToggleSearch)
-        ));
-    }
-
-    #[test]
-    fn handle_key_detail() {
-        let state = LogsState::new();
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key),
-            Some(LogsMessage::ToggleDetail)
-        ));
-    }
-
-    #[test]
-    fn handle_key_in_detail_mode() {
-        let mut state = LogsState::new().with_entries(create_test_entries());
-        state.show_detail = true;
-        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key),
-            Some(LogsMessage::CloseDetail)
-        ));
-    }
-
-    #[test]
-    fn handle_key_in_search_mode() {
-        let mut state = LogsState::new();
-        state.is_searching = true;
-        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(matches!(
-            handle_key(&state, &key),
-            Some(LogsMessage::SearchChar('a'))
-        ));
-    }
-
-    #[test]
-    fn logs_message_is_debug() {
-        let msg = LogsMessage::Refresh;
-        assert!(format!("{msg:?}").contains("Refresh"));
-    }
-
-    #[test]
-    fn format_timestamp_local_parses_rfc3339() {
-        let result = format_timestamp_local("2024-01-15T10:30:00Z");
-        assert!(!result.is_empty());
-        // The result will be in local time, just check it's not the raw input
-        assert!(!result.contains("T"));
-    }
-
-    #[test]
-    fn format_timestamp_local_fallback() {
-        let result = format_timestamp_local("not a timestamp");
-        assert_eq!(result, "not a timestamp");
-    }
-
-    #[test]
-    fn format_full_timestamp_parses_rfc3339() {
-        let result = format_full_timestamp_local("2024-01-15T10:30:00Z");
-        assert!(!result.is_empty());
-        assert!(result.contains("2024"));
-    }
-
-    #[test]
-    fn load_log_entries_from_root_prefers_current_workspace_dir() {
-        let temp = TempDir::new().unwrap();
-        let feature_dir = temp.path().join("feature-1776");
-        let other_dir = temp.path().join("other-workspace");
-        fs::create_dir_all(&feature_dir).unwrap();
-        fs::create_dir_all(&other_dir).unwrap();
-
-        fs::write(
-            feature_dir.join("gwt.jsonl.2026-04-01"),
-            concat!(
-                "{\"timestamp\":\"2026-04-01T01:00:00Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"flow_start\",\"category\":\"ui\",\"event\":\"refresh_logs\",\"result\":\"start\",\"workspace\":\"feature-1776\"}}\n",
-                "{\"timestamp\":\"2026-04-01T01:00:01Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"flow_success\",\"category\":\"ui\",\"event\":\"refresh_logs\",\"result\":\"success\",\"workspace\":\"feature-1776\"}}\n"
-            ),
-        )
-        .unwrap();
-        fs::write(
-            other_dir.join("gwt.jsonl.2026-04-01"),
-            "{\"timestamp\":\"2026-04-01T02:00:00Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"other\",\"workspace\":\"other-workspace\"}}\n",
-        )
-        .unwrap();
-
-        let entries = load_log_entries_from_root(temp.path(), Some("feature-1776"));
-        assert_eq!(entries.len(), 2);
-        assert!(entries
-            .iter()
-            .all(|entry| entry.workspace.as_deref() == Some("feature-1776")));
-    }
-
-    #[test]
-    fn load_log_entries_from_root_falls_back_to_any_workspace() {
-        let temp = TempDir::new().unwrap();
-        let other_dir = temp.path().join("other-workspace");
-        fs::create_dir_all(&other_dir).unwrap();
-        fs::write(
-            other_dir.join("gwt.jsonl.2026-04-01"),
-            "{\"timestamp\":\"2026-04-01T02:00:00Z\",\"level\":\"INFO\",\"target\":\"gwt\",\"fields\":{\"message\":\"other\",\"category\":\"ui\",\"event\":\"switch_management_tab\",\"result\":\"success\"}}\n",
-        )
-        .unwrap();
-
-        let entries = load_log_entries_from_root(temp.path(), Some("missing-workspace"));
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].workspace.as_deref(), Some("other-workspace"));
+    fn render_filter_title_reflects_debug_visibility() {
+        let mut state = LogsState::default();
+        state.show_debug = false;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(row.contains("Debug: off"));
     }
 }

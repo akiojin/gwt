@@ -1,0 +1,28 @@
+---
+source: crates/gwt-tui/tests/snapshot_e2e.rs
+expression: output
+---
+┌ Git View ────────────────────────────┐┌ ▶ Shell ─────────────────────────────┐
+│Files (0)                             ││Session: Shell (80x24)                │
+│No changed files                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│Commits (0)                           ││                                      │
+│No commits loaded                     ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+ ▣ Sh  br:n/a  [G]  ↑↓ mv  ↵ exp  r rfsh  Tab pane  Esc term  ?

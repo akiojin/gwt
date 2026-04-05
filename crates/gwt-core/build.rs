@@ -1,7 +1,4 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-};
+use std::{env, fs, path::PathBuf};
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -10,110 +7,61 @@ fn main() {
         .join("..")
         .join(".claude")
         .join("skills");
-    let commands_dir = PathBuf::from(&manifest_dir)
-        .join("..")
-        .join("..")
-        .join(".claude")
-        .join("commands");
 
+    // Trigger rebuild when skill/command/hook files change.
     println!("cargo:rerun-if-changed=../../.claude/skills");
     println!("cargo:rerun-if-changed=../../.claude/commands");
     println!("cargo:rerun-if-changed=../../.claude/hooks/scripts");
     println!("cargo:rerun-if-changed=../../.codex/hooks/scripts");
 
-    let mut entries = Vec::new();
-
+    // Validate YAML frontmatter in all SKILL.md files at build time.
     if skills_dir.is_dir() {
-        let mut skill_dirs: Vec<_> = fs::read_dir(&skills_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-            .collect();
-        skill_dirs.sort_by_key(|e| e.file_name());
-
-        for entry in skill_dirs {
-            let skill_md = entry.path().join("SKILL.md");
-            if !skill_md.exists() {
-                continue;
-            }
-
-            let content = fs::read_to_string(&skill_md).unwrap();
-            let (name, description) = parse_frontmatter(&content);
-            if name.is_empty() {
-                continue;
-            }
-
-            let command_file = commands_dir.join(format!("{name}.md"));
-            let has_command = command_file.exists();
-
-            entries.push((name, description, has_command));
-        }
+        validate_skill_frontmatter(&skills_dir);
     }
-
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join("skill_catalog_generated.rs");
-
-    let mut code = String::new();
-    code.push_str("pub struct SkillCatalogEntry {\n");
-    code.push_str("    pub name: &'static str,\n");
-    code.push_str("    pub description: &'static str,\n");
-    code.push_str("    pub has_command: bool,\n");
-    code.push_str("}\n\n");
-    code.push_str("pub const SKILL_CATALOG: &[SkillCatalogEntry] = &[\n");
-
-    for (name, description, has_command) in &entries {
-        let escaped_desc = description.replace('\\', "\\\\").replace('"', "\\\"");
-        code.push_str(&format!(
-            "    SkillCatalogEntry {{\n        name: \"{name}\",\n        description: \"{escaped_desc}\",\n        has_command: {has_command},\n    }},\n"
-        ));
-    }
-
-    code.push_str("];\n");
-
-    fs::write(&dest_path, code).unwrap();
 }
 
-/// Simple YAML frontmatter parser for `---` delimited blocks.
-/// Extracts `name` and `description` fields from key: value lines.
-fn parse_frontmatter(content: &str) -> (String, String) {
-    let mut name = String::new();
-    let mut description = String::new();
+/// Validate that every SKILL.md has syntactically correct YAML frontmatter.
+///
+/// gwt does not interpret skill content at runtime — files are treated as
+/// opaque blobs. This validation catches authoring errors at compile time
+/// so that malformed skills never reach worktrees.
+fn validate_skill_frontmatter(skills_dir: &std::path::Path) {
+    let entries = match fs::read_dir(skills_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
 
-    let mut lines = content.lines();
-
-    // First line must be `---`
-    match lines.next() {
-        Some(line) if line.trim() == "---" => {}
-        _ => return (name, description),
-    }
-
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            break;
+    for entry in entries.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        // Follow symlinks (Codex skills may be symlinked)
+        if !ft.is_dir() && !ft.is_symlink() {
+            continue;
         }
-
-        // Skip metadata/nested blocks
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        let skill_md = entry.path().join("SKILL.md");
+        if !skill_md.exists() {
             continue;
         }
 
-        if let Some((key, value)) = trimmed.split_once(':') {
-            let key = key.trim();
-            let value = value.trim();
-            // Strip optional surrounding quotes
-            let value = value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .unwrap_or(value);
-
-            match key {
-                "name" => name = value.to_string(),
-                "description" => description = value.to_string(),
-                _ => {}
+        let content = fs::read_to_string(&skill_md).unwrap_or_default();
+        if let Some(frontmatter) = extract_frontmatter(&content) {
+            if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(frontmatter) {
+                panic!("YAML frontmatter error in {}: {}", skill_md.display(), e);
             }
         }
     }
+}
 
-    (name, description)
+/// Extract the YAML frontmatter block (between `---` delimiters) from a
+/// markdown file.
+fn extract_frontmatter(content: &str) -> Option<&str> {
+    let content = content.trim_start();
+    if !content.starts_with("---") {
+        return None;
+    }
+    let after_first = &content[3..];
+    let end = after_first.find("\n---")?;
+    Some(&after_first[..end])
 }

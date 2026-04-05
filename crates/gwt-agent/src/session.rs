@@ -1,0 +1,200 @@
+//! Agent session persistence: save/load sessions as TOML files.
+
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::types::{AgentId, AgentStatus};
+
+/// Idle duration (in seconds) after which a session is considered stopped.
+const IDLE_TIMEOUT_SECS: i64 = 60;
+
+/// Represents a single agent session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub worktree_path: PathBuf,
+    pub branch: String,
+    pub agent_id: AgentId,
+    pub agent_session_id: Option<String>,
+    pub status: AgentStatus,
+    pub tool_version: Option<String>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_level: Option<String>,
+    #[serde(default)]
+    pub skip_permissions: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_activity_at: DateTime<Utc>,
+    pub display_name: String,
+}
+
+impl Session {
+    /// Create a new session with a generated UUID.
+    pub fn new(
+        worktree_path: impl Into<PathBuf>,
+        branch: impl Into<String>,
+        agent_id: AgentId,
+    ) -> Self {
+        let now = Utc::now();
+        let display_name = agent_id.display_name().to_string();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            worktree_path: worktree_path.into(),
+            branch: branch.into(),
+            agent_id,
+            agent_session_id: None,
+            status: AgentStatus::Unknown,
+            tool_version: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: false,
+            created_at: now,
+            updated_at: now,
+            last_activity_at: now,
+            display_name,
+        }
+    }
+
+    /// Update the session status and touch timestamps.
+    pub fn update_status(&mut self, status: AgentStatus) {
+        self.status = status;
+        let now = Utc::now();
+        self.updated_at = now;
+        if status == AgentStatus::Running || status == AgentStatus::WaitingInput {
+            self.last_activity_at = now;
+        }
+    }
+
+    /// Check if the session should be marked as stopped due to idle timeout.
+    pub fn should_mark_stopped(&self) -> bool {
+        if self.status == AgentStatus::Stopped {
+            return false;
+        }
+        let elapsed = Utc::now()
+            .signed_duration_since(self.last_activity_at)
+            .num_seconds();
+        elapsed >= IDLE_TIMEOUT_SECS
+    }
+
+    /// Save the session to a TOML file under the given directory.
+    /// File is written to `<dir>/<session_id>.toml`.
+    pub fn save(&self, dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{}.toml", self.id));
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        std::fs::write(path, content)
+    }
+
+    /// Load a session from a TOML file.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        toml::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_session_has_uuid_id() {
+        let session = Session::new("/tmp/wt", "feature/test", AgentId::ClaudeCode);
+        assert!(!session.id.is_empty());
+        // Verify it's a valid UUID
+        assert!(Uuid::parse_str(&session.id).is_ok());
+    }
+
+    #[test]
+    fn new_session_defaults() {
+        let session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        assert_eq!(session.status, AgentStatus::Unknown);
+        assert_eq!(session.branch, "main");
+        assert_eq!(session.agent_id, AgentId::Codex);
+        assert_eq!(session.display_name, "Codex");
+        assert!(session.agent_session_id.is_none());
+        assert!(session.tool_version.is_none());
+        assert!(session.model.is_none());
+        assert!(session.reasoning_level.is_none());
+        assert!(!session.skip_permissions);
+    }
+
+    #[test]
+    fn update_status_touches_timestamps() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
+        let before = session.updated_at;
+        // Small sleep not needed; just verify the method works
+        session.update_status(AgentStatus::Running);
+        assert_eq!(session.status, AgentStatus::Running);
+        assert!(session.updated_at >= before);
+    }
+
+    #[test]
+    fn should_mark_stopped_returns_false_when_already_stopped() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
+        session.status = AgentStatus::Stopped;
+        assert!(!session.should_mark_stopped());
+    }
+
+    #[test]
+    fn should_mark_stopped_recent_activity() {
+        let session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
+        // Just created, so last_activity_at is now
+        assert!(!session.should_mark_stopped());
+    }
+
+    #[test]
+    fn should_mark_stopped_old_activity() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
+        session.last_activity_at = Utc::now() - chrono::Duration::seconds(120);
+        session.status = AgentStatus::Running;
+        assert!(session.should_mark_stopped());
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
+        session.model = Some("gemini-2.5-pro".into());
+        session.tool_version = Some("0.1.0".into());
+        session.agent_session_id = Some("agent-abc".into());
+        session.reasoning_level = Some("high".into());
+        session.skip_permissions = true;
+
+        session.save(dir.path()).unwrap();
+
+        let path = dir.path().join(format!("{}.toml", session.id));
+        assert!(path.exists());
+
+        let loaded = Session::load(&path).unwrap();
+        assert_eq!(loaded.id, session.id);
+        assert_eq!(loaded.branch, "feature/x");
+        assert_eq!(loaded.agent_id, AgentId::Gemini);
+        assert_eq!(loaded.model, Some("gemini-2.5-pro".into()));
+        assert_eq!(loaded.tool_version, Some("0.1.0".into()));
+        assert_eq!(loaded.agent_session_id, Some("agent-abc".into()));
+        assert_eq!(loaded.reasoning_level, Some("high".into()));
+        assert!(loaded.skip_permissions);
+        assert_eq!(loaded.display_name, "Gemini CLI");
+    }
+
+    #[test]
+    fn load_nonexistent_returns_error() {
+        let result = Session::load(Path::new("/nonexistent/session.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_invalid_toml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "not valid toml {{{{").unwrap();
+        let result = Session::load(&path);
+        assert!(result.is_err());
+    }
+}

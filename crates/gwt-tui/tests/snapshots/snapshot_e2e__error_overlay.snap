@@ -1,0 +1,28 @@
+---
+source: crates/gwt-tui/tests/snapshot_e2e.rs
+expression: output
+---
+┌ Branches ────────────────────────────┐┌ ▶ Shell ─────────────────────────────┐
+│ View: All │ Sort: Default            ││Session: Shell (80x24)                │
+│No branches loaded                    ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│               ┌Error─────────────────────────────────────────┐               │
+│               │Something went wrong                          │               │
+│               │                                              │               │
+└───────────────│Press Enter or Esc to dismiss                 │               │
+┌ Overview │ SPE│                                              │               │
+│ No branch sele│                                              │               │
+│               └──────────────────────────────────────────────┘               │
+│ Docker status                        ││                                      │
+│ No containers found                  ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+ ▣ Sh  br:n/a  [G]  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Esc→T

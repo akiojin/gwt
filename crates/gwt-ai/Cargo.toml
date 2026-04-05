@@ -1,0 +1,15 @@
+[package]
+name = "gwt-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AI client and utilities for Git Worktree Manager"
+publish = false
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -1,651 +1,735 @@
-//! Central Model: all application state lives here (Elm Architecture)
+//! Model — central application state for the Elm Architecture.
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
-use std::time::Instant;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use gwt_core::terminal::manager::PaneManager;
-use gwt_core::terminal::AgentColor;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use gwt_config::VoiceConfig;
+use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
+use serde::{Deserialize, Serialize};
 
-use crate::screens::branch_session_selector::BranchSessionSelectorState;
-use crate::screens::branches::BranchListState;
-use crate::screens::clone_wizard::CloneWizardState;
+use crate::input::voice::VoiceInputState;
+use crate::screens::branches::BranchesState;
 use crate::screens::confirm::ConfirmState;
-use crate::screens::error::ErrorQueue;
-use crate::screens::issues::IssuePanelState;
-use crate::screens::speckit_wizard::SpecKitState;
+use crate::screens::docker_progress::DockerProgressState;
+use crate::screens::git_view::GitViewState;
+use crate::screens::initialization::InitializationState;
+use crate::screens::issues::IssuesState;
+use crate::screens::logs::LogsState;
+use crate::screens::port_select::PortSelectState;
+use crate::screens::pr_dashboard::PrDashboardState;
+use crate::screens::profiles::ProfilesState;
+use crate::screens::service_select::ServiceSelectState;
+use crate::screens::settings::SettingsState;
 use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
-use crate::screens::{LogsState, SettingsState};
-use crate::widgets::progress_modal::ProgressState;
+use crate::screens::wizard::WizardState;
+use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
 
-// ---------------------------------------------------------------------------
-// Layer / Tab enums
-// ---------------------------------------------------------------------------
+type BoxedVoiceBackend = Box<dyn VoiceBackend + Send>;
 
-/// Top-level layer: Main (sessions) vs Management (branches/issues/settings/logs)
+fn build_voice_backend(config: &VoiceConfig) -> BoxedVoiceBackend {
+    if config.enabled && config.model_path.is_some() {
+        Box::new(Qwen3AsrRecorder::new())
+    } else {
+        Box::new(NoOpVoiceBackend::new())
+    }
+}
+
+/// Runtime voice session state shared across start/stop messages.
+#[derive(Default)]
+pub(crate) struct VoiceRuntimeState {
+    config: VoiceConfig,
+    session: Option<VoiceSession<BoxedVoiceBackend>>,
+}
+
+impl VoiceRuntimeState {
+    pub(crate) fn configure(&mut self, config: &VoiceConfig) {
+        if self.session.is_none() {
+            self.config = config.clone();
+        }
+    }
+
+    pub(crate) fn start_recording(&mut self) -> Result<(), String> {
+        if self.session.is_none() {
+            self.session = Some(VoiceSession::new(build_voice_backend(&self.config)));
+        }
+
+        let result = self
+            .session
+            .as_mut()
+            .expect("voice session initialized")
+            .start_recording()
+            .map_err(|err| err.to_string());
+
+        if result.is_err() {
+            self.session = None;
+        }
+
+        result
+    }
+
+    pub(crate) fn stop_and_transcribe(&mut self) -> Result<String, String> {
+        let Some(mut session) = self.session.take() else {
+            return Err("Not currently recording".to_string());
+        };
+
+        session.stop_and_transcribe().map_err(|err| err.to_string())
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.session = None;
+    }
+}
+
+impl std::fmt::Debug for VoiceRuntimeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoiceRuntimeState")
+            .field("config", &self.config)
+            .field("has_session", &self.session.is_some())
+            .finish()
+    }
+}
+
+/// Which UI layer is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveLayer {
-    /// Initialization screen (shown when no repo is detected)
+    /// Initialization screen (no repo detected — clone wizard or bare migration).
     Initialization,
+    /// Session panes (shell / agent terminals).
     Main,
+    /// Management panel (branches, specs, issues, etc.).
     Management,
 }
 
-/// Management sub-tabs
+/// Which pane currently owns keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusPane {
+    /// Tab content area (↑↓ navigates list, Left/Right switches tabs).
+    #[default]
+    TabContent,
+    /// Branch detail panel (←→ sections, ↑↓ actions).
+    BranchDetail,
+    /// Terminal PTY (all keys forwarded).
+    Terminal,
+}
+
+impl FocusPane {
+    const ALL: [FocusPane; 3] = [
+        FocusPane::TabContent,
+        FocusPane::BranchDetail,
+        FocusPane::Terminal,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&p| p == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&p| p == self).unwrap_or(0);
+        Self::ALL[if idx == 0 {
+            Self::ALL.len() - 1
+        } else {
+            idx - 1
+        }]
+    }
+}
+
+/// Session layout mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLayout {
+    /// One session visible at a time.
+    Tab,
+    /// All sessions in an equal grid.
+    Grid,
+}
+
+/// Management panel tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementTab {
     Branches,
     Specs,
     Issues,
+    PrDashboard,
     Profiles,
+    GitView,
     Versions,
     Settings,
     Logs,
 }
 
 impl ManagementTab {
-    pub const ALL: [ManagementTab; 7] = [
+    /// All tabs in display order.
+    pub const ALL: [ManagementTab; 9] = [
         ManagementTab::Branches,
         ManagementTab::Specs,
         ManagementTab::Issues,
+        ManagementTab::PrDashboard,
         ManagementTab::Profiles,
-        ManagementTab::Settings,
+        ManagementTab::GitView,
         ManagementTab::Versions,
+        ManagementTab::Settings,
         ManagementTab::Logs,
     ];
 
-    pub fn index(self) -> usize {
-        match self {
-            ManagementTab::Branches => 0,
-            ManagementTab::Specs => 1,
-            ManagementTab::Issues => 2,
-            ManagementTab::Profiles => 3,
-            ManagementTab::Versions => 4,
-            ManagementTab::Settings => 5,
-            ManagementTab::Logs => 6,
-        }
-    }
-
+    /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
-            ManagementTab::Branches => "Branches",
-            ManagementTab::Specs => "SPECs",
-            ManagementTab::Issues => "Issues",
-            ManagementTab::Profiles => "Profiles",
-            ManagementTab::Versions => "Versions",
-            ManagementTab::Settings => "Settings",
-            ManagementTab::Logs => "Logs",
+            Self::Branches => "Branches",
+            Self::Specs => "Specs",
+            Self::Issues => "Issues",
+            Self::PrDashboard => "PRs",
+            Self::Profiles => "Profiles",
+            Self::GitView => "Git View",
+            Self::Versions => "Versions",
+            Self::Settings => "Settings",
+            Self::Logs => "Logs",
         }
     }
 
-    pub fn visible_index(self) -> Option<usize> {
-        Self::ALL.iter().position(|candidate| *candidate == self)
+    /// Next tab (wraps around).
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    /// Previous tab (wraps around).
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[if idx == 0 {
+            Self::ALL.len() - 1
+        } else {
+            idx - 1
+        }]
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session tab types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Type of a session tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionTabType {
     Shell,
-    Agent,
+    Agent { agent_id: String, color: AgentColor },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionStatus {
-    Running,
-    Completed(i32),
-    Error(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SessionLayoutMode {
-    #[default]
-    Grid,
-    Maximized,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectionPoint {
-    pub row: u16,
-    pub col: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalViewportState {
-    pub follow_live: bool,
-    pub scrollback: usize,
-    pub max_scrollback: usize,
-    pub selection_anchor: Option<SelectionPoint>,
-    pub selection_focus: Option<SelectionPoint>,
-    pub dragging: bool,
-}
-
-impl Default for TerminalViewportState {
-    fn default() -> Self {
-        Self {
-            follow_live: true,
-            scrollback: 0,
-            max_scrollback: 0,
-            selection_anchor: None,
-            selection_focus: None,
-            dragging: false,
+impl SessionTabType {
+    /// Unicode icon for this session type.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Shell => "\u{25B6}",
+            Self::Agent { .. } => "\u{2B50}",
         }
     }
 }
 
+/// Agent color for TUI display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentColor {
+    Green,
+    Blue,
+    Cyan,
+    Yellow,
+    Magenta,
+    Gray,
+}
+
+/// A single session tab (shell or agent).
 #[derive(Debug, Clone)]
 pub struct SessionTab {
-    pub pane_id: String,
+    pub id: String,
     pub name: String,
     pub tab_type: SessionTabType,
-    pub color: AgentColor,
-    pub status: SessionStatus,
-    pub branch: Option<String>,
-    pub spec_id: Option<String>,
+    pub vt: VtState,
 }
 
-// ---------------------------------------------------------------------------
-// Error / overlay state (legacy types retained for backward compat)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorSeverity {
-    Critical,
-    Minor,
+/// Buffered PTY input waiting to be written to the active session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPtyInput {
+    pub session_id: String,
+    pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ErrorEntry {
-    pub message: String,
-    pub severity: ErrorSeverity,
+/// Pending session conversion selected from the overlay flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSessionConversion {
+    pub session_index: usize,
+    pub target_agent_id: String,
+    pub target_display_name: String,
 }
 
-/// Overlay mode for tracking which overlay is currently shown
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayMode {
-    None,
-    Error,
-    Confirm,
-    Progress,
-    CloneWizard,
-    SpecKitWizard,
-    BranchSessionSelector,
+/// Shared queue of terminal Docker lifecycle results produced in the background.
+pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
+
+/// Result sent from the background Docker lifecycle worker back into the TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DockerProgressResult {
+    Completed { message: String },
+    Failed { message: String, detail: String },
 }
 
-// WizardState is re-exported from screens::wizard
-pub use crate::screens::wizard::WizardState;
-
-// ---------------------------------------------------------------------------
-// Background channel payloads
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct BranchListUpdate {
-    pub branches: Vec<crate::screens::branches::BranchItem>,
+/// Minimal vt100 screen state wrapper.
+pub struct VtState {
+    parser: vt100::Parser,
+    rows: u16,
+    cols: u16,
 }
 
-#[derive(Debug)]
-pub struct ManagementDataUpdate {
-    pub issues: Vec<crate::screens::issues::IssueItem>,
-    pub specs: Vec<crate::screens::specs::SpecItem>,
-    pub versions: Vec<crate::screens::versions::VersionTag>,
-    pub logs: Vec<crate::screens::logs::LogEntry>,
+impl std::fmt::Debug for VtState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VtState")
+            .field("rows", &self.rows)
+            .field("cols", &self.cols)
+            .finish()
+    }
 }
 
-fn spawn_management_data_preload(repo_root: PathBuf) -> Receiver<ManagementDataUpdate> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let issues = crate::screens::issues::load_issues(&repo_root);
-        let specs = crate::screens::specs::load_specs(&repo_root);
-        let versions = crate::screens::versions::load_tags(&repo_root);
-        let logs = crate::screens::logs::load_log_entries(&repo_root);
-        let _ = tx.send(ManagementDataUpdate {
-            issues,
-            specs,
-            versions,
-            logs,
-        });
-    });
-    rx
+impl Clone for VtState {
+    fn clone(&self) -> Self {
+        let mut parser = vt100::Parser::new(self.rows, self.cols, 10_000);
+        let state = self.parser.screen().state_formatted();
+        parser.process(&state);
+        Self {
+            parser,
+            rows: self.rows,
+            cols: self.cols,
+        }
+    }
 }
 
-fn spawn_branch_list_enrichment(repo_root: PathBuf) -> Receiver<BranchListUpdate> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let branches = crate::screens::branches::load_branches_enriched(&repo_root);
-        let _ = tx.send(BranchListUpdate { branches });
-    });
-    rx
+impl VtState {
+    pub fn new(rows: u16, cols: u16) -> Self {
+        Self {
+            parser: vt100::Parser::new(rows, cols, 10_000),
+            rows,
+            cols,
+        }
+    }
+
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.rows = rows;
+        self.cols = cols;
+        self.parser.set_size(rows, cols);
+    }
+
+    pub fn process(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+    }
+
+    pub fn screen(&self) -> &vt100::Screen {
+        self.parser.screen()
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Model
-// ---------------------------------------------------------------------------
-
-/// Central application state (Elm Architecture Model).
+/// Central application state.
 pub struct Model {
-    // Layer management (2-layer tab structure)
+    /// Active status-bar notification (Info/Warn surface).
+    pub(crate) current_notification: Option<Notification>,
+    /// Remaining lifetime for auto-dismissing status notifications.
+    pub(crate) current_notification_ttl: Option<Duration>,
+    /// Structured notification log.
+    pub(crate) notification_log: StructuredLog,
+    /// Sender side of the notification bus.
+    pub(crate) _notification_bus: NotificationBus,
+    /// Receiver side of the notification bus.
+    pub(crate) notification_receiver: NotificationReceiver,
+    /// Which layer has focus.
     pub active_layer: ActiveLayer,
-
-    // Session tabs (Agent + Shell) -- Main layer
-    pub session_tabs: Vec<SessionTab>,
-    pub active_session: usize,
-    pub session_layout_mode: SessionLayoutMode,
-
-    // Management tabs -- Management layer
+    /// Which pane has keyboard focus.
+    pub active_focus: FocusPane,
+    /// All open session tabs.
+    pub(crate) sessions: Vec<SessionTab>,
+    /// Index of the active session.
+    pub(crate) active_session: usize,
+    /// Session layout mode.
+    pub session_layout: SessionLayout,
+    /// Active management tab.
     pub management_tab: ManagementTab,
+    /// Whether the help overlay is visible.
+    pub(crate) help_visible: bool,
+    /// Error queue (shown as overlays).
+    pub(crate) error_queue: VecDeque<Notification>,
+    /// Whether the app should quit.
+    pub quit: bool,
+    /// Repository path.
+    pub(crate) repo_path: PathBuf,
+    /// Terminal size.
+    pub(crate) terminal_size: (u16, u16),
+    /// Branches screen state.
+    pub(crate) branches: BranchesState,
+    /// Profiles screen state.
+    pub(crate) profiles: ProfilesState,
+    /// Issues screen state.
+    pub(crate) issues: IssuesState,
+    /// Specs screen state.
+    pub(crate) specs: SpecsState,
+    /// Git view screen state.
+    pub(crate) git_view: GitViewState,
+    /// PR dashboard screen state.
+    pub(crate) pr_dashboard: PrDashboardState,
+    /// Settings screen state.
+    pub(crate) settings: SettingsState,
+    /// Logs screen state.
+    pub(crate) logs: LogsState,
+    /// Versions screen state.
+    pub(crate) versions: VersionsState,
+    /// Wizard overlay state (None when not active).
+    pub(crate) wizard: Option<WizardState>,
+    /// Docker progress overlay state.
+    pub(crate) docker_progress: Option<DockerProgressState>,
+    /// Background Docker lifecycle completion queue polled from the tick loop.
+    pub(crate) docker_progress_events: Option<DockerProgressQueue>,
+    /// Service selection overlay state.
+    pub(crate) service_select: Option<ServiceSelectState>,
+    /// Port conflict resolution overlay state.
+    pub(crate) port_select: Option<PortSelectState>,
+    /// Confirmation dialog state.
+    pub(crate) confirm: ConfirmState,
+    /// Pending session conversion awaiting confirmation.
+    pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
+    /// Launch config built from completed wizard, ready for PTY spawn.
+    pub(crate) pending_launch_config: Option<gwt_agent::LaunchConfig>,
+    /// Voice input state.
+    pub(crate) voice: VoiceInputState,
+    /// Runtime voice session used to bridge start/stop/transcribe.
+    pub(crate) voice_runtime: VoiceRuntimeState,
+    /// Buffered PTY input generated from forwarded key events.
+    pub(crate) pending_pty_inputs: VecDeque<PendingPtyInput>,
+    /// Live PTY handles keyed by session id.
+    pub(crate) pty_handles: HashMap<String, gwt_terminal::PtyHandle>,
+    /// Sender for PTY output from background reader threads.
+    pub(crate) pty_output_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
+    /// Receiver for PTY output drained in the event loop.
+    pub(crate) pty_output_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    /// Initialization screen state (present when ActiveLayer::Initialization).
+    pub(crate) initialization: Option<InitializationState>,
+}
 
-    // Screen states for management tabs
-    pub branches_state: BranchListState,
-    pub issues_state: IssuePanelState,
-    pub specs_state: SpecsState,
-    pub settings_state: SettingsState,
-    pub logs_state: LogsState,
-    pub versions_state: VersionsState,
-
-    // PTY management
-    pub pane_manager: PaneManager,
-    pub vt_parsers: HashMap<String, vt100::Parser>,
-    pub pty_tx: Option<crate::event::PtyOutputSender>,
-    pub terminal_viewports: HashMap<String, TerminalViewportState>,
-    pub active_history_pane_id: Option<String>,
-    pub active_history_parser: Option<vt100::Parser>,
-    pub pending_resume_panes: HashSet<String>,
-
-    // Overlay states
-    pub overlay_mode: OverlayMode,
-    pub error_queue: Vec<ErrorEntry>,
-    pub error_queue_v2: ErrorQueue,
-    pub progress: Option<ProgressState>,
-    pub confirm: Option<ConfirmState>,
-    pub branch_session_selector: Option<BranchSessionSelectorState>,
-    pub wizard: Option<WizardState>,
-    pub clone_wizard: Option<CloneWizardState>,
-    pub speckit_wizard: SpecKitState,
-    /// Pending Codex launch config waiting for hooks confirmation (SPEC-1786)
-    pub pending_codex_launch: Option<crate::screens::wizard::WizardLaunchConfig>,
-
-    // Background channels (for async operations)
-    pub branch_list_rx: Option<Receiver<BranchListUpdate>>,
-    pub management_data_rx: Option<Receiver<ManagementDataUpdate>>,
-
-    // App lifecycle
-    pub should_quit: bool,
-    pub repo_root: PathBuf,
-    pub terminal_rows: u16,
-    pub terminal_cols: u16,
-    pub last_ctrl_c: Option<Instant>,
-    pub tick_count: u64,
+impl std::fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Model")
+            .field("active_layer", &self.active_layer)
+            .field("active_focus", &self.active_focus)
+            .field("sessions", &self.sessions.len())
+            .field("active_session", &self.active_session)
+            .field("pty_handles", &self.pty_handles.len())
+            .field("repo_path", &self.repo_path)
+            .finish()
+    }
 }
 
 impl Model {
-    /// Create a new Model with default state.
-    /// Detects repo type and starts in Initialization layer if no repo is found,
-    /// otherwise starts in Management layer with Branches tab active.
-    pub fn new(repo_root: PathBuf) -> Self {
-        use gwt_core::git::{detect_repo_type, RepoType};
-
-        let repo_type = detect_repo_type(&repo_root);
-        let active_layer = match repo_type {
-            RepoType::Normal | RepoType::Worktree => ActiveLayer::Management,
-            RepoType::Empty | RepoType::NonRepo => ActiveLayer::Initialization,
+    /// Create a new Model with sensible defaults.
+    pub fn new(repo_path: PathBuf) -> Self {
+        let default_session = SessionTab {
+            id: "shell-0".to_string(),
+            name: "Shell".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: VtState::new(24, 80),
         };
-
+        let (notification_bus, notification_receiver) = NotificationBus::new();
+        let (pty_output_tx, pty_output_rx) = std::sync::mpsc::channel();
         Self {
-            active_layer,
-            session_tabs: Vec::new(),
+            current_notification: None,
+            current_notification_ttl: None,
+            notification_log: StructuredLog::default(),
+            _notification_bus: notification_bus,
+            notification_receiver,
+            active_layer: ActiveLayer::Management,
+            active_focus: FocusPane::TabContent,
+            sessions: vec![default_session],
             active_session: 0,
-            session_layout_mode: SessionLayoutMode::Grid,
+            session_layout: SessionLayout::Tab,
             management_tab: ManagementTab::Branches,
-            branches_state: BranchListState::new(),
-            issues_state: IssuePanelState::new(),
-            specs_state: SpecsState::new(),
-            settings_state: SettingsState::new(),
-            logs_state: LogsState::new(),
-            versions_state: VersionsState::new(),
-            pane_manager: PaneManager::new(),
-            vt_parsers: HashMap::new(),
-            pty_tx: None,
-            terminal_viewports: HashMap::new(),
-            active_history_pane_id: None,
-            active_history_parser: None,
-            pending_resume_panes: HashSet::new(),
-            overlay_mode: OverlayMode::None,
-            error_queue: Vec::new(),
-            error_queue_v2: ErrorQueue::new(),
-            progress: None,
-            confirm: None,
-            branch_session_selector: None,
+            help_visible: false,
+            error_queue: VecDeque::new(),
+            quit: false,
+            repo_path,
+            terminal_size: (80, 24),
+            branches: BranchesState::default(),
+            profiles: ProfilesState::default(),
+            issues: IssuesState::default(),
+            specs: SpecsState::default(),
+            git_view: GitViewState::default(),
+            pr_dashboard: PrDashboardState::default(),
+            settings: SettingsState::default(),
+            logs: LogsState::default(),
+            versions: VersionsState::default(),
             wizard: None,
-            clone_wizard: None,
-            speckit_wizard: SpecKitState::new(),
-            pending_codex_launch: None,
-            branch_list_rx: None,
-            management_data_rx: None,
-            should_quit: false,
-            repo_root,
-            terminal_rows: 24,
-            terminal_cols: 80,
-            last_ctrl_c: None,
-            tick_count: 0,
+            docker_progress: None,
+            docker_progress_events: None,
+            service_select: None,
+            port_select: None,
+            confirm: ConfirmState::default(),
+            pending_session_conversion: None,
+            pending_launch_config: None,
+            voice: VoiceInputState::default(),
+            voice_runtime: VoiceRuntimeState::default(),
+            pending_pty_inputs: VecDeque::new(),
+            pty_handles: HashMap::new(),
+            pty_output_tx,
+            pty_output_rx,
+            initialization: None,
         }
     }
 
-    /// Reset the model for a new repository root.
-    /// Clears session state, reloads all management screen data,
-    /// and transitions to the branch-first management entry.
-    pub fn reset(&mut self, new_repo_root: std::path::PathBuf) {
-        self.repo_root = new_repo_root;
-        self.session_tabs.clear();
-        self.active_session = 0;
-        self.session_layout_mode = SessionLayoutMode::Grid;
-        self.active_layer = ActiveLayer::Management;
-        self.management_tab = ManagementTab::Branches;
-        self.overlay_mode = OverlayMode::None;
-        self.branch_session_selector = None;
-        self.clone_wizard = None;
-        self.load_all_data();
+    /// Create a new Model in Initialization layer (no repo detected).
+    pub fn new_initialization(repo_path: PathBuf, bare_migration: bool) -> Self {
+        let mut model = Self::new(repo_path);
+        model.active_layer = ActiveLayer::Initialization;
+        model.initialization = Some(InitializationState::new(bare_migration));
+        model
     }
 
-    /// Load all management screen data from the current repo_root.
-    pub fn load_all_data(&mut self) {
-        let repo_root = self.repo_root.clone();
-        self.branches_state.branches = crate::screens::branches::load_branches(&repo_root);
-        self.settings_state.load_settings();
-        self.sync_branch_session_counts();
-        self.branch_list_rx = Some(spawn_branch_list_enrichment(repo_root.clone()));
-        self.management_data_rx = Some(spawn_management_data_preload(repo_root));
+    /// Reset all state for a new repository path (after successful clone).
+    ///
+    /// Transitions to Management layer, discarding all previous state.
+    pub fn reset(&mut self, repo_path: PathBuf) {
+        // Kill all live PTY processes before discarding handles.
+        for (_, pty) in self.pty_handles.drain() {
+            let _ = pty.kill();
+        }
+        let terminal_size = self.terminal_size;
+        *self = Self::new(repo_path);
+        self.terminal_size = terminal_size;
     }
 
-    // ---- Session tab helpers ------------------------------------------------
-
-    /// Add a new session tab and switch to it.
-    pub fn add_session(&mut self, tab: SessionTab) {
-        self.clear_active_history_view();
-        self.session_tabs.push(tab);
-        self.active_session = self.session_tabs.len() - 1;
-        self.session_layout_mode = SessionLayoutMode::Grid;
-        self.active_layer = ActiveLayer::Main;
-        self.sync_branch_session_counts();
+    /// Number of sessions.
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
     }
 
-    /// Close the session at `index`. Returns the removed tab, or `None`.
-    pub fn close_session(&mut self, index: usize) -> Option<SessionTab> {
-        if index >= self.session_tabs.len() {
+    /// Get the active session, if any.
+    pub fn active_session_tab(&self) -> Option<&SessionTab> {
+        self.sessions.get(self.active_session)
+    }
+
+    /// Get the active session mutably, if any.
+    pub fn active_session_tab_mut(&mut self) -> Option<&mut SessionTab> {
+        self.sessions.get_mut(self.active_session)
+    }
+
+    /// Find a session by its stable id.
+    pub fn session_tab_mut(&mut self, session_id: &str) -> Option<&mut SessionTab> {
+        self.sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+    }
+
+    /// Buffered PTY input awaiting delivery to sessions.
+    pub fn pending_pty_inputs(&self) -> &VecDeque<PendingPtyInput> {
+        &self.pending_pty_inputs
+    }
+
+    /// Current terminal size `(cols, rows)`.
+    pub fn terminal_size(&self) -> (u16, u16) {
+        self.terminal_size
+    }
+
+    /// Drain PTY output from background reader threads.
+    ///
+    /// Returns an iterator of `(session_id, data)` chunks ready for dispatch.
+    pub fn drain_pty_output(&self) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        while let Ok(item) = self.pty_output_rx.try_recv() {
+            out.push(item);
+        }
+        out
+    }
+
+    /// Kill and remove all live PTY handles.
+    pub fn kill_all_pty(&mut self) {
+        for (_, pty) in self.pty_handles.drain() {
+            let _ = pty.kill();
+        }
+    }
+
+    /// Cloneable handle for sending notifications into the TUI.
+    #[allow(dead_code)]
+    pub(crate) fn notification_bus_handle(&self) -> NotificationBus {
+        self._notification_bus.clone()
+    }
+
+    /// Repository root currently driving the workspace shell.
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
+    }
+
+    /// Drain queued notifications from the in-process bus.
+    pub(crate) fn drain_notifications(&mut self) -> Vec<Notification> {
+        self.notification_receiver.drain()
+    }
+
+    /// Get a mutable reference to the initialization state.
+    pub fn initialization_mut(&mut self) -> Option<&mut InitializationState> {
+        self.initialization.as_mut()
+    }
+
+    /// Get a reference to the initialization state.
+    pub fn initialization(&self) -> Option<&InitializationState> {
+        self.initialization.as_ref()
+    }
+
+    /// Whether a wizard overlay is active.
+    pub fn has_wizard(&self) -> bool {
+        self.wizard.is_some()
+    }
+
+    /// Whether the branches search is active.
+    pub fn is_branches_search_active(&self) -> bool {
+        self.branches.search_active
+    }
+
+    /// Current branches search query.
+    pub fn branches_search_query(&self) -> &str {
+        &self.branches.search_query
+    }
+
+    /// Active detail section index for the branches screen.
+    pub fn branches_detail_section(&self) -> usize {
+        self.branches.detail_section
+    }
+
+    /// Whether the branch detail launch-agent action is pending.
+    pub fn branches_pending_launch_agent(&self) -> bool {
+        self.branches.pending_launch_agent
+    }
+
+    /// Filtered branch names in display order.
+    pub fn filtered_branch_names(&self) -> Vec<String> {
+        self.branches
+            .filtered_branches()
+            .into_iter()
+            .map(|branch| branch.name.clone())
+            .collect()
+    }
+
+    /// Save session state to a TOML file. Best-effort: errors are logged, not fatal.
+    pub fn save_session_state(&self, path: &Path) -> Result<(), String> {
+        let state = SessionState {
+            display_mode: match self.session_layout {
+                SessionLayout::Tab => "tab".to_string(),
+                SessionLayout::Grid => "grid".to_string(),
+            },
+            panel_visible: self.active_layer == ActiveLayer::Management,
+            active_management_tab: self.management_tab.label().to_string(),
+            session_count: self.sessions.len(),
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let content = toml::to_string_pretty(&state).map_err(|e| e.to_string())?;
+        std::fs::write(path, content).map_err(|e| e.to_string())
+    }
+
+    /// Load session state from a TOML file.
+    pub fn load_session_state(path: &Path) -> Result<SessionState, String> {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        toml::from_str(&content).map_err(|e| e.to_string())
+    }
+
+    /// Stable state-file location for a repository root.
+    pub fn session_state_path(repo_path: &Path) -> PathBuf {
+        let encoded = URL_SAFE_NO_PAD.encode(repo_path.to_string_lossy().as_bytes());
+        gwt_core::paths::gwt_sessions_dir().join(format!("{encoded}.toml"))
+    }
+
+    /// Restore persisted shell state from disk, returning a warning when fallback was needed.
+    pub fn restore_session_state_from_path(&mut self, path: &Path) -> Option<String> {
+        if !path.exists() {
             return None;
         }
-        let tab = self.session_tabs.remove(index);
-        if self.active_history_pane_id.as_deref() == Some(tab.pane_id.as_str()) {
-            self.clear_active_history_view();
+
+        match Self::load_session_state(path) {
+            Ok(state) => self.apply_session_state(state),
+            Err(err) => Some(format!("failed to restore session state: {err}")),
         }
-        self.terminal_viewports.remove(&tab.pane_id);
-        self.vt_parsers.remove(&tab.pane_id);
-        self.pending_resume_panes.remove(&tab.pane_id);
-        let pane_index = self
-            .pane_manager
-            .panes()
-            .iter()
-            .position(|pane| pane.pane_id() == tab.pane_id);
-        if let Some(pane_index) = pane_index {
-            let _ = self.pane_manager.close_pane(pane_index);
-        }
-        if self.session_tabs.is_empty() {
-            self.active_session = 0;
-            self.active_layer = ActiveLayer::Management;
-        } else if self.active_session >= self.session_tabs.len() {
-            self.active_session = self.session_tabs.len() - 1;
-        }
-        self.sync_branch_session_counts();
-        Some(tab)
     }
 
-    /// Close the currently active session.
-    pub fn close_active_session(&mut self) -> Option<SessionTab> {
-        if self.session_tabs.is_empty() {
-            return None;
-        }
-        self.close_session(self.active_session)
-    }
+    fn apply_session_state(&mut self, state: SessionState) -> Option<String> {
+        let mut warnings = Vec::new();
 
-    pub fn close_session_by_pane_id(&mut self, pane_id: &str) -> Option<SessionTab> {
-        let index = self
-            .session_tabs
-            .iter()
-            .position(|tab| tab.pane_id == pane_id)?;
-        self.close_session(index)
-    }
-
-    pub fn running_session_count(&self) -> usize {
-        self.session_tabs
-            .iter()
-            .filter(|t| matches!(t.status, SessionStatus::Running))
-            .count()
-    }
-
-    pub fn running_agent_count(&self) -> usize {
-        self.session_tabs
-            .iter()
-            .filter(|t| {
-                t.tab_type == SessionTabType::Agent && matches!(t.status, SessionStatus::Running)
-            })
-            .count()
-    }
-
-    /// Switch to next session (wraps).
-    pub fn next_session(&mut self) {
-        if self.session_tabs.is_empty() {
-            return;
-        }
-        self.clear_active_history_view();
-        self.active_session = (self.active_session + 1) % self.session_tabs.len();
-    }
-
-    /// Switch to previous session (wraps).
-    pub fn prev_session(&mut self) {
-        if self.session_tabs.is_empty() {
-            return;
-        }
-        self.clear_active_history_view();
-        self.active_session = if self.active_session == 0 {
-            self.session_tabs.len() - 1
+        self.session_layout = match state.display_mode.as_str() {
+            "tab" => SessionLayout::Tab,
+            "grid" => SessionLayout::Grid,
+            other => {
+                warnings.push(format!("unknown display_mode `{other}`"));
+                SessionLayout::Tab
+            }
+        };
+        self.active_layer = if state.panel_visible {
+            ActiveLayer::Management
         } else {
-            self.active_session - 1
+            ActiveLayer::Main
         };
-    }
-
-    /// Switch to session by 0-based index.
-    pub fn switch_session(&mut self, index: usize) {
-        if index < self.session_tabs.len() {
-            self.clear_active_history_view();
-            self.active_session = index;
-        }
-    }
-
-    pub fn toggle_session_layout_mode(&mut self) {
-        if self.session_tabs.is_empty() {
-            return;
-        }
-        self.session_layout_mode = match self.session_layout_mode {
-            SessionLayoutMode::Grid => SessionLayoutMode::Maximized,
-            SessionLayoutMode::Maximized => SessionLayoutMode::Grid,
-        };
-    }
-
-    // ---- Layer helpers -------------------------------------------------------
-
-    /// Toggle between Main and Management layers.
-    pub fn toggle_layer(&mut self) {
-        self.active_layer = match self.active_layer {
-            ActiveLayer::Initialization => ActiveLayer::Initialization, // Blocked during init
-            ActiveLayer::Main => {
-                self.clear_active_history_view();
-                ActiveLayer::Management
-            }
-            ActiveLayer::Management => {
-                if self.session_tabs.is_empty() {
-                    // Stay in Management if no sessions exist
-                    ActiveLayer::Management
-                } else {
-                    ActiveLayer::Main
-                }
+        self.management_tab = match ManagementTab::ALL
+            .iter()
+            .copied()
+            .find(|tab| tab.label() == state.active_management_tab)
+        {
+            Some(tab) => tab,
+            None => {
+                warnings.push(format!(
+                    "unknown active_management_tab `{}`",
+                    state.active_management_tab
+                ));
+                ManagementTab::Branches
             }
         };
-    }
 
-    // ---- Error helpers -------------------------------------------------------
-
-    pub fn push_error(&mut self, entry: ErrorEntry) {
-        self.error_queue.push(entry);
-    }
-
-    pub fn dismiss_error(&mut self) {
-        if !self.error_queue.is_empty() {
-            self.error_queue.remove(0);
-        }
-    }
-
-    // ---- Ctrl+C handling -----------------------------------------------------
-
-    /// Handle Ctrl+C press. Returns true if app should quit (double-tap).
-    pub fn handle_ctrl_c(&mut self) -> bool {
-        let now = Instant::now();
-        if let Some(last) = self.last_ctrl_c {
-            if now.duration_since(last) < std::time::Duration::from_millis(500) {
-                self.should_quit = true;
-                return true;
-            }
-        }
-        self.last_ctrl_c = Some(now);
-        false
-    }
-
-    // ---- Background update polling -------------------------------------------
-
-    pub fn apply_background_updates(&mut self) {
-        use gwt_core::terminal::pane::PaneStatus;
-
-        self.tick_count += 1;
-        // Poll branch list updates
-        let mut branch_updates = Vec::new();
-        if let Some(ref rx) = self.branch_list_rx {
-            while let Ok(update) = rx.try_recv() {
-                branch_updates.push(update);
-            }
-        }
-        for update in branch_updates {
-            self.branches_state.set_branches(update.branches);
-            self.sync_branch_session_counts();
-        }
-
-        let mut management_updates = Vec::new();
-        if let Some(ref rx) = self.management_data_rx {
-            while let Ok(update) = rx.try_recv() {
-                management_updates.push(update);
-            }
-        }
-        for update in management_updates {
-            self.issues_state.issues = update.issues;
-            self.specs_state.specs = update.specs;
-            self.versions_state.tags = update.versions;
-            self.logs_state.entries = update.logs;
-        }
-
-        let mut session_status_updates = Vec::new();
-        for pane in self.pane_manager.panes_mut() {
-            let status = match pane.check_status() {
-                Ok(status) => status.clone(),
-                Err(err) => {
-                    let message = err.to_string();
-                    pane.mark_error(message.clone());
-                    PaneStatus::Error(message)
-                }
-            };
-
-            session_status_updates.push((pane.pane_id().to_string(), map_pane_status(&status)));
-        }
-
-        for (pane_id, status) in session_status_updates {
-            if let Some(tab) = self
-                .session_tabs
-                .iter_mut()
-                .find(|tab| tab.pane_id == pane_id)
-            {
-                tab.status = status;
-            }
-        }
-    }
-
-    pub fn terminal_viewport_mut(&mut self, pane_id: &str) -> &mut TerminalViewportState {
-        self.terminal_viewports
-            .entry(pane_id.to_string())
-            .or_default()
-    }
-
-    pub fn terminal_viewport(&self, pane_id: &str) -> Option<&TerminalViewportState> {
-        self.terminal_viewports.get(pane_id)
-    }
-
-    pub fn clear_active_history_view(&mut self) {
-        self.active_history_pane_id = None;
-        self.active_history_parser = None;
-    }
-
-    pub fn sync_branch_session_counts(&mut self) {
-        for branch in &mut self.branches_state.branches {
-            branch.session_count = 0;
-            branch.running_session_count = 0;
-            branch.stopped_session_count = 0;
-        }
-
-        for tab in &self.session_tabs {
-            let Some(tab_branch) = tab.branch.as_deref() else {
-                continue;
-            };
-            let normalized_tab = normalize_branch_name(tab_branch);
-            for branch in &mut self.branches_state.branches {
-                if normalize_branch_name(&branch.name) == normalized_tab {
-                    branch.session_count += 1;
-                    match tab.status {
-                        SessionStatus::Running => branch.running_session_count += 1,
-                        SessionStatus::Completed(_) | SessionStatus::Error(_) => {
-                            branch.stopped_session_count += 1
-                        }
-                    }
-                }
-            }
+        if warnings.is_empty() {
+            None
+        } else {
+            Some(warnings.join("; "))
         }
     }
 }
 
-fn normalize_branch_name(name: &str) -> &str {
-    if let Some(stripped) = name.strip_prefix("remotes/") {
-        if let Some((_, rest)) = stripped.split_once('/') {
-            return rest;
-        }
-        return stripped;
-    }
-
-    if let Some(stripped) = name.strip_prefix("origin/") {
-        return stripped;
-    }
-    if let Some(stripped) = name.strip_prefix("upstream/") {
-        return stripped;
-    }
-
-    name
+/// Persisted session layout state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionState {
+    #[serde(default = "default_display_mode")]
+    pub display_mode: String,
+    #[serde(default = "default_panel_visible", alias = "management_visible")]
+    pub panel_visible: bool,
+    #[serde(default = "default_active_management_tab")]
+    pub active_management_tab: String,
+    #[serde(default = "default_session_count")]
+    pub session_count: usize,
 }
 
-fn map_pane_status(status: &gwt_core::terminal::pane::PaneStatus) -> SessionStatus {
-    match status {
-        gwt_core::terminal::pane::PaneStatus::Running => SessionStatus::Running,
-        gwt_core::terminal::pane::PaneStatus::Completed(code) => SessionStatus::Completed(*code),
-        gwt_core::terminal::pane::PaneStatus::Error(message) => {
-            SessionStatus::Error(message.clone())
+fn default_display_mode() -> String {
+    "tab".to_string()
+}
+
+fn default_panel_visible() -> bool {
+    false
+}
+
+fn default_active_management_tab() -> String {
+    "Branches".to_string()
+}
+
+fn default_session_count() -> usize {
+    1
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            display_mode: default_display_mode(),
+            panel_visible: default_panel_visible(),
+            active_management_tab: default_active_management_tab(),
+            session_count: default_session_count(),
         }
     }
 }
@@ -653,556 +737,215 @@ fn map_pane_status(status: &gwt_core::terminal::pane::PaneStatus) -> SessionStat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, path::PathBuf, thread, time::Duration};
+    use std::path::PathBuf;
 
-    use gwt_core::git::issue_cache::{IssueExactCache, IssueExactCacheEntry};
-    use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
-
-    fn test_model() -> Model {
-        let mut m = Model::new(PathBuf::from("/tmp/test-repo"));
-        m.active_layer = ActiveLayer::Management; // Force Management for tests
-        m
+    #[test]
+    fn model_new_defaults() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.active_session, 0);
+        assert_eq!(model.session_layout, SessionLayout::Tab);
+        assert_eq!(model.management_tab, ManagementTab::Branches);
+        assert!(!model.help_visible);
+        assert!(model.error_queue.is_empty());
+        assert!(!model.quit);
+        assert!(model.drain_notifications().is_empty());
+        assert!(model.notification_bus_handle().send(Notification::new(
+            gwt_notification::Severity::Info,
+            "test",
+            "queued",
+        )));
     }
 
-    fn test_session(name: &str, tab_type: SessionTabType) -> SessionTab {
-        SessionTab {
-            pane_id: format!("pane-{name}"),
-            name: name.to_string(),
-            tab_type,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: None,
-            spec_id: None,
-        }
+    #[test]
+    fn active_session_tab_returns_first() {
+        let model = Model::new(PathBuf::from("/tmp/repo"));
+        let tab = model.active_session_tab().unwrap();
+        assert_eq!(tab.name, "Shell");
+        assert_eq!(tab.tab_type, SessionTabType::Shell);
     }
 
-    fn attach_test_pane(model: &mut Model, pane_id: &str, command: &str, args: &[&str]) {
-        let pane = TerminalPane::new(PaneConfig {
-            pane_id: pane_id.to_string(),
-            command: command.to_string(),
-            args: args.iter().map(|arg| arg.to_string()).collect(),
-            working_dir: std::env::temp_dir(),
-            branch_name: "test-branch".to_string(),
-            agent_name: "test-agent".to_string(),
-            agent_color: AgentColor::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-            terminal_shell: None,
-            interactive: false,
-            windows_force_utf8: false,
-            project_root: model.repo_root.clone(),
-        })
-        .expect("failed to create test pane");
-        model
-            .pane_manager
-            .add_pane(pane)
-            .expect("failed to attach pane");
-    }
-
-    fn wait_for_session_count(model: &mut Model, expected_sessions: usize) {
-        for _ in 0..50 {
-            model.apply_background_updates();
-            if model.session_tabs.len() == expected_sessions {
-                return;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        panic!(
-            "expected {} sessions after auto-close, got {}",
-            expected_sessions,
-            model.session_tabs.len()
-        );
-    }
-
-    fn wait_for_session_status(model: &mut Model, pane_id: &str, expected: SessionStatus) {
-        for _ in 0..50 {
-            model.apply_background_updates();
-            if model
-                .session_tabs
+    #[test]
+    fn management_tab_labels() {
+        assert_eq!(ManagementTab::Branches.label(), "Branches");
+        assert_eq!(
+            ManagementTab::ALL
                 .iter()
-                .find(|tab| tab.pane_id == pane_id)
-                .is_some_and(|tab| tab.status == expected)
-            {
-                return;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        panic!("expected {pane_id} to reach status {:?}", expected);
-    }
-
-    fn wait_for_management_data(model: &mut Model, expected_specs: usize, expected_issues: usize) {
-        for _ in 0..50 {
-            model.apply_background_updates();
-            if model.specs_state.specs.len() == expected_specs
-                && model.issues_state.issues.len() == expected_issues
-            {
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        panic!(
-            "expected specs={}, issues={}, got specs={}, issues={}",
-            expected_specs,
-            expected_issues,
-            model.specs_state.specs.len(),
-            model.issues_state.issues.len()
+                .map(|tab| tab.label())
+                .collect::<Vec<_>>(),
+            vec![
+                "Branches", "Specs", "Issues", "PRs", "Profiles", "Git View", "Versions",
+                "Settings", "Logs",
+            ]
         );
+        assert_eq!(ManagementTab::Settings.label(), "Settings");
+        assert_eq!(ManagementTab::Logs.label(), "Logs");
     }
 
     #[test]
-    fn initial_state_starts_in_management_branches() {
-        let m = test_model();
-        assert_eq!(m.active_layer, ActiveLayer::Management);
-        assert_eq!(m.management_tab, ManagementTab::Branches);
-        assert!(m.session_tabs.is_empty());
-        assert!(!m.should_quit);
-        assert_eq!(m.tick_count, 0);
+    fn management_tab_all_has_nine_entries() {
+        assert_eq!(ManagementTab::ALL.len(), 9);
     }
 
     #[test]
-    fn toggle_layer_stays_management_when_no_sessions() {
-        let mut m = test_model();
-        m.toggle_layer();
-        assert_eq!(m.active_layer, ActiveLayer::Management);
+    fn vt_state_dimensions() {
+        let vt = VtState::new(40, 120);
+        assert_eq!(vt.rows(), 40);
+        assert_eq!(vt.cols(), 120);
+    }
+
+    // ---- SessionState tests ----
+
+    #[test]
+    fn session_state_default() {
+        let state = SessionState::default();
+        assert_eq!(state.display_mode, "tab");
+        assert!(!state.panel_visible);
+        assert_eq!(state.active_management_tab, "Branches");
+        assert_eq!(state.session_count, 1);
     }
 
     #[test]
-    fn toggle_layer_switches_when_sessions_exist() {
-        let mut m = test_model();
-        m.add_session(test_session("shell-1", SessionTabType::Shell));
-        // add_session switches to Main automatically
-        assert_eq!(m.active_layer, ActiveLayer::Main);
-        m.toggle_layer();
-        assert_eq!(m.active_layer, ActiveLayer::Management);
-        m.toggle_layer();
-        assert_eq!(m.active_layer, ActiveLayer::Main);
+    fn save_and_load_session_state_roundtrip_preserves_layout_visibility_and_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+
+        let model = Model::new(PathBuf::from("/tmp/repo"));
+        model.save_session_state(&path).unwrap();
+
+        let loaded = Model::load_session_state(&path).expect("load state");
+        assert_eq!(loaded.display_mode, "tab");
+        assert!(loaded.panel_visible);
+        assert_eq!(loaded.active_management_tab, "Branches");
+        assert_eq!(loaded.session_count, 1);
     }
 
     #[test]
-    fn add_session_switches_to_main_layer() {
-        let mut m = test_model();
-        m.add_session(test_session("agent-1", SessionTabType::Agent));
-        assert_eq!(m.active_layer, ActiveLayer::Main);
-        assert_eq!(m.active_session, 0);
-        assert_eq!(m.session_tabs.len(), 1);
+    fn save_session_state_with_grid_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.session_layout = SessionLayout::Grid;
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Settings;
+        model.save_session_state(&path).unwrap();
+
+        let loaded = Model::load_session_state(&path).expect("load state");
+        assert_eq!(loaded.display_mode, "grid");
+        assert!(loaded.panel_visible);
+        assert_eq!(loaded.active_management_tab, "Settings");
     }
 
     #[test]
-    fn session_next_prev_wraps() {
-        let mut m = test_model();
-        m.add_session(test_session("s1", SessionTabType::Shell));
-        m.add_session(test_session("s2", SessionTabType::Agent));
-        m.add_session(test_session("s3", SessionTabType::Shell));
-        assert_eq!(m.active_session, 2);
-
-        m.next_session();
-        assert_eq!(m.active_session, 0);
-
-        m.prev_session();
-        assert_eq!(m.active_session, 2);
+    fn load_session_state_missing_file_returns_error() {
+        let result = Model::load_session_state(Path::new("/nonexistent/path/session.toml"));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn switch_session_by_index() {
-        let mut m = test_model();
-        m.add_session(test_session("s1", SessionTabType::Shell));
-        m.add_session(test_session("s2", SessionTabType::Agent));
-        m.switch_session(0);
-        assert_eq!(m.active_session, 0);
-        // Out of range does nothing
-        m.switch_session(99);
-        assert_eq!(m.active_session, 0);
+    fn model_new_initialization_defaults() {
+        let model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization);
+        assert!(model.initialization.is_some());
+        let init = model.initialization.as_ref().unwrap();
+        assert!(!init.bare_migration);
+        assert!(init.url_input.is_empty());
     }
 
     #[test]
-    fn close_session_returns_to_management_when_empty() {
-        let mut m = test_model();
-        m.add_session(test_session("s1", SessionTabType::Shell));
-        assert_eq!(m.active_layer, ActiveLayer::Main);
-        m.close_active_session();
-        assert!(m.session_tabs.is_empty());
-        assert_eq!(m.active_layer, ActiveLayer::Management);
+    fn model_new_initialization_bare_migration() {
+        let model = Model::new_initialization(PathBuf::from("/tmp/bare"), true);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization);
+        let init = model.initialization.as_ref().unwrap();
+        assert!(init.bare_migration);
     }
 
     #[test]
-    fn close_session_adjusts_active_index() {
-        let mut m = test_model();
-        m.add_session(test_session("s1", SessionTabType::Shell));
-        m.add_session(test_session("s2", SessionTabType::Shell));
-        m.add_session(test_session("s3", SessionTabType::Shell));
-        // active = 2 (last added)
-        m.close_session(2);
-        assert_eq!(m.active_session, 1);
-        assert_eq!(m.session_tabs.len(), 2);
-    }
+    fn model_reset_transitions_to_management() {
+        let mut model = Model::new_initialization(PathBuf::from("/tmp/empty"), false);
+        assert_eq!(model.active_layer, ActiveLayer::Initialization);
 
-    #[test]
-    fn close_session_removes_matching_vt_parser() {
-        let mut m = test_model();
-        m.add_session(test_session("s1", SessionTabType::Shell));
-        m.vt_parsers
-            .insert("pane-s1".to_string(), vt100::Parser::new(24, 80, 0));
-
-        m.close_active_session();
-
-        assert!(!m.vt_parsers.contains_key("pane-s1"));
-    }
-
-    #[test]
-    fn apply_background_updates_keeps_completed_agent_session_visible() {
-        let mut m = test_model();
-        attach_test_pane(&mut m, "pane-agent", "/usr/bin/true", &[]);
-        m.add_session(SessionTab {
-            pane_id: "pane-agent".to_string(),
-            name: "agent".to_string(),
-            tab_type: SessionTabType::Agent,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: Some("feature/test".to_string()),
-            spec_id: None,
-        });
-
-        wait_for_session_count(&mut m, 1);
-        wait_for_session_status(&mut m, "pane-agent", SessionStatus::Completed(0));
-
-        assert_eq!(m.active_layer, ActiveLayer::Main);
-        assert_eq!(m.session_tabs.len(), 1);
-        assert_eq!(m.session_tabs[0].status, SessionStatus::Completed(0));
-    }
-
-    #[test]
-    fn apply_background_updates_keeps_completed_shell_session_visible() {
-        let mut m = test_model();
-        attach_test_pane(&mut m, "pane-shell", "/usr/bin/true", &[]);
-        m.add_session(SessionTab {
-            pane_id: "pane-shell".to_string(),
-            name: "shell".to_string(),
-            tab_type: SessionTabType::Shell,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: None,
-            spec_id: None,
-        });
-
-        wait_for_session_count(&mut m, 1);
-        wait_for_session_status(&mut m, "pane-shell", SessionStatus::Completed(0));
-
-        assert_eq!(m.active_layer, ActiveLayer::Main);
-        assert_eq!(m.session_tabs.len(), 1);
-        assert_eq!(m.session_tabs[0].status, SessionStatus::Completed(0));
-    }
-
-    #[test]
-    fn apply_background_updates_keeps_failed_session_visible() {
-        let mut m = test_model();
-        attach_test_pane(&mut m, "pane-failed", "/usr/bin/false", &[]);
-        m.add_session(SessionTab {
-            pane_id: "pane-failed".to_string(),
-            name: "shell".to_string(),
-            tab_type: SessionTabType::Shell,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: None,
-            spec_id: None,
-        });
-
-        wait_for_session_count(&mut m, 1);
-        wait_for_session_status(&mut m, "pane-failed", SessionStatus::Completed(1));
-
-        assert_eq!(m.active_layer, ActiveLayer::Main);
-        assert_eq!(m.session_tabs.len(), 1);
-        assert_eq!(m.session_tabs[0].status, SessionStatus::Completed(1));
-    }
-
-    #[test]
-    fn apply_background_updates_keeps_completed_session_focused() {
-        let mut m = test_model();
-        attach_test_pane(&mut m, "pane-slow", "/bin/sleep", &["60"]);
-        m.add_session(SessionTab {
-            pane_id: "pane-slow".to_string(),
-            name: "shell".to_string(),
-            tab_type: SessionTabType::Shell,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: None,
-            spec_id: None,
-        });
-        attach_test_pane(&mut m, "pane-done", "/usr/bin/true", &[]);
-        m.add_session(SessionTab {
-            pane_id: "pane-done".to_string(),
-            name: "agent".to_string(),
-            tab_type: SessionTabType::Agent,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: Some("feature/test".to_string()),
-            spec_id: None,
-        });
-
-        wait_for_session_count(&mut m, 2);
-        wait_for_session_status(&mut m, "pane-done", SessionStatus::Completed(0));
-
-        assert_eq!(m.active_layer, ActiveLayer::Main);
-        assert_eq!(m.active_session, 1);
-        assert_eq!(m.session_tabs[0].pane_id, "pane-slow");
-        assert_eq!(m.session_tabs[0].status, SessionStatus::Running);
-        assert_eq!(m.session_tabs[1].pane_id, "pane-done");
-        assert_eq!(m.session_tabs[1].status, SessionStatus::Completed(0));
-
-        let _ = m.close_active_session();
-    }
-
-    #[test]
-    fn ctrl_c_double_tap_quits() {
-        let mut m = test_model();
-        assert!(!m.handle_ctrl_c());
-        // Immediate second tap
-        assert!(m.handle_ctrl_c());
-        assert!(m.should_quit);
-    }
-
-    #[test]
-    fn error_queue_push_dismiss() {
-        let mut m = test_model();
-        assert!(m.error_queue.is_empty());
-        m.push_error(ErrorEntry {
-            message: "test error".into(),
-            severity: ErrorSeverity::Minor,
-        });
-        assert_eq!(m.error_queue.len(), 1);
-        m.dismiss_error();
-        assert!(m.error_queue.is_empty());
-        // Dismiss on empty is safe
-        m.dismiss_error();
-    }
-
-    #[test]
-    fn management_tab_metadata() {
-        assert_eq!(ManagementTab::Branches.index(), 0);
-        assert_eq!(ManagementTab::Specs.index(), 1);
-        assert_eq!(ManagementTab::Issues.index(), 2);
-        assert_eq!(ManagementTab::Profiles.index(), 3);
-        assert_eq!(ManagementTab::Versions.index(), 4);
-        assert_eq!(ManagementTab::Settings.index(), 5);
-        assert_eq!(ManagementTab::Logs.index(), 6);
-        assert_eq!(ManagementTab::ALL[1].label(), "SPECs");
-        assert_eq!(ManagementTab::ALL[2].label(), "Issues");
-        assert_eq!(ManagementTab::ALL[3].label(), "Profiles");
-        assert_eq!(ManagementTab::ALL[4].label(), "Settings");
-        assert_eq!(ManagementTab::ALL[5].label(), "Versions");
-        assert_eq!(ManagementTab::ALL[6].label(), "Logs");
-        assert_eq!(ManagementTab::ALL.len(), 7);
-    }
-
-    #[test]
-    fn tick_increments_count() {
-        let mut m = test_model();
-        m.apply_background_updates();
-        assert_eq!(m.tick_count, 1);
-        m.apply_background_updates();
-        assert_eq!(m.tick_count, 2);
-    }
-
-    #[test]
-    fn load_all_data_keeps_specs_and_issues_separate() {
-        let temp = tempfile::tempdir().unwrap();
-        let specs_dir = temp.path().join("specs");
-        std::fs::create_dir_all(specs_dir.join("SPEC-1776")).unwrap();
-        std::fs::write(
-            specs_dir.join("SPEC-1776").join("metadata.json"),
-            r#"{"id":"1776","title":"Spec detail","status":"open","phase":"planning"}"#,
-        )
-        .unwrap();
-
-        let mut cache = IssueExactCache::default();
-        cache.upsert(IssueExactCacheEntry {
-            number: 42,
-            title: "GitHub issue".to_string(),
-            url: "https://example.com/issues/42".to_string(),
-            state: "OPEN".to_string(),
-            labels: vec!["bug".to_string()],
-            updated_at: "2026-04-02T00:00:00Z".to_string(),
-            fetched_at: 0,
-        });
-        cache.save(temp.path()).unwrap();
-
-        let mut model = Model::new(temp.path().to_path_buf());
-        model.load_all_data();
-        wait_for_management_data(&mut model, 1, 1);
-
-        assert_eq!(model.specs_state.specs.len(), 1);
-        assert_eq!(model.issues_state.issues.len(), 1);
-        assert_eq!(model.issues_state.issues[0].number, 42);
-        assert_eq!(model.issues_state.issues[0].title, "GitHub issue");
-    }
-
-    #[test]
-    fn reset_returns_to_branch_first_management_entry() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Issues;
-        model.add_session(test_session("s1", SessionTabType::Shell));
-
-        let repo = tempfile::tempdir().unwrap();
-
-        model.reset(repo.path().to_path_buf());
+        model.terminal_size = (120, 40);
+        model.reset(PathBuf::from("/tmp/repo"));
 
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert_eq!(model.management_tab, ManagementTab::Branches);
-        assert!(model.session_tabs.is_empty());
-        assert_eq!(model.session_layout_mode, SessionLayoutMode::Grid);
+        assert!(model.initialization.is_none());
+        assert_eq!(model.repo_path, PathBuf::from("/tmp/repo"));
+        // Terminal size is preserved
+        assert_eq!(model.terminal_size, (120, 40));
     }
 
     #[test]
-    fn sync_branch_session_counts_tracks_running_and_stopped_sessions() {
-        let mut model = test_model();
-        model.branches_state.branches = vec![crate::screens::branches::BranchItem {
-            name: "feature/demo".to_string(),
-            is_current: false,
-            has_worktree: true,
-            worktree_path: Some("/tmp/feature-demo".to_string()),
-            session_count: 0,
-            running_session_count: 0,
-            stopped_session_count: 0,
-            worktree_indicator: 'w',
-            has_changes: false,
-            has_unpushed: false,
-            is_protected: false,
-            last_tool_usage: None,
-            last_tool_id: None,
-            quick_start_available: false,
-            linked_issue_number: None,
-            linked_issue_state: None,
-            pr_title: None,
-            pr_number: None,
-            pr_state: None,
-            safety_status: crate::screens::branches::SafetyStatus::Safe,
-            is_remote: false,
-            last_commit_timestamp: None,
-        }];
-        model.add_session(SessionTab {
-            pane_id: "pane-running".to_string(),
-            name: "running".to_string(),
-            tab_type: SessionTabType::Agent,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: Some("feature/demo".to_string()),
-            spec_id: None,
+    fn save_session_state_tracks_session_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        // Add extra sessions
+        model.sessions.push(SessionTab {
+            id: "shell-1".to_string(),
+            name: "Shell 2".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: VtState::new(24, 80),
         });
-        model.add_session(SessionTab {
-            pane_id: "pane-done".to_string(),
-            name: "done".to_string(),
-            tab_type: SessionTabType::Agent,
-            color: AgentColor::Green,
-            status: SessionStatus::Completed(0),
-            branch: Some("feature/demo".to_string()),
-            spec_id: None,
+        model.sessions.push(SessionTab {
+            id: "shell-2".to_string(),
+            name: "Shell 3".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: VtState::new(24, 80),
         });
+        model.save_session_state(&path).unwrap();
 
-        model.sync_branch_session_counts();
-
-        let branch = &model.branches_state.branches[0];
-        assert_eq!(branch.session_count, 2);
-        assert_eq!(branch.running_session_count, 1);
-        assert_eq!(branch.stopped_session_count, 1);
+        let loaded = Model::load_session_state(&path).expect("load state");
+        assert_eq!(loaded.session_count, 3);
     }
 
     #[test]
-    fn apply_background_updates_applies_management_data_preload() {
-        let mut model = test_model();
-        let (tx, rx) = std::sync::mpsc::channel();
-        model.management_data_rx = Some(rx);
+    fn save_session_state_creates_missing_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("state.toml");
 
-        tx.send(ManagementDataUpdate {
-            issues: vec![crate::screens::issues::IssueItem {
-                number: 7,
-                title: "Loaded issue".to_string(),
-                state: "OPEN".to_string(),
-                labels: vec!["bug".to_string()],
-            }],
-            specs: vec![crate::screens::specs::SpecItem {
-                dir_name: "SPEC-7".to_string(),
-                id: "7".to_string(),
-                title: "Loaded spec".to_string(),
-                status: "open".to_string(),
-                phase: "draft".to_string(),
-                branches: vec![],
-            }],
-            versions: vec![crate::screens::versions::VersionTag {
-                id: "v1".to_string(),
-                label: "v1.0.0".to_string(),
-                range_from: None,
-                range_to: "v1.0.0".to_string(),
-                commit_count: 1,
-                summary_preview: "initial".to_string(),
-            }],
-            logs: vec![crate::screens::logs::LogEntry {
-                timestamp: "2026-04-02T00:00:00Z".to_string(),
-                level: "INFO".to_string(),
-                message: "loaded".to_string(),
-                target: "gwt".to_string(),
-                category: Some("ui".to_string()),
-                event: Some("preload".to_string()),
-                result: Some("success".to_string()),
-                workspace: Some("default".to_string()),
-                error_code: None,
-                error_detail: None,
-                extra: std::collections::BTreeMap::new(),
-            }],
-        })
-        .unwrap();
+        let model = Model::new(PathBuf::from("/tmp/repo"));
+        model.save_session_state(&path).unwrap();
 
-        model.apply_background_updates();
-
-        assert_eq!(model.issues_state.issues.len(), 1);
-        assert_eq!(model.specs_state.specs.len(), 1);
-        assert_eq!(model.versions_state.tags.len(), 1);
-        assert_eq!(model.logs_state.entries.len(), 1);
+        assert!(path.exists());
     }
 
     #[test]
-    fn apply_background_updates_applies_branch_list_enrichment() {
-        let mut model = test_model();
-        let (tx, rx) = std::sync::mpsc::channel();
-        model.branch_list_rx = Some(rx);
+    fn restore_session_state_from_corrupted_file_returns_warning_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(&path, "display_mode = [").unwrap();
 
-        tx.send(BranchListUpdate {
-            branches: vec![crate::screens::branches::BranchItem {
-                name: "feature/demo".to_string(),
-                is_current: false,
-                has_worktree: true,
-                worktree_path: Some("/tmp/demo".to_string()),
-                session_count: 0,
-                running_session_count: 0,
-                stopped_session_count: 0,
-                worktree_indicator: 'w',
-                has_changes: false,
-                has_unpushed: true,
-                is_protected: false,
-                last_tool_usage: None,
-                last_tool_id: None,
-                quick_start_available: false,
-                linked_issue_number: None,
-                linked_issue_state: None,
-                pr_title: Some("Demo PR".to_string()),
-                pr_number: Some(7),
-                pr_state: Some("open".to_string()),
-                safety_status: crate::screens::branches::SafetyStatus::Warning,
-                is_remote: false,
-                last_commit_timestamp: None,
-            }],
-        })
-        .unwrap();
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.session_layout = SessionLayout::Grid;
+        model.management_tab = ManagementTab::Settings;
 
-        model.apply_background_updates();
+        let warning = model.restore_session_state_from_path(&path);
 
-        assert_eq!(model.branches_state.branches.len(), 1);
-        let branch = &model.branches_state.branches[0];
-        assert_eq!(branch.pr_number, Some(7));
-        assert_eq!(branch.pr_title.as_deref(), Some("Demo PR"));
-        assert_eq!(
-            branch.safety_status,
-            crate::screens::branches::SafetyStatus::Warning
-        );
-        assert_eq!(branch.worktree_indicator, 'w');
+        assert!(warning.is_some());
+        assert_eq!(model.session_layout, SessionLayout::Grid);
+        assert_eq!(model.management_tab, ManagementTab::Settings);
+    }
+
+    #[test]
+    fn restore_session_state_from_path_applies_saved_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let mut original = Model::new(PathBuf::from("/tmp/repo"));
+        original.session_layout = SessionLayout::Grid;
+        original.active_layer = ActiveLayer::Main;
+        original.management_tab = ManagementTab::Logs;
+        original.save_session_state(&path).unwrap();
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restored.restore_session_state_from_path(&path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.session_layout, SessionLayout::Grid);
+        assert_eq!(restored.active_layer, ActiveLayer::Main);
+        assert_eq!(restored.management_tab, ManagementTab::Logs);
     }
 }

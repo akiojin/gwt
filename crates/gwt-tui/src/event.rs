@@ -1,110 +1,63 @@
-//! Event loop: polls crossterm events and PTY output into a unified stream
+//! Event loop — polls crossterm events, PTY output, and tick timer.
 
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind, MouseEvent};
+use crossterm::event::{self, Event, KeyEvent};
 
-/// Unified TUI event
-#[derive(Debug)]
-pub enum TuiEvent {
-    /// Key press event (only Press kind, not Release/Repeat)
-    Key(KeyEvent),
-    /// Pasted text from the terminal
-    Paste(String),
-    /// Mouse event
-    Mouse(MouseEvent),
-    /// Terminal resize
-    Resize(u16, u16),
-    /// PTY output from a pane
-    PtyOutput { pane_id: String, data: Vec<u8> },
-    /// Tick for background polling
-    Tick,
-}
+use crate::message::Message;
 
-/// PTY output message sent from reader threads to the event loop.
-#[derive(Debug)]
-pub struct PtyOutputMsg {
-    pub pane_id: String,
-    pub data: Vec<u8>,
-}
+/// Tick interval for the event loop.
+const TICK_RATE: Duration = Duration::from_millis(100);
 
-/// Sender half for PTY output (cloned per reader thread).
-pub type PtyOutputSender = Sender<PtyOutputMsg>;
-/// Receiver half consumed by the event loop.
-pub type PtyOutputReceiver = Receiver<PtyOutputMsg>;
-
-/// Create a channel pair for PTY output.
-pub fn pty_output_channel() -> (PtyOutputSender, PtyOutputReceiver) {
-    mpsc::channel()
-}
-
-/// Event loop that merges crossterm events with PTY output.
-pub struct EventLoop {
-    pty_rx: PtyOutputReceiver,
-    poll_timeout: Duration,
-}
-
-impl EventLoop {
-    /// Create a new event loop with the PTY output receiver.
-    pub fn new(pty_rx: PtyOutputReceiver) -> Self {
-        Self {
-            pty_rx,
-            // Poll crossterm at 50ms intervals for responsive PTY output
-            poll_timeout: Duration::from_millis(50),
-        }
+/// Poll for the next message. Returns `None` on timeout with no events.
+pub fn poll_event(deadline: Instant) -> Option<Message> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Some(Message::Tick);
     }
 
-    fn read_ready_terminal_event(
-        &self,
-        timeout: Duration,
-    ) -> Result<Option<TuiEvent>, Box<dyn std::error::Error>> {
-        if !event::poll(timeout)? {
-            return Ok(None);
-        }
-
-        let event = match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => Some(TuiEvent::Key(key)),
-            Event::Paste(data) => Some(TuiEvent::Paste(data)),
-            Event::Mouse(mouse) => Some(TuiEvent::Mouse(mouse)),
-            Event::Resize(w, h) => Some(TuiEvent::Resize(w, h)),
+    if event::poll(remaining).unwrap_or(false) {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == event::KeyEventKind::Press => {
+                Some(Message::KeyInput(key))
+            }
+            Ok(Event::Mouse(mouse)) => Some(Message::MouseInput(mouse)),
+            Ok(Event::Resize(w, h)) => Some(Message::Resize(w, h)),
             _ => None,
-        };
+        }
+    } else {
+        Some(Message::Tick)
+    }
+}
 
-        Ok(event)
+/// Calculate the next tick deadline.
+pub fn next_tick_deadline() -> Instant {
+    Instant::now() + TICK_RATE
+}
+
+/// Convert a raw key event into a high-level Message via the keybind system,
+/// or return it as-is for PTY forwarding.
+pub fn classify_key(key: KeyEvent) -> Message {
+    // Phase 2: integrate with keybind registry for Ctrl+G prefix
+    Message::KeyInput(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_tick_deadline_is_in_the_future() {
+        let now = Instant::now();
+        let deadline = next_tick_deadline();
+        assert!(deadline > now);
+        assert!(deadline - now <= TICK_RATE + Duration::from_millis(5));
     }
 
-    fn try_recv_pty(&self) -> Option<TuiEvent> {
-        match self.pty_rx.try_recv() {
-            Ok(msg) => Some(TuiEvent::PtyOutput {
-                pane_id: msg.pane_id,
-                data: msg.data,
-            }),
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
-        }
-    }
-
-    /// Block until the next event is available.
-    pub fn next(&self) -> Result<TuiEvent, Box<dyn std::error::Error>> {
-        // Prefer already-ready terminal input over PTY output so copy-mode
-        // scrolling and selection don't get starved by chatty panes.
-        if let Some(event) = self.read_ready_terminal_event(Duration::ZERO)? {
-            return Ok(event);
-        }
-
-        if let Some(event) = self.try_recv_pty() {
-            return Ok(event);
-        }
-
-        if let Some(event) = self.read_ready_terminal_event(self.poll_timeout)? {
-            return Ok(event);
-        }
-
-        if let Some(event) = self.try_recv_pty() {
-            return Ok(event);
-        }
-
-        // Nothing happened → tick
-        Ok(TuiEvent::Tick)
+    #[test]
+    fn poll_event_returns_tick_on_expired_deadline() {
+        let past = Instant::now() - Duration::from_secs(1);
+        let msg = poll_event(past);
+        assert!(matches!(msg, Some(Message::Tick)));
     }
 }

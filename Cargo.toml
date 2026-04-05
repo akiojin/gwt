@@ -1,8 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/gwt-agent",
+    "crates/gwt-ai",
+    "crates/gwt-clipboard",
+    "crates/gwt-config",
     "crates/gwt-core",
+    "crates/gwt-docker",
+    "crates/gwt-git",
+    "crates/gwt-notification",
+    "crates/gwt-skills",
+    "crates/gwt-terminal",
     "crates/gwt-tui",
+    "crates/gwt-voice",
 ]
 default-members = [
     "crates/gwt-tui",
@@ -17,7 +27,17 @@ authors = ["akiojin"]
 
 [workspace.dependencies]
 # Internal crates
+gwt-agent = { path = "crates/gwt-agent" }
+gwt-ai = { path = "crates/gwt-ai" }
+gwt-clipboard = { path = "crates/gwt-clipboard" }
+gwt-config = { path = "crates/gwt-config" }
 gwt-core = { path = "crates/gwt-core" }
+gwt-docker = { path = "crates/gwt-docker" }
+gwt-git = { path = "crates/gwt-git" }
+gwt-notification = { path = "crates/gwt-notification" }
+gwt-skills = { path = "crates/gwt-skills" }
+gwt-terminal = { path = "crates/gwt-terminal" }
+gwt-voice = { path = "crates/gwt-voice" }
 
 # Error handling
 thiserror = "2"
@@ -59,9 +79,13 @@ portable-pty = "0.9"
 
 # Testing
 tempfile = "3"
+insta = { version = "1", features = ["yaml"] }
 
 # Benchmarks
 criterion = { version = "0.8", features = ["html_reports"] }
+
+# Embedded assets
+include_dir = "0.7"
 
 # Utilities
 directories = "6"
@@ -84,6 +108,9 @@ sha2 = "0.10"
 
 # Home directory
 dirs = "6"
+
+# Executable detection
+which = "8"
 
 # Path canonicalization (UNC-free on Windows)
 dunce = "1"

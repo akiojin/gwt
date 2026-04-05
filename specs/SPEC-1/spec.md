@@ -1,0 +1,102 @@
+# Terminal Emulation -- vt100 Rendering, Scrollback, Selection
+
+## Background
+
+`renderer.rs` and related tests cover low-level vt100 cell rendering, URL underline detection, and alt-screen verification, but the current `gwt-tui` session pane still lacks an end-to-end vt100-backed surface. This SPEC therefore covers both the renderer-level work already in place and the still-missing session-surface foundation needed for URL opening, scrollback interaction, and selection.
+
+## User Stories
+
+### US-1: View Agent Output with Full ANSI Color and Attribute Support (P0) -- PARTIALLY IMPLEMENTED
+
+As a developer, I want agent output to render with full ANSI color and text attributes so that I can read formatted output naturally.
+
+**Acceptance Scenarios**
+
+1. Given PTY output containing ANSI 256-color escape sequences, when rendered in gwt-tui, then all Named, Indexed, and RGB colors display correctly.
+2. Given PTY output containing bold, italic, underline, and strikethrough attributes, when rendered, then each attribute is visually distinct.
+3. Given rapid PTY output (1000+ lines/sec), when rendering, then no frames are dropped and all content is eventually visible.
+
+### US-2: Scroll Through Terminal History (P0) -- NOT IMPLEMENTED
+
+As a developer, I want to scroll through terminal history so that I can review past output.
+
+**Acceptance Scenarios**
+
+1. Given a session with more than one screen of output, when I scroll up with mouse wheel, then earlier output becomes visible.
+2. Given a scrollback buffer at maximum capacity (10,000 lines), when new output arrives, then the oldest lines are evicted first.
+3. Given I have scrolled up, when new output arrives, then the viewport stays at my scroll position (no auto-jump).
+
+### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
+
+As a developer, I want to select text with mouse drag and copy it so that I can paste terminal output elsewhere.
+
+**Acceptance Scenarios**
+
+1. Given terminal output is visible, when I click and drag the mouse, then the selected region is highlighted with reversed video.
+2. Given a text selection exists, when I release the mouse button, then the selected text is copied to the system clipboard.
+3. Given a selection spans multiple lines, when copied, then line breaks are preserved correctly.
+
+### US-4: Click URLs in Terminal Output to Open in Browser (P1) -- NOT IMPLEMENTED
+
+As a developer, I want to click URLs in terminal output so that I can quickly open links without manual copy-paste.
+
+**Acceptance Scenarios**
+
+1. Given terminal output contains a URL (http:// or https://), when rendered, then the URL text is underlined.
+2. Given a detected URL is visible, when I Ctrl+click it, then my default browser opens the URL.
+3. Given terminal output contains multiple URLs on the same line, when rendered, then each URL is independently clickable.
+4. Given a URL wraps across two terminal lines, when detected, then the full URL is recognized and clickable.
+
+### US-5: Run TUI Apps That Use Alt-Screen Buffer (P2) -- VERIFIED AT RENDERER LAYER ONLY
+
+As a developer, I want TUI applications (vi, top, htop) running inside gwt sessions to display correctly using the alternate screen buffer.
+
+**Acceptance Scenarios**
+
+1. Given a TUI app (e.g., vi) is launched inside a gwt session, when it enters alt-screen mode, then the main scrollback is preserved and the alt-screen content renders.
+2. Given a TUI app exits alt-screen mode, when the main screen restores, then the original scrollback content is intact.
+3. Given a TUI app uses cursor movement and screen clearing, when rendering, then the display matches native terminal behavior.
+
+## Edge Cases
+
+- PTY output contains incomplete/malformed ANSI escape sequences mid-stream.
+- Extremely long lines (>10,000 characters) that exceed terminal width.
+- Binary data accidentally written to PTY (non-UTF-8 bytes).
+- Scrollback buffer boundary: exactly 10,000 lines with rapid new output.
+- URL containing special characters (parentheses, query strings, fragments).
+- URL at the very end of scrollback buffer about to be evicted.
+- Mouse selection across a region containing wide (CJK) characters.
+- Alt-screen app sends output after gwt session is backgrounded.
+
+## Functional Requirements
+
+- **FR-001**: `vt100::Parser` processes raw PTY bytes into a screen buffer with cell-level color and attribute data.
+- **FR-002**: `renderer.rs` converts vt100 cells to ratatui `Buffer` with color mapping: Named to Named, Indexed to Indexed, RGB to Rgb.
+- **FR-003**: Scrollback buffer stores up to 10,000 lines per pane, configurable via settings.
+- **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
+- **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
+- **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
+- **FR-007**: Copy selected text to system clipboard via platform-native clipboard integration.
+- **FR-008**: URL detection in terminal output using regex pattern matching (http/https schemes).
+- **FR-009**: Ctrl+click or Enter on a detected URL opens the default browser via `open` (macOS) / `xdg-open` (Linux).
+- **FR-010**: Alt-screen buffer support: vt100 crate handles DECSET 1049 for alternate screen activation/deactivation.
+- **FR-011**: Rendering handles wide characters (CJK) with correct 2-cell width accounting.
+- **FR-012**: Malformed ANSI sequences are silently discarded without corrupting the screen buffer.
+
+## Non-Functional Requirements
+
+- **NFR-001**: Rendering latency under 16ms per frame to maintain 60fps visual smoothness.
+- **NFR-002**: Memory usage proportional to scrollback size; 10,000 lines should consume under 50MB per pane.
+- **NFR-003**: Cross-platform support via crossterm backend (macOS, Linux, Windows).
+- **NFR-004**: No visible flicker during rapid output (smooth rendering pipeline).
+- **NFR-005**: Clipboard operations complete within 100ms.
+- **NFR-006**: URL detection adds no measurable latency to normal rendering path.
+
+## Success Criteria
+
+- **SC-001**: All 17+ existing keybind and viewport tests continue to pass.
+- **SC-002**: URL detection correctly identifies URLs in test fixtures covering common patterns.
+- **SC-003**: Ctrl+click on a URL invokes the platform browser opener with the correct URL.
+- **SC-004**: Alt-screen buffer activation/deactivation preserves main scrollback integrity.
+- **SC-005**: Color mapping tests cover Named, Indexed, and RGB color spaces.
+- **SC-006**: Scrollback eviction at 10,000-line boundary works without data corruption.

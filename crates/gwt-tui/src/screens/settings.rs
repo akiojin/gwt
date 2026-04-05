@@ -1,2345 +1,1520 @@
-//! Settings screen — category-based settings management
-//!
-//! Migrated from gwt-cli reference with Elm Architecture adaptation.
-//! Includes custom agent management (SPEC-71f2742d US3),
-//! profile management, environment variable editing.
+//! Settings management screen.
 
-use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwt_core::config::{
-    AgentType, CustomCodingAgent, Profile, ProfilesConfig, Settings, ToolsConfig,
+use gwt_agent::{custom::CustomAgentType, CustomCodingAgent};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, List, ListItem, Paragraph},
+    Frame,
 };
-use ratatui::prelude::*;
-use ratatui::widgets::*;
 
-// ---------------------------------------------------------------------------
-// Settings categories
-// ---------------------------------------------------------------------------
+use gwt_config::{ConfigError, Settings, VoiceConfig};
+use gwt_skills::assets::CLAUDE_SKILLS;
 
-/// Settings categories displayed in the left/tab panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::custom_agents::{
+    load_stored_custom_agents_from_path, save_stored_custom_agents_to_path, StoredCustomAgent,
+};
+
+/// Settings category tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
+    #[default]
     General,
     Worktree,
     Agent,
     CustomAgents,
     Environment,
-    AISettings,
+    Ai,
+    Skills,
+    Voice,
 }
 
 impl SettingsCategory {
-    pub const ALL: [SettingsCategory; 6] = [
+    /// All categories in display order.
+    pub const ALL: [SettingsCategory; 8] = [
         SettingsCategory::General,
         SettingsCategory::Worktree,
         SettingsCategory::Agent,
         SettingsCategory::CustomAgents,
         SettingsCategory::Environment,
-        SettingsCategory::AISettings,
+        SettingsCategory::Ai,
+        SettingsCategory::Skills,
+        SettingsCategory::Voice,
     ];
 
+    /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
-            SettingsCategory::General => "General",
-            SettingsCategory::Worktree => "Worktree",
-            SettingsCategory::Agent => "Agent",
-            SettingsCategory::CustomAgents => "Custom",
-            SettingsCategory::Environment => "Env",
-            SettingsCategory::AISettings => "AI",
+            Self::General => "General",
+            Self::Worktree => "Worktree",
+            Self::Agent => "Agent",
+            Self::CustomAgents => "Custom Agents",
+            Self::Environment => "Environment",
+            Self::Ai => "AI",
+            Self::Skills => "Skills",
+            Self::Voice => "Voice",
         }
     }
 
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
+    /// Cycle to next category.
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|c| *c == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 
-    pub const MANAGEMENT_TAB_ALL: [SettingsCategory; 5] = [
-        SettingsCategory::General,
-        SettingsCategory::Worktree,
-        SettingsCategory::Agent,
-        SettingsCategory::CustomAgents,
-        SettingsCategory::AISettings,
-    ];
-
-    fn management_index(self) -> Option<usize> {
-        Self::MANAGEMENT_TAB_ALL.iter().position(|c| *c == self)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Custom agent form types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum CustomAgentMode {
-    #[default]
-    List,
-    Add,
-    Edit(String),
-    ConfirmDelete(String),
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum AgentFormField {
-    #[default]
-    Id,
-    DisplayName,
-    Type,
-    Command,
-}
-
-impl AgentFormField {
-    pub fn all() -> &'static [AgentFormField] {
-        &[
-            AgentFormField::Id,
-            AgentFormField::DisplayName,
-            AgentFormField::Type,
-            AgentFormField::Command,
-        ]
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            AgentFormField::Id => "ID",
-            AgentFormField::DisplayName => "Display Name",
-            AgentFormField::Type => "Type",
-            AgentFormField::Command => "Command",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AgentFormState {
-    pub id: String,
-    pub display_name: String,
-    pub agent_type: AgentType,
-    pub command: String,
-    pub current_field: AgentFormField,
-    pub cursor: usize,
-}
-
-impl AgentFormState {
-    pub fn new() -> Self {
-        Self {
-            agent_type: AgentType::Command,
-            ..Default::default()
-        }
-    }
-
-    pub fn from_agent(agent: &CustomCodingAgent) -> Self {
-        Self {
-            id: agent.id.clone(),
-            display_name: agent.display_name.clone(),
-            agent_type: agent.agent_type,
-            command: agent.command.clone(),
-            current_field: AgentFormField::Id,
-            cursor: agent.id.len(),
-        }
-    }
-
-    pub fn to_agent(&self) -> CustomCodingAgent {
-        CustomCodingAgent {
-            id: self.id.clone(),
-            display_name: self.display_name.clone(),
-            agent_type: self.agent_type,
-            command: self.command.clone(),
-            default_args: vec![],
-            mode_args: None,
-            permission_skip_args: vec![],
-            env: HashMap::new(),
-            models: vec![],
-            version_command: None,
-        }
-    }
-
-    fn current_value(&self) -> &str {
-        match self.current_field {
-            AgentFormField::Id => &self.id,
-            AgentFormField::DisplayName => &self.display_name,
-            AgentFormField::Type => "",
-            AgentFormField::Command => &self.command,
-        }
-    }
-
-    fn current_value_mut(&mut self) -> Option<&mut String> {
-        match self.current_field {
-            AgentFormField::Id => Some(&mut self.id),
-            AgentFormField::DisplayName => Some(&mut self.display_name),
-            AgentFormField::Type => None,
-            AgentFormField::Command => Some(&mut self.command),
-        }
-    }
-
-    pub fn next_field(&mut self) {
-        let fields = AgentFormField::all();
-        let idx = fields
-            .iter()
-            .position(|f| *f == self.current_field)
-            .unwrap_or(0);
-        self.current_field = fields[(idx + 1) % fields.len()];
-        self.cursor = self.current_value().len();
-    }
-
-    pub fn prev_field(&mut self) {
-        let fields = AgentFormField::all();
-        let idx = fields
-            .iter()
-            .position(|f| *f == self.current_field)
-            .unwrap_or(0);
-        self.current_field = fields[(idx + fields.len() - 1) % fields.len()];
-        self.cursor = self.current_value().len();
-    }
-
-    pub fn insert_char(&mut self, c: char) {
-        let cursor = self.cursor;
-        if let Some(value) = self.current_value_mut() {
-            value.insert(cursor, c);
-        }
-        self.cursor += 1;
-    }
-
-    pub fn delete_char(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            let cursor = self.cursor;
-            if let Some(value) = self.current_value_mut() {
-                value.remove(cursor);
-            }
-        }
-    }
-
-    pub fn cycle_type(&mut self) {
-        self.agent_type = match self.agent_type {
-            AgentType::Command => AgentType::Path,
-            AgentType::Path => AgentType::Bunx,
-            AgentType::Bunx => AgentType::Command,
-        };
-    }
-
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.id.is_empty() {
-            return Err("ID is required");
-        }
-        if !self.id.chars().all(|c| c.is_alphanumeric() || c == '-') {
-            return Err("ID must be alphanumeric with hyphens only");
-        }
-        if self.display_name.is_empty() {
-            return Err("Display Name is required");
-        }
-        if self.command.is_empty() {
-            return Err("Command is required");
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Profile management types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum ProfileMode {
-    #[default]
-    List,
-    Add,
-    Edit(String),
-    ConfirmDelete(String),
-    EnvEdit(String),
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ProfileFormField {
-    #[default]
-    Name,
-    Description,
-}
-
-impl ProfileFormField {
-    pub fn all() -> &'static [ProfileFormField] {
-        &[ProfileFormField::Name, ProfileFormField::Description]
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            ProfileFormField::Name => "Name",
-            ProfileFormField::Description => "Description",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ProfileFormState {
-    pub name: String,
-    pub description: String,
-    pub current_field: ProfileFormField,
-    pub cursor: usize,
-}
-
-impl ProfileFormState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn from_profile(profile: &Profile) -> Self {
-        Self {
-            name: profile.name.clone(),
-            description: profile.description.clone(),
-            current_field: ProfileFormField::Name,
-            cursor: profile.name.len(),
-        }
-    }
-
-    pub fn to_profile(&self, original: Option<&Profile>) -> Profile {
-        Profile {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            env: original.map(|p| p.env.clone()).unwrap_or_default(),
-            disabled_env: original.map(|p| p.disabled_env.clone()).unwrap_or_default(),
-            ai: original.and_then(|p| p.ai.clone()),
-            ai_enabled: original.and_then(|p| p.ai_enabled),
-        }
-    }
-
-    fn current_value(&self) -> &str {
-        match self.current_field {
-            ProfileFormField::Name => &self.name,
-            ProfileFormField::Description => &self.description,
-        }
-    }
-
-    fn current_value_mut(&mut self) -> &mut String {
-        match self.current_field {
-            ProfileFormField::Name => &mut self.name,
-            ProfileFormField::Description => &mut self.description,
-        }
-    }
-
-    pub fn next_field(&mut self) {
-        let fields = ProfileFormField::all();
-        let idx = fields
-            .iter()
-            .position(|f| *f == self.current_field)
-            .unwrap_or(0);
-        self.current_field = fields[(idx + 1) % fields.len()];
-        self.cursor = self.current_value().len();
-    }
-
-    pub fn prev_field(&mut self) {
-        let fields = ProfileFormField::all();
-        let idx = fields
-            .iter()
-            .position(|f| *f == self.current_field)
-            .unwrap_or(0);
-        self.current_field = fields[(idx + fields.len() - 1) % fields.len()];
-        self.cursor = self.current_value().len();
-    }
-
-    pub fn insert_char(&mut self, c: char) {
-        let cursor = self.cursor;
-        let value = self.current_value_mut();
-        value.insert(cursor, c);
-        self.cursor += 1;
-    }
-
-    pub fn delete_char(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            let cursor = self.cursor;
-            let value = self.current_value_mut();
-            value.remove(cursor);
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.name.is_empty() {
-            return Err("Name is required");
-        }
-        if !self
-            .name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err("Name must be alphanumeric with hyphens/underscores only");
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Environment variable edit state
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnvDisplayKind {
-    OsOnly,
-    OsDisabled,
-    Added,
-    Overridden,
-}
-
-#[derive(Debug, Clone)]
-struct DisplayEnvItem {
-    key: String,
-    value: String,
-    kind: EnvDisplayKind,
-    profile_index: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct EnvEditState {
-    pub vars: Vec<(String, String)>,
-    pub os_vars: Vec<(String, String)>,
-    pub disabled_keys: Vec<String>,
-    pub selected_index: usize,
-    pub editing: Option<EnvEditMode>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnvEditMode {
-    Key(usize),
-    Value(usize),
-}
-
-impl EnvEditState {
-    pub fn from_profile(profile: &Profile) -> Self {
-        let mut vars: Vec<(String, String)> = profile
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        vars.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut os_vars: Vec<(String, String)> = std::env::vars().collect();
-        os_vars.sort_by(|a, b| a.0.cmp(&b.0));
-        Self {
-            vars,
-            os_vars,
-            disabled_keys: profile.disabled_env.clone(),
-            selected_index: 0,
-            editing: None,
-        }
-    }
-
-    pub fn to_env(&self) -> HashMap<String, String> {
-        self.vars.iter().cloned().collect()
-    }
-
-    pub fn add_new_var(&mut self) {
-        self.vars.push((String::new(), String::new()));
-        self.selected_index = 0;
-        self.editing = Some(EnvEditMode::Key(0));
-    }
-
-    pub fn delete_selected(&mut self) {
-        if self.selected_is_overridden() {
-            self.delete_selected_override();
-            return;
-        }
-        if let Some(index) = self.selected_profile_index() {
-            self.vars.remove(index);
-            if self.selected_index > 0 && self.selected_index >= self.display_len() {
-                self.selected_index = self.display_len().saturating_sub(1);
-            }
-        }
-    }
-
-    pub fn select_next(&mut self) {
-        let total = self.display_len();
-        if total > 0 && self.selected_index < total - 1 {
-            self.selected_index += 1;
-        }
-    }
-
-    pub fn select_prev(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-        }
-    }
-
-    pub fn toggle_key_value(&mut self) {
-        if let Some(ref mode) = self.editing.clone() {
-            match mode {
-                EnvEditMode::Key(pos) => {
-                    if self.selected_index < self.vars.len() {
-                        let val_len = self.vars[self.selected_index].1.len();
-                        self.editing = Some(EnvEditMode::Value(val_len.min(*pos)));
-                    }
-                }
-                EnvEditMode::Value(pos) => {
-                    if self.selected_index < self.vars.len() {
-                        let key_len = self.vars[self.selected_index].0.len();
-                        self.editing = Some(EnvEditMode::Key(key_len.min(*pos)));
-                    }
-                }
-            }
-        }
-    }
-
-    fn display_len(&self) -> usize {
-        self.display_items().len()
-    }
-
-    fn selected_display_item(&self) -> Option<DisplayEnvItem> {
-        let items = self.display_items();
-        items.get(self.selected_index).cloned()
-    }
-
-    fn display_items(&self) -> Vec<DisplayEnvItem> {
-        let mut os_map: HashMap<String, String> = HashMap::new();
-        for (key, value) in &self.os_vars {
-            os_map.insert(key.clone(), value.clone());
-        }
-        let mut profile_map: HashMap<String, (usize, String)> = HashMap::new();
-        for (index, (key, value)) in self.vars.iter().enumerate() {
-            profile_map.insert(key.clone(), (index, value.clone()));
-        }
-
-        let mut keys: Vec<String> = os_map.keys().cloned().collect();
-        for key in profile_map.keys() {
-            if !os_map.contains_key(key) {
-                keys.push(key.clone());
-            }
-        }
-        keys.sort();
-
-        keys.into_iter()
-            .map(|key| match (profile_map.get(&key), os_map.get(&key)) {
-                (Some((index, profile_value)), Some(_)) => DisplayEnvItem {
-                    key,
-                    value: profile_value.clone(),
-                    kind: EnvDisplayKind::Overridden,
-                    profile_index: Some(*index),
-                },
-                (Some((index, profile_value)), None) => DisplayEnvItem {
-                    key,
-                    value: profile_value.clone(),
-                    kind: EnvDisplayKind::Added,
-                    profile_index: Some(*index),
-                },
-                (None, Some(os_value)) => DisplayEnvItem {
-                    key: key.clone(),
-                    value: os_value.clone(),
-                    kind: if self.disabled_keys.contains(&key) {
-                        EnvDisplayKind::OsDisabled
-                    } else {
-                        EnvDisplayKind::OsOnly
-                    },
-                    profile_index: None,
-                },
-                (None, None) => DisplayEnvItem {
-                    key,
-                    value: String::new(),
-                    kind: EnvDisplayKind::OsOnly,
-                    profile_index: None,
-                },
-            })
-            .collect()
-    }
-
-    pub fn selected_profile_index(&self) -> Option<usize> {
-        self.selected_display_item()
-            .and_then(|item| item.profile_index)
-    }
-
-    pub fn selected_is_overridden(&self) -> bool {
-        matches!(
-            self.selected_display_item().map(|item| item.kind),
-            Some(EnvDisplayKind::Overridden)
-        )
-    }
-
-    pub fn selected_is_added(&self) -> bool {
-        matches!(
-            self.selected_display_item().map(|item| item.kind),
-            Some(EnvDisplayKind::Added)
-        )
-    }
-
-    pub fn selected_is_os_entry(&self) -> bool {
-        matches!(
-            self.selected_display_item().map(|item| item.kind),
-            Some(EnvDisplayKind::OsOnly | EnvDisplayKind::OsDisabled)
-        )
-    }
-
-    pub fn selected_key(&self) -> Option<String> {
-        self.selected_display_item().map(|item| item.key)
-    }
-
-    pub fn toggle_selected_disabled(&mut self) -> bool {
-        let Some(item) = self.selected_display_item() else {
-            return false;
-        };
-        if !matches!(
-            item.kind,
-            EnvDisplayKind::OsOnly | EnvDisplayKind::OsDisabled
-        ) {
-            return false;
-        }
-        if let Some(pos) = self.disabled_keys.iter().position(|key| key == &item.key) {
-            self.disabled_keys.remove(pos);
-            false
+    /// Cycle to previous category.
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|c| *c == self).unwrap_or(0);
+        if idx == 0 {
+            Self::ALL[Self::ALL.len() - 1]
         } else {
-            self.disabled_keys.push(item.key);
-            self.disabled_keys.sort();
-            true
+            Self::ALL[idx - 1]
         }
-    }
-
-    pub fn delete_selected_override(&mut self) {
-        if let Some(item) = self.selected_display_item() {
-            if item.kind == EnvDisplayKind::Overridden {
-                if let Some(pos) = self.vars.iter().position(|var| var.0 == item.key) {
-                    self.vars.remove(pos);
-                }
-            }
-        }
-    }
-
-    pub fn start_edit_selected(&mut self) {
-        let Some(item) = self.selected_display_item() else {
-            return;
-        };
-        if let Some(index) = item.profile_index {
-            let value_len = self.vars[index].1.len();
-            self.selected_index = self
-                .selected_index
-                .min(self.display_len().saturating_sub(1));
-            self.editing = Some(EnvEditMode::Value(value_len));
-            return;
-        }
-
-        self.vars.push((item.key.clone(), item.value.clone()));
-        self.vars.sort_by(|a, b| a.0.cmp(&b.0));
-        let new_index = self
-            .display_items()
-            .iter()
-            .position(|display| display.key == item.key && display.profile_index.is_some())
-            .unwrap_or(0);
-        self.selected_index = new_index;
-        self.editing = Some(EnvEditMode::Value(item.value.len()));
     }
 }
 
-// ---------------------------------------------------------------------------
-// SettingsState
-// ---------------------------------------------------------------------------
+const CUSTOM_AGENT_LABEL: &str = "Agent";
+const CUSTOM_AGENT_ID_LABEL: &str = "ID";
+const CUSTOM_AGENT_DISPLAY_NAME_LABEL: &str = "Display name";
+const CUSTOM_AGENT_TYPE_LABEL: &str = "Type";
+const CUSTOM_AGENT_COMMAND_LABEL: &str = "Command";
+const CUSTOM_AGENT_ADD_LABEL: &str = "Add agent";
+const CUSTOM_AGENT_DELETE_LABEL: &str = "Delete agent";
 
-/// Central state for the Settings screen.
-#[derive(Debug)]
+/// Field type for a setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldType {
+    Text,
+    Bool,
+    Path,
+    Choice,
+    Action,
+}
+
+/// A single setting field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingField {
+    pub label: String,
+    pub value: String,
+    pub field_type: FieldType,
+}
+
+/// State for the settings screen.
+#[derive(Debug, Clone, Default)]
 pub struct SettingsState {
-    pub category: SettingsCategory,
-    pub selected_item: usize,
-    pub settings: Option<Settings>,
-    pub error_message: Option<String>,
-    // Custom agents
-    pub tools_config: Option<ToolsConfig>,
-    pub custom_agent_mode: CustomAgentMode,
-    pub custom_agent_index: usize,
-    pub agent_form: AgentFormState,
-    pub delete_confirm: bool,
-    // Profile management
-    pub profiles_config: Option<ProfilesConfig>,
-    pub profile_mode: ProfileMode,
-    pub profile_index: usize,
-    pub profile_form: ProfileFormState,
-    pub profile_delete_confirm: bool,
-    // Environment variable edit
-    pub env_state: EnvEditState,
+    pub(crate) category: SettingsCategory,
+    pub(crate) fields: Vec<SettingField>,
+    pub(crate) selected: usize,
+    pub(crate) editing: bool,
+    pub(crate) edit_buffer: String,
+    /// Last save error, if any.
+    pub(crate) save_error: Option<String>,
+    pub(crate) config_path_override: Option<PathBuf>,
+    custom_agents: CustomAgentsState,
 }
 
-impl Default for SettingsState {
-    fn default() -> Self {
-        Self {
-            category: SettingsCategory::General,
-            selected_item: 0,
-            settings: None,
-            error_message: None,
-            tools_config: None,
-            custom_agent_mode: CustomAgentMode::default(),
-            custom_agent_index: 0,
-            agent_form: AgentFormState::default(),
-            delete_confirm: false,
-            profiles_config: None,
-            profile_mode: ProfileMode::default(),
-            profile_index: 0,
-            profile_form: ProfileFormState::default(),
-            profile_delete_confirm: false,
-            env_state: EnvEditState::default(),
-        }
+#[derive(Debug, Clone, Default)]
+struct CustomAgentsState {
+    agents: Vec<StoredCustomAgent>,
+    selected_agent: usize,
+}
+
+impl CustomAgentsState {
+    fn selected_agent(&self) -> Option<&StoredCustomAgent> {
+        self.agents.get(self.selected_agent)
     }
 }
 
 impl SettingsState {
-    pub fn new() -> Self {
-        Self::default()
+    /// Get the currently selected field, if any.
+    pub fn selected_field(&self) -> Option<&SettingField> {
+        self.fields.get(self.selected)
     }
 
-    /// Load settings from global config.
-    pub fn load_settings(&mut self) {
-        match Settings::load_global() {
-            Ok(s) => {
-                self.tools_config = Some(s.tools.clone());
-                self.profiles_config = Some(s.profiles.clone());
-                self.settings = Some(s);
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to load settings: {e}"));
-            }
+    /// Load fields for the current category.
+    pub fn load_category_fields(&mut self) {
+        self.save_error = None;
+        let settings = self.load_settings_snapshot();
+        if self.category == SettingsCategory::CustomAgents {
+            self.load_custom_agents_fields();
+        } else {
+            self.fields = fields_for_category_with_settings(self.category, settings.as_ref());
         }
+        self.selected = 0;
+        self.editing = false;
+        self.edit_buffer.clear();
     }
 
-    /// Get display items for the current category.
-    pub fn category_items(&self) -> Vec<(&'static str, String)> {
-        let settings = match &self.settings {
-            Some(s) => s,
-            None => return vec![],
-        };
-
-        match self.category {
-            SettingsCategory::General => vec![
-                ("Default Base Branch", settings.default_base_branch.clone()),
-                ("Debug Mode", format!("{}", settings.debug)),
-                (
-                    "Log Retention Days",
-                    format!("{}", settings.log_retention_days),
-                ),
-            ],
-            SettingsCategory::Worktree => vec![
-                ("Worktree Root", settings.worktree_root.clone()),
-                ("Protected Branches", settings.protected_branches.join(", ")),
-            ],
-            SettingsCategory::Agent => vec![
-                (
-                    "Default Agent",
-                    settings
-                        .agent
-                        .default_agent
-                        .clone()
-                        .unwrap_or_else(|| "None".to_string()),
-                ),
-                (
-                    "Auto Install Deps",
-                    format!("{}", settings.agent.auto_install_deps),
-                ),
-                (
-                    "Claude Path",
-                    settings
-                        .agent
-                        .claude_path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "Not set".to_string()),
-                ),
-            ],
-            SettingsCategory::CustomAgents
-            | SettingsCategory::Environment
-            | SettingsCategory::AISettings => vec![],
-        }
-    }
-
-    pub fn custom_agents(&self) -> &[CustomCodingAgent] {
-        self.tools_config
-            .as_ref()
-            .map(|c| c.custom_coding_agents.as_slice())
-            .unwrap_or(&[])
-    }
-
-    // ---- Category navigation ----
-
-    pub fn next_category(&mut self) {
-        let idx = self.category.index();
-        self.category = SettingsCategory::ALL[(idx + 1) % SettingsCategory::ALL.len()];
-        self.reset_category_state();
-    }
-
-    pub fn prev_category(&mut self) {
-        let idx = self.category.index();
-        let len = SettingsCategory::ALL.len();
-        self.category = SettingsCategory::ALL[(idx + len - 1) % len];
-        self.reset_category_state();
-    }
-
-    pub fn ensure_management_tab_category(&mut self) {
-        if self.category.management_index().is_none() {
-            self.category = SettingsCategory::General;
-            self.reset_category_state();
-        }
-    }
-
-    pub fn next_management_tab_category(&mut self) {
-        let idx = self.category.management_index().unwrap_or(0);
-        self.category = SettingsCategory::MANAGEMENT_TAB_ALL
-            [(idx + 1) % SettingsCategory::MANAGEMENT_TAB_ALL.len()];
-        self.reset_category_state();
-    }
-
-    pub fn prev_management_tab_category(&mut self) {
-        let idx = self.category.management_index().unwrap_or(0);
-        let len = SettingsCategory::MANAGEMENT_TAB_ALL.len();
-        self.category = SettingsCategory::MANAGEMENT_TAB_ALL[(idx + len - 1) % len];
-        self.reset_category_state();
-    }
-
-    fn reset_category_state(&mut self) {
-        self.selected_item = 0;
-        self.custom_agent_index = 0;
-        self.custom_agent_mode = CustomAgentMode::List;
-        self.profile_index = 0;
-        self.profile_mode = ProfileMode::List;
-    }
-
-    // ---- Item navigation ----
-
-    pub fn select_next(&mut self) {
-        match self.category {
-            SettingsCategory::CustomAgents => {
-                let max = self.custom_agents().len();
-                if self.custom_agent_index < max {
-                    self.custom_agent_index += 1;
-                }
-            }
-            SettingsCategory::Environment => {
-                if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
-                    self.env_state.select_next();
+    fn load_settings_snapshot(&self) -> Option<Settings> {
+        self.config_path_override
+            .as_deref()
+            .and_then(|path| Settings::load_from_path(path).ok())
+            .or_else(|| {
+                if self.category == SettingsCategory::Voice {
+                    Settings::load().ok()
                 } else {
-                    let max = self.profile_names().len();
-                    if self.profile_index < max {
-                        self.profile_index += 1;
-                    }
+                    None
                 }
-            }
-            _ => {
-                let items = self.category_items();
-                if !items.is_empty() && self.selected_item < items.len() - 1 {
-                    self.selected_item += 1;
-                }
-            }
-        }
-    }
-
-    pub fn select_prev(&mut self) {
-        match self.category {
-            SettingsCategory::CustomAgents => {
-                if self.custom_agent_index > 0 {
-                    self.custom_agent_index -= 1;
-                }
-            }
-            SettingsCategory::Environment => {
-                if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
-                    self.env_state.select_prev();
-                } else if self.profile_index > 0 {
-                    self.profile_index -= 1;
-                }
-            }
-            _ => {
-                if self.selected_item > 0 {
-                    self.selected_item -= 1;
-                }
-            }
-        }
-    }
-
-    // ---- Custom agent helpers ----
-
-    pub fn selected_custom_agent(&self) -> Option<&CustomCodingAgent> {
-        self.custom_agents().get(self.custom_agent_index)
-    }
-
-    pub fn is_add_agent_selected(&self) -> bool {
-        self.category == SettingsCategory::CustomAgents
-            && self.custom_agent_index == self.custom_agents().len()
-    }
-
-    pub fn enter_add_mode(&mut self) {
-        self.agent_form = AgentFormState::new();
-        self.custom_agent_mode = CustomAgentMode::Add;
-    }
-
-    pub fn enter_edit_mode(&mut self) {
-        if let Some(agent) = self.selected_custom_agent() {
-            let id = agent.id.clone();
-            self.agent_form = AgentFormState::from_agent(agent);
-            self.custom_agent_mode = CustomAgentMode::Edit(id);
-        }
-    }
-
-    pub fn enter_delete_mode(&mut self) {
-        if let Some(agent) = self.selected_custom_agent() {
-            self.custom_agent_mode = CustomAgentMode::ConfirmDelete(agent.id.clone());
-            self.delete_confirm = false;
-        }
-    }
-
-    pub fn cancel_mode(&mut self) {
-        self.custom_agent_mode = CustomAgentMode::List;
-        self.agent_form = AgentFormState::default();
-        self.delete_confirm = false;
-    }
-
-    pub fn save_agent(&mut self) -> Result<(), &'static str> {
-        self.agent_form.validate()?;
-        let agent = self.agent_form.to_agent();
-
-        match &self.custom_agent_mode {
-            CustomAgentMode::Add => {
-                if let Some(ref mut config) = self.tools_config {
-                    if !config.add_agent(agent) {
-                        return Err("Agent with this ID already exists");
-                    }
-                } else {
-                    let mut config = ToolsConfig::empty();
-                    config.add_agent(agent);
-                    self.tools_config = Some(config);
-                }
-            }
-            CustomAgentMode::Edit(_) => {
-                if let Some(ref mut config) = self.tools_config {
-                    if !config.update_agent(agent) {
-                        return Err("Agent not found");
-                    }
-                }
-            }
-            _ => return Err("Invalid mode for save"),
-        }
-
-        self.cancel_mode();
-        Ok(())
-    }
-
-    pub fn delete_agent(&mut self) -> bool {
-        if let CustomAgentMode::ConfirmDelete(ref id) = self.custom_agent_mode {
-            let id = id.clone();
-            if let Some(ref mut config) = self.tools_config {
-                if config.remove_agent(&id) {
-                    if self.custom_agent_index > 0
-                        && self.custom_agent_index >= config.custom_coding_agents.len()
-                    {
-                        self.custom_agent_index =
-                            config.custom_coding_agents.len().saturating_sub(1);
-                    }
-                    self.cancel_mode();
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn is_form_mode(&self) -> bool {
-        matches!(
-            self.custom_agent_mode,
-            CustomAgentMode::Add | CustomAgentMode::Edit(_)
-        ) || matches!(self.profile_mode, ProfileMode::Add | ProfileMode::Edit(_))
-    }
-
-    pub fn is_delete_mode(&self) -> bool {
-        matches!(self.custom_agent_mode, CustomAgentMode::ConfirmDelete(_))
-    }
-
-    // ---- Profile helpers ----
-
-    pub fn profile_names(&self) -> Vec<String> {
-        self.profiles_config
-            .as_ref()
-            .map(|c| {
-                let mut names: Vec<String> = c.profiles.keys().cloned().collect();
-                names.sort();
-                names
             })
-            .unwrap_or_default()
     }
 
-    pub fn selected_profile(&self) -> Option<&Profile> {
-        let names = self.profile_names();
-        names.get(self.profile_index).and_then(|name| {
-            self.profiles_config
-                .as_ref()
-                .and_then(|c| c.profiles.get(name))
-        })
-    }
-
-    pub fn selected_profile_name(&self) -> Option<String> {
-        self.profile_names().get(self.profile_index).cloned()
-    }
-
-    pub fn is_add_profile_selected(&self) -> bool {
-        self.category == SettingsCategory::Environment
-            && self.profile_index == self.profile_names().len()
-    }
-
-    pub fn is_profile_active(&self, name: &str) -> bool {
-        self.profiles_config
-            .as_ref()
-            .and_then(|c| c.active.as_ref())
-            .map(|active| active == name)
-            .unwrap_or(false)
-    }
-
-    pub fn toggle_active_profile(&mut self) {
-        if let Some(name) = self.selected_profile_name() {
-            let is_active = self.is_profile_active(&name);
-            if let Some(ref mut config) = self.profiles_config {
-                config.set_active(if is_active { None } else { Some(name) });
-            }
-        }
-    }
-
-    pub fn enter_profile_add_mode(&mut self) {
-        self.profile_form = ProfileFormState::new();
-        self.profile_mode = ProfileMode::Add;
-    }
-
-    pub fn enter_profile_edit_mode(&mut self) {
-        if let Some(profile) = self.selected_profile() {
-            let name = profile.name.clone();
-            self.profile_form = ProfileFormState::from_profile(profile);
-            self.profile_mode = ProfileMode::Edit(name);
-        }
-    }
-
-    pub fn enter_profile_delete_mode(&mut self) {
-        if let Some(name) = self.selected_profile_name() {
-            self.profile_mode = ProfileMode::ConfirmDelete(name);
-            self.profile_delete_confirm = false;
-        }
-    }
-
-    pub fn enter_env_edit_mode(&mut self) {
-        if let Some(profile) = self.selected_profile() {
-            let name = profile.name.clone();
-            self.env_state = EnvEditState::from_profile(profile);
-            self.profile_mode = ProfileMode::EnvEdit(name);
-        }
-    }
-
-    pub fn cancel_profile_mode(&mut self) {
-        self.profile_mode = ProfileMode::List;
-        self.profile_form = ProfileFormState::default();
-        self.profile_delete_confirm = false;
-        self.env_state = EnvEditState::default();
-    }
-
-    pub fn save_profile(&mut self) -> Result<(), &'static str> {
-        self.profile_form.validate()?;
-
-        match &self.profile_mode {
-            ProfileMode::Add => {
-                if let Some(ref mut config) = self.profiles_config {
-                    let name = self.profile_form.name.clone();
-                    if config.profiles.contains_key(&name) {
-                        return Err("Profile with this name already exists");
-                    }
-                    let profile = self.profile_form.to_profile(None);
-                    config.profiles.insert(name, profile);
-                } else {
-                    let mut config = ProfilesConfig {
-                        version: 1,
-                        active: None,
-                        profiles: HashMap::new(),
-                    };
-                    let name = self.profile_form.name.clone();
-                    let profile = self.profile_form.to_profile(None);
-                    config.profiles.insert(name, profile);
-                    self.profiles_config = Some(config);
-                }
-            }
-            ProfileMode::Edit(original_name) => {
-                if let Some(ref mut config) = self.profiles_config {
-                    let new_name = self.profile_form.name.clone();
-                    let original_profile = config.profiles.get(original_name);
-                    let profile = self.profile_form.to_profile(original_profile);
-
-                    if &new_name != original_name {
-                        if config.profiles.contains_key(&new_name) {
-                            return Err("Profile with this name already exists");
-                        }
-                        config.profiles.remove(original_name);
-                        if config.active.as_ref() == Some(original_name) {
-                            config.active = Some(new_name.clone());
-                        }
-                    }
-                    config.profiles.insert(new_name, profile);
-                }
-            }
-            _ => return Err("Invalid mode for save"),
-        }
-
-        self.cancel_profile_mode();
-        Ok(())
-    }
-
-    pub fn persist_env_edit(&mut self) -> Result<(), &'static str> {
-        let profile_name = match &self.profile_mode {
-            ProfileMode::EnvEdit(name) => name.clone(),
-            _ => return Err("Not in environment edit mode"),
+    fn load_custom_agents_fields(&mut self) {
+        let Some(path) = self.config_path() else {
+            self.custom_agents = CustomAgentsState::default();
+            sync_custom_agent_fields(self);
+            return;
         };
 
-        let config = self
-            .profiles_config
-            .as_mut()
-            .ok_or("Profiles config not loaded")?;
-
-        let profile = config
-            .profiles
-            .get_mut(&profile_name)
-            .ok_or("Profile not found")?;
-
-        profile.env = self.env_state.to_env();
-        profile.disabled_env = self.env_state.disabled_keys.clone();
-        Ok(())
-    }
-
-    pub fn delete_profile(&mut self) -> bool {
-        if let ProfileMode::ConfirmDelete(ref name) = self.profile_mode {
-            let name = name.clone();
-            if let Some(ref mut config) = self.profiles_config {
-                if config.profiles.remove(&name).is_some() {
-                    if config.active.as_ref() == Some(&name) {
-                        config.active = None;
-                    }
-                    let profiles_len = config.profiles.len();
-                    if self.profile_index > 0 && self.profile_index >= profiles_len {
-                        self.profile_index = profiles_len.saturating_sub(1);
-                    }
-                    self.cancel_profile_mode();
-                    return true;
-                }
+        match load_stored_custom_agents_from_path(&path) {
+            Ok(agents) => {
+                let selected_agent = self
+                    .custom_agents
+                    .selected_agent
+                    .min(agents.len().saturating_sub(1));
+                self.custom_agents = CustomAgentsState {
+                    agents,
+                    selected_agent,
+                };
+            }
+            Err(err) => {
+                self.custom_agents = CustomAgentsState::default();
+                self.save_error = Some(err);
             }
         }
-        false
+        sync_custom_agent_fields(self);
+    }
+
+    fn config_path(&self) -> Option<PathBuf> {
+        self.config_path_override
+            .clone()
+            .or_else(Settings::global_config_path)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
+/// Return default fields for a given category.
+pub fn fields_for_category(category: SettingsCategory) -> Vec<SettingField> {
+    fields_for_category_with_settings(category, None)
+}
 
-/// Messages specific to the Settings screen.
-#[derive(Debug)]
+/// Return default fields for a given category, optionally using live settings
+/// for categories that should reflect persisted configuration.
+pub fn fields_for_category_with_settings(
+    category: SettingsCategory,
+    settings: Option<&Settings>,
+) -> Vec<SettingField> {
+    match category {
+        SettingsCategory::General => vec![
+            SettingField {
+                label: "Theme".to_string(),
+                value: "dark".to_string(),
+                field_type: FieldType::Text,
+            },
+            SettingField {
+                label: "Language".to_string(),
+                value: "en".to_string(),
+                field_type: FieldType::Text,
+            },
+            SettingField {
+                label: "Auto-save".to_string(),
+                value: "true".to_string(),
+                field_type: FieldType::Bool,
+            },
+            SettingField {
+                label: "Log level".to_string(),
+                value: "info".to_string(),
+                field_type: FieldType::Text,
+            },
+        ],
+        SettingsCategory::Worktree => vec![
+            SettingField {
+                label: "Default path".to_string(),
+                value: "~/.gwt/worktrees".to_string(),
+                field_type: FieldType::Path,
+            },
+            SettingField {
+                label: "Auto-clean".to_string(),
+                value: "false".to_string(),
+                field_type: FieldType::Bool,
+            },
+            SettingField {
+                label: "Max worktrees".to_string(),
+                value: "10".to_string(),
+                field_type: FieldType::Text,
+            },
+        ],
+        SettingsCategory::Agent => vec![
+            SettingField {
+                label: "Default agent".to_string(),
+                value: "claude".to_string(),
+                field_type: FieldType::Text,
+            },
+            SettingField {
+                label: "Auto-start".to_string(),
+                value: "false".to_string(),
+                field_type: FieldType::Bool,
+            },
+            SettingField {
+                label: "Timeout (s)".to_string(),
+                value: "300".to_string(),
+                field_type: FieldType::Text,
+            },
+        ],
+        SettingsCategory::CustomAgents => vec![
+            SettingField {
+                label: CUSTOM_AGENT_LABEL.to_string(),
+                value: "(none)".to_string(),
+                field_type: FieldType::Choice,
+            },
+            SettingField {
+                label: CUSTOM_AGENT_ADD_LABEL.to_string(),
+                value: "Create new custom agent".to_string(),
+                field_type: FieldType::Action,
+            },
+        ],
+        SettingsCategory::Environment => vec![
+            SettingField {
+                label: "Shell".to_string(),
+                value: "/bin/zsh".to_string(),
+                field_type: FieldType::Path,
+            },
+            SettingField {
+                label: "PATH prefix".to_string(),
+                value: String::new(),
+                field_type: FieldType::Text,
+            },
+            SettingField {
+                label: "Inherit env".to_string(),
+                value: "true".to_string(),
+                field_type: FieldType::Bool,
+            },
+        ],
+        SettingsCategory::Ai => vec![
+            SettingField {
+                label: "Provider".to_string(),
+                value: "anthropic".to_string(),
+                field_type: FieldType::Text,
+            },
+            SettingField {
+                label: "Model".to_string(),
+                value: "claude-sonnet-4-20250514".to_string(),
+                field_type: FieldType::Text,
+            },
+            SettingField {
+                label: "API key set".to_string(),
+                value: "true".to_string(),
+                field_type: FieldType::Bool,
+            },
+        ],
+        SettingsCategory::Skills => bundled_skill_fields(),
+        SettingsCategory::Voice => {
+            let voice = settings.map(|s| &s.voice);
+            voice_fields(voice)
+        }
+    }
+}
+
+/// Build a read-only display of bundled skill count.
+pub fn bundled_skill_fields() -> Vec<SettingField> {
+    let count = CLAUDE_SKILLS.dirs().count();
+    vec![SettingField {
+        label: "Bundled skills".to_string(),
+        value: count.to_string(),
+        field_type: FieldType::Text,
+    }]
+}
+
+/// Build the Voice settings fields from the persisted voice config.
+pub fn voice_fields(voice: Option<&VoiceConfig>) -> Vec<SettingField> {
+    let voice = voice.cloned().unwrap_or_default();
+    vec![
+        SettingField {
+            label: "Model path".to_string(),
+            value: voice
+                .model_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            field_type: FieldType::Path,
+        },
+        SettingField {
+            label: "Hotkey".to_string(),
+            value: voice.hotkey,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: "Input device".to_string(),
+            value: voice.input_device,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: "Language".to_string(),
+            value: voice.language,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: "Enabled".to_string(),
+            value: voice.enabled.to_string(),
+            field_type: FieldType::Bool,
+        },
+    ]
+}
+
+fn custom_agent_fields(state: &CustomAgentsState) -> Vec<SettingField> {
+    let selected = state.selected_agent();
+    let summary = if let Some(agent) = selected {
+        format!(
+            "{} ({}/{})",
+            agent.agent.display_name,
+            state.selected_agent + 1,
+            state.agents.len()
+        )
+    } else {
+        "(none)".to_string()
+    };
+    let id = selected
+        .map(|agent| agent.agent.id.clone())
+        .unwrap_or_default();
+    let display_name = selected
+        .map(|agent| agent.agent.display_name.clone())
+        .unwrap_or_default();
+    let agent_type = selected
+        .map(|agent| custom_agent_type_label(agent.agent.agent_type).to_string())
+        .unwrap_or_else(|| custom_agent_type_label(CustomAgentType::Command).to_string());
+    let command = selected
+        .map(|agent| agent.agent.command.clone())
+        .unwrap_or_default();
+
+    vec![
+        SettingField {
+            label: CUSTOM_AGENT_LABEL.to_string(),
+            value: summary,
+            field_type: FieldType::Choice,
+        },
+        SettingField {
+            label: CUSTOM_AGENT_ID_LABEL.to_string(),
+            value: id,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: CUSTOM_AGENT_DISPLAY_NAME_LABEL.to_string(),
+            value: display_name,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: CUSTOM_AGENT_TYPE_LABEL.to_string(),
+            value: agent_type,
+            field_type: FieldType::Choice,
+        },
+        SettingField {
+            label: CUSTOM_AGENT_COMMAND_LABEL.to_string(),
+            value: command,
+            field_type: FieldType::Text,
+        },
+        SettingField {
+            label: CUSTOM_AGENT_ADD_LABEL.to_string(),
+            value: "Create new custom agent".to_string(),
+            field_type: FieldType::Action,
+        },
+        SettingField {
+            label: CUSTOM_AGENT_DELETE_LABEL.to_string(),
+            value: if selected.is_some() {
+                "Remove selected custom agent".to_string()
+            } else {
+                "No custom agent selected".to_string()
+            },
+            field_type: FieldType::Action,
+        },
+    ]
+}
+
+fn sync_custom_agent_fields(state: &mut SettingsState) {
+    state.fields = custom_agent_fields(&state.custom_agents);
+    if !state.fields.is_empty() {
+        state.selected = state.selected.min(state.fields.len() - 1);
+    }
+}
+
+fn custom_agent_type_label(agent_type: CustomAgentType) -> &'static str {
+    match agent_type {
+        CustomAgentType::Command => "command",
+        CustomAgentType::Path => "path",
+        CustomAgentType::Bunx => "bunx",
+    }
+}
+
+fn next_custom_agent_type(agent_type: CustomAgentType) -> CustomAgentType {
+    match agent_type {
+        CustomAgentType::Command => CustomAgentType::Path,
+        CustomAgentType::Path => CustomAgentType::Bunx,
+        CustomAgentType::Bunx => CustomAgentType::Command,
+    }
+}
+
+fn next_custom_agent_id(existing: &[StoredCustomAgent]) -> String {
+    let base = "custom-agent";
+    if !existing.iter().any(|agent| agent.agent.id == base) {
+        return base.to_string();
+    }
+
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("{base}-{index}");
+        if !existing.iter().any(|agent| agent.agent.id == candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn default_custom_agent(existing: &[StoredCustomAgent]) -> StoredCustomAgent {
+    let id = next_custom_agent_id(existing);
+    StoredCustomAgent::new(CustomCodingAgent {
+        id: id.clone(),
+        display_name: format!("Custom Agent {}", existing.len() + 1),
+        agent_type: CustomAgentType::Command,
+        command: id,
+        default_args: Vec::new(),
+        mode_args: None,
+        env: std::collections::HashMap::new(),
+    })
+}
+
+/// Messages specific to the settings screen.
+#[derive(Debug, Clone)]
 pub enum SettingsMessage {
-    Refresh,
+    MoveUp,
+    MoveDown,
     NextCategory,
     PrevCategory,
-    SelectNext,
-    SelectPrev,
-    Activate,
-    Edit,
-    Delete,
+    StartEdit,
+    EndEdit,
+    CancelEdit,
+    InputChar(char),
+    Backspace,
+    ToggleBool,
     Save,
-    Cancel,
-    FormChar(char),
-    FormBackspace,
-    FormNextField,
-    FormPrevField,
-    FormCycleType,
-    ToggleDeleteConfirm,
-    ConfirmDelete,
-    // Profile-specific
-    ProfileAdd,
-    ProfileEdit,
-    ProfileDelete,
-    ProfileToggleActive,
-    ProfileEnvEdit,
-    // Env edit
-    EnvNew,
-    EnvDelete,
-    EnvToggleDisabled,
-    EnvToggleKeyValue,
-    EnvStartEdit,
-    EnvConfirm,
 }
 
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
-fn panel_title_style() -> Style {
-    Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
+/// Toggle a bool field's value between "true" and "false".
+fn toggle_bool_field(field: &mut SettingField) {
+    if field.field_type == FieldType::Bool {
+        field.value = if field.value == "true" {
+            "false".to_string()
+        } else {
+            "true".to_string()
+        };
+    }
 }
 
-fn styled_block(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::White))
-        .title(title)
-        .title_style(panel_title_style())
+fn collect_voice_config_from_fields(state: &SettingsState) -> VoiceConfig {
+    let mut voice = VoiceConfig::default();
+
+    for field in &state.fields {
+        match field.label.as_str() {
+            "Model path" => {
+                voice.model_path = if field.value.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(&field.value))
+                };
+            }
+            "Hotkey" => {
+                voice.hotkey = if field.value.trim().is_empty() {
+                    "Ctrl+G,v".to_string()
+                } else {
+                    field.value.clone()
+                };
+            }
+            "Input device" => {
+                voice.input_device = if field.value.trim().is_empty() {
+                    "system_default".to_string()
+                } else {
+                    field.value.clone()
+                };
+            }
+            "Language" => {
+                voice.language = if field.value.trim().is_empty() {
+                    "auto".to_string()
+                } else {
+                    field.value.clone()
+                };
+            }
+            "Enabled" => {
+                voice.enabled = field.value == "true";
+            }
+            _ => {}
+        }
+    }
+
+    voice
 }
 
-/// Render the settings screen into the given area.
-pub fn render(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let chunks = Layout::vertical([
-        Constraint::Length(3), // Category tabs
-        Constraint::Min(0),    // Content
-    ])
-    .split(area);
+/// Persist current settings fields to gwt-config's global config.
+///
+/// Reads the current global Settings, applies matching fields from the TUI state,
+/// and writes back. Returns an error string on failure.
+fn save_settings_to_config(state: &SettingsState) -> Result<(), String> {
+    if let Some(path) = state.config_path_override.as_deref() {
+        return save_settings_to_path(state, path);
+    }
+    if state.category == SettingsCategory::CustomAgents {
+        let path = Settings::global_config_path()
+            .ok_or_else(|| "failed to resolve ~/.gwt/config.toml".to_string())?;
+        return save_stored_custom_agents_to_path(&path, &state.custom_agents.agents);
+    }
 
-    render_tabs(state, buf, chunks[0], &SettingsCategory::ALL);
-    render_content(state, buf, chunks[1]);
+    use gwt_config::Settings;
+
+    Settings::update_global(|settings| {
+        for field in &state.fields {
+            match (state.category, field.label.as_str()) {
+                // General
+                (SettingsCategory::General, "Log level") => {
+                    settings.debug = field.value == "debug";
+                }
+                // Worktree
+                (SettingsCategory::Worktree, "Default path") => {
+                    if field.value.is_empty() || field.value == "~/.gwt/worktrees" {
+                        settings.worktree_root = None;
+                    } else {
+                        settings.worktree_root = Some(std::path::PathBuf::from(&field.value));
+                    }
+                }
+                // Agent
+                (SettingsCategory::Agent, "Default agent") => {
+                    if field.value.is_empty() {
+                        settings.agent.default_agent = None;
+                    } else {
+                        settings.agent.default_agent = Some(field.value.clone());
+                    }
+                }
+                // Voice
+                (SettingsCategory::Voice, "Model path")
+                | (SettingsCategory::Voice, "Hotkey")
+                | (SettingsCategory::Voice, "Input device")
+                | (SettingsCategory::Voice, "Language")
+                | (SettingsCategory::Voice, "Enabled") => {
+                    settings.voice = collect_voice_config_from_fields(state);
+                    settings
+                        .voice
+                        .validate()
+                        .map_err(|e| ConfigError::ValidationError {
+                            reason: e.to_string(),
+                        })?;
+                }
+                _ => {} // Other fields have no backend mapping yet
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("{e}"))
 }
 
-pub fn render_settings_tab(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let chunks = Layout::vertical([
-        Constraint::Length(3), // Category tabs
-        Constraint::Min(0),    // Content
-    ])
-    .split(area);
+/// Save settings to a specific TOML file path.
+pub fn save_settings_to_path(state: &SettingsState, path: &std::path::Path) -> Result<(), String> {
+    if state.category == SettingsCategory::CustomAgents {
+        return save_stored_custom_agents_to_path(path, &state.custom_agents.agents);
+    }
 
-    render_tabs(state, buf, chunks[0], &SettingsCategory::MANAGEMENT_TAB_ALL);
-    render_content(state, buf, chunks[1]);
+    let mut settings = Settings::load_from_path(path).unwrap_or_default();
+
+    for field in &state.fields {
+        match (state.category, field.label.as_str()) {
+            (SettingsCategory::General, "Log level") => {
+                settings.debug = field.value == "debug";
+            }
+            (SettingsCategory::Worktree, "Default path") => {
+                if field.value.is_empty() || field.value == "~/.gwt/worktrees" {
+                    settings.worktree_root = None;
+                } else {
+                    settings.worktree_root = Some(std::path::PathBuf::from(&field.value));
+                }
+            }
+            (SettingsCategory::Agent, "Default agent") => {
+                if field.value.is_empty() {
+                    settings.agent.default_agent = None;
+                } else {
+                    settings.agent.default_agent = Some(field.value.clone());
+                }
+            }
+            (SettingsCategory::Voice, "Model path")
+            | (SettingsCategory::Voice, "Hotkey")
+            | (SettingsCategory::Voice, "Input device")
+            | (SettingsCategory::Voice, "Language")
+            | (SettingsCategory::Voice, "Enabled") => {
+                settings.voice = collect_voice_config_from_fields(state);
+                settings.voice.validate().map_err(|e| e.to_string())?;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    settings.save(path).map_err(|e| e.to_string())
 }
 
-fn render_tabs(
-    state: &SettingsState,
-    buf: &mut Buffer,
-    area: Rect,
-    categories: &[SettingsCategory],
-) {
-    let titles: Vec<Line> = categories
+fn persist_custom_agents_update<F>(state: &mut SettingsState, mutate: F)
+where
+    F: FnOnce(&mut CustomAgentsState),
+{
+    let Some(path) = state.config_path() else {
+        state.save_error = Some("failed to resolve ~/.gwt/config.toml".to_string());
+        return;
+    };
+
+    let mut next = state.custom_agents.clone();
+    mutate(&mut next);
+    match save_stored_custom_agents_to_path(&path, &next.agents) {
+        Ok(()) => {
+            state.custom_agents = next;
+            state.save_error = None;
+            sync_custom_agent_fields(state);
+        }
+        Err(err) => {
+            state.save_error = Some(err);
+            sync_custom_agent_fields(state);
+        }
+    }
+}
+
+fn start_custom_agent_interaction(state: &mut SettingsState) {
+    let Some(field) = state.fields.get(state.selected) else {
+        return;
+    };
+
+    match field.label.as_str() {
+        CUSTOM_AGENT_LABEL => {
+            if !state.custom_agents.agents.is_empty() {
+                state.custom_agents.selected_agent =
+                    (state.custom_agents.selected_agent + 1) % state.custom_agents.agents.len();
+                state.save_error = None;
+                sync_custom_agent_fields(state);
+            }
+        }
+        CUSTOM_AGENT_TYPE_LABEL => {
+            if state.custom_agents.selected_agent().is_some() {
+                persist_custom_agents_update(state, |custom_agents| {
+                    if let Some(agent) = custom_agents.agents.get_mut(custom_agents.selected_agent)
+                    {
+                        agent.agent.agent_type = next_custom_agent_type(agent.agent.agent_type);
+                    }
+                });
+            }
+        }
+        CUSTOM_AGENT_ADD_LABEL => {
+            persist_custom_agents_update(state, |custom_agents| {
+                custom_agents
+                    .agents
+                    .push(default_custom_agent(&custom_agents.agents));
+                custom_agents.selected_agent = custom_agents.agents.len().saturating_sub(1);
+            });
+        }
+        CUSTOM_AGENT_DELETE_LABEL => {
+            if state.custom_agents.selected_agent().is_some() {
+                persist_custom_agents_update(state, |custom_agents| {
+                    custom_agents.agents.remove(custom_agents.selected_agent);
+                    if custom_agents.selected_agent >= custom_agents.agents.len() {
+                        custom_agents.selected_agent = custom_agents.agents.len().saturating_sub(1);
+                    }
+                });
+            }
+        }
+        CUSTOM_AGENT_ID_LABEL | CUSTOM_AGENT_DISPLAY_NAME_LABEL | CUSTOM_AGENT_COMMAND_LABEL => {
+            if let Some(agent) = state.custom_agents.selected_agent() {
+                state.edit_buffer = match field.label.as_str() {
+                    CUSTOM_AGENT_ID_LABEL => agent.agent.id.clone(),
+                    CUSTOM_AGENT_DISPLAY_NAME_LABEL => agent.agent.display_name.clone(),
+                    CUSTOM_AGENT_COMMAND_LABEL => agent.agent.command.clone(),
+                    _ => String::new(),
+                };
+                state.editing = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn finish_custom_agent_edit(state: &mut SettingsState) {
+    let Some(field) = state.fields.get(state.selected) else {
+        state.editing = false;
+        state.edit_buffer.clear();
+        return;
+    };
+
+    let new_value = state.edit_buffer.clone();
+    let label = field.label.clone();
+    state.editing = false;
+    state.edit_buffer.clear();
+
+    let Some(_) = state.custom_agents.selected_agent() else {
+        return;
+    };
+
+    persist_custom_agents_update(state, move |custom_agents| {
+        if let Some(agent) = custom_agents.agents.get_mut(custom_agents.selected_agent) {
+            match label.as_str() {
+                CUSTOM_AGENT_ID_LABEL => agent.agent.id = new_value.clone(),
+                CUSTOM_AGENT_DISPLAY_NAME_LABEL => agent.agent.display_name = new_value.clone(),
+                CUSTOM_AGENT_COMMAND_LABEL => agent.agent.command = new_value.clone(),
+                _ => {}
+            }
+        }
+    });
+}
+
+/// Update settings state in response to a message.
+pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
+    match msg {
+        SettingsMessage::MoveUp => {
+            if !state.editing {
+                super::move_up(&mut state.selected, state.fields.len());
+            }
+        }
+        SettingsMessage::MoveDown => {
+            if !state.editing {
+                super::move_down(&mut state.selected, state.fields.len());
+            }
+        }
+        SettingsMessage::NextCategory => {
+            if !state.editing {
+                state.category = state.category.next();
+                state.load_category_fields();
+            }
+        }
+        SettingsMessage::PrevCategory => {
+            if !state.editing {
+                state.category = state.category.prev();
+                state.load_category_fields();
+            }
+        }
+        SettingsMessage::StartEdit => {
+            if state.category == SettingsCategory::CustomAgents {
+                start_custom_agent_interaction(state);
+                return;
+            }
+            if !state.editing {
+                if let Some(field) = state.fields.get(state.selected) {
+                    if field.field_type == FieldType::Bool {
+                        toggle_bool_field(&mut state.fields[state.selected]);
+                    } else {
+                        state.edit_buffer = field.value.clone();
+                        state.editing = true;
+                    }
+                }
+            }
+        }
+        SettingsMessage::EndEdit => {
+            if state.category == SettingsCategory::CustomAgents {
+                finish_custom_agent_edit(state);
+                return;
+            }
+            if state.editing {
+                if let Some(field) = state.fields.get_mut(state.selected) {
+                    field.value = state.edit_buffer.clone();
+                }
+                state.editing = false;
+                state.edit_buffer.clear();
+            }
+        }
+        SettingsMessage::CancelEdit => {
+            state.editing = false;
+            state.edit_buffer.clear();
+        }
+        SettingsMessage::InputChar(ch) => {
+            if state.editing {
+                state.edit_buffer.push(ch);
+            }
+        }
+        SettingsMessage::Backspace => {
+            if state.editing {
+                state.edit_buffer.pop();
+            }
+        }
+        SettingsMessage::ToggleBool => {
+            if !state.editing {
+                if let Some(field) = state.fields.get_mut(state.selected) {
+                    toggle_bool_field(field);
+                }
+            }
+        }
+        SettingsMessage::Save => {
+            if let Err(e) = save_settings_to_config(state) {
+                state.save_error = Some(e);
+            } else {
+                state.save_error = None;
+            }
+        }
+    }
+}
+
+/// Render the settings screen (borderless — outer pane border is handled by app.rs).
+pub fn render(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    // Category sub-tab header line
+    let active_idx = SettingsCategory::ALL
         .iter()
-        .map(|cat| {
-            let style = if *cat == state.category {
+        .position(|c| *c == state.category)
+        .unwrap_or(0);
+    let labels: Vec<&str> = SettingsCategory::ALL.iter().map(|c| c.label()).collect();
+    let tab_title = super::build_tab_title(&labels, active_idx);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    let header = Paragraph::new(tab_title);
+    frame.render_widget(header, chunks[0]);
+    render_fields(state, frame, chunks[1]);
+}
+
+/// Render the fields list for the current category.
+fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    if state.fields.is_empty() {
+        let block = Block::default();
+        let paragraph = Paragraph::new("No settings in this category")
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let show_error = matches!(
+        state.category,
+        SettingsCategory::Voice | SettingsCategory::CustomAgents
+    ) && state.save_error.is_some();
+
+    let chunks = if show_error {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0)])
+            .split(area)
+    };
+
+    let items: Vec<ListItem> = state
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let is_selected = idx == state.selected;
+            let is_editing = is_selected && state.editing;
+
+            let label_style = if is_selected {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                Style::default().fg(Color::White)
             };
-            Line::styled(cat.label().to_string(), style)
-        })
-        .collect();
 
-    let tabs = Tabs::new(titles)
-        .block(styled_block(" Categories "))
-        .highlight_style(Style::default().fg(Color::Cyan))
-        .select(
-            categories
-                .iter()
-                .position(|cat| *cat == state.category)
-                .unwrap_or(0),
-        );
-
-    Widget::render(tabs, area, buf);
-}
-
-fn render_content(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    match state.category {
-        SettingsCategory::CustomAgents => render_custom_agents(state, buf, area),
-        SettingsCategory::Environment => render_profiles(state, buf, area),
-        SettingsCategory::AISettings => render_ai_settings(state, buf, area),
-        _ => render_general_content(state, buf, area),
-    }
-}
-
-fn render_general_content(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let items = state.category_items();
-
-    if items.is_empty() {
-        let text = if state.settings.is_none() {
-            "Settings not loaded. Loading..."
-        } else {
-            "No settings in this category"
-        };
-        let paragraph = Paragraph::new(text)
-            .alignment(Alignment::Center)
-            .block(styled_block(" Settings "));
-        Widget::render(paragraph, area, buf);
-        return;
-    }
-
-    let (list_area, desc_area) = if area.height >= 6 {
-        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-        (chunks[0], Some(chunks[1]))
-    } else {
-        (area, None)
-    };
-
-    let list_items: Vec<ListItem> = items
-        .iter()
-        .enumerate()
-        .map(|(i, (name, value))| {
-            let content = format!("  {}: {}", name, value);
-            let style = if i == state.selected_item {
-                Style::default().add_modifier(Modifier::REVERSED)
+            let value_display = if is_editing {
+                format!("{}_", state.edit_buffer)
             } else {
-                Style::default()
+                field.value.clone()
             };
-            ListItem::new(content).style(style)
-        })
-        .collect();
 
-    let category_name = state.category.label();
-    let title = format!(" {} Settings ", category_name);
-    let list = List::new(list_items).block(styled_block(&title));
-    Widget::render(list, list_area, buf);
-
-    if let Some(desc_area) = desc_area {
-        let description = selected_description(state);
-        let paragraph = Paragraph::new(description)
-            .wrap(Wrap { trim: true })
-            .block(styled_block(" Description "));
-        Widget::render(paragraph, desc_area, buf);
-    }
-}
-
-fn selected_description(state: &SettingsState) -> &'static str {
-    match state.category {
-        SettingsCategory::General => match state.selected_item {
-            0 => "Base branch used for diff checks and cleanup safety.",
-            1 => "Enable verbose logging output.",
-            2 => "Days to keep logs before pruning.",
-            _ => "",
-        },
-        SettingsCategory::Worktree => match state.selected_item {
-            0 => "Relative root directory for worktree creation.",
-            1 => "Branches that cannot be deleted.",
-            _ => "",
-        },
-        SettingsCategory::Agent => match state.selected_item {
-            0 => "Default coding agent for quick start.",
-            1 => "If false, dependency install is skipped before launch.",
-            2 => "Override path to Claude executable.",
-            _ => "",
-        },
-        SettingsCategory::CustomAgents => "Manage custom coding agents.",
-        SettingsCategory::Environment => "Manage environment profiles.",
-        SettingsCategory::AISettings => "Configure AI settings (endpoint, key, model).",
-    }
-}
-
-fn render_custom_agents(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    match &state.custom_agent_mode {
-        CustomAgentMode::List => render_custom_agents_list(state, buf, area),
-        CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
-            render_agent_form(state, buf, area);
-        }
-        CustomAgentMode::ConfirmDelete(id) => {
-            render_agent_delete_confirm(state, buf, area, id);
-        }
-    }
-}
-
-fn render_custom_agents_list(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let agents = state.custom_agents();
-
-    let mut list_items: Vec<ListItem> = agents
-        .iter()
-        .enumerate()
-        .map(|(i, agent)| {
-            let type_str = match agent.agent_type {
-                AgentType::Command => "cmd",
-                AgentType::Path => "path",
-                AgentType::Bunx => "bunx",
-            };
-            let content = format!(
-                "  {} [{}] - {}",
-                agent.display_name, type_str, agent.command
-            );
-            let style = if i == state.custom_agent_index {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(content).style(style)
-        })
-        .collect();
-
-    let add_style = if state.is_add_agent_selected() {
-        Style::default()
-            .add_modifier(Modifier::REVERSED)
-            .fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    list_items.push(ListItem::new("  + Add new custom agent...").style(add_style));
-
-    let list = List::new(list_items).block(styled_block(" Custom Coding Agents "));
-    Widget::render(list, area, buf);
-}
-
-fn render_agent_form(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let form = &state.agent_form;
-    let is_edit = matches!(state.custom_agent_mode, CustomAgentMode::Edit(_));
-    let title = if is_edit {
-        " Edit Custom Agent "
-    } else {
-        " Add Custom Agent "
-    };
-
-    let block = styled_block(title);
-    let inner = block.inner(area);
-    Widget::render(block, area, buf);
-
-    let field_height = 3u16;
-    let fields = AgentFormField::all();
-    let constraints: Vec<Constraint> = fields
-        .iter()
-        .map(|_| Constraint::Length(field_height))
-        .chain(std::iter::once(Constraint::Min(0)))
-        .collect();
-
-    let chunks = Layout::vertical(constraints).margin(1).split(inner);
-
-    for (i, field) in fields.iter().enumerate() {
-        let is_selected = *field == form.current_field;
-
-        let (value, show_cursor) = match field {
-            AgentFormField::Id => (form.id.as_str(), is_selected),
-            AgentFormField::DisplayName => (form.display_name.as_str(), is_selected),
-            AgentFormField::Type => {
-                let type_str = match form.agent_type {
-                    AgentType::Command => "command (PATH search)",
-                    AgentType::Path => "path (absolute path)",
-                    AgentType::Bunx => "bunx (bunx execution)",
-                };
-                (type_str, false)
-            }
-            AgentFormField::Command => (form.command.as_str(), is_selected),
-        };
-
-        let display_text = if show_cursor {
-            let mut text = String::from(value);
-            let cursor_pos = form.cursor.min(text.len());
-            text.insert(cursor_pos, '|');
-            text
-        } else {
-            value.to_string()
-        };
-
-        let field_style = if is_selected {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        };
-
-        let hint = if is_selected && *field == AgentFormField::Type {
-            " (Space to cycle)"
-        } else {
-            ""
-        };
-
-        let field_title = format!(" {} ", field.label());
-        let field_block = styled_block(&field_title).border_style(field_style);
-        let paragraph = Paragraph::new(format!("{}{}", display_text, hint)).block(field_block);
-        Widget::render(paragraph, chunks[i], buf);
-    }
-}
-
-fn render_agent_delete_confirm(
-    state: &SettingsState,
-    buf: &mut Buffer,
-    area: Rect,
-    agent_id: &str,
-) {
-    let display_name = state
-        .custom_agents()
-        .iter()
-        .find(|a| a.id == agent_id)
-        .map(|a| a.display_name.as_str())
-        .unwrap_or(agent_id);
-
-    let yes_style = if state.delete_confirm {
-        Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
-    let no_style = if !state.delete_confirm {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
-
-    let text = vec![
-        Line::from(format!("Delete agent \"{}\"?", display_name)),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" Yes ", yes_style),
-            Span::raw("  "),
-            Span::styled(" No ", no_style),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(text)
-        .alignment(Alignment::Center)
-        .block(styled_block(" Confirm Delete "));
-    Widget::render(paragraph, area, buf);
-}
-
-fn render_profiles(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    match &state.profile_mode {
-        ProfileMode::List => render_profile_list(state, buf, area),
-        ProfileMode::Add | ProfileMode::Edit(_) => render_profile_form(state, buf, area),
-        ProfileMode::ConfirmDelete(name) => {
-            let name = name.clone();
-            render_profile_delete_confirm(state, buf, area, &name);
-        }
-        ProfileMode::EnvEdit(_) => render_env_edit(state, buf, area),
-    }
-}
-
-pub fn render_profiles_tab(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    render_profiles(state, buf, area);
-}
-
-fn render_profile_list(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let names = state.profile_names();
-
-    let mut list_items: Vec<ListItem> = names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let active_marker = if state.is_profile_active(name) {
-                " [active]"
-            } else {
-                ""
-            };
-            let desc = state
-                .profiles_config
-                .as_ref()
-                .and_then(|c| c.profiles.get(name))
-                .map(|p| {
-                    if p.description.is_empty() {
-                        String::new()
+            let value_style = match (&field.field_type, is_editing) {
+                (_, true) => Style::default().fg(Color::Yellow),
+                (FieldType::Bool, false) => {
+                    if field.value == "true" {
+                        Style::default().fg(Color::Green)
                     } else {
-                        format!(" - {}", p.description)
+                        Style::default().fg(Color::Red)
                     }
-                })
-                .unwrap_or_default();
+                }
+                (FieldType::Choice, false) => Style::default().fg(Color::Cyan),
+                (FieldType::Action, false) => Style::default().fg(Color::Yellow),
+                (FieldType::Path, false) => Style::default().fg(Color::Cyan),
+                (FieldType::Text, false) => Style::default().fg(Color::White),
+            };
 
-            let content = format!("  {}{}{}", name, active_marker, desc);
-            let style = if i == state.profile_index {
-                Style::default().add_modifier(Modifier::REVERSED)
+            let type_indicator = match field.field_type {
+                FieldType::Text => "T",
+                FieldType::Bool => "B",
+                FieldType::Path => "P",
+                FieldType::Choice => "C",
+                FieldType::Action => "A",
+            };
+
+            let bg_style = if is_selected {
+                Style::default().bg(Color::DarkGray)
             } else {
                 Style::default()
             };
-            ListItem::new(content).style(style)
+
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", type_indicator),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("{}: ", field.label), label_style),
+                Span::styled(value_display, value_style),
+            ]);
+            ListItem::new(line).style(bg_style)
         })
         .collect();
 
-    let add_style = if state.is_add_profile_selected() {
+    let hints = if state.editing {
+        " Enter: save | Esc: cancel"
+    } else if state.category == SettingsCategory::CustomAgents {
+        " Enter: cycle/edit/action | Ctrl+Left/Right: category"
+    } else {
+        " Enter: edit | Space: toggle bool | Tab/Shift+Tab: category"
+    };
+
+    let block = Block::default().title(format!("{}{}", state.category.label(), hints));
+    let list = List::new(items).block(block).highlight_style(
         Style::default()
-            .add_modifier(Modifier::REVERSED)
-            .fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    list_items.push(ListItem::new("  + Add new profile...").style(add_style));
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(state.selected));
 
-    let list = List::new(list_items).block(styled_block(" Environment Profiles "));
-    Widget::render(list, area, buf);
-}
+    frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
-fn render_profile_form(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let form = &state.profile_form;
-    let is_edit = matches!(state.profile_mode, ProfileMode::Edit(_));
-    let title = if is_edit {
-        " Edit Profile "
-    } else {
-        " Add Profile "
-    };
+    if let Some(error) = state.save_error.as_ref() {
+        let error_block = Block::default().title("Save failed");
+        let error_paragraph = Paragraph::new(error.as_str())
+            .block(error_block)
+            .style(Style::default().fg(Color::Red));
 
-    let block = styled_block(title);
-    let inner = block.inner(area);
-    Widget::render(block, area, buf);
-
-    let fields = ProfileFormField::all();
-    let constraints: Vec<Constraint> = fields
-        .iter()
-        .map(|_| Constraint::Length(3))
-        .chain(std::iter::once(Constraint::Min(0)))
-        .collect();
-
-    let chunks = Layout::vertical(constraints).margin(1).split(inner);
-
-    for (i, field) in fields.iter().enumerate() {
-        let is_selected = *field == form.current_field;
-        let value = match field {
-            ProfileFormField::Name => &form.name,
-            ProfileFormField::Description => &form.description,
-        };
-
-        let display_text = if is_selected {
-            let mut text = value.clone();
-            let cursor_pos = form.cursor.min(text.len());
-            text.insert(cursor_pos, '|');
-            text
-        } else {
-            value.clone()
-        };
-
-        let field_style = if is_selected {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        };
-
-        let field_title = format!(" {} ", field.label());
-        let field_block = styled_block(&field_title).border_style(field_style);
-        let paragraph = Paragraph::new(display_text).block(field_block);
-        Widget::render(paragraph, chunks[i], buf);
+        let error_area = if chunks.len() > 1 { chunks[1] } else { area };
+        frame.render_widget(error_paragraph, error_area);
     }
 }
-
-fn render_profile_delete_confirm(
-    state: &SettingsState,
-    buf: &mut Buffer,
-    area: Rect,
-    profile_name: &str,
-) {
-    let yes_style = if state.profile_delete_confirm {
-        Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
-    let no_style = if !state.profile_delete_confirm {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
-
-    let text = vec![
-        Line::from(format!("Delete profile \"{}\"?", profile_name)),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" Yes ", yes_style),
-            Span::raw("  "),
-            Span::styled(" No ", no_style),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(text)
-        .alignment(Alignment::Center)
-        .block(styled_block(" Confirm Delete "));
-    Widget::render(paragraph, area, buf);
-}
-
-fn render_env_edit(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let env = &state.env_state;
-    let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(area);
-
-    let display_items = env.display_items();
-    if display_items.is_empty() {
-        let paragraph = Paragraph::new("No environment variables. Press 'n' to add.")
-            .alignment(Alignment::Center)
-            .block(styled_block(" Environment Variables "));
-        Widget::render(paragraph, layout[0], buf);
-        render_env_footer(env, buf, layout[1]);
-        return;
-    }
-
-    let list_items: Vec<ListItem> = display_items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let is_selected = i == env.selected_index;
-            let kind_marker = match item.kind {
-                EnvDisplayKind::Overridden => "[OVR]",
-                EnvDisplayKind::Added => "[ADD]",
-                EnvDisplayKind::OsDisabled => "[OFF]",
-                EnvDisplayKind::OsOnly => "[OS ]",
-            };
-            let display = if let Some(ref edit_mode) = env.editing {
-                if is_selected {
-                    match edit_mode {
-                        EnvEditMode::Key(cursor) => {
-                            let mut k = item.key.clone();
-                            let pos = (*cursor).min(k.len());
-                            k.insert(pos, '|');
-                            format!(" {kind_marker} {} = {}", k, item.value)
-                        }
-                        EnvEditMode::Value(cursor) => {
-                            let mut v = item.value.clone();
-                            let pos = (*cursor).min(v.len());
-                            v.insert(pos, '|');
-                            format!(" {kind_marker} {} = {}", item.key, v)
-                        }
-                    }
-                } else {
-                    format!(" {kind_marker} {} = {}", item.key, item.value)
-                }
-            } else {
-                format!(" {kind_marker} {} = {}", item.key, item.value)
-            };
-
-            let style = if is_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                match item.kind {
-                    EnvDisplayKind::Overridden => Style::default().fg(Color::Yellow),
-                    EnvDisplayKind::Added => Style::default().fg(Color::Green),
-                    EnvDisplayKind::OsDisabled => Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::CROSSED_OUT),
-                    EnvDisplayKind::OsOnly => Style::default(),
-                }
-            };
-            ListItem::new(display).style(style)
-        })
-        .collect();
-
-    let list = List::new(list_items).block(styled_block(" Environment Variables "));
-    Widget::render(list, layout[0], buf);
-    render_env_footer(env, buf, layout[1]);
-}
-
-fn render_env_footer(env: &EnvEditState, buf: &mut Buffer, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
-
-    let hint = if env.editing.is_some() {
-        "[Enter] Confirm  [Tab] Key/Value  [Esc] Save & Back"
-    } else if env.selected_is_os_entry() {
-        "[Enter] Override  [Space] Disable/Enable  [n] Add  [Esc] Save & Back"
-    } else if env.selected_is_overridden() {
-        "[Enter] Edit Override  [d] Delete Override  [n] Add  [Esc] Save & Back"
-    } else if env.selected_is_added() {
-        "[Enter] Edit  [d] Delete  [n] Add  [Esc] Save & Back"
-    } else {
-        "[Enter] Edit  [n] Add  [Esc] Save & Back"
-    };
-
-    let span = Span::styled(hint, Style::default().fg(Color::DarkGray));
-    buf.set_span(area.x, area.y, &span, area.width);
-
-    if area.height > 1 {
-        let legend = Span::styled(
-            "[OS] inherited  [OVR] override  [ADD] added  [OFF] disabled",
-            Style::default().fg(Color::DarkGray),
-        );
-        buf.set_span(area.x, area.y + 1, &legend, area.width);
-    }
-}
-
-fn render_ai_settings(state: &SettingsState, buf: &mut Buffer, area: Rect) {
-    let ai_info = state
-        .profiles_config
-        .as_ref()
-        .and_then(|c| c.active_profile())
-        .and_then(|p| p.ai.as_ref());
-
-    let text = if let Some(ai) = ai_info {
-        vec![
-            Line::from(vec![
-                Span::styled("Endpoint: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(&ai.endpoint),
-            ]),
-            Line::from(vec![
-                Span::styled("Model:    ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(if ai.model.is_empty() {
-                    "Not set"
-                } else {
-                    &ai.model
-                }),
-            ]),
-            Line::from(vec![
-                Span::styled("API Key:  ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(if ai.api_key.is_empty() {
-                    "Not set"
-                } else {
-                    "********"
-                }),
-            ]),
-            Line::from(vec![
-                Span::styled("Language: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(&ai.language),
-            ]),
-            Line::from(vec![
-                Span::styled("Summary:  ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(if ai.summary_enabled {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }),
-            ]),
-        ]
-    } else {
-        vec![
-            Line::from("No AI settings configured."),
-            Line::from("Set up via profile AI settings or wizard."),
-        ]
-    };
-
-    let paragraph = Paragraph::new(text)
-        .wrap(Wrap { trim: true })
-        .block(styled_block(" AI Settings "));
-    Widget::render(paragraph, area, buf);
-}
-
-// ---------------------------------------------------------------------------
-// Key handling
-// ---------------------------------------------------------------------------
-
-/// Handle a key event in the settings screen.
-pub fn handle_key(state: &SettingsState, key: &KeyEvent) -> Option<SettingsMessage> {
-    // Form mode (custom agent or profile)
-    if state.is_form_mode() {
-        return handle_form_key(key);
-    }
-
-    // Delete confirmation mode (agent)
-    if state.is_delete_mode() {
-        return handle_delete_confirm_key(key);
-    }
-
-    // Profile delete confirmation
-    if matches!(state.profile_mode, ProfileMode::ConfirmDelete(_)) {
-        return handle_profile_delete_confirm_key(key);
-    }
-
-    // Env edit mode
-    if matches!(state.profile_mode, ProfileMode::EnvEdit(_)) {
-        return handle_env_edit_key(state, key);
-    }
-
-    match key.code {
-        KeyCode::Left | KeyCode::Char('h') => Some(SettingsMessage::PrevCategory),
-        KeyCode::Right | KeyCode::Char('l') => Some(SettingsMessage::NextCategory),
-        KeyCode::Up | KeyCode::Char('k') => Some(SettingsMessage::SelectPrev),
-        KeyCode::Down | KeyCode::Char('j') => Some(SettingsMessage::SelectNext),
-        KeyCode::Enter => match state.category {
-            SettingsCategory::CustomAgents => Some(SettingsMessage::Edit),
-            SettingsCategory::Environment => {
-                if state.is_add_profile_selected() {
-                    Some(SettingsMessage::ProfileAdd)
-                } else {
-                    Some(SettingsMessage::ProfileEnvEdit)
-                }
-            }
-            _ => None,
-        },
-        KeyCode::Char('d') | KeyCode::Char('D') => match state.category {
-            SettingsCategory::CustomAgents if !state.is_add_agent_selected() => {
-                Some(SettingsMessage::Delete)
-            }
-            SettingsCategory::Environment if !state.is_add_profile_selected() => {
-                Some(SettingsMessage::ProfileDelete)
-            }
-            _ => None,
-        },
-        KeyCode::Char('e') | KeyCode::Char('E') => {
-            if state.category == SettingsCategory::Environment && !state.is_add_profile_selected() {
-                Some(SettingsMessage::ProfileEdit)
-            } else {
-                None
-            }
-        }
-        KeyCode::Char(' ') => {
-            if state.category == SettingsCategory::Environment && !state.is_add_profile_selected() {
-                Some(SettingsMessage::ProfileToggleActive)
-            } else {
-                None
-            }
-        }
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(SettingsMessage::Refresh)
-        }
-        _ => None,
-    }
-}
-
-fn handle_form_key(key: &KeyEvent) -> Option<SettingsMessage> {
-    match key.code {
-        KeyCode::Esc => Some(SettingsMessage::Cancel),
-        KeyCode::Enter => Some(SettingsMessage::Save),
-        KeyCode::Tab | KeyCode::Down => Some(SettingsMessage::FormNextField),
-        KeyCode::BackTab | KeyCode::Up => Some(SettingsMessage::FormPrevField),
-        KeyCode::Char(' ') => Some(SettingsMessage::FormCycleType),
-        KeyCode::Backspace => Some(SettingsMessage::FormBackspace),
-        KeyCode::Char(c) => Some(SettingsMessage::FormChar(c)),
-        _ => None,
-    }
-}
-
-fn handle_delete_confirm_key(key: &KeyEvent) -> Option<SettingsMessage> {
-    match key.code {
-        KeyCode::Esc => Some(SettingsMessage::Cancel),
-        KeyCode::Left | KeyCode::Right => Some(SettingsMessage::ToggleDeleteConfirm),
-        KeyCode::Enter => Some(SettingsMessage::ConfirmDelete),
-        _ => None,
-    }
-}
-
-fn handle_profile_delete_confirm_key(key: &KeyEvent) -> Option<SettingsMessage> {
-    match key.code {
-        KeyCode::Esc => Some(SettingsMessage::Cancel),
-        KeyCode::Left | KeyCode::Right => Some(SettingsMessage::ToggleDeleteConfirm),
-        KeyCode::Enter => Some(SettingsMessage::ConfirmDelete),
-        _ => None,
-    }
-}
-
-fn handle_env_edit_key(state: &SettingsState, key: &KeyEvent) -> Option<SettingsMessage> {
-    if state.env_state.editing.is_some() {
-        // In edit mode
-        match key.code {
-            KeyCode::Esc => Some(SettingsMessage::Cancel),
-            KeyCode::Enter => Some(SettingsMessage::EnvConfirm),
-            KeyCode::Tab => Some(SettingsMessage::EnvToggleKeyValue),
-            KeyCode::Backspace => Some(SettingsMessage::FormBackspace),
-            KeyCode::Char(c) => Some(SettingsMessage::FormChar(c)),
-            _ => None,
-        }
-    } else {
-        // Navigation mode
-        match key.code {
-            KeyCode::Esc => Some(SettingsMessage::Cancel),
-            KeyCode::Up | KeyCode::Char('k') => Some(SettingsMessage::SelectPrev),
-            KeyCode::Down | KeyCode::Char('j') => Some(SettingsMessage::SelectNext),
-            KeyCode::Enter => Some(SettingsMessage::EnvStartEdit),
-            KeyCode::Char('n') | KeyCode::Char('N') => Some(SettingsMessage::EnvNew),
-            KeyCode::Char('d') | KeyCode::Char('D') => Some(SettingsMessage::EnvDelete),
-            KeyCode::Char(' ') => Some(SettingsMessage::EnvToggleDisabled),
-            _ => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use crate::custom_agents::load_custom_agents_from_path;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::Path;
 
-    #[test]
-    fn settings_state_default_starts_at_general() {
-        let state = SettingsState::new();
-        assert_eq!(state.category, SettingsCategory::General);
-        assert_eq!(state.selected_item, 0);
-        assert!(state.settings.is_none());
+    fn state_with_fields() -> SettingsState {
+        let mut state = SettingsState::default();
+        state.load_category_fields();
+        state
     }
 
-    #[test]
-    fn category_navigation_wraps() {
-        let mut state = SettingsState::new();
-        assert_eq!(state.category, SettingsCategory::General);
-
-        state.next_category();
-        assert_eq!(state.category, SettingsCategory::Worktree);
-
-        state.next_category();
-        assert_eq!(state.category, SettingsCategory::Agent);
-
-        state.next_category();
-        assert_eq!(state.category, SettingsCategory::CustomAgents);
-
-        state.next_category();
-        assert_eq!(state.category, SettingsCategory::Environment);
-
-        state.next_category();
-        assert_eq!(state.category, SettingsCategory::AISettings);
-
-        state.next_category();
-        assert_eq!(state.category, SettingsCategory::General); // wraps
-
-        state.prev_category();
-        assert_eq!(state.category, SettingsCategory::AISettings); // wraps back
+    fn voice_state_with_fields() -> SettingsState {
+        let mut state = SettingsState::default();
+        state.category = SettingsCategory::Voice;
+        state.load_category_fields();
+        state
     }
 
-    #[test]
-    fn management_tab_category_navigation_skips_environment() {
-        let mut state = SettingsState::new();
+    fn custom_agents_state_with_fields(config_path: &Path) -> SettingsState {
+        let mut state = SettingsState::default();
         state.category = SettingsCategory::CustomAgents;
-
-        state.next_management_tab_category();
-        assert_eq!(state.category, SettingsCategory::AISettings);
-
-        state.next_management_tab_category();
-        assert_eq!(state.category, SettingsCategory::General);
-
-        state.category = SettingsCategory::Environment;
-        state.ensure_management_tab_category();
-        assert_eq!(state.category, SettingsCategory::General);
-
-        state.prev_management_tab_category();
-        assert_eq!(state.category, SettingsCategory::AISettings);
+        state.config_path_override = Some(config_path.to_path_buf());
+        state.load_category_fields();
+        state
     }
 
-    #[test]
-    fn category_items_empty_when_no_settings() {
-        let state = SettingsState::new();
-        assert!(state.category_items().is_empty());
-    }
-
-    #[test]
-    fn category_items_general_with_settings() {
-        let mut state = SettingsState::new();
-        state.settings = Some(Settings::default());
-        let items = state.category_items();
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].0, "Default Base Branch");
-    }
-
-    #[test]
-    fn custom_agent_form_validation() {
-        let form = AgentFormState::new();
-        assert!(form.validate().is_err());
-
-        let mut form = AgentFormState::new();
-        form.id = "test-agent".to_string();
-        form.display_name = "Test Agent".to_string();
-        form.command = "/usr/bin/test".to_string();
-        assert!(form.validate().is_ok());
-    }
-
-    #[test]
-    fn custom_agent_form_char_insert_delete() {
-        let mut form = AgentFormState::new();
-        form.current_field = AgentFormField::Id;
-        form.cursor = 0;
-
-        form.insert_char('a');
-        form.insert_char('b');
-        assert_eq!(form.id, "ab");
-        assert_eq!(form.cursor, 2);
-
-        form.delete_char();
-        assert_eq!(form.id, "a");
-        assert_eq!(form.cursor, 1);
-    }
-
-    #[test]
-    fn custom_agent_form_field_navigation() {
-        let mut form = AgentFormState::new();
-        assert_eq!(form.current_field, AgentFormField::Id);
-
-        form.next_field();
-        assert_eq!(form.current_field, AgentFormField::DisplayName);
-
-        form.next_field();
-        assert_eq!(form.current_field, AgentFormField::Type);
-
-        form.prev_field();
-        assert_eq!(form.current_field, AgentFormField::DisplayName);
-    }
-
-    #[test]
-    fn custom_agent_type_cycle() {
-        let mut form = AgentFormState::new();
-        assert_eq!(form.agent_type, AgentType::Command);
-
-        form.cycle_type();
-        assert_eq!(form.agent_type, AgentType::Path);
-
-        form.cycle_type();
-        assert_eq!(form.agent_type, AgentType::Bunx);
-
-        form.cycle_type();
-        assert_eq!(form.agent_type, AgentType::Command);
-    }
-
-    #[test]
-    fn profile_form_validation() {
-        let form = ProfileFormState::new();
-        assert!(form.validate().is_err());
-
-        let mut form = ProfileFormState::new();
-        form.name = "test-profile".to_string();
-        assert!(form.validate().is_ok());
-
-        form.name = "invalid name!".to_string();
-        assert!(form.validate().is_err());
-    }
-
-    #[test]
-    fn profile_crud_operations() {
-        let mut state = SettingsState::new();
-        state.profiles_config = Some(ProfilesConfig {
-            version: 1,
-            active: None,
-            profiles: HashMap::new(),
-        });
-
-        // Add profile
-        state.enter_profile_add_mode();
-        assert!(matches!(state.profile_mode, ProfileMode::Add));
-        state.profile_form.name = "test".to_string();
-        state.profile_form.description = "Test profile".to_string();
-        assert!(state.save_profile().is_ok());
-        assert_eq!(state.profile_names().len(), 1);
-
-        // Toggle active
-        state.profile_index = 0;
-        state.toggle_active_profile();
-        assert!(state.is_profile_active("test"));
-
-        // Delete
-        state.enter_profile_delete_mode();
-        assert!(matches!(state.profile_mode, ProfileMode::ConfirmDelete(_)));
-        assert!(state.delete_profile());
-        assert!(state.profile_names().is_empty());
-    }
-
-    #[test]
-    fn env_edit_state_operations() {
-        let mut profile = Profile::new("test");
-        profile.env.insert("FOO".to_string(), "bar".to_string());
-        profile.env.insert("BAZ".to_string(), "qux".to_string());
-
-        let mut env = EnvEditState::from_profile(&profile);
-        assert_eq!(env.vars.len(), 2);
-        // sorted by key
-        assert_eq!(env.vars[0].0, "BAZ");
-        assert_eq!(env.vars[1].0, "FOO");
-
-        env.add_new_var();
-        assert_eq!(env.vars.len(), 3);
-        assert_eq!(env.selected_index, 0);
-
-        env.delete_selected();
-        assert_eq!(env.vars.len(), 2);
-
-        let env_map = env.to_env();
-        assert_eq!(env_map.len(), 2);
-    }
-
-    #[test]
-    fn env_edit_state_classifies_os_and_profile_entries() {
-        let mut profile = Profile::new("test");
-        profile
-            .env
-            .insert("TOKEN".to_string(), "override".to_string());
-        profile.env.insert("NEW".to_string(), "added".to_string());
-        profile.disabled_env.push("HOME".to_string());
-
-        let mut env = EnvEditState::from_profile(&profile);
-        env.os_vars = vec![
-            ("HOME".to_string(), "/tmp".to_string()),
-            ("PATH".to_string(), "/bin".to_string()),
-            ("TOKEN".to_string(), "os-token".to_string()),
-        ];
-
-        let items = env.display_items();
-        let home = items.iter().find(|item| item.key == "HOME").unwrap();
-        assert_eq!(home.kind, EnvDisplayKind::OsDisabled);
-        let path = items.iter().find(|item| item.key == "PATH").unwrap();
-        assert_eq!(path.kind, EnvDisplayKind::OsOnly);
-        let token = items.iter().find(|item| item.key == "TOKEN").unwrap();
-        assert_eq!(token.kind, EnvDisplayKind::Overridden);
-        let added = items.iter().find(|item| item.key == "NEW").unwrap();
-        assert_eq!(added.kind, EnvDisplayKind::Added);
-    }
-
-    #[test]
-    fn env_edit_state_toggle_selected_disabled_marks_os_entry() {
-        let profile = Profile::new("test");
-        let mut env = EnvEditState::from_profile(&profile);
-        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
-
-        assert!(env.toggle_selected_disabled());
-        assert_eq!(env.disabled_keys, vec!["PATH".to_string()]);
-        assert!(!env.toggle_selected_disabled());
-        assert!(env.disabled_keys.is_empty());
-    }
-
-    #[test]
-    fn env_edit_state_start_edit_selected_on_os_entry_creates_override() {
-        let profile = Profile::new("test");
-        let mut env = EnvEditState::from_profile(&profile);
-        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
-
-        env.start_edit_selected();
-
-        assert_eq!(env.vars.len(), 1);
-        assert_eq!(env.vars[0].0, "PATH");
-        assert_eq!(env.vars[0].1, "/bin");
-        assert!(env.selected_is_overridden() || env.selected_is_added());
-    }
-
-    #[test]
-    fn persist_env_edit_saves_disabled_env() {
-        let mut state = SettingsState::new();
-        let profile = Profile::new("dev");
-        let mut config = ProfilesConfig::default();
-        config.profiles.insert("dev".to_string(), profile);
-        state.profiles_config = Some(config);
-        state.profile_mode = ProfileMode::EnvEdit("dev".to_string());
-        state.env_state.os_vars = vec![("HOME".to_string(), "/tmp".to_string())];
-        state.env_state.toggle_selected_disabled();
-
-        state.persist_env_edit().unwrap();
-
-        let saved = state
-            .profiles_config
-            .as_ref()
-            .unwrap()
-            .profiles
-            .get("dev")
-            .unwrap();
-        assert_eq!(saved.disabled_env, vec!["HOME".to_string()]);
-    }
-
-    #[test]
-    fn select_next_prev_general() {
-        let mut state = SettingsState::new();
-        state.settings = Some(Settings::default());
-
-        state.select_next();
-        assert_eq!(state.selected_item, 1);
-        state.select_next();
-        assert_eq!(state.selected_item, 2);
-        state.select_next();
-        assert_eq!(state.selected_item, 2); // clamped
-
-        state.select_prev();
-        assert_eq!(state.selected_item, 1);
-    }
-
-    #[test]
-    fn render_smoke_test() {
-        let state = SettingsState::new();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
-    }
-
-    #[test]
-    fn render_with_settings_smoke_test() {
-        let mut state = SettingsState::new();
-        state.settings = Some(Settings::default());
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
-    }
-
-    #[test]
-    fn render_custom_agents_smoke_test() {
-        let mut state = SettingsState::new();
-        state.category = SettingsCategory::CustomAgents;
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
-    }
-
-    #[test]
-    fn render_profiles_smoke_test() {
-        let mut state = SettingsState::new();
-        state.category = SettingsCategory::Environment;
-        state.profiles_config = Some(ProfilesConfig {
-            version: 1,
-            active: None,
-            profiles: HashMap::new(),
-        });
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
-    }
-
-    #[test]
-    fn render_settings_tab_hides_environment_category() {
-        let mut state = SettingsState::new();
-        state.settings = Some(Settings::default());
-        state.category = SettingsCategory::General;
-        let area = Rect::new(0, 0, 80, 24);
-        let mut buf = Buffer::empty(area);
-        render_settings_tab(&state, &mut buf, area);
-
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
         let mut text = String::new();
-        for y in 0..area.height {
-            for x in 0..area.width {
-                text.push(
-                    buf.cell((x, y))
-                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')),
-                );
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push_str(buf[(x, y)].symbol());
             }
+            text.push_str(line.trim_end());
+            text.push('\n');
         }
-        assert!(
-            text.contains("General"),
-            "expected General tab, got: {text:?}"
-        );
-        assert!(!text.contains("Env"), "unexpected Env tab, got: {text:?}");
+        text
     }
 
     #[test]
-    fn render_env_footer_shows_os_entry_actions() {
-        let profile = Profile::new("test");
-        let mut env = EnvEditState::from_profile(&profile);
-        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
+    fn default_state() {
+        let state = SettingsState::default();
+        assert_eq!(state.category, SettingsCategory::General);
+        assert!(state.fields.is_empty());
+        assert_eq!(state.selected, 0);
+        assert!(!state.editing);
+        assert!(state.edit_buffer.is_empty());
+    }
 
-        let area = Rect::new(0, 0, 80, 2);
-        let mut buf = Buffer::empty(area);
-        render_env_footer(&env, &mut buf, area);
+    #[test]
+    fn load_category_fields_populates() {
+        let state = state_with_fields();
+        assert!(!state.fields.is_empty());
+        assert_eq!(state.selected, 0);
+        assert!(!state.editing);
+    }
 
-        let text: String = (0..80)
-            .map(|x| {
-                buf.cell((x, 0))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+    #[test]
+    fn move_down_wraps() {
+        let mut state = state_with_fields();
+        let len = state.fields.len();
+
+        for _ in 0..len {
+            update(&mut state, SettingsMessage::MoveDown);
+        }
+        assert_eq!(state.selected, 0); // wraps
+    }
+
+    #[test]
+    fn move_up_wraps() {
+        let mut state = state_with_fields();
+
+        update(&mut state, SettingsMessage::MoveUp);
+        assert_eq!(state.selected, state.fields.len() - 1); // wraps to last
+    }
+
+    #[test]
+    fn move_on_empty_is_noop() {
+        let mut state = SettingsState::default();
+        update(&mut state, SettingsMessage::MoveDown);
+        assert_eq!(state.selected, 0);
+        update(&mut state, SettingsMessage::MoveUp);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn move_blocked_during_editing() {
+        let mut state = state_with_fields();
+        state.editing = true;
+
+        update(&mut state, SettingsMessage::MoveDown);
+        assert_eq!(state.selected, 0); // did not move
+    }
+
+    #[test]
+    fn next_category_cycles() {
+        let mut state = state_with_fields();
+        assert_eq!(state.category, SettingsCategory::General);
+
+        update(&mut state, SettingsMessage::NextCategory);
+        assert_eq!(state.category, SettingsCategory::Worktree);
+        assert!(!state.fields.is_empty());
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn prev_category_cycles() {
+        let mut state = state_with_fields();
+        assert_eq!(state.category, SettingsCategory::General);
+
+        update(&mut state, SettingsMessage::PrevCategory);
+        assert_eq!(state.category, SettingsCategory::Voice);
+    }
+
+    #[test]
+    fn category_change_blocked_during_editing() {
+        let mut state = state_with_fields();
+        state.editing = true;
+
+        update(&mut state, SettingsMessage::NextCategory);
+        assert_eq!(state.category, SettingsCategory::General);
+    }
+
+    #[test]
+    fn start_edit_text_field() {
+        let mut state = state_with_fields();
+        // First field is "Theme" (Text)
+        assert_eq!(state.fields[0].field_type, FieldType::Text);
+
+        update(&mut state, SettingsMessage::StartEdit);
+        assert!(state.editing);
+        assert_eq!(state.edit_buffer, "dark");
+    }
+
+    #[test]
+    fn start_edit_bool_toggles_instead() {
+        let mut state = state_with_fields();
+        // Find a Bool field — "Auto-save" at index 2
+        state.selected = 2;
+        assert_eq!(state.fields[2].field_type, FieldType::Bool);
+        assert_eq!(state.fields[2].value, "true");
+
+        update(&mut state, SettingsMessage::StartEdit);
+        assert!(!state.editing); // did not enter edit mode
+        assert_eq!(state.fields[2].value, "false"); // toggled
+    }
+
+    #[test]
+    fn end_edit_saves_buffer() {
+        let mut state = state_with_fields();
+        state.editing = true;
+        state.edit_buffer = "light".to_string();
+
+        update(&mut state, SettingsMessage::EndEdit);
+        assert!(!state.editing);
+        assert_eq!(state.fields[0].value, "light");
+        assert!(state.edit_buffer.is_empty());
+    }
+
+    #[test]
+    fn cancel_edit_discards() {
+        let mut state = state_with_fields();
+        let original = state.fields[0].value.clone();
+        state.editing = true;
+        state.edit_buffer = "something-else".to_string();
+
+        update(&mut state, SettingsMessage::CancelEdit);
+        assert!(!state.editing);
+        assert_eq!(state.fields[0].value, original); // unchanged
+        assert!(state.edit_buffer.is_empty());
+    }
+
+    #[test]
+    fn input_char_appends_in_edit_mode() {
+        let mut state = state_with_fields();
+        state.editing = true;
+        state.edit_buffer.clear();
+
+        update(&mut state, SettingsMessage::InputChar('a'));
+        update(&mut state, SettingsMessage::InputChar('b'));
+        assert_eq!(state.edit_buffer, "ab");
+    }
+
+    #[test]
+    fn input_char_ignored_outside_edit() {
+        let mut state = state_with_fields();
+        update(&mut state, SettingsMessage::InputChar('x'));
+        assert!(state.edit_buffer.is_empty());
+    }
+
+    #[test]
+    fn backspace_removes_in_edit_mode() {
+        let mut state = state_with_fields();
+        state.editing = true;
+        state.edit_buffer = "abc".to_string();
+
+        update(&mut state, SettingsMessage::Backspace);
+        assert_eq!(state.edit_buffer, "ab");
+    }
+
+    #[test]
+    fn backspace_on_empty_is_noop() {
+        let mut state = state_with_fields();
+        state.editing = true;
+        state.edit_buffer.clear();
+
+        update(&mut state, SettingsMessage::Backspace);
+        assert!(state.edit_buffer.is_empty());
+    }
+
+    #[test]
+    fn toggle_bool_flips_value() {
+        let mut state = state_with_fields();
+        state.selected = 2; // Auto-save (Bool)
+        assert_eq!(state.fields[2].value, "true");
+
+        update(&mut state, SettingsMessage::ToggleBool);
+        assert_eq!(state.fields[2].value, "false");
+
+        update(&mut state, SettingsMessage::ToggleBool);
+        assert_eq!(state.fields[2].value, "true");
+    }
+
+    #[test]
+    fn toggle_bool_noop_on_text_field() {
+        let mut state = state_with_fields();
+        state.selected = 0; // Theme (Text)
+        let original = state.fields[0].value.clone();
+
+        update(&mut state, SettingsMessage::ToggleBool);
+        assert_eq!(state.fields[0].value, original);
+    }
+
+    #[test]
+    fn toggle_bool_noop_during_editing() {
+        let mut state = state_with_fields();
+        state.selected = 2;
+        state.editing = true;
+        let original = state.fields[2].value.clone();
+
+        update(&mut state, SettingsMessage::ToggleBool);
+        assert_eq!(state.fields[2].value, original);
+    }
+
+    #[test]
+    fn fields_for_all_categories_non_empty() {
+        for cat in SettingsCategory::ALL {
+            let fields = fields_for_category(cat);
+            assert!(!fields.is_empty(), "Category {:?} has no fields", cat);
+        }
+    }
+
+    #[test]
+    fn voice_category_has_expected_fields() {
+        let fields = fields_for_category(SettingsCategory::Voice);
+        let labels: Vec<_> = fields.iter().map(|field| field.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Model path",
+                "Hotkey",
+                "Input device",
+                "Language",
+                "Enabled",
+            ]
+        );
+    }
+
+    #[test]
+    fn voice_fields_reflect_persisted_settings() {
+        let voice = VoiceConfig {
+            model_path: Some(std::path::PathBuf::from("/tmp/models/qwen")),
+            hotkey: "Ctrl+Alt+V".to_string(),
+            input_device: "mic-2".to_string(),
+            language: "ja".to_string(),
+            enabled: true,
+        };
+        let fields = voice_fields(Some(&voice));
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[0].value, "/tmp/models/qwen");
+        assert_eq!(fields[1].value, "Ctrl+Alt+V");
+        assert_eq!(fields[2].value, "mic-2");
+        assert_eq!(fields[3].value, "ja");
+        assert_eq!(fields[4].value, "true");
+    }
+
+    #[test]
+    fn save_settings_to_path_persists_voice_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let model_dir = dir.path().join("model");
+        std::fs::create_dir(&model_dir).unwrap();
+
+        let mut state = voice_state_with_fields();
+        state.fields[0].value = model_dir.display().to_string();
+        state.fields[1].value = "Ctrl+Shift+V".to_string();
+        state.fields[2].value = "mic-9".to_string();
+        state.fields[3].value = "en".to_string();
+        state.fields[4].value = "true".to_string();
+
+        save_settings_to_path(&state, &config_path).unwrap();
+
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert_eq!(
+            loaded.voice.model_path.as_deref(),
+            Some(model_dir.as_path())
+        );
+        assert_eq!(loaded.voice.hotkey, "Ctrl+Shift+V");
+        assert_eq!(loaded.voice.input_device, "mic-9");
+        assert_eq!(loaded.voice.language, "en");
+        assert!(loaded.voice.enabled);
+    }
+
+    #[test]
+    fn category_cycle_full_round() {
+        let mut cat = SettingsCategory::General;
+        for _ in 0..8 {
+            cat = cat.next();
+        }
+        assert_eq!(cat, SettingsCategory::General); // full cycle
+    }
+
+    #[test]
+    fn voice_and_skills_categories_are_last_in_sidebar_order() {
+        assert_eq!(SettingsCategory::ALL.len(), 8);
+        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Skills);
+        assert_eq!(SettingsCategory::ALL[7], SettingsCategory::Voice);
+    }
+
+    #[test]
+    fn category_prev_full_round() {
+        let mut cat = SettingsCategory::General;
+        for _ in 0..8 {
+            cat = cat.prev();
+        }
+        assert_eq!(cat, SettingsCategory::General); // full cycle
+    }
+
+    #[test]
+    fn skills_category_renders_bundled_count() {
+        let mut state = SettingsState::default();
+        state.category = SettingsCategory::Skills;
+        state.load_category_fields();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
             })
-            .collect();
-        assert!(
-            text.contains("Override"),
-            "expected override hint, got: {text:?}"
-        );
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text = buffer_text(&buf);
+        assert!(text.contains("Bundled skills"));
+        assert!(text.contains("Skills"));
     }
 
     #[test]
-    fn render_env_footer_shows_override_actions() {
-        let mut profile = Profile::new("test");
-        profile
-            .env
-            .insert("PATH".to_string(), "/custom".to_string());
-        let mut env = EnvEditState::from_profile(&profile);
-        env.os_vars = vec![("PATH".to_string(), "/bin".to_string())];
+    fn skills_bundled_count_is_positive() {
+        let mut state = SettingsState::default();
+        state.category = SettingsCategory::Skills;
+        state.load_category_fields();
+        assert_eq!(state.fields.len(), 1);
+        assert_eq!(state.fields[0].label, "Bundled skills");
+        let count: usize = state.fields[0].value.parse().unwrap_or(0);
+        assert!(count > 0, "should have bundled skills");
+    }
 
-        let area = Rect::new(0, 0, 80, 2);
-        let mut buf = Buffer::empty(area);
-        render_env_footer(&env, &mut buf, area);
+    #[test]
+    fn custom_agents_category_loads_persisted_agent_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[tools.customCodingAgents.my-agent]
+id = "my-agent"
+displayName = "My Agent"
+agentType = "command"
+command = "my-agent-cli"
+"#,
+        )
+        .unwrap();
 
-        let text: String = (0..80)
-            .map(|x| {
-                buf.cell((x, 0))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+        let state = custom_agents_state_with_fields(&config_path);
+
+        assert_eq!(state.fields.len(), 7);
+        assert_eq!(state.fields[0].label, CUSTOM_AGENT_LABEL);
+        assert_eq!(state.fields[1].value, "my-agent");
+        assert_eq!(state.fields[2].value, "My Agent");
+        assert_eq!(state.fields[3].value, "command");
+        assert_eq!(state.fields[4].value, "my-agent-cli");
+    }
+
+    #[test]
+    fn custom_agents_add_edit_delete_persist_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+
+        let mut state = custom_agents_state_with_fields(&config_path);
+
+        state.selected = 5;
+        update(&mut state, SettingsMessage::StartEdit);
+
+        let mut agents = load_custom_agents_from_path(&config_path).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].display_name, "Custom Agent 1");
+        assert_eq!(agents[0].agent_type, CustomAgentType::Command);
+
+        state.selected = 2;
+        update(&mut state, SettingsMessage::StartEdit);
+        state.edit_buffer = "QA Agent".to_string();
+        update(&mut state, SettingsMessage::EndEdit);
+
+        state.selected = 3;
+        update(&mut state, SettingsMessage::StartEdit);
+
+        state.selected = 4;
+        update(&mut state, SettingsMessage::StartEdit);
+        state.edit_buffer = "qa-agent-cli".to_string();
+        update(&mut state, SettingsMessage::EndEdit);
+
+        agents = load_custom_agents_from_path(&config_path).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].display_name, "QA Agent");
+        assert_eq!(agents[0].agent_type, CustomAgentType::Path);
+        assert_eq!(agents[0].command, "qa-agent-cli");
+
+        state.selected = 6;
+        update(&mut state, SettingsMessage::StartEdit);
+
+        agents = load_custom_agents_from_path(&config_path).unwrap();
+        assert!(agents.is_empty());
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("debug = true"));
+        assert!(!content.contains("customCodingAgents"));
+    }
+
+    #[test]
+    fn render_with_fields_does_not_panic() {
+        let state = state_with_fields();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
             })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
             .collect();
-        assert!(
-            text.contains("Delete Override"),
-            "expected delete override hint, got: {text:?}"
-        );
+        assert!(text.contains("General"));
     }
 
     #[test]
-    fn render_ai_settings_smoke_test() {
-        let mut state = SettingsState::new();
-        state.category = SettingsCategory::AISettings;
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        render(&state, &mut buf, Rect::new(0, 0, 80, 24));
+    fn render_empty_does_not_panic() {
+        let state = SettingsState::default();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
     }
 
     #[test]
-    fn handle_key_category_navigation() {
-        let state = SettingsState::new();
-        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
-        let msg = handle_key(&state, &key);
-        assert!(matches!(msg, Some(SettingsMessage::NextCategory)));
-
-        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
-        let msg = handle_key(&state, &key);
-        assert!(matches!(msg, Some(SettingsMessage::PrevCategory)));
+    fn render_editing_does_not_panic() {
+        let mut state = state_with_fields();
+        state.editing = true;
+        state.edit_buffer = "new-value".to_string();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
     }
 
     #[test]
-    fn handle_key_item_navigation() {
-        let state = SettingsState::new();
-        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
-        let msg = handle_key(&state, &key);
-        assert!(matches!(msg, Some(SettingsMessage::SelectNext)));
+    fn render_voice_save_error_is_visible() {
+        let mut state = voice_state_with_fields();
+        state.fields[0].value = "/nonexistent/model".to_string();
+        update(&mut state, SettingsMessage::Save);
+        assert!(state.save_error.is_some());
 
-        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-        let msg = handle_key(&state, &key);
-        assert!(matches!(msg, Some(SettingsMessage::SelectPrev)));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text = buffer_text(&buf);
+        assert!(text.contains("Save failed"));
+        assert!(text.contains("voice model path does not exist"));
     }
 
     #[test]
-    fn settings_message_is_debug() {
-        let msg = SettingsMessage::Refresh;
-        assert!(format!("{msg:?}").contains("Refresh"));
+    fn selected_field_returns_correct() {
+        let mut state = state_with_fields();
+        state.selected = 1;
+        let field = state.selected_field().unwrap();
+        assert_eq!(field.label, "Language");
+    }
+
+    #[test]
+    fn selected_field_none_when_empty() {
+        let state = SettingsState::default();
+        assert!(state.selected_field().is_none());
     }
 }

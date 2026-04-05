@@ -1,12 +1,26 @@
-//! Terminal view widget: renders VT100 parser screen into ratatui buffer
-//!
-//! Phase 2: will use renderer.rs for full VT100 → ratatui conversion.
+//! Terminal view widget — renders a vt100 screen buffer.
 
-use ratatui::prelude::*;
+use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
-/// Render a VT100 parser screen into the given buffer area.
-pub fn render(_buf: &mut Buffer, _area: Rect, _parser: Option<&vt100::Parser>) {
-    // Phase 2: delegate to renderer module for VT100 cell conversion
+use crate::renderer;
+
+/// Widget that renders a vt100 screen into a ratatui area.
+pub struct TerminalView<'a> {
+    screen: &'a vt100::Screen,
+}
+
+impl<'a> TerminalView<'a> {
+    pub fn new(screen: &'a vt100::Screen) -> Self {
+        Self { screen }
+    }
+}
+
+impl Widget for TerminalView<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        // URL regions are returned but discarded here; callers needing
+        // click-to-open should call `renderer::render_vt_screen` directly.
+        let _ = renderer::render_vt_screen(self.screen, buf, area);
+    }
 }
 
 #[cfg(test)]
@@ -14,27 +28,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_none_smoke() {
-        let area = Rect::new(0, 0, 80, 24);
+    fn terminal_view_renders_without_panic() {
+        let parser = vt100::Parser::new(4, 10, 0);
+        let view = TerminalView::new(parser.screen());
+        let area = Rect::new(0, 0, 10, 4);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, None);
-        // No-op, no panic
-    }
-
-    #[test]
-    fn render_with_parser_smoke() {
-        let parser = vt100::Parser::new(24, 80, 0);
-        let area = Rect::new(0, 0, 80, 24);
-        let mut buf = Buffer::empty(area);
-        render(&mut buf, area, Some(&parser));
-        // No-op (Phase 2 stub), no panic
-    }
-
-    #[test]
-    fn render_zero_area_smoke() {
-        let area = Rect::new(0, 0, 0, 0);
-        let mut buf = Buffer::empty(area);
-        render(&mut buf, area, None);
-        // No panic with zero-sized area
+        view.render(area, &mut buf);
     }
 }

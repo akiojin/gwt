@@ -1,244 +1,381 @@
-//! Status bar widget: bottom bar showing context and key hints
+//! Status bar widget — footer with session info, branch, and help hint.
 
-use ratatui::prelude::*;
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
 
-use crate::model::{ActiveLayer, Model};
+use gwt_notification::{Notification, Severity};
+
+use crate::input::voice;
+use crate::model::{ActiveLayer, Model, SessionLayout, SessionTabType};
 
 /// Render the status bar.
-pub fn render(model: &Model, buf: &mut Buffer, area: Rect) {
-    // Fill background
-    for x in area.x..area.right() {
-        if let Some(cell) = buf.cell_mut((x, area.y)) {
-            cell.set_style(Style::default().bg(Color::DarkGray));
-            cell.set_char(' ');
+pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
+    render_with_notification(model, model.current_notification.as_ref(), frame, area);
+}
+
+/// Render the status bar with an optional notification segment.
+pub fn render_with_notification(
+    model: &Model,
+    notification: Option<&Notification>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    render_with_notification_and_hints(model, notification, None, frame, area);
+}
+
+/// Render the status bar with an optional notification segment and contextual hints.
+pub fn render_with_notification_and_hints(
+    model: &Model,
+    notification: Option<&Notification>,
+    hints: Option<&str>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let session_name = model
+        .active_session_tab()
+        .map(|s| s.name.as_str())
+        .unwrap_or("No session");
+    let session_type = model
+        .active_session_tab()
+        .map(|s| session_type_label(&s.tab_type))
+        .unwrap_or_else(|| "None".to_string());
+    let branch_context = derive_branch_context(model).unwrap_or_else(|| "n/a".to_string());
+    let compact_footer = notification.is_none() && hints.is_some() && area.width <= 80;
+
+    let layout_icon = match model.session_layout {
+        SessionLayout::Tab => "\u{25A3}",
+        SessionLayout::Grid => "\u{25A6}",
+    };
+
+    let layer = match model.active_layer {
+        ActiveLayer::Initialization => "Init",
+        ActiveLayer::Main => "Main",
+        ActiveLayer::Management => "Mgmt",
+    };
+
+    let mut spans = if compact_footer {
+        vec![
+            Span::styled(
+                format!(
+                    " {layout_icon} {} ",
+                    compact_session_type_label(&session_type)
+                ),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(" br:{} ", compact_branch_context(&branch_context, 8)),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!(" [{}] ", compact_layer_label(layer)),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled(
+                format!(" {layout_icon} {session_name} "),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(" branch: {branch_context} "),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!(" type: {session_type} "),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!(" [{layer}] "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    };
+
+    // Voice indicator (when active)
+    if let Some(indicator) = voice::render_indicator(&model.voice) {
+        spans.push(Span::styled(
+            format!(" {indicator} "),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if let Some(notification) = notification {
+        spans.push(notification_span(notification));
+    }
+
+    if !compact_footer {
+        spans.push(Span::styled(
+            format!(" {} ", model.repo_path.display()),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if let Some(hints) = hints.filter(|value| !value.is_empty()) {
+        spans.push(Span::styled(
+            format!(" {hints} "),
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        spans.push(Span::styled(
+            " Ctrl+G,? Help ",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let status = Line::from(spans);
+
+    let bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(bar, area);
+}
+
+fn compact_branch_context(branch_context: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = branch_context.chars().collect();
+    if chars.len() <= max_chars {
+        return branch_context.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(1);
+    let truncated: String = chars.into_iter().take(keep).collect();
+    format!("{truncated}…")
+}
+
+fn compact_session_type_label(session_type: &str) -> &str {
+    match session_type {
+        "Shell" => "Sh",
+        "Claude" => "Cl",
+        "Codex" => "Cx",
+        "Gemini CLI" => "Gm",
+        "OpenCode" => "Op",
+        _ => session_type,
+    }
+}
+
+fn compact_layer_label(layer: &str) -> &str {
+    match layer {
+        "Main" => "M",
+        "Mgmt" => "G",
+        "Init" => "I",
+        _ => layer,
+    }
+}
+
+fn derive_branch_context(model: &Model) -> Option<String> {
+    if let Some(session) = model.active_session_tab() {
+        if let Some(branch) = session.name.strip_prefix("Shell: ") {
+            return Some(branch.to_string());
         }
     }
 
-    let left = match model.active_layer {
-        ActiveLayer::Initialization => " Initialization".to_string(),
-        ActiveLayer::Main => {
-            if model.session_tabs.is_empty() {
-                " No sessions".to_string()
-            } else {
-                let tab = &model.session_tabs[model.active_session];
-                let branch = tab.branch.as_deref().unwrap_or("");
-                if branch.is_empty() {
-                    format!(" {}", tab.name)
-                } else {
-                    format!(" {} | {}", tab.name, branch)
-                }
-            }
-        }
-        ActiveLayer::Management => {
-            let tab_name = model.management_tab.label();
-            let running = model.running_session_count();
-            if running > 0 {
-                format!(" {tab_name} | {running} running")
-            } else {
-                format!(" {tab_name}")
-            }
-        }
-    };
+    model
+        .branches
+        .selected_branch()
+        .map(|branch| branch.name.clone())
+}
 
-    let hints = match model.active_layer {
-        ActiveLayer::Initialization => " Enter: Clone | Esc: Quit ",
-        ActiveLayer::Main if model.session_tabs.is_empty() => {
-            " Enter on Branches: Agent | Ctrl+G,c: Shell | Ctrl+G,Ctrl+G: Manage "
-        }
-        ActiveLayer::Main => {
-            " Wheel: Scroll | PgUp/PgDn: History | Drag: Copy | Ctrl+G,z: Maximize | Ctrl+G,Ctrl+G: Manage | Ctrl+G,x: Close "
-        }
-        ActiveLayer::Management => " Tab: Switch | Ctrl+G,Ctrl+G: Terminal | Ctrl+C×2: Quit ",
-    };
-
-    let preferred_left_width = left.chars().count().min(usize::from(area.width)) as u16;
-    let left_width = preferred_left_width;
-    let right_width = area.width.saturating_sub(left_width);
-
-    let left_span = Span::styled(left, Style::default().fg(Color::White).bg(Color::DarkGray));
-    buf.set_span(area.x, area.y, &left_span, left_width);
-
-    if right_width > 0 {
-        let right_span = Span::styled(hints, Style::default().fg(Color::Gray).bg(Color::DarkGray));
-        let right_x = area.x + left_width;
-        buf.set_span(right_x, area.y, &right_span, right_width);
+fn session_type_label(tab_type: &SessionTabType) -> String {
+    match tab_type {
+        SessionTabType::Shell => "Shell".to_string(),
+        SessionTabType::Agent { agent_id, .. } => match agent_id.as_str() {
+            "claude" => "Claude".to_string(),
+            "codex" => "Codex".to_string(),
+            "gemini" => "Gemini CLI".to_string(),
+            "opencode" => "OpenCode".to_string(),
+            other => other.to_string(),
+        },
     }
+}
+
+fn notification_span(notification: &Notification) -> Span<'static> {
+    let style = match notification.severity {
+        Severity::Debug => Style::default().fg(Color::DarkGray),
+        Severity::Info => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        Severity::Warn => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        Severity::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    };
+
+    let summary = match notification.detail.as_deref() {
+        Some(detail) if !detail.is_empty() => format!(
+            " {} {}: {} - {} ",
+            notification.severity, notification.source, notification.message, detail
+        ),
+        _ => format!(
+            " {} {}: {} ",
+            notification.severity, notification.source, notification.message
+        ),
+    };
+
+    Span::styled(summary, style)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ManagementTab, Model};
+    use crate::model::{AgentColor, SessionTab, SessionTabType, VtState};
+    use crate::screens::branches::BranchCategory;
+    use crate::screens::branches::BranchItem;
+    use gwt_notification::{Notification, Severity};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
     use std::path::PathBuf;
 
-    fn test_model() -> Model {
-        let mut m = Model::new(PathBuf::from("/tmp/test-repo"));
-        m.active_layer = ActiveLayer::Management; // Force Management for tests
-        m
-    }
-
-    fn buf_row_text(buf: &Buffer, y: u16, width: u16) -> String {
-        (0..width)
-            .map(|x| {
-                buf.cell((x, y))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+    #[test]
+    fn render_status_bar_tab_layout() {
+        let model = Model::new(PathBuf::from("/tmp/test"));
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&model, f, area);
             })
-            .collect()
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("Shell"));
+        assert!(text.contains("Mgmt"));
     }
 
     #[test]
-    fn render_management_layer_smoke() {
-        let model = test_model();
-        assert_eq!(model.active_layer, ActiveLayer::Management);
-        let area = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(area);
-        render(&model, &mut buf, area);
-        let text = buf_row_text(&buf, 0, 120);
-        // Management tab label should appear
-        assert!(
-            text.contains("Branches"),
-            "Expected 'Branches' in: {text:?}"
-        );
-        // Hint text should appear
-        assert!(
-            text.contains("Tab: Switch"),
-            "Expected hint text in: {text:?}"
-        );
-    }
-
-    #[test]
-    fn render_main_layer_no_sessions_smoke() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Main;
-        let area = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(area);
-        render(&model, &mut buf, area);
-        let text = buf_row_text(&buf, 0, 120);
-        assert!(
-            text.contains("Ctrl+G,c: Shell"),
-            "Expected session creation hint in: {text:?}"
-        );
-    }
-
-    #[test]
-    fn render_main_layer_with_session_no_branch() {
-        let mut model = test_model();
-        use crate::model::{SessionStatus, SessionTab, SessionTabType};
-        use gwt_core::terminal::AgentColor;
-        model.add_session(SessionTab {
-            pane_id: "p1".into(),
-            name: "Shell #1".into(),
-            tab_type: SessionTabType::Shell,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: None,
-            spec_id: None,
-        });
-        let area = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(area);
-        render(&model, &mut buf, area);
-        let text = buf_row_text(&buf, 0, 120);
-        assert!(text.contains("Shell #1"), "Expected tab name in: {text:?}");
-        assert!(!text.contains("LIVE"), "Unexpected LIVE label in: {text:?}");
-        assert!(
-            !text.contains("SCROLLED"),
-            "Unexpected SCROLLED label in: {text:?}"
-        );
-    }
-
-    #[test]
-    fn render_main_layer_with_session_and_branch() {
-        let mut model = test_model();
-        use crate::model::{SessionStatus, SessionTab, SessionTabType};
-        use gwt_core::terminal::AgentColor;
-        model.add_session(SessionTab {
-            pane_id: "p2".into(),
-            name: "Agent #1".into(),
-            tab_type: SessionTabType::Agent,
-            color: AgentColor::Blue,
-            status: SessionStatus::Running,
-            branch: Some("feature/test".into()),
-            spec_id: None,
-        });
-        let area = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(area);
-        render(&model, &mut buf, area);
-        let text = buf_row_text(&buf, 0, 120);
-        assert!(text.contains("Agent #1"), "Expected tab name in: {text:?}");
-        assert!(
-            text.contains("feature/test"),
-            "Expected branch in: {text:?}"
-        );
-        assert!(!text.contains("LIVE"), "Unexpected LIVE label in: {text:?}");
-        assert!(
-            !text.contains("SCROLLED"),
-            "Unexpected SCROLLED label in: {text:?}"
-        );
-    }
-
-    #[test]
-    fn render_management_with_running_agents() {
-        let mut model = test_model();
-        use crate::model::{SessionStatus, SessionTab, SessionTabType};
-        use gwt_core::terminal::AgentColor;
-        model.session_tabs.push(SessionTab {
-            pane_id: "p1".into(),
-            name: "Agent #1".into(),
-            tab_type: SessionTabType::Agent,
-            color: AgentColor::Blue,
-            status: SessionStatus::Running,
-            branch: Some("feature/test".into()),
-            spec_id: None,
-        });
-        model.session_tabs.push(SessionTab {
-            pane_id: "p2".into(),
-            name: "Agent #2".into(),
-            tab_type: SessionTabType::Agent,
-            color: AgentColor::Green,
-            status: SessionStatus::Running,
-            branch: None,
-            spec_id: None,
-        });
-        // Stay in management layer
+    fn render_status_bar_grid_management() {
+        let mut model = Model::new(PathBuf::from("/tmp/test"));
+        model.session_layout = SessionLayout::Grid;
         model.active_layer = ActiveLayer::Management;
-        let area = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(area);
-        render(&model, &mut buf, area);
-        let text = buf_row_text(&buf, 0, 120);
-        assert!(
-            text.contains("2 running"),
-            "Expected '2 running' in: {text:?}"
-        );
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&model, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("Mgmt"));
     }
 
     #[test]
-    fn render_management_no_running_agents() {
-        let model = test_model();
-        let area = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(area);
-        render(&model, &mut buf, area);
-        let text = buf_row_text(&buf, 0, 120);
-        assert!(
-            !text.contains("running"),
-            "Expected no 'running' in: {text:?}"
-        );
+    fn render_with_info_notification_shows_summary() {
+        let model = Model::new(PathBuf::from("/tmp/test"));
+        let notification = Notification::new(Severity::Info, "core", "Started");
+        let backend = TestBackend::new(100, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_with_notification(&model, Some(&notification), f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("INFO"));
+        assert!(text.contains("core"));
+        assert!(text.contains("Started"));
     }
 
     #[test]
-    fn render_all_management_tabs_no_panic() {
-        let mut model = test_model();
-        let area = Rect::new(0, 0, 120, 1);
-        for tab in ManagementTab::ALL {
-            model.management_tab = tab;
-            model.active_layer = ActiveLayer::Management;
-            let mut buf = Buffer::empty(area);
-            render(&model, &mut buf, area);
-            let text = buf_row_text(&buf, 0, 120);
-            assert!(
-                text.contains(tab.label()),
-                "Expected '{}' in: {text:?}",
-                tab.label()
-            );
-        }
+    fn render_with_warn_notification_shows_summary() {
+        let model = Model::new(PathBuf::from("/tmp/test"));
+        let notification = Notification::new(Severity::Warn, "git", "Detached HEAD");
+        let backend = TestBackend::new(100, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_with_notification(&model, Some(&notification), f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("WARN"));
+        assert!(text.contains("git"));
+        assert!(text.contains("Detached HEAD"));
+    }
+
+    #[test]
+    fn render_status_bar_shell_session_shows_branch_and_shell_type() {
+        let mut model = Model::new(PathBuf::from("/tmp/test"));
+        model.active_layer = ActiveLayer::Main;
+        model.sessions[0] = SessionTab {
+            id: "shell-0".to_string(),
+            name: "Shell: feature/status-bar".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: VtState::new(24, 80),
+        };
+
+        let backend = TestBackend::new(140, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&model, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("branch: feature/status-bar"));
+        assert!(text.contains("type: Shell"));
+    }
+
+    #[test]
+    fn render_status_bar_agent_session_shows_agent_type_and_selected_branch_context() {
+        let mut model = Model::new(PathBuf::from("/tmp/test"));
+        model.active_layer = ActiveLayer::Management;
+        model.sessions[0] = SessionTab {
+            id: "agent-0".to_string(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: AgentColor::Blue,
+            },
+            vt: VtState::new(24, 80),
+        };
+        model.branches.branches = vec![BranchItem {
+            name: "feature/agent-context".to_string(),
+            is_head: false,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-agent-context")),
+        }];
+        model.branches.selected = 0;
+
+        let backend = TestBackend::new(160, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&model, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("branch: feature/agent-context"));
+        assert!(text.contains("type: Codex"));
     }
 }

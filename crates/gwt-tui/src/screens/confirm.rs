@@ -1,324 +1,224 @@
-//! Confirmation Dialog Screen
-//!
-//! Displays a centered confirmation dialog with configurable title, message,
-//! button labels, and dangerous-action styling.
+//! Confirmation dialog overlay.
 
-#![allow(dead_code)]
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
+    Frame,
+};
 
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-
-/// Action to perform when confirmation is accepted
-#[derive(Debug, Clone)]
-pub enum ConfirmAction {
-    QuitWithAgents,
-    CloseSession(String),
-    DeleteBranch(String),
-    DeleteWorktree(String),
-    TerminateAgent(String),
-    ForceKillAgent(String),
-    EmbedCodexHooks,
-    Custom(String),
+/// Which button is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfirmChoice {
+    Yes,
+    #[default]
+    No,
 }
 
-/// Confirmation dialog state
-#[derive(Debug)]
+/// State for the confirmation dialog.
+#[derive(Debug, Clone)]
 pub struct ConfirmState {
-    /// Dialog title
-    pub title: String,
-    /// Dialog message
     pub message: String,
-    /// Additional details (optional)
-    pub details: Vec<String>,
-    /// Confirm button label
-    pub confirm_label: String,
-    /// Cancel button label
-    pub cancel_label: String,
-    /// Currently selected button (true = confirm, false = cancel)
-    pub selected_confirm: bool,
-    /// Is this a dangerous action (shows in red)
-    pub is_dangerous: bool,
-    /// Action to perform on confirm
-    pub on_confirm: ConfirmAction,
+    pub selected: ConfirmChoice,
+    pub visible: bool,
 }
 
 impl Default for ConfirmState {
     fn default() -> Self {
-        Self::new()
+        Self {
+            message: String::new(),
+            selected: ConfirmChoice::No,
+            visible: false,
+        }
     }
 }
 
 impl ConfirmState {
-    pub fn new() -> Self {
+    /// Create a new visible confirm dialog with the given message.
+    pub fn with_message(message: impl Into<String>) -> Self {
         Self {
-            title: "Confirm".to_string(),
-            message: "Are you sure?".to_string(),
-            details: Vec::new(),
-            confirm_label: "Confirm".to_string(),
-            cancel_label: "Cancel".to_string(),
-            selected_confirm: false, // Default to cancel for safety
-            is_dangerous: false,
-            on_confirm: ConfirmAction::Custom("confirm".to_string()),
+            message: message.into(),
+            selected: ConfirmChoice::No,
+            visible: true,
         }
     }
 
-    /// Create a delete confirmation dialog
-    pub fn delete(item_name: &str) -> Self {
-        Self {
-            title: "Delete Confirmation".to_string(),
-            message: format!("Are you sure you want to delete '{}'?", item_name),
-            details: vec!["This action cannot be undone.".to_string()],
-            confirm_label: "Delete".to_string(),
-            cancel_label: "Cancel".to_string(),
-            selected_confirm: false,
-            is_dangerous: true,
-            on_confirm: ConfirmAction::DeleteBranch(item_name.to_string()),
-        }
-    }
-
-    /// Create exit confirmation dialog when agents are running
-    pub fn exit_with_running_agents(agent_count: usize) -> Self {
-        Self {
-            title: "Running Agents".to_string(),
-            message: format!(
-                "{} agent(s) are still running.\nExit will terminate all agents.",
-                agent_count
-            ),
-            details: vec![
-                "Press Enter to exit and terminate agents.".to_string(),
-                "Press Esc to cancel and keep working.".to_string(),
-            ],
-            confirm_label: "Exit".to_string(),
-            cancel_label: "Cancel".to_string(),
-            selected_confirm: false,
-            is_dangerous: true,
-            on_confirm: ConfirmAction::QuitWithAgents,
-        }
-    }
-
-    /// Create confirmation dialog for embedding Codex managed hooks (FR-032, FR-033)
-    pub fn embed_codex_hooks() -> Self {
-        Self {
-            title: "Update Codex Hooks".to_string(),
-            message: "gwt needs to update .codex/hooks.json with managed hooks.".to_string(),
-            details: vec![
-                "This file is tracked by git. Changes will appear in git diff.".to_string(),
-                "You don't need to commit immediately, but may do so.".to_string(),
-            ],
-            confirm_label: "Embed".to_string(),
-            cancel_label: "Skip".to_string(),
-            selected_confirm: true, // Default to Embed (non-dangerous)
-            is_dangerous: false,
-            on_confirm: ConfirmAction::EmbedCodexHooks,
-        }
-    }
-
-    /// Create termination confirmation dialog for a single agent
-    pub fn terminate_agent(branch_name: &str, agent_name: &str) -> Self {
-        Self {
-            title: "Terminate Agent".to_string(),
-            message: format!(
-                "Terminate {} agent on branch '{}'?",
-                agent_name, branch_name
-            ),
-            details: vec!["The agent will be sent SIGTERM to allow graceful shutdown.".to_string()],
-            confirm_label: "Terminate".to_string(),
-            cancel_label: "Cancel".to_string(),
-            selected_confirm: false,
-            is_dangerous: true,
-            on_confirm: ConfirmAction::TerminateAgent(branch_name.to_string()),
-        }
-    }
-
-    /// Toggle selection
-    pub fn toggle_selection(&mut self) {
-        self.selected_confirm = !self.selected_confirm;
-    }
-
-    /// Select confirm
-    pub fn select_confirm(&mut self) {
-        self.selected_confirm = true;
-    }
-
-    /// Select cancel
-    pub fn select_cancel(&mut self) {
-        self.selected_confirm = false;
-    }
-
-    /// Check if confirm is selected
-    pub fn is_confirmed(&self) -> bool {
-        self.selected_confirm
+    /// Whether the user accepted (Yes).
+    pub fn accepted(&self) -> bool {
+        self.selected == ConfirmChoice::Yes
     }
 }
 
-/// Render confirmation dialog
-pub fn render_confirm(state: &ConfirmState, buf: &mut Buffer, area: Rect) {
-    let dialog_width = 60.min(area.width.saturating_sub(4));
-    let detail_lines = state.details.len() as u16;
-    let dialog_height = (8 + detail_lines).min(area.height.saturating_sub(4));
+/// Messages specific to the confirmation dialog.
+#[derive(Debug, Clone)]
+pub enum ConfirmMessage {
+    Toggle,
+    Accept,
+    Cancel,
+}
 
-    let dialog_area = centered_rect(dialog_width, dialog_height, area);
+/// Update confirm state in response to a message.
+pub fn update(state: &mut ConfirmState, msg: ConfirmMessage) {
+    match msg {
+        ConfirmMessage::Toggle => {
+            state.selected = match state.selected {
+                ConfirmChoice::Yes => ConfirmChoice::No,
+                ConfirmChoice::No => ConfirmChoice::Yes,
+            };
+        }
+        ConfirmMessage::Accept => {
+            state.visible = false;
+        }
+        ConfirmMessage::Cancel => {
+            state.selected = ConfirmChoice::No;
+            state.visible = false;
+        }
+    }
+}
 
-    Clear.render(dialog_area, buf);
+/// Render the confirmation dialog as a centered overlay.
+pub fn render(state: &ConfirmState, frame: &mut Frame, area: Rect) {
+    if !state.visible {
+        return;
+    }
 
-    let border_style = if state.is_dangerous {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
+    // Centered dialog — fixed size
+    let dialog = super::centered_rect(40, 7, area);
+
+    frame.render_widget(Clear, dialog);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(format!(" {} ", state.title))
-        .title_style(Style::default().add_modifier(Modifier::BOLD));
+        .title("Confirm")
+        .border_style(Style::default().fg(Color::Yellow));
 
-    let inner_area = block.inner(dialog_area);
-    block.render(dialog_area, buf);
-
-    let content_area = Rect::new(
-        inner_area.x + 2,
-        inner_area.y,
-        inner_area.width.saturating_sub(4),
-        inner_area.height,
-    );
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),                   // Message
-            Constraint::Length(detail_lines.max(1)), // Details
-            Constraint::Length(1),                   // Spacer
-            Constraint::Length(1),                   // Buttons
-        ])
-        .split(content_area);
-
-    // Message
-    let message_style = if state.is_dangerous {
-        Style::default().fg(Color::Yellow)
-    } else {
+    let yes_style = if state.selected == ConfirmChoice::Yes {
         Style::default()
-    };
-    let message = Paragraph::new(state.message.as_str())
-        .style(message_style)
-        .wrap(Wrap { trim: false });
-    message.render(chunks[0], buf);
-
-    // Details
-    if !state.details.is_empty() {
-        let details_text: Vec<Line> = state
-            .details
-            .iter()
-            .map(|line| Line::from(line.as_str()).style(Style::default().fg(Color::DarkGray)))
-            .collect();
-        let details = Paragraph::new(details_text).wrap(Wrap { trim: false });
-        details.render(chunks[1], buf);
-    }
-
-    // Buttons
-    let cancel_style = if !state.selected_confirm {
-        Style::default().bg(Color::DarkGray).fg(Color::White)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let cancel_text = format!("[ {} ]", state.cancel_label);
-
-    let confirm_style = if state.selected_confirm {
-        if state.is_dangerous {
-            Style::default().bg(Color::Red).fg(Color::White)
-        } else {
-            Style::default().bg(Color::Green).fg(Color::Black)
-        }
-    } else if state.is_dangerous {
-        Style::default().fg(Color::Red)
+            .fg(Color::White)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Green)
     };
-    let confirm_text = format!("[ {} ]", state.confirm_label);
 
-    let button_line = Line::from(vec![
-        Span::styled(cancel_text, cancel_style),
-        Span::raw("  "),
-        Span::styled(confirm_text, confirm_style),
-    ]);
-    let buttons = Paragraph::new(button_line).alignment(Alignment::Center);
-    buttons.render(chunks[3], buf);
-}
+    let no_style = if state.selected == ConfirmChoice::No {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Red)
+    };
 
-/// Helper function to create a centered rect
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
+    let text = vec![
+        Line::from(Span::raw(&state.message)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [ Yes ]  ", yes_style),
+            Span::raw("  "),
+            Span::styled("  [ No ]  ", no_style),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(paragraph, dialog);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
-    fn test_confirm_state_toggle() {
-        let mut state = ConfirmState::new();
-        assert!(!state.selected_confirm);
-
-        state.toggle_selection();
-        assert!(state.selected_confirm);
-
-        state.toggle_selection();
-        assert!(!state.selected_confirm);
+    fn default_state() {
+        let state = ConfirmState::default();
+        assert!(state.message.is_empty());
+        assert_eq!(state.selected, ConfirmChoice::No);
+        assert!(!state.visible);
     }
 
     #[test]
-    fn test_delete_dialog() {
-        let state = ConfirmState::delete("feature/test");
-        assert!(state.is_dangerous);
-        assert!(state.message.contains("feature/test"));
-        assert_eq!(state.confirm_label, "Delete");
+    fn with_message_creates_visible() {
+        let state = ConfirmState::with_message("Delete this?");
+        assert_eq!(state.message, "Delete this?");
+        assert!(state.visible);
+        assert_eq!(state.selected, ConfirmChoice::No);
     }
 
     #[test]
-    fn test_exit_with_running_agents() {
-        let state = ConfirmState::exit_with_running_agents(3);
-        assert!(state.is_dangerous);
-        assert!(state.message.contains("3 agent"));
-        assert_eq!(state.confirm_label, "Exit");
+    fn toggle_switches_choice() {
+        let mut state = ConfirmState::with_message("test");
+        assert_eq!(state.selected, ConfirmChoice::No);
+
+        update(&mut state, ConfirmMessage::Toggle);
+        assert_eq!(state.selected, ConfirmChoice::Yes);
+
+        update(&mut state, ConfirmMessage::Toggle);
+        assert_eq!(state.selected, ConfirmChoice::No);
     }
 
     #[test]
-    fn test_terminate_agent() {
-        let state = ConfirmState::terminate_agent("feature/test", "claude");
-        assert!(state.is_dangerous);
-        assert!(state.message.contains("claude"));
-        assert!(state.message.contains("feature/test"));
-        assert_eq!(state.confirm_label, "Terminate");
+    fn accept_hides_dialog() {
+        let mut state = ConfirmState::with_message("test");
+        state.selected = ConfirmChoice::Yes;
+
+        update(&mut state, ConfirmMessage::Accept);
+        assert!(!state.visible);
+        assert!(state.accepted());
     }
 
     #[test]
-    fn test_embed_codex_hooks_dialog() {
-        let state = ConfirmState::embed_codex_hooks();
-        assert!(!state.is_dangerous);
-        assert!(state.selected_confirm); // Default to Embed
-        assert_eq!(state.confirm_label, "Embed");
-        assert_eq!(state.cancel_label, "Skip");
-        assert!(state.title.contains("Codex"));
-        assert!(state.message.contains("hooks.json"));
-        assert!(matches!(state.on_confirm, ConfirmAction::EmbedCodexHooks));
+    fn cancel_hides_and_resets_to_no() {
+        let mut state = ConfirmState::with_message("test");
+        state.selected = ConfirmChoice::Yes;
+
+        update(&mut state, ConfirmMessage::Cancel);
+        assert!(!state.visible);
+        assert_eq!(state.selected, ConfirmChoice::No);
+        assert!(!state.accepted());
     }
 
     #[test]
-    fn test_select_confirm_cancel() {
-        let mut state = ConfirmState::new();
-        state.select_confirm();
-        assert!(state.is_confirmed());
-        state.select_cancel();
-        assert!(!state.is_confirmed());
+    fn render_visible_does_not_panic() {
+        let state = ConfirmState::with_message("Are you sure?");
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Check that "Confirm" title is rendered somewhere
+        let full_text: String = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(full_text.contains("Confirm"));
     }
 
     #[test]
-    fn test_render_confirm_no_panic() {
-        let state = ConfirmState::delete("test-branch");
-        let area = Rect::new(0, 0, 80, 24);
-        let mut buf = Buffer::empty(area);
-        render_confirm(&state, &mut buf, area);
+    fn render_invisible_is_noop() {
+        let state = ConfirmState::default(); // visible = false
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        // Should not contain "Confirm" title since invisible
+        let buf = terminal.backend().buffer().clone();
+        let full_text: String = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(!full_text.contains("Confirm"));
     }
 }

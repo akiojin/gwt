@@ -1,3 +1,4 @@
-//! Input handling: keybindings and key processing
+//! Input handling — keybindings and voice input.
 
 pub mod keybind;
+pub mod voice;
