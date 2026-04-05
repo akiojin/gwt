@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
+
+use crate::theme;
 
 /// A single issue entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +160,7 @@ fn render_header(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let block = Block::default().title("Issues");
     let paragraph = Paragraph::new(header_text)
         .block(block)
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(theme::color::FOCUS));
     frame.render_widget(paragraph, area);
 }
 
@@ -176,9 +178,9 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, issue)| {
             let state_color = match issue.state.as_str() {
-                "open" => Color::Green,
-                "closed" => Color::Red,
-                _ => Color::DarkGray,
+                "open" => theme::color::SUCCESS,
+                "closed" => theme::color::ERROR,
+                _ => theme::color::SURFACE,
             };
 
             let style = super::list_item_style(idx == state.selected);
@@ -192,25 +194,23 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(
                     format!("#{:<5} ", issue.number),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::color::ACTIVE),
                 ),
                 Span::styled(issue.title.clone(), style),
                 Span::styled(
                     format!(" ({})", issue.state),
                     Style::default().fg(state_color),
                 ),
-                Span::styled(labels_str, Style::default().fg(Color::Magenta)),
+                Span::styled(labels_str, Style::default().fg(theme::color::ACCENT)),
             ]);
             ListItem::new(line)
         })
         .collect();
 
     let block = Block::default();
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -224,7 +224,7 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
             let block = Block::default().title("Issue Detail");
             let paragraph = Paragraph::new("No issue selected")
                 .block(block)
-                .style(Style::default().fg(Color::DarkGray));
+                .style(theme::style::muted_text());
             frame.render_widget(paragraph, area);
             return;
         }
@@ -252,7 +252,7 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let header_block = Block::default().title("Issue Detail");
     let header = Paragraph::new(header_text)
         .block(header_block)
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(theme::color::FOCUS));
     frame.render_widget(header, chunks[0]);
 
     // Body section
@@ -265,7 +265,7 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let body = Paragraph::new(body_text)
         .block(body_block)
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(theme::color::TEXT_PRIMARY));
     frame.render_widget(body, chunks[1]);
 }
 

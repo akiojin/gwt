@@ -4,11 +4,13 @@ use std::collections::HashSet;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// File status in the working tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,9 +33,9 @@ impl FileStatus {
     /// Color for the badge.
     pub fn color(self) -> Color {
         match self {
-            Self::Staged => Color::Green,
-            Self::Unstaged => Color::Yellow,
-            Self::Untracked => Color::DarkGray,
+            Self::Staged => theme::color::SUCCESS,
+            Self::Unstaged => theme::color::ACTIVE,
+            Self::Untracked => theme::color::SURFACE,
         }
     }
 }
@@ -158,7 +160,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
         let block = Block::default().title("Files (0)");
         let paragraph = Paragraph::new("No changed files")
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -178,7 +180,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
         let expand_marker = if state.is_expanded(idx) { "v " } else { "> " };
 
         let line = Line::from(vec![
-            Span::styled(expand_marker, Style::default().fg(Color::Cyan)),
+            Span::styled(expand_marker, Style::default().fg(theme::color::FOCUS)),
             Span::styled(
                 format!("{} ", file.status.badge()),
                 Style::default().fg(file.status.color()),
@@ -192,11 +194,11 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
             let preview_lines: Vec<&str> = file.diff_preview.lines().take(50).collect();
             for diff_line in preview_lines {
                 let diff_color = if diff_line.starts_with('+') {
-                    Color::Green
+                    theme::color::SUCCESS
                 } else if diff_line.starts_with('-') {
-                    Color::Red
+                    theme::color::ERROR
                 } else {
-                    Color::DarkGray
+                    theme::color::SURFACE
                 };
                 let diff_display = Line::from(Span::styled(
                     format!("    {diff_line}"),
@@ -208,11 +210,7 @@ fn render_file_list(state: &GitViewState, frame: &mut Frame, area: Rect) {
     }
 
     let block = Block::default().title(title);
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items).block(block).highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -224,7 +222,7 @@ fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
         let block = Block::default().title("Commits (0)");
         let paragraph = Paragraph::new("No commits loaded")
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -237,12 +235,12 @@ fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(
                     format!("{} ", &commit.hash[..commit.hash.len().min(7)]),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::color::ACTIVE),
                 ),
-                Span::styled(commit.subject.clone(), Style::default().fg(Color::White)),
+                Span::styled(commit.subject.clone(), Style::default().fg(theme::color::TEXT_PRIMARY)),
                 Span::styled(
                     format!(" ({}, {})", commit.author, commit.date),
-                    Style::default().fg(Color::DarkGray),
+                    theme::style::muted_text(),
                 ),
             ]);
             ListItem::new(line)
@@ -250,11 +248,7 @@ fn render_commits(state: &GitViewState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().title(title);
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items).block(block).highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);

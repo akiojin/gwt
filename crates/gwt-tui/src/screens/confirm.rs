@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// Which button is selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,25 +92,26 @@ pub fn render(state: &ConfirmState, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(theme::border::modal())
         .title("Confirm")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme::color::ACTIVE));
 
     let yes_style = if state.selected == ConfirmChoice::Yes {
         Style::default()
-            .fg(Color::White)
-            .bg(Color::Green)
+            .fg(theme::color::TEXT_PRIMARY)
+            .bg(theme::color::SUCCESS)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme::color::SUCCESS)
     };
 
     let no_style = if state.selected == ConfirmChoice::No {
         Style::default()
-            .fg(Color::White)
-            .bg(Color::Red)
+            .fg(theme::color::TEXT_PRIMARY)
+            .bg(theme::color::ERROR)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Red)
+        Style::default().fg(theme::color::ERROR)
     };
 
     let text = vec![
@@ -123,7 +126,7 @@ pub fn render(state: &ConfirmState, frame: &mut Frame, area: Rect) {
 
     let paragraph = Paragraph::new(text)
         .block(block)
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(theme::color::TEXT_PRIMARY));
     frame.render_widget(paragraph, dialog);
 }
 

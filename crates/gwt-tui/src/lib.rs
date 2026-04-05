@@ -12,6 +12,7 @@ pub mod model;
 pub mod notification_router;
 pub mod renderer;
 pub mod screens;
+pub mod theme;
 pub mod widgets;
 
 pub use gwt_clipboard::clipboard_payload_to_bytes;

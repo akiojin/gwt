@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// Which step of the wizard is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1246,12 +1248,12 @@ fn render_list_content(frame: &mut Frame, area: Rect, items: Vec<ListItem>) {
 }
 
 fn wizard_row_style(is_selected: bool) -> Style {
-    wizard_row_style_with_fg(is_selected, Color::White)
+    wizard_row_style_with_fg(is_selected, theme::color::TEXT_PRIMARY)
 }
 
 fn wizard_row_style_with_fg(is_selected: bool, fg: Color) -> Style {
     if is_selected {
-        Style::default().bg(Color::Cyan).fg(Color::Black)
+        Style::default().bg(theme::color::FOCUS).fg(Color::Black)
     } else {
         Style::default().fg(fg)
     }
@@ -1369,7 +1371,7 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let mut y = area.y;
     if has_more_above {
         frame.render_widget(
-            Paragraph::new("  ^ more above ^").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("  ^ more above ^").style(theme::style::muted_text()),
             Rect::new(area.x, y, area.width, 1),
         );
         y += 1;
@@ -1402,7 +1404,7 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     if has_more_below {
         frame.render_widget(
-            Paragraph::new("  v more below v").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("  v more below v").style(theme::style::muted_text()),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
     }
@@ -1410,22 +1412,22 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
 fn quick_start_agent_color(agent_id: &str) -> Color {
     match agent_id {
-        "claude" => Color::Yellow,
-        "codex" => Color::Cyan,
-        "gemini" => Color::Magenta,
-        "opencode" => Color::Green,
-        _ => Color::White,
+        "claude" => theme::color::ACTIVE,
+        "codex" => theme::color::FOCUS,
+        "gemini" => theme::color::ACCENT,
+        "opencode" => theme::color::SUCCESS,
+        _ => theme::color::TEXT_PRIMARY,
     }
 }
 
 fn agent_row_color(agent_id: &str) -> Color {
     match agent_id {
-        "claude" => Color::Yellow,
-        "codex" => Color::Cyan,
-        "gemini" => Color::Magenta,
-        "opencode" => Color::Green,
-        "gh" => Color::Blue,
-        _ => Color::White,
+        "claude" => theme::color::ACTIVE,
+        "codex" => theme::color::FOCUS,
+        "gemini" => theme::color::ACCENT,
+        "opencode" => theme::color::SUCCESS,
+        "gh" => theme::color::AGENT,
+        _ => theme::color::TEXT_PRIMARY,
     }
 }
 
@@ -1492,11 +1494,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             &state.branch_name,
             area.width as usize,
         ))
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+        .style(theme::style::header()),
         Rect::new(area.x, area.y, area.width, 1),
     );
 
@@ -1580,11 +1578,7 @@ fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
                 &state.branch_name,
                 area.width as usize,
             ))
-            .style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            .style(theme::style::header()),
             Rect::new(area.x, area.y, area.width, 1),
         );
         1
@@ -1646,13 +1640,10 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Popup chrome
     let title_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_type(theme::border::modal())
+        .border_style(Style::default().fg(theme::color::FOCUS))
         .title_top(
-            Line::from(popup_title(state)).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Line::from(popup_title(state)).style(theme::style::header()),
         )
         .title_top(Line::from(" [ESC] ").right_aligned());
     frame.render_widget(title_block, chunks[0]);
@@ -1677,7 +1668,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::SkipPermissions => " Up/Down: select | Enter: launch | Esc: back",
         _ => " Up/Down: select | Enter: next | Esc: back",
     };
-    let hints = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+    let hints = Paragraph::new(hint).style(theme::style::muted_text());
     frame.render_widget(hints, chunks[2]);
 }
 
@@ -1718,11 +1709,7 @@ fn render_input_step(
     }
 
     frame.render_widget(
-        Paragraph::new(label).style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(label).style(theme::style::header()),
         Rect::new(area.x, area.y, area.width, 1),
     );
 
@@ -1731,7 +1718,7 @@ fn render_input_step(
     }
 
     frame.render_widget(
-        Paragraph::new(format!("{value}_")).style(Style::default().fg(Color::Yellow)),
+        Paragraph::new(format!("{value}_")).style(Style::default().fg(theme::color::ACTIVE)),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
 }
@@ -1748,7 +1735,7 @@ fn render_option_list(state: &WizardState, frame: &mut Frame, area: Rect) {
             let marker_style = if idx == state.selected {
                 style
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(theme::color::FOCUS)
             };
             let line = Line::from(vec![
                 Span::styled(marker, marker_style),
@@ -1772,11 +1759,7 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
                 &format!("Context: {}", summary),
                 area.width as usize,
             ))
-            .style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            .style(theme::style::header()),
             Rect::new(area.x, area.y, area.width, 1),
         );
         2
@@ -1797,14 +1780,14 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
         ];
         let ch = spinner_chars[state.ai_suggest.tick_counter % spinner_chars.len()];
         let text = Paragraph::new(format!(" {} Generating branch name suggestions...", ch))
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(theme::color::ACTIVE));
         frame.render_widget(text, body_area);
         return;
     }
 
     if let Some(ref err) = state.ai_suggest.error {
         let text =
-            Paragraph::new(format!(" Error: {}", err)).style(Style::default().fg(Color::Red));
+            Paragraph::new(format!(" Error: {}", err)).style(Style::default().fg(theme::color::ERROR));
         frame.render_widget(text, body_area);
         return;
     }
@@ -1828,7 +1811,7 @@ fn render_ai_suggest(state: &WizardState, frame: &mut Frame, area: Rect) {
             let style = super::list_item_style(idx == state.selected);
             let marker = if idx == state.selected { "> " } else { "  " };
             let line = Line::from(vec![
-                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(marker, Style::default().fg(theme::color::FOCUS)),
                 Span::styled(opt.clone(), style),
             ]);
             ListItem::new(line)
@@ -2515,7 +2498,7 @@ mod tests {
             "input value should render on a row below the prompt"
         );
         assert!(
-            text.matches('┌').count() == 1,
+            text.matches('╔').count() == 1,
             "branch input should reuse the popup chrome instead of adding a second boxed title inside the content area"
         );
     }
@@ -2538,7 +2521,7 @@ mod tests {
             "input value should render on a row below the prompt"
         );
         assert!(
-            text.matches('┌').count() == 1,
+            text.matches('╔').count() == 1,
             "issue input should use the same inline prompt style instead of adding another boxed title"
         );
     }
@@ -3005,7 +2988,7 @@ mod tests {
         let text = render_text(&state, 90, 24);
 
         assert!(text.contains("Use selected branch"));
-        assert!(text.matches('┌').count() == 1);
+        assert!(text.matches('╔').count() == 1);
     }
 
     #[test]
@@ -3050,7 +3033,7 @@ mod tests {
         let text = render_text(&state, 160, 24);
 
         assert!(text.contains("Default (recommended) - Opus 4.6"));
-        assert!(text.matches('┌').count() == 1);
+        assert!(text.matches('╔').count() == 1);
     }
 
     #[test]
@@ -3190,7 +3173,7 @@ mod tests {
         let text = render_text(&state, 90, 24);
 
         assert!(text.contains("Installed (v1.0.0) - Use installed version"));
-        assert!(text.matches('┌').count() == 1);
+        assert!(text.matches('╔').count() == 1);
     }
 
     #[test]
@@ -3381,7 +3364,7 @@ mod tests {
         assert!(text.contains("feature/oauth-flow"));
         assert!(text.contains("Manual input"));
         assert!(
-            text.matches('┌').count() == 1,
+            text.matches('╔').count() == 1,
             "AI suggestions should reuse the popup chrome instead of adding inner boxes"
         );
     }
@@ -3485,7 +3468,7 @@ mod tests {
             loading_y > context_y,
             "loading text should render below the context line"
         );
-        assert!(text.matches('┌').count() == 1);
+        assert!(text.matches('╔').count() == 1);
     }
 
     #[test]
@@ -3535,7 +3518,7 @@ mod tests {
             error_y > context_y,
             "error copy should render below the context line"
         );
-        assert!(text.matches('┌').count() == 1);
+        assert!(text.matches('╔').count() == 1);
     }
 
     #[test]

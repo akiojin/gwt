@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// Sort mode for the branch list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -578,17 +580,17 @@ fn render_header(state: &BranchesState, frame: &mut Frame, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
             format!(" View: {} ", state.view_mode.label()),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         ),
-        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", Style::default().fg(theme::color::SURFACE)),
         Span::styled(
             format!(" Sort: {} ", state.sort_mode.label()),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         ),
-        Span::styled(search_display, Style::default().fg(Color::Yellow)),
+        Span::styled(search_display, Style::default().fg(theme::color::ACTIVE)),
     ]);
 
-    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(theme::color::SURFACE));
     frame.render_widget(paragraph, area);
 }
 
@@ -604,7 +606,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         };
         let p = Paragraph::new(msg)
             .block(Block::default())
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(p, area);
         return;
     }
@@ -613,25 +615,23 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|branch| {
             let worktree_icon = if branch.worktree_path.is_some() {
-                "\u{25CF}"
+                theme::icon::WORKTREE_ACTIVE
             } else {
-                "\u{25CB}"
+                theme::icon::WORKTREE_INACTIVE
             };
-            let head_indicator = if branch.is_head { " *" } else { "" };
+            let head_indicator = if branch.is_head { theme::icon::HEAD_INDICATOR } else { "" };
             let line = Line::from(vec![
-                Span::styled(&branch.name, Style::default().fg(Color::White)),
+                Span::styled(&branch.name, Style::default().fg(theme::color::TEXT_PRIMARY)),
                 Span::raw(" "),
-                Span::styled(worktree_icon, Style::default().fg(Color::Cyan)),
-                Span::styled(head_indicator, Style::default().fg(Color::Green)),
+                Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
+                Span::styled(head_indicator, Style::default().fg(theme::color::SUCCESS)),
             ]);
             ListItem::new(line)
         })
         .collect();
 
     let list = List::new(items).block(Block::default()).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
+        theme::style::active_item(),
     );
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
@@ -673,7 +673,7 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
         ));
     }
 
-    let paragraph = Paragraph::new(lines.join("\n")).style(Style::default().fg(Color::White));
+    let paragraph = Paragraph::new(lines.join("\n")).style(Style::default().fg(theme::color::TEXT_PRIMARY));
     frame.render_widget(paragraph, area);
 }
 
@@ -709,7 +709,7 @@ fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
 fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
     if state.selected_branch().is_none() {
         let paragraph =
-            Paragraph::new(" No branch selected").style(Style::default().fg(Color::DarkGray));
+            Paragraph::new(" No branch selected").style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -724,7 +724,7 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
         } else {
             " No worktree (no SPECs available)"
         };
-        let paragraph = Paragraph::new(msg).style(Style::default().fg(Color::DarkGray));
+        let paragraph = Paragraph::new(msg).style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -736,14 +736,12 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(
                     format!(" {} ", spec.id),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    theme::style::header(),
                 ),
-                Span::styled(&spec.title, Style::default().fg(Color::White)),
+                Span::styled(&spec.title, Style::default().fg(theme::color::TEXT_PRIMARY)),
                 Span::styled(
                     format!("  [{}]", spec.status),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::color::ACTIVE),
                 ),
             ]);
             ListItem::new(line)
@@ -758,7 +756,7 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
 fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect) {
     if state.selected_branch().is_none() {
         let paragraph =
-            Paragraph::new(" No branch selected").style(Style::default().fg(Color::DarkGray));
+            Paragraph::new(" No branch selected").style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -770,7 +768,7 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
 
     if !has_worktree {
         let paragraph = Paragraph::new(" No worktree (no git status available)")
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -781,22 +779,20 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
     if state.detail_files.is_empty() {
         lines.push(Line::from(Span::styled(
             " Working tree clean",
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme::color::SUCCESS),
         )));
     } else {
         lines.push(Line::from(Span::styled(
             format!(" Changed files ({})", state.detail_files.len()),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            theme::style::active_item(),
         )));
         for file in &state.detail_files {
             let color = if file.starts_with("[S]") {
-                Color::Green
+                theme::color::SUCCESS
             } else if file.starts_with("[?]") {
-                Color::Red
+                theme::color::ERROR
             } else {
-                Color::Yellow
+                theme::color::ACTIVE
             };
             lines.push(Line::from(Span::styled(
                 format!("  {file}"),
@@ -810,19 +806,17 @@ fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             " Recent commits",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::style::header(),
         )));
         for commit in &state.detail_commits {
             lines.push(Line::from(Span::styled(
                 format!("  {commit}"),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme::color::TEXT_PRIMARY),
             )));
         }
     }
 
-    let paragraph = Paragraph::new(lines).style(Style::default().fg(Color::White));
+    let paragraph = Paragraph::new(lines).style(Style::default().fg(theme::color::TEXT_PRIMARY));
     frame.render_widget(paragraph, area);
 }
 
@@ -835,7 +829,7 @@ fn render_detail_sessions(
 ) {
     if sessions.is_empty() {
         let paragraph =
-            Paragraph::new(" No active sessions").style(Style::default().fg(Color::DarkGray));
+            Paragraph::new(" No active sessions").style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -846,21 +840,19 @@ fn render_detail_sessions(
         let selected_marker = if index == selected_session { ">" } else { " " };
         let marker = if session.active { "●" } else { " " };
         let kind_style = match session.kind {
-            "Agent" => Style::default().fg(Color::Cyan),
-            "Shell" => Style::default().fg(Color::Green),
-            _ => Style::default().fg(Color::White),
+            "Agent" => Style::default().fg(theme::color::FOCUS),
+            "Shell" => Style::default().fg(theme::color::SUCCESS),
+            _ => Style::default().fg(theme::color::TEXT_PRIMARY),
         };
         let name_style = if index == selected_session || session.active {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            theme::style::active_item()
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(theme::color::TEXT_PRIMARY)
         };
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {selected_marker} {marker} "),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::color::ACTIVE),
             ),
             Span::styled(session.kind, kind_style),
             Span::raw("  "),
@@ -869,7 +861,7 @@ fn render_detail_sessions(
         if let Some(detail) = session.detail.as_ref() {
             lines.push(Line::from(Span::styled(
                 format!("   {detail}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::color::SURFACE),
             )));
         }
     }
@@ -1430,8 +1422,8 @@ mod tests {
         assert!(!joined.contains("── Main ──"));
         assert!(!joined.contains("[L]"));
         assert!(!joined.contains("[R]"));
-        assert!(joined.contains("main ○ *"));
-        assert!(joined.contains("feature/worktree ●"));
+        assert!(joined.contains("main \u{25C7} \u{25B8}"));
+        assert!(joined.contains("feature/worktree \u{25C6}"));
     }
 
     #[test]

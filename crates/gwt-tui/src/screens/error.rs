@@ -5,11 +5,13 @@ use std::collections::VecDeque;
 use gwt_notification::Notification;
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// Messages specific to the error overlay.
 #[derive(Debug, Clone)]
@@ -44,7 +46,8 @@ pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rec
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::default().fg(Color::Red));
+        .border_type(theme::border::modal())
+        .border_style(Style::default().fg(theme::color::ERROR));
 
     let summary = if notification.source == "app" && notification.detail.is_none() {
         notification.message.clone()
@@ -54,7 +57,7 @@ pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rec
 
     let mut text = vec![Line::from(Span::styled(
         summary,
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        theme::style::error_text(),
     ))];
     if let Some(detail) = notification
         .detail
@@ -63,18 +66,18 @@ pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rec
     {
         text.push(Line::from(Span::styled(
             detail.to_string(),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         )));
     }
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
         "Press Enter or Esc to dismiss",
-        Style::default().fg(Color::DarkGray),
+        theme::style::muted_text(),
     )));
 
     let paragraph = Paragraph::new(text)
         .block(block)
-        .style(Style::default().fg(Color::Red));
+        .style(Style::default().fg(theme::color::ERROR));
     frame.render_widget(paragraph, overlay);
 }
 

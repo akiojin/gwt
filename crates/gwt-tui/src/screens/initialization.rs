@@ -7,11 +7,13 @@ use std::path::PathBuf;
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+
+use crate::theme;
 
 /// Clone operation status.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -131,7 +133,8 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
         .borders(Borders::ALL)
         .title(" gwt — Clone Repository ")
         .title_alignment(Alignment::Center)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::color::FOCUS))
+        .border_type(theme::border::modal());
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
 
@@ -149,27 +152,23 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
 
     // Instructions
     let instructions = Paragraph::new("Enter a repository URL to clone into this directory.")
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(theme::color::TEXT_PRIMARY))
         .alignment(Alignment::Center);
     frame.render_widget(instructions, chunks[0]);
 
     // Label
-    let label = Paragraph::new("Repository URL:").style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let label = Paragraph::new("Repository URL:").style(theme::style::active_item());
     frame.render_widget(label, chunks[2]);
 
     // Input field
     let input_style = match &state.clone_status {
-        CloneStatus::Error(_) => Style::default().fg(Color::Red),
-        _ => Style::default().fg(Color::White),
+        CloneStatus::Error(_) => Style::default().fg(theme::color::ERROR),
+        _ => Style::default().fg(theme::color::TEXT_PRIMARY),
     };
     let cursor = if state.clone_status == CloneStatus::Idle
         || matches!(state.clone_status, CloneStatus::Error(_))
     {
-        "\u{2588}" // Block cursor
+        theme::icon::BLOCK_CURSOR
     } else {
         ""
     };
@@ -183,41 +182,28 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
     let status: Paragraph = match &state.clone_status {
         CloneStatus::Idle => {
             let help = Line::from(vec![
-                Span::styled(
-                    "Enter",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("Enter", theme::style::success_text()),
                 Span::raw(" Clone  "),
-                Span::styled(
-                    "Esc",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("Esc", theme::style::error_text()),
                 Span::raw(" Exit"),
             ]);
             Paragraph::new(help).alignment(Alignment::Center)
         }
         CloneStatus::Cloning => Paragraph::new("Cloning repository...")
-            .style(Style::default().fg(Color::Yellow))
+            .style(Style::default().fg(theme::color::ACTIVE))
             .alignment(Alignment::Center),
         CloneStatus::Success(_) => Paragraph::new("Clone successful! Loading workspace...")
-            .style(Style::default().fg(Color::Green))
+            .style(Style::default().fg(theme::color::SUCCESS))
             .alignment(Alignment::Center),
         CloneStatus::Error(err) => {
             let lines = vec![
                 Line::from(Span::styled(
                     format!("Error: {err}"),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(theme::color::ERROR),
                 )),
                 Line::from(vec![
                     Span::raw("Edit URL and press "),
-                    Span::styled(
-                        "Enter",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("Enter", theme::style::success_text()),
                     Span::raw(" to retry"),
                 ]),
             ];
@@ -235,7 +221,8 @@ fn render_bare_migration(frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .title(" gwt — Bare Repository Detected ")
         .title_alignment(Alignment::Center)
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(Style::default().fg(theme::color::ERROR))
+        .border_type(theme::border::modal());
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
 
@@ -243,9 +230,7 @@ fn render_bare_migration(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "This directory contains a bare Git repository.",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            theme::style::active_item(),
         )),
         Line::from(""),
         Line::from("gwt requires a normal (non-bare) clone to work properly."),
@@ -253,25 +238,20 @@ fn render_bare_migration(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "  1. Move to a new directory",
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         )),
         Line::from(Span::styled(
             "  2. git clone --depth=1 <url> .",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::style::header(),
         )),
         Line::from(Span::styled(
             "  3. Launch gwt-tui in the new clone",
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         )),
         Line::from(""),
         Line::from(vec![
             Span::raw("Press "),
-            Span::styled(
-                "Esc",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("Esc", theme::style::error_text()),
             Span::raw(" to exit"),
         ]),
     ];
