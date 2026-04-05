@@ -103,7 +103,11 @@ fn run_app(
     // Spawn PTY for the default shell-0 session.
     if model.active_layer != ActiveLayer::Initialization {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let (cols, rows) = model.terminal_size();
+        let (cols, rows) = app::session_content_size(&model);
+        // Resize default VtState to match actual pane area.
+        if let Some(s) = model.active_session_tab_mut() {
+            s.vt.resize(rows, cols);
+        }
         let config = gwt_terminal::pty::SpawnConfig {
             command: shell,
             args: vec![],
@@ -144,7 +148,11 @@ fn run_app(
             // (skip keybind processing when in Initialization layer)
             let msg = match msg {
                 Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
-                    keybinds.process_key(key).unwrap_or(Message::KeyInput(key))
+                    let terminal_focused =
+                        model.active_focus == gwt_tui::model::FocusPane::Terminal;
+                    keybinds
+                        .process_key_with_focus(key, terminal_focused)
+                        .unwrap_or(Message::KeyInput(key))
                 }
                 other => other,
             };

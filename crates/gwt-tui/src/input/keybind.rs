@@ -179,22 +179,38 @@ impl KeybindRegistry {
 
     /// Process a key event through the prefix state machine.
     /// Returns `Some(Message)` if the key was consumed, `None` if it should be forwarded.
+    ///
+    /// When `terminal_focused` is true, Ctrl+C double-tap quit is disabled so
+    /// that every Ctrl+C reaches the PTY as SIGINT.  Use `Ctrl+G, q` to quit.
     pub fn process_key(&mut self, key: KeyEvent) -> Option<Message> {
+        self.process_key_with_focus(key, false)
+    }
+
+    /// Process a key event, optionally suppressing double-tap Ctrl+C quit
+    /// when a terminal session has focus.
+    pub fn process_key_with_focus(
+        &mut self,
+        key: KeyEvent,
+        terminal_focused: bool,
+    ) -> Option<Message> {
         // Check for timeout
         if self.prefix_state.is_expired() {
             self.prefix_state = PrefixState::Idle;
         }
 
-        // Ctrl+C double-tap quit (works in any state)
+        // Ctrl+C double-tap quit — disabled when terminal has focus so that
+        // every Ctrl+C reaches the PTY as SIGINT.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            if let Some(last) = self.last_ctrl_c {
-                if last.elapsed() < DOUBLE_TAP_WINDOW {
-                    self.last_ctrl_c = None;
-                    return Some(Message::Quit);
+            if !terminal_focused {
+                if let Some(last) = self.last_ctrl_c {
+                    if last.elapsed() < DOUBLE_TAP_WINDOW {
+                        self.last_ctrl_c = None;
+                        return Some(Message::Quit);
+                    }
                 }
+                self.last_ctrl_c = Some(Instant::now());
             }
-            self.last_ctrl_c = Some(Instant::now());
-            return None; // Single Ctrl+C: forward to PTY
+            return None; // Forward to PTY (or non-terminal handler)
         }
         // Any non-Ctrl+C key resets the double-tap tracker
         self.last_ctrl_c = None;

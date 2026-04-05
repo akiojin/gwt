@@ -95,6 +95,15 @@ pub fn spawn_pty_for_session(
     Ok(())
 }
 
+/// Compute the session pane content size `(cols, rows)` for PTY/VtState
+/// initialization.  Falls back to `model.terminal_size` when the layout
+/// geometry is not yet available (e.g. during early startup).
+pub fn session_content_size(model: &Model) -> (u16, u16) {
+    active_session_content_area(model)
+        .map(|r| (r.width, r.height))
+        .unwrap_or(model.terminal_size)
+}
+
 /// Drain buffered PTY input and write it to the corresponding PTY handles.
 fn drain_pending_pty_inputs(model: &mut Model) {
     while let Some(input) = model.pending_pty_inputs.pop_front() {
@@ -175,16 +184,23 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::NewShell => {
             let idx = model.sessions.len();
-            let (cols, rows) = model.terminal_size;
             let session = crate::model::SessionTab {
                 id: format!("shell-{idx}"),
                 name: format!("Shell {}", idx + 1),
                 tab_type: SessionTabType::Shell,
-                vt: crate::model::VtState::new(rows, cols),
+                vt: crate::model::VtState::new(24, 80),
             };
             let session_id = session.id.clone();
             model.sessions.push(session);
             model.active_session = idx;
+
+            // Use actual pane content area for PTY size.
+            let (cols, rows) = session_content_size(model);
+
+            // Resize VtState to match.
+            if let Some(s) = model.sessions.last_mut() {
+                s.vt.resize(rows, cols);
+            }
 
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
             let config = gwt_terminal::pty::SpawnConfig {
@@ -216,12 +232,16 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Resize(w, h) => {
             model.terminal_size = (w, h);
-            // Propagate resize to all PTY processes and VtState parsers.
-            for pty in model.pty_handles.values() {
-                let _ = pty.resize(w, h);
-            }
-            for session in &mut model.sessions {
-                session.vt.resize(h, w);
+            // Propagate resize to all PTY processes and VtState parsers
+            // using the actual session pane content area, not the full
+            // terminal size.
+            if let Some(content) = active_session_content_area(model) {
+                for pty in model.pty_handles.values() {
+                    let _ = pty.resize(content.width, content.height);
+                }
+                for session in &mut model.sessions {
+                    session.vt.resize(content.height, content.width);
+                }
             }
         }
         Message::PtyOutput(pane_id, data) => {
@@ -1574,11 +1594,16 @@ fn check_branch_pending_actions(model: &mut Model) {
         model.branches.pending_launch_agent = false;
         if let Some(branch) = model.branches.selected_branch() {
             let branch_name = branch.name.clone();
+            let worktree_path = branch.worktree_path.clone();
+            let quick_start_root = worktree_path
+                .clone()
+                .unwrap_or_else(|| model.repo_path.clone());
             open_wizard(model, None);
             if let Some(ref mut wizard) = model.wizard {
+                wizard.worktree_path = worktree_path;
                 configure_existing_branch_wizard_with_sessions(
                     wizard,
-                    &model.repo_path,
+                    &quick_start_root,
                     &gwt_sessions_dir(),
                     &branch_name,
                 );
@@ -1588,7 +1613,7 @@ fn check_branch_pending_actions(model: &mut Model) {
     if model.branches.pending_open_shell {
         model.branches.pending_open_shell = false;
         if let Some(branch) = model.branches.selected_branch() {
-            if branch.worktree_path.is_some() {
+            if let Some(ref wt_path) = branch.worktree_path {
                 let idx = model.sessions.len();
                 let session = crate::model::SessionTab {
                     id: format!("shell-{idx}"),
@@ -1596,9 +1621,35 @@ fn check_branch_pending_actions(model: &mut Model) {
                     tab_type: crate::model::SessionTabType::Shell,
                     vt: crate::model::VtState::new(24, 80),
                 };
+                let session_id = session.id.clone();
                 model.sessions.push(session);
                 model.active_session = idx;
                 model.active_focus = FocusPane::Terminal;
+
+                let (cols, rows) = session_content_size(model);
+                if let Some(s) = model.sessions.last_mut() {
+                    s.vt.resize(rows, cols);
+                }
+
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                let config = gwt_terminal::pty::SpawnConfig {
+                    command: shell,
+                    args: vec![],
+                    cols,
+                    rows,
+                    env: HashMap::new(),
+                    cwd: Some(wt_path.clone()),
+                };
+                if let Err(e) = spawn_pty_for_session(model, &session_id, config) {
+                    apply_notification(
+                        model,
+                        Notification::new(
+                            Severity::Error,
+                            "pty",
+                            format!("Branch shell spawn failed: {e}"),
+                        ),
+                    );
+                }
             }
         }
     }
@@ -2249,6 +2300,10 @@ fn build_launch_config_from_wizard_with_custom_agents(
 
     let mut builder = AgentLaunchBuilder::new(agent_id);
 
+    if let Some(ref wt) = wizard.worktree_path {
+        builder = builder.working_dir(wt);
+    }
+
     if !wizard.branch_name.is_empty() {
         builder = builder.branch(&wizard.branch_name);
     }
@@ -2331,7 +2386,7 @@ fn build_custom_launch_config_from_wizard(
         command,
         args,
         env_vars,
-        working_dir: None,
+        working_dir: wizard.worktree_path.clone(),
         branch: (!wizard.branch_name.is_empty()).then(|| wizard.branch_name.clone()),
         display_name: custom_agent.display_name.clone(),
         model: None,
@@ -2369,8 +2424,12 @@ fn materialize_pending_launch_with(
         return Ok(());
     };
 
+    let worktree = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| model.repo_path.clone());
     let mut session = AgentSession::new(
-        model.repo_path.clone(),
+        worktree,
         config.branch.clone().unwrap_or_default(),
         config.agent_id.clone(),
     );
@@ -2385,7 +2444,6 @@ fn materialize_pending_launch_with(
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
 
-    let (cols, rows) = model.terminal_size;
     let tab = crate::model::SessionTab {
         id: session.id.clone(),
         name: config.display_name.clone(),
@@ -2393,12 +2451,18 @@ fn materialize_pending_launch_with(
             agent_id: config.agent_id.command().to_string(),
             color: tui_agent_color(config.color),
         },
-        vt: crate::model::VtState::new(rows, cols),
+        vt: crate::model::VtState::new(24, 80),
     };
     let tab_id = tab.id.clone();
     model.sessions.push(tab);
     model.active_session = model.sessions.len().saturating_sub(1);
     model.active_layer = ActiveLayer::Main;
+
+    // Use actual pane content area for PTY size.
+    let (cols, rows) = session_content_size(model);
+    if let Some(s) = model.sessions.last_mut() {
+        s.vt.resize(rows, cols);
+    }
 
     // Spawn PTY process for the agent session.
     let pty_config = gwt_terminal::pty::SpawnConfig {
@@ -2950,6 +3014,33 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Down => Some(b"\x1b[B".to_vec()),
         KeyCode::Right => Some(b"\x1b[C".to_vec()),
         KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Home => Some(b"\x1b[H".to_vec()),
+        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
+        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
+        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
+        KeyCode::F(n) => f_key_to_bytes(n),
+        _ => None,
+    }
+}
+
+fn f_key_to_bytes(n: u8) -> Option<Vec<u8>> {
+    match n {
+        // F1-F4: SS3 sequences (xterm PC-style default)
+        1 => Some(b"\x1bOP".to_vec()),
+        2 => Some(b"\x1bOQ".to_vec()),
+        3 => Some(b"\x1bOR".to_vec()),
+        4 => Some(b"\x1bOS".to_vec()),
+        // F5-F12: CSI sequences
+        5 => Some(b"\x1b[15~".to_vec()),
+        6 => Some(b"\x1b[17~".to_vec()),
+        7 => Some(b"\x1b[18~".to_vec()),
+        8 => Some(b"\x1b[19~".to_vec()),
+        9 => Some(b"\x1b[20~".to_vec()),
+        10 => Some(b"\x1b[21~".to_vec()),
+        11 => Some(b"\x1b[23~".to_vec()),
+        12 => Some(b"\x1b[24~".to_vec()),
         _ => None,
     }
 }
@@ -3159,7 +3250,12 @@ fn open_url(url: &str) -> Result<(), String> {
         })
 }
 
-fn render_session_surface(session: &crate::model::SessionTab, frame: &mut Frame, area: Rect) {
+fn render_session_surface(
+    session: &crate::model::SessionTab,
+    frame: &mut Frame,
+    area: Rect,
+    show_cursor: bool,
+) {
     if session.vt.screen().contents().trim().is_empty() {
         let placeholder = Paragraph::new(format!(
             "Session: {} ({}x{})",
@@ -3174,6 +3270,16 @@ fn render_session_surface(session: &crate::model::SessionTab, frame: &mut Frame,
             crate::widgets::terminal_view::TerminalView::new(session.vt.screen()),
             area,
         );
+    }
+
+    // Show the vt100 cursor when this session has terminal focus.
+    if show_cursor && !session.vt.screen().hide_cursor() {
+        let (cursor_row, cursor_col) = session.vt.screen().cursor_position();
+        let x = area.x + cursor_col;
+        let y = area.y + cursor_row;
+        if x < area.right() && y < area.bottom() {
+            frame.set_cursor_position((x, y));
+        }
     }
 }
 
@@ -3344,7 +3450,7 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
                 let block = pane_block(title, terminal_focused);
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
-                render_session_surface(session, frame, inner);
+                render_session_surface(session, frame, inner, terminal_focused);
             }
         }
         SessionLayout::Grid => {
