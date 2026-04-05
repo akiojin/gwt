@@ -15,8 +15,6 @@ const GWT_EXCLUDE_PATTERNS: &[&str] = &[
     ".claude/settings.local.json",
     ".codex/skills/gwt-*",
     ".agents/skills/gwt-*",
-    "AGENTS.md",
-    "CLAUDE.md",
 ];
 
 /// Update `.git/info/exclude` to include gwt-managed asset exclusions.

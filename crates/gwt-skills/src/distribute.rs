@@ -1,6 +1,6 @@
 //! Distribute bundled skill assets to a target worktree.
 
-use crate::assets::{AGENTS_MD, CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_MD, CLAUDE_SKILLS};
+use crate::assets::{CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_SKILLS};
 use include_dir::Dir;
 use std::fs;
 use std::io;
@@ -56,12 +56,6 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
         &worktree.join(".agents/skills"),
         &mut report,
     )?;
-
-    // Project instruction files at worktree root
-    fs::write(worktree.join("AGENTS.md"), AGENTS_MD)?;
-    report.files_written += 1;
-    fs::write(worktree.join("CLAUDE.md"), CLAUDE_MD)?;
-    report.files_written += 1;
 
     Ok(report)
 }
