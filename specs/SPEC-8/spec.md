@@ -44,11 +44,15 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 
 **Acceptance Scenarios**
 
-1. Given I create a new worktree through the standard Launch Agent flow, when I continue past branch type and issue selection, then the wizard opens manual branch input directly without requiring AI settings.
+1. Given I create a new worktree through the standard Launch Agent flow from
+   Branches, SPEC detail, or Issue detail, when I continue past branch type
+   and issue selection, then the wizard opens manual branch input directly
+   without requiring AI settings.
 2. Given the AI suggestion step is explicitly re-enabled, when the SPEC title or Issue description is available, then 3-5 AI-generated branch name suggestions are displayed.
 3. Given suggestions are displayed, when I select one, then it is used as the branch name.
 4. Given I prefer a custom name or the AI provider is unavailable or times out (10s), when I choose manual input, then I can type a branch name freely.
 5. Given a suggestion is selected, when validated, then it conforms to Git branch naming rules (no spaces, no special chars except /-_).
+6. Given I use the current product surface, when I configure Launch Agent, then no public control is available to re-enable the dormant AI suggestion step.
 
 ## Edge Cases
 
@@ -82,10 +86,14 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 
 ### AI Branch Naming
 
-- **FR-011**: The standard new-worktree Launch Agent flow skips AI branch suggestion and opens manual branch input without requiring active AI settings.
+- **FR-011**: The standard new-worktree Launch Agent flow from Branches,
+  SPEC detail, and Issue detail skips AI branch suggestion and opens manual
+  branch input without requiring active AI settings.
 - **FR-012**: When the AI suggestion step is explicitly enabled, `BranchNameSuggester` generates 3-5 candidate names from the SPEC title or Issue description.
 - **FR-013**: When the AI suggestion step is enabled, manual text input remains available if AI is unavailable or timeout exceeds 10 seconds.
 - **FR-014**: All generated branch names are validated against Git branch naming rules before display.
+- **FR-015**: The dormant AI suggestion step is implementation-only in this
+  slice; no public UI or settings affordance re-enables it.
 
 ## Non-Functional Requirements
 

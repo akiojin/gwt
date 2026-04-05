@@ -56,7 +56,7 @@
 - [x] **T-033**: Implement PTY injection of extracted file paths.
 - [x] **T-034**: Verify T-030, T-031 pass (GREEN).
 
-## Phase 3: AI Branch Naming Wizard Integration (Dormant in Standard Launch Agent Flow)
+## Phase 3: AI Branch Naming Wizard Integration (Dormant in Standard Launch Agent Flow from Branches / SPEC Detail / Issue Detail)
 
 ### 3.1 Branch Name Suggestion Display
 

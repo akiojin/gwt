@@ -311,3 +311,9 @@
 - [x] T163 Extract shared custom-agent config load/save helpers into `crates/gwt-tui/src/custom_agents.rs`, preserving unrelated settings and unknown nested custom-agent tables.
 - [x] T164 Implement Settings > Custom Agents selector/edit/action rows in `crates/gwt-tui/src/screens/settings.rs` and wire them to the shared helper.
 - [x] T165 Verify focused `custom_agents` and `screens::settings` tests, then refresh SPEC-3 artifacts.
+
+## Phase 45: Issue Detail Launch Agent Restoration
+
+- [x] T166 Write RED test: `Shift+Enter` on Issue detail opens the wizard with prefilled issue context and the standard new-branch flow.
+- [x] T167 Restore the Issues detail route in `app.rs` so `Shift+Enter` opens the wizard, seeds issue-derived branch context, and prefills `issue_id`.
+- [x] T168 Verify focused issue-launch tests, broad workspace checks, and refresh SPEC-3 artifacts.

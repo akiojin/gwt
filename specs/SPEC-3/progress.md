@@ -3,13 +3,16 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `171/171` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T12:06:42Z`
+- Task progress: `174/174` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T12:22:37Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
 - Session conversion artifacts now consistently describe the implemented metadata-driven agent switch instead of PTY relaunch.
 - Supporting artifacts now cover execution, review, and completion-gate reconciliation for this near-finished SPEC.
+- Issue detail launches now rejoin the standard new-branch wizard flow, so
+  Branches, SPEC detail, and Issue detail all enter `BranchType -> Issue ->
+  Branch Name` without requiring AI configuration.
 - Wizard version selection is now a dedicated step, with focused tests for
   installed-version fallback, cache-backed options, and confirm-summary
   rendering.

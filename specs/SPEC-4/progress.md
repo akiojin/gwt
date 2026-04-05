@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `40/40` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T08:10:00Z`
+- Task progress: `43/43` checked in `tasks.md`
+- Artifact refresh: `2026-04-05T12:22:37Z`
 
 ## Done
 - The missing planning support files for this SPEC are now present.
@@ -22,6 +22,9 @@
 - `fetch_pr_list()` now uses the gh CLI's GraphQL-backed `pr list --json`
   surface as the primary transport and falls back to the REST pulls endpoint
   when that surface is unavailable, so `FR-008` is now implemented.
+- Issue detail now routes `Shift+Enter` back into the shared Launch Agent
+  wizard with the selected issue number prefilled, matching the standard
+  new-branch flow without AI configuration.
 - The remaining gap is completion-gate review, not unchecked execution tasks.
 
 ## Next

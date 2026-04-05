@@ -40,15 +40,19 @@ suggestion dormant in the standard new-branch flow.
 
 1. Given I launch from an existing branch, when the wizard opens, then I see
    `BranchAction` before any agent configuration step.
-2. Given I choose to create a new branch, when I continue, then the wizard
-   runs `BranchType -> Issue -> Branch Name -> Agent`.
-3. Given I select Codex, when I continue through the wizard, then the flow
+2. Given I choose to create a new branch from Branches, SPEC detail, or
+   Issue detail, when I continue, then the wizard runs
+   `BranchType -> Issue -> Branch Name -> Agent`.
+3. Given I use the standard new-branch wizard flow, when I look for AI
+   branch suggestion controls, then no public toggle or step is exposed in
+   this slice.
+4. Given I select Codex, when I continue through the wizard, then the flow
    includes `Model -> Reasoning -> Version -> Execution Mode -> Skip Permissions`
    without requiring a trailing confirm screen.
-4. Given I choose session conversion, when I pick `Convert` from execution
+5. Given I choose session conversion, when I pick `Convert` from execution
    mode, then the wizard routes through `ConvertAgentSelect` and
    `ConvertSessionSelect` before `SkipPermissions`.
-5. Given I reach the last step, when I confirm the selection there, then the
+6. Given I reach the last step, when I confirm the selection there, then the
    launch completes directly from the final step instead of a separate
    `Confirm` screen.
 
@@ -196,9 +200,13 @@ As a developer, I want to convert an existing session to a different agent type 
   `ReasoningLevel`, `VersionSelect`, `ExecutionMode`,
   `ConvertAgentSelect`, `ConvertSessionSelect`, `SkipPermissions`,
   `BranchTypeSelect`, `IssueSelect`, `AIBranchSuggest`, and
-  `BranchNameInput`, while the standard new-branch path currently routes
+  `BranchNameInput`, while the standard new-branch path for Branches, SPEC
+  detail, and Issue detail currently routes
   `BranchTypeSelect -> IssueSelect -> BranchNameInput` without entering
   `AIBranchSuggest`.
+- **FR-016a**: This slice does not expose a public setting, wizard toggle, or
+  other user-facing control to re-enable `AIBranchSuggest`; any future
+  reactivation path requires separate specification work.
 - **FR-017**: `ModelSelect`, `ReasoningLevel`, `ExecutionMode`,
   `SkipPermissions`, and `VersionSelect` use old-TUI-style row formatting
   with descriptive text and version-list scroll indicators.

@@ -68,6 +68,9 @@ As a developer, I want to launch an agent session from an Issue detail view so t
 
 - AC-6.1: Shift+Enter on Issue detail opens agent launch wizard
 - AC-6.2: Agent launch pre-fills Issue context
+- AC-6.3: Issue-origin launches enter the standard new-branch wizard flow at
+  `BranchTypeSelect`, keep the issue number prefilled in `IssueSelect`, and
+  do not require AI settings to continue to manual branch input
 
 ## Functional Requirements
 
@@ -81,6 +84,7 @@ As a developer, I want to launch an agent session from an Issue detail view so t
 | FR-006 | PR detail with CI check badges | P1 | Implemented |
 | FR-007 | PR status from gwt-core::git::pr_status (PrStatus struct) | P1 | Implemented |
 | FR-008 | GraphQL primary, REST fallback for GitHub API | P1 | Implemented |
+| FR-009 | Issue detail launch pre-fills issue context and issue number while following the standard new-branch wizard flow | P1 | Implemented |
 
 ## Non-Functional Requirements
 

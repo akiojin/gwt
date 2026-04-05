@@ -53,7 +53,9 @@
 
 ## Phase 3: AI Branch Naming Wizard Integration
 
-**Goal**: Keep `BranchNameSuggester` integrated behind the wizard's dedicated AI suggestion step while the standard Launch Agent flow continues directly to manual branch input.
+**Goal**: Keep `BranchNameSuggester` integrated behind the wizard's dedicated
+AI suggestion step while the standard Launch Agent flow from Branches, SPEC
+detail, and Issue detail continues directly to manual branch input.
 
 ### Key Changes
 
