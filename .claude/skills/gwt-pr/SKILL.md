@@ -1,114 +1,235 @@
 ---
 name: gwt-pr
-description: "Create or update GitHub Pull Requests with the gh CLI, preferring REST-first `gh api` flows for PR list/create/update/view while deciding whether to create a new PR or only push based on existing PR merge status. Use when the user asks to open/create/edit a PR, generate a PR body/template, or says 'open a PR/create a PR/gh pr'. Defaults: base=develop, head=current branch (same-branch only; never create/switch branches)."
+description: "Unified GitHub PR lifecycle manager. Auto-detects mode: creates PRs when none exist, pushes to open PRs, checks PR status, and fixes CI failures/merge conflicts/reviewer comments. Use when user says 'create PR', 'check PR', 'fix CI', 'PR status', 'fix the PR', or 'open a PR'."
 ---
 
-# GH PR
+# gwt-pr — Unified PR Lifecycle Manager
 
 ## Overview
 
-Create or update GitHub Pull Requests with the gh CLI using a detailed body template, strict same-branch rules, and REST-first transport for PR list/create/update/view operations.
+Single skill for the full PR lifecycle: create, check status, and fix blockers. Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user.
 
-## Decision rules (must follow)
+REST-first `gh api` flows for all PR operations. GraphQL only for unresolved review threads and thread reply/resolve.
 
-1. **Do not create or switch branches.** Always use the current branch as the PR head.
-2. **Only `develop` may target `main`.** If the base is `main` and the head branch is anything other than `develop`, **refuse to create the PR** and instruct the user to merge into `develop` first, then create a release PR from `develop`.
-3. **Check local working tree state before push/PR operations.**
-   - `git status --porcelain`
-   - If output is non-empty (tracked or untracked changes), pause and ask the user what to do.
-   - Present 3 options: continue as-is, abort, or manual cleanup then rerun.
-   - **Do not** run `git stash`, `git commit`, or `git clean` automatically unless explicitly requested.
-4. **Check for an existing PR for the current head branch.**
-   - Resolve the repo slug first: `gh repo view --json nameWithOwner -q .nameWithOwner`
-   - Resolve the repo owner from `<owner>/<repo>`
-   - Primary lookup path:
-     - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
-5. **If no PR exists** → create a new PR.
-6. **If any OPEN PR exists and is NOT merged** (`state == open` and `mergedAt` is null) → push only and finish (do **not** create a new PR).
-   - Only an OPEN PR blocks new PR creation.
-   - CLOSED and unmerged PRs do **not** block creating a new PR.
-   - Only update title/body/labels if the user explicitly requests changes.
-7. **If no OPEN unmerged PR exists and at least one PR for the head is merged** → check for post-merge commits (see below).
-8. **If the only existing PRs are CLOSED and unmerged** → create a new PR.
-9. **If multiple PRs exist for the head** → use the most recently updated PR for reporting, but the create vs push decision is based on open-unmerged vs merged state.
+## Mode Auto-Detection
 
-## Post-merge commit check (critical)
+On invocation, resolve the current branch's PR state and select mode:
 
-When all PRs for the head branch are merged, you **must** check whether there are new commits after the merge:
+1. **Preflight** — Resolve repo, head, base, and list PRs via REST (see [Shared Preflight](#shared-preflight)).
+2. **Route:**
+   - User explicitly says "check status" / "PR status" / "is it merged?" --> **check** mode
+   - User explicitly says "fix CI" / "fix the PR" / "resolve blockers" --> **fix** mode
+   - User explicitly says "create PR" / "open PR" --> **create** mode (with smart skip if open PR exists)
+   - No explicit mode --> auto-detect:
+     - No PR exists --> **create**
+     - Open unmerged PR exists, user has new commits --> **create** (push-only + post-push fix)
+     - Open unmerged PR exists, user asks about status --> **check**
+     - PR has CI failures / review comments / conflicts --> **fix**
+     - All PRs merged with new commits --> **create**
+     - All PRs merged, no diff --> report NO ACTION
 
-1. **Get the merge commit SHA** of the most recent merged PR from the REST PR payload (`merge_commit_sha`).
-2. **Validate merge commit ancestry first**: `git merge-base --is-ancestor <merge_commit> HEAD`
-3. **If the merge commit is an ancestor of `HEAD`**, count commits after the merge:
-   - `git rev-list --count <merge_commit>..HEAD`
-4. **If the merge commit is missing or not an ancestor of `HEAD`**, fallback to the branch upstream first:
-   - `git rev-list --count origin/<head>..HEAD`
-5. **If the upstream comparison returns `0` or fails**, compare against the base branch:
-   - `git rev-list --count origin/<base>..HEAD`
-6. **Before creating a PR from post-merge commit counts, verify the branch still differs from the base branch**:
-   - `git diff --quiet origin/<base>...HEAD --`
-   - Exit code `1` → a PR-worthy diff exists; proceed
-   - Exit code `0` → no PR-worthy diff remains; finish with `NO ACTION`
-   - Any other failure → stop with `MANUAL CHECK`
-7. **Decision**:
-   - If the selected count is greater than 0 → create a new PR
-   - If both upstream and base comparisons report `0` → report "No new changes since merge" and finish
-   - If both fallback comparisons fail → stop and report `MANUAL CHECK`
+## Shared Preflight
 
-### Why this matters
+Every mode begins with these steps:
 
-- **Scenario A**: PR merged → user makes local changes → pushes → changes are NOT in the merged PR
-  - Without this check, the changes would be lost or require manual intervention
-- **Scenario B**: PR merged → user says "create PR" without new changes → would create empty/duplicate PR
-  - This check prevents unnecessary PR creation
+1. **Repo + branches:**
+   - `git rev-parse --show-toplevel` / `git rev-parse --abbrev-ref HEAD`
+   - Base defaults to `develop` unless user specifies.
+2. **Branch protection:** Only `develop` may target `main`. Refuse any other branch targeting `main`.
+3. **Working tree state:** `git status --porcelain`. If dirty, pause and present options (continue / abort / cleanup). Do not auto-commit/stash.
+4. **Fetch:** `git fetch origin`
+5. **PR lookup (REST-first):**
+   - `repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
+   - `owner="${repo_slug%%/*}"`
+   - `gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100"`
+6. **Classify PR state:**
+   - No PR --> `NO_PR`
+   - Open + unmerged (`state == "open" && merged_at == null`) --> `UNMERGED_PR_EXISTS`
+   - Only closed + unmerged --> `CLOSED_UNMERGED_ONLY`
+   - At least one merged, no open unmerged --> perform post-merge commit check (see `references/check-flow.md`)
 
-## PR title rules (must follow)
+## Mode: Create
 
-1. **Format**: `<type>(<scope>): <subject>` — follow Conventional Commits.
-2. **type**: must be one of `feat` / `fix` / `docs` / `chore` / `refactor` / `test` / `ci` / `perf`.
-3. **scope**: optional. Use a short scope that clearly identifies the affected area (for example: `gui`, `core`, `pty`).
-4. **subject**: keep it within 70 characters. Use the imperative mood (for example: "add ..." / "fix ..."). Do not capitalize the first letter or end with a period.
-5. If the branch name has a prefix such as `feat/` or `fix/`, **the title type must match that prefix**.
+Detailed logic in `references/create-flow.md`.
 
-## PR body rules (must follow)
+### Decision Rules
 
-### Section classification
+1. **Do not create or switch branches.** Always use the current branch as head.
+2. **If `UNMERGED_PR_EXISTS`** --> push only, return existing PR URL.
+3. **If `NO_PR` or `CLOSED_UNMERGED_ONLY`** --> create new PR.
+4. **If all PRs merged** --> post-merge commit check determines create vs no-action.
+5. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
 
-| Section | Required | Notes |
-|---------|----------|-------|
-| Summary | **YES** | 1-3 bullet points. Include both the what and the why. |
-| Changes | **YES** | Enumerate changes by file or module. |
-| Testing | **YES** | List the commands run or the exact manual test steps. |
-| Closing Issues | **YES** | `Closes #N` 形式。クローズ対象がなければ "None"。 |
-| Related Issues / Links | **YES** | 参照のみ（自動クローズしない）。 |
-| Checklist | **YES** | Review every item and mark it checked or N/A. |
-| Context | Conditional | Required when 3 or more files changed or the rationale is non-trivial. |
-| Risk / Impact | Conditional | Required when the change is breaking, performance-sensitive, or needs rollback steps. |
-| Screenshots | Conditional | Required only for UI changes. |
-| Deployment | Optional | Include only when deployment steps exist. |
-| Notes | Optional | Include only when reviewers need extra context. |
+### PR Title Rules
 
-### Validation (agent must check before creating PR)
+- Format: `<type>(<scope>): <subject>` (Conventional Commits)
+- type: `feat`/`fix`/`docs`/`chore`/`refactor`/`test`/`ci`/`perf`
+- subject: imperative mood, under 70 chars, no capital, no period
+- Branch prefix `feat/`/`fix/` must match title type
 
-1. **Do not create a PR if any required section still contains `TODO`.**
-2. If a conditional section does not apply, remove the entire section instead of leaving an empty TODO.
-3. Each Summary bullet must be a **single sentence**. Do not use vague wording such as "several changes" or "various fixes."
-4. Changes must be specific and include the changed file or module names.
-5. Testing must be reproducible. Do not use vague wording such as "tested."
-6. Add a reason comment to every unchecked checklist item (for example: `- [ ] Docs updated — N/A: no user-facing change`).
-7. Related Issues must be written as `#123` or as a URL. If nothing applies, explicitly write "None".
-8. Closing Issues セクションは `Closes #N` または `None` のみ許可。`- #N`（キーワードなし）は不可。
-9. `Related Issues / Links` に `#N` があり、その Issue をリリースで閉じたい場合は、同じ番号を `Closing Issues` にも `Closes #N` で必ず記載する。`Related Issues / Links` のみでは auto-close されない。
+### PR Body Rules
 
-## Issue/PR Comment Formatting (must follow)
+- Template: `.claude/skills/gwt-pr/references/pr-body-template.md`
+- Required sections: Summary, Changes, Testing, Closing Issues, Related Issues, Checklist
+- Conditional sections (remove if N/A): Context, Risk/Impact, Screenshots, Deployment
+- Remove all `<!-- GUIDE: ... -->` comments from final output
+- No `TODO` in required sections; derive content from diff/Issues/SPECs before asking user
+- `Closing Issues`: `Closes #N` or `None` only. Bare `#N` without keyword is forbidden.
+- Add reason to every unchecked checklist item
 
-- Final comment text must not contain escaped newline literals such as `\n`.
-- Use real line breaks in comment bodies. Do not rely on escaped sequences for formatting.
-- Before posting, verify the final body does not accidentally include escaped control sequences (`\n`, `\t`).
-- If a raw escape sequence must be shown for explanation, include it only inside a fenced code block and clarify it is intentional.
+### Create/Update Commands
 
-## Issue Progress Comment Template (required for issue-based work)
+- Primary: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
+- Fallback: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
+- Update (only if user asks): `PATCH` via REST or `gh pr edit`
 
-When work is tracked in GitHub Issues, progress updates must use this template:
+### Post-Create
+
+After PR creation or push, automatically enter **fix** mode to check CI/conflicts/reviews.
+
+## Mode: Check
+
+Detailed logic in `references/check-flow.md`.
+
+**Read-only mode.** Do not create/switch branches, push, or create/edit PRs.
+
+### Output Contract
+
+Human-readable summary using signal prefixes:
+
+| Prefix | Action | Meaning |
+|--------|--------|---------|
+| `>>` | `CREATE PR` | Create a new PR |
+| `>` | `PUSH ONLY` | Push to existing PR |
+| `--` | `NO ACTION` | Nothing to do |
+| `!!` | `MANUAL CHECK` | Manual check required |
+
+Per-status templates:
+
+- **NO_PR:** `>> CREATE PR -- No PR exists for <head> -> <base>.`
+- **UNMERGED_PR_EXISTS:** `> PUSH ONLY -- Unmerged PR open for <head>.` + PR URL
+- **CLOSED_UNMERGED_ONLY:** `>> CREATE PR -- No open PR; only closed unmerged PRs found.` + last closed PR
+- **ALL_MERGED_WITH_NEW_COMMITS:** `>> CREATE PR -- <N> new commit(s) after last merge (#<pr>).`
+- **ALL_MERGED_NO_PR_DIFF:** `-- NO ACTION -- All PRs merged, no PR-worthy diff.`
+- **CHECK_FAILED:** `!! MANUAL CHECK -- Could not determine PR status.` + reason
+
+Append `(!) Worktree has uncommitted changes.` when dirty.
+
+### Post-Merge Commit Check
+
+When all PRs are merged:
+
+1. Get `merge_commit_sha` from latest merged PR.
+2. Verify ancestry: `git merge-base --is-ancestor <merge_commit> HEAD`
+3. If ancestor, count: `git rev-list --count <merge_commit>..HEAD`
+4. Fallback chain: `origin/<head>..HEAD` --> `origin/<base>..HEAD`
+5. Before recommending CREATE_PR, verify diff exists: `git diff --quiet origin/<base>...HEAD --`
+6. Empty diff --> NO ACTION. Both fallbacks fail --> MANUAL CHECK.
+
+## Mode: Fix
+
+Detailed logic in `references/fix-flow.md`.
+
+### Inspection Targets
+
+- **CI failures:** REST check-runs + GitHub Actions log extraction
+- **Merge conflicts:** `mergeable` / `mergeStateStatus` fields (CONFLICTING/DIRTY/BEHIND)
+- **Reviewer comments:** REST reviews + inline comments + issue comments (full text, no truncation)
+- **Unresolved threads:** GraphQL only
+- **Change requests:** Reviews with `CHANGES_REQUESTED` state
+
+### Diagnosis Report (mandatory format)
+
+```text
+## Diagnosis Report: PR #<number>
+
+**Merge Verdict: BLOCKED | CLEAR**
+Blocking items: <N>
+
+---
+
+### BLOCKING
+
+#### B1. [CATEGORY] <1-line title>
+- **What:** Factual statement
+- **Where:** file_path:line / check name / branch ref
+- **Evidence:** Verbatim quote from output
+- **Action:** Specific fix with file path/command
+- **Auto-fix:** Yes | No (needs confirmation)
+
+---
+
+### INFORMATIONAL
+#### I1. [CATEGORY] <1-line title>
+- **What / Note**
+
+---
+
+**Summary:** <N> blocking, <M> informational.
+```
+
+**Categories:** `CONFLICT`, `BRANCH-BEHIND`, `CI-FAILURE`, `CHANGE-REQUEST`, `UNRESOLVED-THREAD`, `REVIEW-COMMENT`
+
+**Classification:**
+
+- BLOCKING: merge conflicts, BEHIND, CI failure/cancelled/timed_out, CHANGES_REQUESTED, unresolved threads
+- INFORMATIONAL: comments without change requests, pending CI, outdated threads
+
+**Each CHANGE-REQUEST and UNRESOLVED-THREAD is a separate B-item.**
+
+### Execution Path
+
+1. All `Auto-fix: Yes` --> proceed directly to fix.
+2. Any `Auto-fix: No` --> ask user about those items only.
+
+### Fix Implementation
+
+- Apply fixes, commit, push.
+- For BRANCH-BEHIND: `git fetch origin <base> && git merge origin/<base> && git push`
+- For CONFLICT: inspect both sides, resolve if clear, ask user if ambiguous.
+
+### Comment Response Policy
+
+> **No reviewer comment may be left unanswered.**
+
+- Every unresolved thread MUST receive a reply before resolution.
+- Addressed: "Fixed: <what was done>."
+- Not addressed: "Not addressed: <reason>."
+- Use `--reply-and-resolve` JSON array covering ALL threads.
+
+### Reviewer Notification (mandatory)
+
+Post PR comment via REST summarizing all fixes. Fallback: `gh pr comment`.
+
+### Verify Fix (mandatory)
+
+Re-run inspection with `--mode all`. Loop until exit code 0.
+- CI pending --> poll 30s intervals until complete.
+- After fix push, re-poll for new CI run.
+
+### Loop Safety Guard
+
+Same CI check fails 3 consecutive iterations --> report to user, ask continue/abort/change approach.
+
+## Diagnosis Report Anti-Patterns
+
+| Prohibited | Required Alternative |
+|---|---|
+| "We should look into..." | "Edit `path/file.ts:42` to..." |
+| "There seem to be some issues" | "3 blocking items detected" |
+| "This might be causing..." | "Root cause: `<error from log>`" |
+| "Consider fixing..." | "Action: Fix `<what>` in `<where>`" |
+| "Various CI checks are failing" | "2 CI checks failing: `build`, `lint`" |
+
+## Comment Formatting Rules
+
+- No escaped newline literals (`\n`) in final comment text.
+- Use real line breaks. Verify before posting.
+- If raw escape sequences needed for explanation, use fenced code blocks only.
+
+## Issue Progress Comment Template
+
+When work is tracked in Issues:
 
 ```markdown
 Progress
@@ -121,254 +242,30 @@ Next
 - ...
 ```
 
-- Post updates at least when starting work, after meaningful progress, and when blocked/unblocked.
-- In `Next`, explicitly state blockers or the immediate next action.
+## Bundled Scripts
 
-## Workflow (recommended)
+| Script | Path | Purpose |
+|--------|------|---------|
+| check_pr_status.py | `.claude/skills/gwt-pr-check/scripts/check_pr_status.py` | PR status check |
+| inspect_pr_checks.py | `.claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py` | CI/conflict/review inspection |
 
-1. **Confirm repo + branches**
-   - Repo root: `git rev-parse --show-toplevel`
-   - Current branch (head): `git rev-parse --abbrev-ref HEAD`
-   - Base branch defaults to `develop` unless user specifies.
+### inspect_pr_checks.py Arguments
 
-2. **Check local working tree state (preflight)**
-   - Run `git status --porcelain`.
-   - If empty, continue.
-   - If non-empty, show detected files and ask the user to choose:
-     - Continue as-is
-     - Abort
-     - Manual cleanup first (`git commit` / `git stash` / `git clean`) and rerun
-   - Proceed only when the user explicitly chooses continue.
-
-3. **Fetch latest remote state**
-   - `git fetch origin` to ensure accurate comparison
-
-4. **Check branch sync against base (critical)**
-   - Run `git rev-list --left-right --count "HEAD...origin/$base"`.
-   - Parse the result as `ahead behind`.
-   - If `behind == 0`, continue.
-   - If `behind > 0`, merge `origin/$base` into the current branch before PR creation.
-   - The update strategy is always `git merge origin/$base`; do not use rebase for this workflow.
-   - After merge, push the branch so the PR branch and worktree stay aligned with gwt's remote-first flow.
-   - If merge conflicts occur, inspect the affected files carefully, resolve only when the resulting behavior is coherent, and continue.
-   - If you cannot resolve the conflict with high confidence, stop and ask the user before proceeding.
-
-5. **Check existing PR for head branch**
-   - Use the REST pull-request list endpoint as the primary transport.
-   - Use decision rules above to pick action.
-   - Treat `merged_at` as the source of truth for "merged".
-   - Treat `state == open && merged_at == null` as the source of truth for "existing active PR".
-
-6. **If no OPEN unmerged PR exists and at least one PR is merged, perform post-merge commit check**
-   - Get merge commit from the latest merged item returned by `GET /repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>`
-   - If the merge commit is an ancestor of `HEAD`, count `git rev-list --count <merge_commit>..HEAD`
-   - If the merge commit is missing or not an ancestor, count `git rev-list --count origin/<head>..HEAD` first
-   - If the upstream count is `0`, still count `git rev-list --count origin/<base>..HEAD` before concluding `NO_ACTION`
-   - If any count is greater than `0`, verify `git diff --quiet origin/<base>...HEAD --` before creating a PR
-   - If the base compare is empty, return `NO ACTION` because merged base commits alone do not justify a new PR
-   - Only if both fallback comparisons fail, stop with `MANUAL CHECK`
-   - If the selected count is 0 → finish with message "No new changes since merge"
-   - If the selected count is >0 → proceed to create new PR
-   - If neither comparison is usable → stop with `MANUAL CHECK`
-
-7. **Ensure the head branch is pushed**
-   - If no upstream: `git push -u origin <head>`
-   - Otherwise: `git push`
-
-8. **Collect PR inputs (for new PR or explicit update)**
-   - Title, Summary, Context, Changes, Testing, Risk/Impact, Deployment, Screenshots, Related Links, Notes
-   - Optional: labels, reviewers, assignees, draft
-
-9. **Build PR body from template**
-   - Read the template from the gwt-pr skill path (not the current project path):
-     - `PR_BODY_TEMPLATE=".claude/skills/gwt-pr/references/pr-body-template.md"`
-   - Read `${PR_BODY_TEMPLATE}` and fill all required placeholders.
-   - Derive missing sections from the diff, linked Issues/SPECs, and executed tests before asking the user.
-   - **If a conditional section does not apply, remove the entire section.**
-   - **Remove any `<!-- GUIDE: ... -->` comments from the final output.**
-   - **If any required section still contains TODO after inference, ask only for the irreducible missing information.**
-
-10. **Create or update the PR**
-    - Primary path (REST-first):
-      - Create: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
-      - Update (only if user asked): `gh api repos/<owner>/<repo>/pulls/<number> --method PATCH --input <json-file>`
-    - Fallback path:
-      - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-      - Update: `gh pr edit <number> --title "<title>" --body-file <file>`
-    - If one path fails with a secondary rate limit or `was submitted too quickly`, retry with the other path before stopping.
-    - Keep the same title/body content across the REST and `gh pr` paths.
-
-11. **Return PR URL**
-    - `gh api repos/<owner>/<repo>/pulls/<number> --jq .html_url`
-
-12. **Post-PR CI/merge check (automatic).**
-    - After PR creation or push, load `.claude/skills/gwt-pr-fix/SKILL.md` and follow its workflow to inspect CI status, merge state, and review feedback.
-    - If all CI checks are still pending, poll (30s interval) until complete.
-    - If conflicts, review issues, or CI failures are detected, proceed with the gwt-pr-fix workflow to diagnose and fix.
-
-## Command snippets (bash)
-
-```bash
-head=$(git rev-parse --abbrev-ref HEAD)
-base=develop
-PR_BODY_TEMPLATE=".claude/skills/gwt-pr/references/pr-body-template.md"
-
-base_compare_has_diff() {
-  git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
-  case $? in
-    0) echo "no" ;;
-    1) echo "yes" ;;
-    *) echo "" ;;
-  esac
-}
-
-if [ ! -f "$PR_BODY_TEMPLATE" ]; then
-  echo "PR template not found: $PR_BODY_TEMPLATE" >&2
-  exit 1
-fi
-
-# Preflight: local working tree state
-status_lines=$(git status --porcelain)
-if [ -n "$status_lines" ] && [ "${ALLOW_DIRTY_WORKTREE:-0}" != "1" ]; then
-  echo "Detected local uncommitted/untracked changes:" >&2
-  echo "$status_lines" >&2
-  echo "Choose one before continuing: continue as-is, abort, or manual cleanup then rerun." >&2
-  echo "Set ALLOW_DIRTY_WORKTREE=1 only after explicit user confirmation to continue." >&2
-  exit 1
-fi
-
-# Fetch latest remote state
-git fetch origin
-
-# Check branch sync against base before PR creation
-divergence=$(git rev-list --left-right --count "HEAD...origin/$base" 2>/dev/null) || {
-  echo "Failed to compare HEAD with origin/$base" >&2
-  exit 1
-}
-ahead_count=$(echo "$divergence" | awk '{print $1}')
-behind_count=$(echo "$divergence" | awk '{print $2}')
-
-if [ "${behind_count:-0}" -gt 0 ]; then
-  echo "Merging origin/$base into $head before PR creation"
-  git merge "origin/$base" || {
-    echo "Base-branch merge produced conflicts. Inspect and resolve them before continuing." >&2
-    exit 1
-  }
-  git push -u origin "$head"
-fi
-
-# Check existing PRs for the head branch (REST-first)
-repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-owner="${repo_slug%%/*}"
-pr_json=$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")
-pr_count=$(echo "$pr_json" | jq 'length')
-open_unmerged_count=$(echo "$pr_json" | jq 'map(select(.state == "open" and .merged_at == null)) | length')
-merged_count=$(echo "$pr_json" | jq 'map(select(.merged_at != null)) | length')
-
-if [ "$pr_count" -eq 0 ]; then
-  action=create
-elif [ "$open_unmerged_count" -gt 0 ]; then
-  action=push_only
-elif [ "$merged_count" -eq 0 ]; then
-  # Only closed, unmerged PRs exist for this head. They do not block a new PR.
-  action=create
-else
-  # All PRs are merged - check for post-merge commits
-  merge_commit=$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')
-  new_commits=""
-
-  if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ] && \
-     git merge-base --is-ancestor "$merge_commit" HEAD 2>/dev/null; then
-    new_commits=$(git rev-list --count "$merge_commit"..HEAD 2>/dev/null || echo "")
-  fi
-
-  if [ -n "$new_commits" ]; then
-    if [ "$new_commits" -gt 0 ]; then
-      compare_has_diff="$(base_compare_has_diff)"
-      if [ "$compare_has_diff" = "yes" ]; then
-        echo "Found $new_commits commit(s) after merge and a diff against origin/$base - creating new PR"
-        action=create
-      elif [ "$compare_has_diff" = "no" ]; then
-        echo "No PR-worthy diff remains against origin/$base - nothing to do"
-        action=none
-      else
-        echo "Manual check required: could not compare HEAD against origin/$base" >&2
-        action=manual_check
-      fi
-    else
-      echo "No new commits since merge - nothing to do"
-      action=none
-    fi
-  else
-    upstream_commits=$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")
-
-    if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
-      compare_has_diff="$(base_compare_has_diff)"
-      if [ "$compare_has_diff" = "yes" ]; then
-        echo "Found $upstream_commits commit(s) ahead of origin/$head and a diff against origin/$base - creating new PR"
-        action=create
-      elif [ "$compare_has_diff" = "no" ]; then
-        echo "No PR-worthy diff remains against origin/$base - nothing to do"
-        action=none
-      else
-        echo "Manual check required: could not compare HEAD against origin/$base" >&2
-        action=manual_check
-      fi
-    else
-      fallback_commits=$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")
-
-      if [ -n "$fallback_commits" ]; then
-        if [ "$fallback_commits" -gt 0 ]; then
-          compare_has_diff="$(base_compare_has_diff)"
-          if [ "$compare_has_diff" = "yes" ]; then
-            echo "Upstream comparison unavailable; found $fallback_commits commit(s) ahead of origin/$base with a diff - creating new PR"
-            action=create
-          elif [ "$compare_has_diff" = "no" ]; then
-            echo "No PR-worthy diff remains against origin/$base - nothing to do"
-            action=none
-          else
-            echo "Manual check required: could not compare HEAD against origin/$base" >&2
-            action=manual_check
-          fi
-        else
-          echo "No commits ahead of origin/$head or origin/$base - nothing to do"
-          action=none
-        fi
-      else
-        echo "Manual check required: could not determine whether new commits exist after the last merge" >&2
-        action=manual_check
-      fi
-    fi
-  fi
-fi
-
-# Execute action
-case "$action" in
-  create)
-    cp "$PR_BODY_TEMPLATE" /tmp/pr-body.md
-
-    git push -u origin "$head"
-    jq -n --arg title "..." --arg head "$head" --arg base "$base" --rawfile body /tmp/pr-body.md \
-      '{title:$title, head:$head, base:$base, body:$body}' >/tmp/pr-create.json
-    gh api "repos/$repo_slug/pulls" --method POST --input /tmp/pr-create.json || {
-      gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md
-    }
-    ;;
-  push_only)
-    echo "Existing unmerged PR found - pushing changes only"
-    git push
-    echo "$pr_json" | jq -r 'map(select(.merged_at == null)) | sort_by(.updated_at) | last | .html_url'
-    ;;
-  none)
-    echo "No action needed - no new changes since last merge"
-    ;;
-  manual_check)
-    echo "Manual check required - post-merge commit status could not be determined" >&2
-    exit 1
-    ;;
-esac
-```
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--repo` | `.` | Path inside the target Git repository |
+| `--pr` | (current) | PR number or URL |
+| `--mode` | `all` | `checks`, `conflicts`, `reviews`, `all` |
+| `--max-lines` | 160 | Max lines for log snippets |
+| `--context` | 30 | Context lines around failure markers |
+| `--required-only` | false | Limit to required checks only |
+| `--json` | false | Emit JSON output |
+| `--reply-and-resolve` | (none) | JSON array of `{threadId, body}` |
+| `--add-comment` | (none) | Post comment to PR |
 
 ## References
 
-- `.claude/skills/gwt-pr/references/pr-body-template.md`: PR body template
+- `references/create-flow.md` -- PR creation workflow details
+- `references/check-flow.md` -- PR status checking details
+- `references/fix-flow.md` -- CI/conflict/review fix details
+- `references/pr-body-template.md` -- PR body template
