@@ -6075,6 +6075,44 @@ mod tests {
         assert!(name.status.success(), "git config user.name failed");
     }
 
+    fn init_bare_git_repo(path: &std::path::Path) {
+        let path_str = path.to_string_lossy().to_string();
+        let init = std::process::Command::new("git")
+            .args(["init", "--bare", &path_str])
+            .output()
+            .expect("init bare git repo");
+        assert!(init.status.success(), "git init --bare failed: {:?}", init);
+    }
+
+    fn git_clone_repo(src: &std::path::Path, dst: &std::path::Path) {
+        let output = std::process::Command::new("git")
+            .args([
+                "clone",
+                src.to_str().expect("clone src"),
+                dst.to_str().expect("clone dst"),
+            ])
+            .output()
+            .expect("clone git repo");
+        assert!(
+            output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_push_branch(path: &std::path::Path, name: &str) {
+        let output = std::process::Command::new("git")
+            .args(["push", "-u", "origin", name])
+            .current_dir(path)
+            .output()
+            .expect("push git branch");
+        assert!(
+            output.status.success(),
+            "git push -u origin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn git_commit_allow_empty(path: &std::path::Path, message: &str) {
         let output = std::process::Command::new("git")
             .args(["commit", "--allow-empty", "-m", message])
@@ -7836,6 +7874,85 @@ CUSTOM_ENV = "enabled"
         assert_eq!(
             String::from_utf8_lossy(&branch_output.stdout).trim(),
             "feature/test"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .next()
+            .expect("session entry")
+            .expect("dir entry")
+            .path();
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_bare_workspace_linked_worktree_uses_repo_name_layout() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let bare_repo_path = workspace_dir.path().join("gwt.git");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        init_bare_git_repo(&bare_repo_path);
+
+        let bootstrap_path = workspace_dir.path().join("bootstrap");
+        git_clone_repo(&bare_repo_path, &bootstrap_path);
+        let email = std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&bootstrap_path)
+            .output()
+            .expect("set git email");
+        assert!(email.status.success(), "git config user.email failed");
+        let name = std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&bootstrap_path)
+            .output()
+            .expect("set git name");
+        assert!(name.status.success(), "git config user.name failed");
+        git_checkout_new_branch(&bootstrap_path, "develop");
+        git_commit_allow_empty(&bootstrap_path, "initial commit");
+        git_push_branch(&bootstrap_path, "develop");
+
+        let develop_worktree = workspace_dir.path().join("develop");
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                develop_worktree.to_str().expect("develop worktree path"),
+                "develop",
+            ])
+            .current_dir(&bare_repo_path)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/test".to_string(),
+            worktree_path: Some(develop_worktree.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(develop_worktree);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let expected_worktree = workspace_dir.path().join("gwt-feature-test");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
+        assert!(
+            expected_worktree.exists(),
+            "new sibling worktree should exist for bare workspace layout"
+        );
+        assert!(
+            !workspace_dir.path().join("develop-feature-test").exists(),
+            "bare workspace linked worktree name must not be used as repo prefix"
         );
 
         let session_entry = std::fs::read_dir(sessions_dir.path())

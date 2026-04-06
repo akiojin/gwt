@@ -142,7 +142,7 @@ pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
         });
     }
 
-    Ok(repo_path.to_path_buf())
+    Ok(common_dir)
 }
 
 /// Derive a sibling worktree path from the repo root and branch name.
@@ -150,6 +150,7 @@ pub fn sibling_worktree_path(repo_path: &Path, branch: &str) -> PathBuf {
     let repo_name = repo_path
         .file_name()
         .and_then(|name| name.to_str())
+        .map(|name| name.strip_suffix(".git").unwrap_or(name))
         .filter(|name| !name.is_empty())
         .unwrap_or("repo");
     let suffix = slug_branch_for_path(branch);
@@ -265,6 +266,39 @@ mod tests {
             .output()
             .expect("git config user.name");
         assert!(name.status.success(), "git config user.name failed");
+    }
+
+    fn init_bare_git_repo(path: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", path.to_str().unwrap()])
+            .output()
+            .expect("git init --bare");
+        assert!(output.status.success(), "git init --bare failed");
+    }
+
+    fn git_clone_repo(src: &Path, dst: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["clone", src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .expect("git clone");
+        assert!(
+            output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_push_branch(path: &Path, branch: &str) {
+        let output = std::process::Command::new("git")
+            .args(["push", "-u", "origin", branch])
+            .current_dir(path)
+            .output()
+            .expect("git push -u origin");
+        assert!(
+            output.status.success(),
+            "git push -u origin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn git_commit_allow_empty(path: &Path, message: &str) {
@@ -399,6 +433,56 @@ prunable gitdir file points to non-existent location
         assert_eq!(
             main_worktree_root(&linked_worktree).unwrap(),
             std::fs::canonicalize(&repo_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn main_worktree_root_uses_bare_common_dir_for_linked_workspace_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare_repo_path = tmp.path().join("gwt.git");
+        init_bare_git_repo(&bare_repo_path);
+
+        let bootstrap_path = tmp.path().join("bootstrap");
+        git_clone_repo(&bare_repo_path, &bootstrap_path);
+        let email = std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&bootstrap_path)
+            .output()
+            .expect("git config user.email");
+        assert!(email.status.success(), "git config user.email failed");
+        let name = std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&bootstrap_path)
+            .output()
+            .expect("git config user.name");
+        assert!(name.status.success(), "git config user.name failed");
+        git_checkout_new_branch(&bootstrap_path, "develop");
+        git_commit_allow_empty(&bootstrap_path, "initial commit");
+        git_push_branch(&bootstrap_path, "develop");
+
+        let linked_worktree = tmp.path().join("develop");
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                linked_worktree.to_str().unwrap(),
+                "develop",
+            ])
+            .current_dir(&bare_repo_path)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let layout_root = main_worktree_root(&linked_worktree).unwrap();
+        assert_eq!(layout_root, std::fs::canonicalize(&bare_repo_path).unwrap());
+        let expected_parent = std::fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(
+            sibling_worktree_path(&layout_root, "feature/banner"),
+            expected_parent.join("gwt-feature-banner")
         );
     }
 

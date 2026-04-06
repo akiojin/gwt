@@ -154,6 +154,11 @@
 - Launches started from a linked worktree such as `develop` now resolve the
   main repository root before deriving the sibling layout, so new branches no
   longer materialize under `develop-*` paths like `develop-feature-test`.
+- Launches started from a legacy bare workspace layout (`gwt.git` +
+  `develop/`) now use the bare common-dir as the Git control path while
+  stripping the `.git` suffix from the repo name for sibling path derivation,
+  so new branches no longer materialize under `develop-*` paths like
+  `develop-feature-test2`.
 - If a branch was already materialized into a stale worktree path from an
   earlier launch bug, Launch Agent now reuses that existing branch worktree
   instead of failing a second `git worktree add`.
@@ -169,9 +174,11 @@
   `cargo test -p gwt-git sibling_worktree_path_uses_repo_name_and_slugged_branch -- --nocapture`,
   `cargo test -p gwt-git create_from_base_creates_new_branch_worktree -- --nocapture`,
   `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`,
+  `cargo test -p gwt-git bare_common_dir -- --nocapture`,
   `cargo test -p gwt-tui base_branch -- --nocapture`, and
   `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`,
   `cargo test -p gwt-tui linked_worktree_uses_main_repo_sibling_layout -- --nocapture`,
+  `cargo test -p gwt-tui bare_workspace_linked_worktree_uses_repo_name_layout -- --nocapture`,
   `cargo test -p gwt-tui existing_branch_worktree_reuses_previous_path -- --nocapture`,
   plus `cargo test -p gwt-tui from_selected_branch -- --nocapture`.
 
