@@ -35,12 +35,23 @@
   One SPEC per cohesive feature (e.g., "Voice Input", "Docker Support", not "fix voice crash").
 - **Issue = Work item.** Bug fixes, tasks, and improvements are GitHub Issues linked to a SPEC.
   Never create a SPEC for a bug fix — file an Issue against the relevant SPEC instead.
-- **Granularity rule:** A SPEC should be decomposable into 3-15 tasks. If fewer, merge into
-  a parent SPEC. If more, split into child SPECs with clear scope boundaries.
+- **When to create a SPEC:** The work introduces new user-facing functionality, defines
+  architecture, or requires design decisions that should be documented. SPEC scope is
+  determined by feature cohesion — one SPEC per cohesive feature. Task count is irrelevant
+  to this decision. Implementation phasing is handled by gwt-spec-plan.
+- **When to use an Issue instead:** Bug fixes, one-off chores, and changes that don't require
+  design decisions. Link Issues to their parent SPEC when applicable.
 - **No duplicate scope:** Before creating a SPEC, search existing SPECs (`gwt-spec-search`)
   and Issues (`gwt-issue-search`). Reuse an existing owner when one clearly fits.
 - **SPEC categories:** CORE-TUI, AGENT, GIT, DOCKER, GITHUB, CONFIG, ASSISTANT, SEARCH,
   BUILD, NOTIFICATION, VOICE, DESIGN. Each SPEC belongs to exactly one category.
+
+### 7. File Size Rule
+
+- Source files should stay under 500 lines. Files exceeding this are candidates for
+  module extraction.
+- Critical threshold: files over 1,000 lines must be split before adding new functionality.
+- The TUI application layer (gwt-tui) is the primary risk area for God Files.
 
 ## Required Plan Gates
 

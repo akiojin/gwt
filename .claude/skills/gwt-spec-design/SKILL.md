@@ -155,18 +155,17 @@ Use the DDD model to validate SPEC granularity:
 - If the feature spans multiple BCs, consider splitting into per-BC SPECs.
 - Cross-BC interactions should be documented as integration points, not merged scope.
 
-Also apply the size gate:
+Also apply the SPEC vs Issue decision:
 
 | Criteria | SPEC | Issue |
 |---|---|---|
-| Adds new user-facing functionality | Yes | -- |
-| Defines architecture or design | Yes | -- |
-| Fixes a bug | -- | Yes (link to parent SPEC) |
-| One-off task or chore | -- | Yes |
-| 3-15 tasks to complete | Yes | -- |
-| Describable in a single commit | -- | Yes |
+| New user-facing functionality | Yes | -- |
+| Architecture or design decisions | Yes | -- |
+| Bug fix | -- | Yes (link to parent SPEC) |
+| One-off chore | -- | Yes |
 
-A well-scoped SPEC: 3-15 tasks, 2-5 user stories, one category, no overlap.
+SPEC scope is determined by feature cohesion, not task count.
+Implementation phasing is handled by gwt-spec-plan.
 
 ### DDD output
 
