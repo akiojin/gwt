@@ -326,6 +326,7 @@ mod tests {
             name: "Shell: feature/status-bar".to_string(),
             tab_type: SessionTabType::Shell,
             vt: VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         };
 
         let backend = TestBackend::new(140, 3);
@@ -357,6 +358,7 @@ mod tests {
                 color: AgentColor::Blue,
             },
             vt: VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         };
         model.branches.branches = vec![BranchItem {
             name: "feature/agent-context".to_string(),

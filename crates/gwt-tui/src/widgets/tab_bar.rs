@@ -67,6 +67,7 @@ mod tests {
                 color: AgentColor::Green,
             },
             vt: VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         });
         let backend = TestBackend::new(80, 3);
         let mut terminal = Terminal::new(backend).unwrap();
