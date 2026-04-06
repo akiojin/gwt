@@ -1,11 +1,11 @@
 ---
-name: gwt-design
+name: gwt-spec-design
 description: "Drive SPEC design from intake to planning-ready. Runs preflight search, one-question-at-a-time interview, DDD domain discovery, SPEC registration, and clarification. Use when user says 'design this feature', 'brainstorm', 'create a new spec', 'clarify the spec', 'deepen the spec', 'domain model this', or starts from a rough idea."
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 argument-hint: "[rough idea or request | --deepen SPEC-N]"
 ---
 
-# gwt-design
+# gwt-spec-design
 
 Unified design skill that takes a rough idea through domain discovery to a
 planning-ready SPEC. Absorbs brainstorm, register, clarify, and deepen into a
@@ -15,7 +15,7 @@ single five-phase pipeline.
 
 | Invocation | Behavior |
 |---|---|
-| `gwt-design` | Run Phase 1-4 sequentially (intake through clarification) |
+| `gwt-spec-design` | Run Phase 1-4 sequentially (intake through clarification) |
 | `gwt-design <rough idea>` | Same, seeded with the given idea |
 | `gwt-design --deepen SPEC-N` | Run Phase 5 only on an existing SPEC |
 
@@ -373,7 +373,7 @@ for the user.
 On completion of Phase 4 (or Phase 5), suggest:
 
 ```text
-SPEC-<id> is planning-ready. Run `gwt-plan` to generate plan.md and
+SPEC-<id> is planning-ready. Run `gwt-spec-plan` to generate plan.md and
 supporting artifacts.
 ```
 

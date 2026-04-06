@@ -1,9 +1,9 @@
 ---
-name: gwt-plan
+name: gwt-spec-plan
 description: "Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Produces research.md, data-model.md, quickstart.md, contracts/*. Use when user says 'plan this spec', 'generate tasks', 'run analysis gate', or 'gwt-plan SPEC-X'."
 ---
 
-# gwt-plan
+# gwt-spec-plan
 
 Unified planning skill that translates a clarified `spec.md` into implementation-ready
 artifacts through four sequential phases: technical context, architecture design,
@@ -14,14 +14,14 @@ Absorbs the responsibilities of `gwt-spec-plan`, `gwt-spec-tasks`, and `gwt-spec
 ## Invocation
 
 - **With SPEC:** `gwt-plan SPEC-<id>` — full pipeline from spec.md to quality gate
-- **Lightweight:** `gwt-plan` without a SPEC — produce a plan.md and tasks.md in the
+- **Lightweight:** `gwt-spec-plan` without a SPEC — produce a plan.md and tasks.md in the
   current working context (no spec.md required, skip traceability checks)
 - **Standalone:** works independently of `gwt-spec-ops`
 
 ## Prerequisites
 
-- If `spec.md` has critical `[NEEDS CLARIFICATION]` markers, use `gwt-design` first.
-- If the target SPEC does not exist, use `gwt-design` to create it first.
+- If `spec.md` has critical `[NEEDS CLARIFICATION]` markers, use `gwt-spec-design` first.
+- If the target SPEC does not exist, use `gwt-spec-design` to create it first.
 - If planning artifacts already exist but are stale, update them — do not recreate blindly.
 
 ## Required inputs
@@ -161,16 +161,16 @@ Next:
 
 **Decision rule:**
 
-- **CLEAR** — implementation may proceed through `gwt-build`
+- **CLEAR** — implementation may proceed through `gwt-spec-build`
 - **AUTO-FIXABLE** — repair the artifact set in-place and rerun the quality gate
 - **NEEDS-DECISION** — report points to the exact user decision or unresolved ambiguity
 
 **Boundary:** CLEAR means artifacts are ready for execution. It does not mean the SPEC is
-complete — completion requires post-implementation reconciliation in `gwt-build`.
+complete — completion requires post-implementation reconciliation in `gwt-spec-build`.
 
 ## Chain suggestion
 
-On `CLEAR` verdict, suggest proceeding to `gwt-build` for implementation.
+On `CLEAR` verdict, suggest proceeding to `gwt-spec-build` for implementation.
 
 ## Lightweight mode
 

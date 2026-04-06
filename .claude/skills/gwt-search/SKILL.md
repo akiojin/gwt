@@ -1,6 +1,6 @@
 ---
 name: gwt-search
-description: "Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB vector embeddings. Use when user says 'search', 'find related', 'check for duplicates', 'which spec/issue/file handles X', or as mandatory preflight before gwt-design, gwt-issue-register, gwt-issue-resolve, gwt-spec-register, and gwt-spec-ops."
+description: "Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB vector embeddings. Use when user says 'search', 'find related', 'check for duplicates', 'which spec/issue/file handles X', or as mandatory preflight before gwt-spec-design, gwt-issue-register, gwt-issue-resolve, gwt-spec-register, and gwt-spec-ops."
 ---
 
 # Unified Search
@@ -144,7 +144,7 @@ $PYTHON $RUNNER \
 
 This skill is a **mandatory preflight step** before:
 
-- `gwt-design` (spec brainstorm, register, clarify, ops)
+- `gwt-spec-design` (spec brainstorm, register, clarify, ops)
 - `gwt-spec-register` / `gwt-spec-ops`
 - `gwt-issue-register` / `gwt-issue-resolve`
 

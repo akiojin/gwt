@@ -1,9 +1,9 @@
 ---
-name: gwt-build
+name: gwt-spec-build
 description: "Implement code using test-first TDD methodology. Works in two modes: SPEC mode (driven by tasks.md with full progress tracking) and standalone mode (user-provided task, no SPEC artifacts needed). Use when user says 'implement this', 'build this', 'start coding', 'TDD this', or 'implement this spec'."
 ---
 
-# gwt-build
+# gwt-spec-build
 
 Implement code using strict TDD (Red-Green-Refactor) methodology. Operates in two modes:
 
@@ -142,7 +142,7 @@ Update execution tracking:
 
 ### Chain suggestion
 
-On completion, suggest `gwt-review` for code review if available, or proceed to `gwt-pr` if not already done.
+On completion, suggest `gwt-arch-review` for code review if available, or proceed to `gwt-pr` if not already done.
 
 ## Stop conditions
 
@@ -165,7 +165,7 @@ Verification:
 
 Next:
 - `gwt-pr` (create/update PR)
-- `gwt-review` (code review)
+- `gwt-arch-review` (code review)
 - return to `gwt-spec-ops` (artifact repair)
 - ask user for decision
 ```

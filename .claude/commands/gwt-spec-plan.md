@@ -11,25 +11,25 @@ Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Pr
 ## Usage
 
 ```text
-/gwt:gwt-plan [SPEC-ID]
+/gwt:gwt-spec-plan [SPEC-ID]
 ```
 
 ## Steps
 
-1. Load `.claude/skills/gwt-plan/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-spec-plan/SKILL.md` and follow the workflow.
 2. Read the target SPEC's spec.md and generate planning artifacts.
 3. Run the analysis gate to verify completeness before implementation.
 
 ## Examples
 
 ```text
-/gwt:gwt-plan SPEC-5
+/gwt:gwt-spec-plan SPEC-5
 ```
 
 ```text
-/gwt:gwt-plan
+/gwt:gwt-spec-plan
 ```
 
 ```text
-/gwt:gwt-plan --lightweight
+/gwt:gwt-spec-plan --lightweight
 ```

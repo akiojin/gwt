@@ -11,25 +11,25 @@ Drive SPEC design with DDD methodology. Runs preflight search, one-question-at-a
 ## Usage
 
 ```text
-/gwt:gwt-design [args]
+/gwt:gwt-spec-design [args]
 ```
 
 ## Steps
 
-1. Load `.claude/skills/gwt-design/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-spec-design/SKILL.md` and follow the workflow.
 2. Run preflight search to check for existing SPECs and Issues before creating new ones.
 3. Conduct the design interview and produce a planning-ready SPEC.
 
 ## Examples
 
 ```text
-/gwt:gwt-design この機能を設計したい
+/gwt:gwt-spec-design この機能を設計したい
 ```
 
 ```text
-/gwt:gwt-design --deepen SPEC-5
+/gwt:gwt-spec-design --deepen SPEC-5
 ```
 
 ```text
-/gwt:gwt-design terminal multiplexing feature
+/gwt:gwt-spec-design terminal multiplexing feature
 ```
