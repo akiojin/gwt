@@ -45,3 +45,5 @@
 - [x] T032 Route render / selection / URL hit testing / scrollbar logic through the currently visible live-or-snapshot surface and verify focused regressions.
 - [x] T033 [P] Write RED tests: ignore `MouseEventKind::Moved` floods and normalize leaked SGR wheel reports back into terminal mouse input without forwarding raw `[<...M` text to the PTY.
 - [x] T034 Implement terminal-focus input normalization in `event.rs` / `main.rs` so leaked SGR mouse reports are swallowed or converted, and hover-only move events are dropped before redraw.
+- [x] T035 [P] Write RED tests: consecutive wheel messages are drained as one bounded burst and the first following non-scroll message is preserved for the next event-loop iteration.
+- [x] T036 Implement bounded wheel-burst batching in `main.rs` so Terminal.app trackpad floods do not force one redraw per raw scroll event.

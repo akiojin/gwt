@@ -3,9 +3,10 @@
 //! Initializes the terminal, creates the Model, and runs the event loop.
 
 use std::{
+    collections::VecDeque,
     io,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -27,6 +28,7 @@ use gwt_tui::{
 };
 
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
+const MAX_MOUSE_SCROLL_BURST_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DisableAlternateScrollMode;
@@ -51,6 +53,65 @@ fn drain_pty_output_into_model(model: &mut Model) -> bool {
         drained = true;
     }
     drained
+}
+
+fn is_mouse_scroll_message(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::MouseInput(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp
+                | crossterm::event::MouseEventKind::ScrollDown,
+            ..
+        })
+    )
+}
+
+fn poll_immediate_message_for_scroll_burst(
+    deadline: Instant,
+    input_normalizer: &mut event::InputNormalizer,
+    terminal_focused: bool,
+) -> Option<Message> {
+    loop {
+        let now = Instant::now();
+        if let Some(msg) = input_normalizer.pop_pending(now) {
+            return Some(msg);
+        }
+
+        let raw = event::poll_event_slice(deadline, Duration::ZERO)?;
+        let now = Instant::now();
+        let Some(msg) = input_normalizer.normalize(raw, now, terminal_focused) else {
+            continue;
+        };
+        return Some(msg);
+    }
+}
+
+fn drain_mouse_scroll_burst<F>(
+    first: Message,
+    pending_messages: &mut VecDeque<Message>,
+    mut next_message: F,
+) -> Vec<Message>
+where
+    F: FnMut() -> Option<Message>,
+{
+    let mut burst = vec![first];
+    if !is_mouse_scroll_message(&burst[0]) {
+        return burst;
+    }
+
+    while burst.len() < MAX_MOUSE_SCROLL_BURST_MESSAGES {
+        let Some(next) = next_message() else {
+            break;
+        };
+        if is_mouse_scroll_message(&next) {
+            burst.push(next);
+        } else {
+            pending_messages.push_back(next);
+            break;
+        }
+    }
+
+    burst
 }
 
 fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
@@ -210,6 +271,7 @@ fn run_app(
 
     let mut keybinds = KeybindRegistry::new();
     let mut input_normalizer = event::InputNormalizer::default();
+    let mut pending_messages = VecDeque::new();
 
     loop {
         drain_pty_output_into_model(&mut model);
@@ -236,7 +298,10 @@ fn run_app(
                 break;
             }
 
-            let Some(msg) = event::poll_event_slice(deadline, PTY_OUTPUT_POLL_SLICE) else {
+            let Some(msg) = pending_messages
+                .pop_front()
+                .or_else(|| event::poll_event_slice(deadline, PTY_OUTPUT_POLL_SLICE))
+            else {
                 continue;
             };
 
@@ -248,21 +313,34 @@ fn run_app(
                 continue;
             };
 
-            // Route key events through keybind registry
-            // (skip keybind processing when in Initialization layer)
-            let msg = match msg {
-                Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
-                    let terminal_focused =
-                        model.active_focus == gwt_tui::model::FocusPane::Terminal;
-                    keybinds
-                        .process_key_with_focus(key, terminal_focused)
-                        .unwrap_or(Message::KeyInput(key))
-                }
-                other => other,
-            };
+            let burst = drain_mouse_scroll_burst(msg, &mut pending_messages, || {
+                poll_immediate_message_for_scroll_burst(
+                    deadline,
+                    &mut input_normalizer,
+                    terminal_focused,
+                )
+            });
 
-            // Update: process message
-            app::update(&mut model, msg);
+            for msg in burst {
+                // Route key events through keybind registry
+                // (skip keybind processing when in Initialization layer)
+                let msg = match msg {
+                    Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
+                        let terminal_focused =
+                            model.active_focus == gwt_tui::model::FocusPane::Terminal;
+                        keybinds
+                            .process_key_with_focus(key, terminal_focused)
+                            .unwrap_or(Message::KeyInput(key))
+                    }
+                    other => other,
+                };
+
+                // Update: process message
+                app::update(&mut model, msg);
+                if model.quit {
+                    break;
+                }
+            }
             break;
         }
     }
@@ -295,8 +373,18 @@ fn sync_startup_terminal_size(model: &mut Model, width: u16, height: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use gwt_tui::app;
     use gwt_tui::model::{ManagementTab, SessionLayout};
+
+    fn scroll_message(kind: MouseEventKind) -> Message {
+        Message::MouseInput(MouseEvent {
+            kind,
+            column: 40,
+            row: 12,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
 
     #[test]
     fn restore_startup_session_state_with_applies_saved_layout() {
@@ -408,6 +496,50 @@ mod tests {
     fn terminal_enter_commands_enable_bracketed_paste() {
         let ansi = terminal_enter_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004h"));
+    }
+
+    #[test]
+    fn drain_mouse_scroll_burst_collects_consecutive_scroll_messages() {
+        let first = scroll_message(MouseEventKind::ScrollUp);
+        let mut pending_messages = VecDeque::new();
+        let mut queued = VecDeque::from([
+            scroll_message(MouseEventKind::ScrollUp),
+            scroll_message(MouseEventKind::ScrollDown),
+            Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )),
+        ]);
+
+        let burst = drain_mouse_scroll_burst(first, &mut pending_messages, || queued.pop_front());
+
+        assert_eq!(burst.len(), 3);
+        assert!(burst.iter().all(is_mouse_scroll_message));
+        assert!(matches!(
+            pending_messages.pop_front(),
+            Some(Message::KeyInput(key)) if key.code == KeyCode::Esc
+        ));
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn drain_mouse_scroll_burst_preserves_non_scroll_first_message() {
+        let first = Message::Tick;
+        let mut pending_messages = VecDeque::new();
+        let mut queued = VecDeque::from([scroll_message(MouseEventKind::ScrollUp)]);
+
+        let burst = drain_mouse_scroll_burst(first, &mut pending_messages, || queued.pop_front());
+
+        assert!(matches!(burst.as_slice(), [Message::Tick]));
+        assert!(pending_messages.is_empty());
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(
+            queued.pop_front(),
+            Some(Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                ..
+            }))
+        ));
     }
 
     #[test]

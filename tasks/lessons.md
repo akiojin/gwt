@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: trackpad scroll の重さは wheel flood ごとの redraw 回数を先に疑う
+
+### 事象
+
+Terminal.app 上で trackpad scroll 自体は機能していたが、raw mouse report の漏れを止めた後も、
+scroll の反応だけがかなり重く感じられた。
+
+### 原因
+
+- 診断ログでは `ScrollUp/ScrollDown` が 1 gesture あたり大量に届いていた。
+- main loop は 1 message ごとに `app::update()` のあと即 `terminal.draw()` へ戻る構造だったため、
+  wheel flood がそのまま full-frame redraw flood になっていた。
+- `Moved` flood を落とすだけでは十分でなく、wheel event 自体も描画前にまとめる必要があった。
+
+### 再発防止策
+
+1. trackpad scroll の「重い」「反応が悪い」は handler の中身だけでなく、`run_app` の redraw cadence を必ず確認する。
+2. host terminal が burst で送る wheel event は、最初の非 scroll message を壊さない範囲で bounded batching してから描画する。
+3. batching を入れるときは「consecutive scroll をまとめる」と「burst 後の最初の非 scroll を保留する」を focused test で固定する。
+
 ## 2026-04-07 — fix: trackpad 修正後の遅さは `Moved` flood と leaked SGR mouse report を分けて見る
 
 ### 事象

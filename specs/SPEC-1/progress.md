@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `34/34` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T16:59:22Z`
+- Task progress: `36/36` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T17:14:28Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -21,6 +21,7 @@
 - Snapshot-backed scrollback stays frozen on the chosen historical frame while new output arrives and only returns to live-follow when the user scrolls back to the newest frame.
 - Terminal-focus input is now normalized so leaked SGR wheel reports are converted back into mouse input instead of being echoed into the pane as literal `[<...M` text.
 - Hover-only `Moved` floods are now dropped at the event layer, reducing redraw pressure during Terminal.app trackpad gestures.
+- Consecutive wheel events are now drained as a bounded burst before redraw, so Terminal.app trackpad floods no longer force one full frame render per raw scroll event.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next
