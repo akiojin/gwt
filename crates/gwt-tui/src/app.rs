@@ -7554,6 +7554,80 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_migrates_tracked_legacy_codex_runtime_hooks() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-develop");
+        fs::create_dir_all(worktree.join(".codex")).expect("create .codex");
+        fs::write(
+            worktree.join(".codex/hooks.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" SessionStart",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .expect("serialize tracked hooks"),
+        )
+        .expect("write tracked hooks");
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg(&worktree)
+            .status()
+            .expect("git init")
+            .success());
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .expect("git add tracked hooks")
+            .success());
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "gwt-missing-custom-agent-command".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("develop".to_string()),
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let hooks_path = worktree.join(".codex/hooks.json");
+        let content = fs::read_to_string(&hooks_path).expect("read migrated codex hooks");
+        let value: serde_json::Value =
+            serde_json::from_str(&content).expect("parse migrated codex hooks");
+        let command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("hook command");
+
+        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(!content.contains("gwt-forward-hook.mjs"));
+        assert!(!command.contains("node"));
+    }
+
+    #[test]
     fn materialize_pending_launch_with_prepares_claude_settings_before_agent_process_starts() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-feature-spec-42");

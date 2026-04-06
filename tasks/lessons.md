@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: tracked な `.codex/hooks.json` の一律スキップは旧式 runtime hook worktree を永久に直せない
+
+### 事象
+
+`feature/branches` の `gwt-tui` から `develop` worktree で Codex を起動しても、
+Branches の spinner sidecar が生成されなかった。
+
+### 原因
+
+- `generate_codex_hooks()` が tracked `.codex/hooks.json` を無条件で skip していた。
+- `develop` 側の tracked `.codex/hooks.json` には旧式の
+  `node .../.codex/hooks/scripts/gwt-forward-hook.mjs` runtime hook が残っていた。
+- そのため `feature/branches` 側で no-Node runtime hook へ移行していても、
+  実際に起動された worktree には新しい hook 形状が一切届かなかった。
+
+### 再発防止策
+
+1. tracked な生成設定ファイルでも、「現行ユーザー設定」と「旧式 gwt 管理設定」を区別し、一律 skip しない。
+2. launch 不具合では、起動元ブランチの埋め込み資産だけでなく、実際に agent が起動する対象 worktree の config ファイル内容まで確認する。
+3. 「tracked file を preserve する」仕様を入れる場合は、旧式 tracked asset を抱えた別 worktree で launch する RED テストも必ず追加する。
+
 ## 2026-04-06 — fix: Launch args に依存する runtime path は build 後の env 注入だけでは反映されない
 
 ### 事象

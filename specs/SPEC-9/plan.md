@@ -79,7 +79,7 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
    - Generates `.claude/settings.local.json` and untracked `.codex/hooks.json` from a shared typed hook builder.
    - Preserves user-defined hooks while replacing only gwt-managed runtime hooks.
    - Uses direct shell commands that write `GWT_SESSION_RUNTIME_PATH` instead of a Node-based runtime forwarder.
-   - Skips tracked `.codex/hooks.json` files to avoid dirtying tracked worktrees.
+   - Skips tracked `.codex/hooks.json` files by default, but migrates tracked files that still contain gwt's legacy runtime forward hooks so launched worktrees do not stay pinned to stale Node-based runtime hooks.
 
 4. **gwt-tui (app.rs)**: Call `distribute_to_worktree()` in agent launch flow, after `PaneManager::launch_agent()` resolves the worktree path.
 

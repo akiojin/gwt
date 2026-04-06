@@ -700,7 +700,7 @@ Bring back the old-TUI scanability contract by letting Branches show live agent 
 - Map `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` to `Running`, and `Stop` to `WaitingInput`.
 - When a PTY exits or the user closes a session tab, persist `Stopped` so stale waiting/running state cannot linger.
 - Materialize Claude worktree hooks in Claude's native `.claude/settings.local.json` `hooks` schema, preserving user hooks and replacing stale gwt-managed entries instead of emitting an internal merge schema that Claude ignores.
-- Generate `.codex/hooks.json` for untracked worktrees, preserve tracked `.codex/hooks.json`, and prepare both Claude and Codex hook assets before spawning the agent PTY so the first turn can generate runtime state without requiring a relaunch.
+- Generate `.codex/hooks.json` for untracked worktrees, preserve tracked `.codex/hooks.json` by default, migrate tracked files that still contain legacy gwt runtime forward hooks, and prepare both Claude and Codex hook assets before spawning the agent PTY so the first turn can generate runtime state without requiring a relaunch.
 - Replace the Node-based runtime forwarder path with direct shell commands that write `GWT_SESSION_RUNTIME_PATH`.
 - Reset only the current gwt PID namespace on startup so stale runtime sidecars from previous runs disappear without touching sibling gwt processes.
 

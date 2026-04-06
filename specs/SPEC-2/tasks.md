@@ -549,3 +549,9 @@ banner in favor of pane-title chrome.
 - [x] T350 [P] Write RED test: materialized Codex launches append the runtime namespace writable root after the persisted session id is known.
 - [x] T351 Implement materialized Codex runtime namespace augmentation in `crates/gwt-tui/src/app.rs`.
 - [x] T352 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for the materialized Codex runtime writable-root path.
+
+## Phase 57: Tracked Legacy Codex Hook Migration
+
+- [x] T353 [P] Write RED test: materialized Codex launches migrate tracked legacy `.codex/hooks.json` runtime hooks to the no-Node form before the session starts.
+- [x] T354 Implement tracked legacy Codex runtime-hook migration in `crates/gwt-skills/src/settings_local.rs` and launch materialization coverage in `crates/gwt-tui/src/app.rs`.
+- [x] T355 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for tracked legacy Codex runtime-hook migration.

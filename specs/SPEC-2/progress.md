@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `352/352` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T15:24:31Z`
+- Task progress: `355/355` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T17:06:20Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -69,7 +69,7 @@
 - Explicit agent-session close and detected PTY exit now persist `Stopped`, so stale running/waiting indicators do not survive after the session is gone.
 - Embedded asset distribution now also writes `.codex/hooks/scripts/gwt-*.mjs`, so launched worktrees get the updated Codex hook script alongside the already-distributed Claude hook assets.
 - Claude launch materialization now regenerates `.claude/settings.local.json` in Claude's native `hooks` schema, preserving user hooks and unrelated settings while replacing the stale internal `managed_hooks` / `user_hooks` layout that prevented Claude hook execution.
-- Codex launch materialization now also generates `.codex/hooks.json` for untracked worktrees, preserves tracked hook files, and uses direct shell commands instead of Node-based live-state forwarders.
+- Codex launch materialization now also generates `.codex/hooks.json` for untracked worktrees, preserves tracked hook files by default, migrates tracked files that still contain legacy gwt runtime forward hooks, and uses direct shell commands instead of Node-based live-state forwarders.
 - gwt startup now resets only its own runtime PID namespace before restore, so stale indicators from earlier gwt runs disappear without touching sibling gwt processes.
 - Codex launch configs now add the current `~/.gwt/sessions/runtime/<pid>` namespace as an extra writable root, so Codex hooks can persist live spinner sidecars even under `workspace-write` sandboxing.
 - Materialized Codex launches now append that writable root after the real persisted session id is allocated, so the spawned PTY args finally match the runtime sidecar path injected into the environment.

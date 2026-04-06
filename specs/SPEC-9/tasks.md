@@ -112,6 +112,9 @@
 - [x] **T-144**: Write RED test: materialized Codex launches append the runtime namespace writable root after the persisted session id is known.
 - [x] **T-145**: Implement materialized Codex runtime writable-root augmentation in `crates/gwt-tui/src/app.rs`.
 - [x] **T-146**: Refresh `SPEC-9` artifacts and rerun focused plus broad verification for the materialized Codex runtime writable-root path.
+- [x] **T-147**: Write RED test: tracked `.codex/hooks.json` files that still contain legacy gwt runtime forward hooks are migrated to the no-Node runtime-hook shape while preserving user hooks.
+- [x] **T-148**: Implement tracked legacy Codex runtime-hook migration in `crates/gwt-skills/src/settings_local.rs` and cover launch materialization in `crates/gwt-tui/src/app.rs`.
+- [x] **T-149**: Refresh `SPEC-9` / `SPEC-2` artifacts and rerun focused plus broad verification for tracked legacy Codex runtime-hook migration.
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 

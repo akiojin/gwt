@@ -57,10 +57,17 @@ pub fn generate_settings_local(worktree: &Path) -> io::Result<()> {
     generate_hook_config(worktree, ManagedHookTarget::Claude)
 }
 
-/// Generate `.codex/hooks.json` in the target worktree unless that file is
-/// already tracked by Git.
+/// Generate `.codex/hooks.json` in the target worktree.
+///
+/// Tracked Codex hook files are normally preserved, but tracked files that
+/// still contain gwt's legacy runtime forward-hook commands are migrated to the
+/// current no-Node runtime-hook shape so launched worktrees do not stay pinned
+/// to stale hook behavior forever.
 pub fn generate_codex_hooks(worktree: &Path) -> io::Result<()> {
-    if path_is_git_tracked(worktree, Path::new(CODEX_HOOKS_PATH))? {
+    let settings_path = worktree.join(CODEX_HOOKS_PATH);
+    if path_is_git_tracked(worktree, Path::new(CODEX_HOOKS_PATH))?
+        && !tracked_codex_hooks_need_runtime_migration(&settings_path)?
+    {
         return Ok(());
     }
     generate_hook_config(worktree, ManagedHookTarget::Codex)
@@ -213,6 +220,39 @@ fn is_gwt_managed_command(command: &str) -> bool {
     command.contains(GWT_FORWARD_SCRIPT)
         || command.contains(GWT_BLOCK_SCRIPT_PREFIX)
         || command.contains(GWT_MANAGED_RUNTIME_MARKER)
+}
+
+fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
+    let root = read_existing_settings(path)?;
+    Ok(contains_legacy_runtime_forwarder(root.get("hooks")))
+}
+
+fn contains_legacy_runtime_forwarder(existing: Option<&Value>) -> bool {
+    let Some(Value::Object(events)) = existing else {
+        return false;
+    };
+
+    MANAGED_EVENT_ORDER.iter().any(|event| {
+        events
+            .get(*event)
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .as_object()
+                        .and_then(|obj| obj.get("hooks"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.as_object()
+                                    .and_then(|obj| obj.get("command"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|command| command.contains(GWT_FORWARD_SCRIPT))
+                            })
+                        })
+                })
+            })
+    })
 }
 
 fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Value> {
@@ -544,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_codex_hooks_skips_tracked_hooks_json() {
+    fn generate_codex_hooks_skips_tracked_hooks_json_without_legacy_runtime_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -589,6 +629,83 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("tracked-command"));
         assert!(!content.contains("GWT_MANAGED_HOOK"));
+    }
+
+    #[test]
+    fn generate_codex_hooks_migrates_tracked_legacy_runtime_hooks_without_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" SessionStart",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ],
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" PreToolUse",
+                                    "type": "command"
+                                },
+                                {
+                                    "command": "my-custom-hook",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("session start command");
+        let pre_tool_commands: Vec<&str> = value["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect();
+
+        assert!(session_start_command.contains("GWT_MANAGED_HOOK"));
+        assert!(!content.contains("gwt-forward-hook.mjs"));
+        assert!(!session_start_command.contains("node"));
+        assert!(pre_tool_commands.contains(&"my-custom-hook"));
     }
 
     #[cfg(not(windows))]
