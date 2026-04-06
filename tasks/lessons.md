@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: session pane mouse interaction は keyboard focus 前提で捨てない
+
+### 事象
+
+terminal pane の scrollback 実装自体は存在していたが、管理ビューの初期状態から session 上でホイールしても
+スクロールせず、最初のマウス操作が無視されていた。
+
+### 原因
+
+- `handle_mouse_input_with_tools()` が `active_focus == FocusPane::Terminal` を満たさない限り
+  session 領域上の `ScrollUp` / `ScrollDown` / click / drag をまとめて `Ok(false)` で捨てていた。
+- モデルの初期 focus は `TabContent` のため、session 上の最初のマウス操作だけでは terminal focus に遷移できなかった。
+
+### 再発防止策
+
+1. session pane の mouse UX を追加・変更するときは、「keyboard focus が terminal でない状態」からの 1 発目の操作を RED テストで固定する。
+2. session 領域上の wheel / click / drag は、必要なら先に terminal focus へ遷移させてから個別処理へ流す。
+3. opener 呼び出しの有無だけを見るテストと、イベントが session interaction として handled されるかを見るテストを分けて評価する。
+
 ## 2026-04-06 — fix: Branch detail preload は Tick ごとに処理上限を設ける
 
 ### 事象

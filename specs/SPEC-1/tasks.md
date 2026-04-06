@@ -36,3 +36,4 @@
 - [x] T023 Implement drag-selection extraction/highlighting and clipboard copy in `app.rs` / `renderer.rs`.
 - [x] T024 Render the overflow-only terminal scrollbar in the session surface and keep cursor placement correct when the gutter is present.
 - [x] T025 Refresh SPEC-1 artifacts and rerun focused terminal interaction verification.
+- [x] T026 Fix regression: session-pane mouse wheel now re-focuses the terminal before applying scrollback.
