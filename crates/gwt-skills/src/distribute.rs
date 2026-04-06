@@ -8,6 +8,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const TRACKED_ROOTS: &[&str] = &[
+    ".claude/skills",
+    ".claude/commands",
+    ".claude/hooks/scripts",
+    ".codex/skills",
+];
+
 /// Result of a distribution operation.
 #[derive(Debug, Default)]
 pub struct DistributeReport {
@@ -107,19 +114,16 @@ fn should_skip_tracked_path(
     target
         .strip_prefix(worktree)
         .ok()
-        .map(|relative| tracked_paths.contains(relative))
+        .map(|relative| {
+            tracked_paths
+                .iter()
+                .any(|tracked| relative == tracked || relative.starts_with(tracked))
+        })
         .unwrap_or(false)
 }
 
 fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
-    const TRACKED_ROOTS: &[&str] = &[
-        ".claude/skills",
-        ".claude/commands",
-        ".claude/hooks/scripts",
-        ".codex/skills",
-    ];
-
-    let output = match Command::new("git")
+    match Command::new("git")
         .arg("-C")
         .arg(worktree)
         .arg("ls-files")
@@ -128,15 +132,33 @@ fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
         .args(TRACKED_ROOTS)
         .output()
     {
-        Ok(output) if output.status.success() => output.stdout,
-        _ => return HashSet::new(),
-    };
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Ok(_) if is_git_worktree(worktree) => TRACKED_ROOTS.iter().map(PathBuf::from).collect(),
+        Ok(_) => HashSet::new(),
+        Err(_) if worktree.join(".git").exists() => {
+            TRACKED_ROOTS.iter().map(PathBuf::from).collect()
+        }
+        Err(_) => HashSet::new(),
+    }
+}
 
-    String::from_utf8_lossy(&output)
-        .split('\0')
-        .filter(|entry| !entry.is_empty())
-        .map(PathBuf::from)
-        .collect()
+fn is_git_worktree(worktree: &Path) -> bool {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .output()
+    {
+        Ok(output) => {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        }
+        Err(_) => worktree.join(".git").exists(),
+    }
 }
 
 #[cfg(test)]
@@ -193,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn distribute_preserves_tracked_claude_assets() {
+    fn distribute_preserves_tracked_managed_assets() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
@@ -202,17 +224,21 @@ mod tests {
         let tracked_hook = dir
             .path()
             .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
+        let tracked_codex_skill = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
 
         fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
         fs::create_dir_all(tracked_hook.parent().unwrap()).unwrap();
+        fs::create_dir_all(tracked_codex_skill.parent().unwrap()).unwrap();
         fs::write(&tracked_skill, "tracked skill").unwrap();
         fs::write(&tracked_command, "tracked command").unwrap();
         fs::write(&tracked_hook, "tracked hook").unwrap();
+        fs::write(&tracked_codex_skill, "tracked codex skill").unwrap();
 
         track_path(dir.path(), ".claude/skills/gwt-pr/SKILL.md");
         track_path(dir.path(), ".claude/commands/gwt-pr.md");
         track_path(dir.path(), ".claude/hooks/scripts/gwt-forward-hook.mjs");
+        track_path(dir.path(), ".codex/skills/gwt-pr/SKILL.md");
 
         distribute_to_worktree(dir.path()).unwrap();
 
@@ -222,9 +248,30 @@ mod tests {
             "tracked command"
         );
         assert_eq!(fs::read_to_string(&tracked_hook).unwrap(), "tracked hook");
+        assert_eq!(
+            fs::read_to_string(&tracked_codex_skill).unwrap(),
+            "tracked codex skill"
+        );
+    }
 
-        let codex_skill = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
-        assert!(codex_skill.exists(), "expected {}", codex_skill.display());
+    #[test]
+    fn root_level_protection_skips_nested_assets() {
+        let worktree = Path::new("/tmp/repo");
+        let protected_roots = HashSet::from([
+            PathBuf::from(".claude/skills"),
+            PathBuf::from(".codex/skills"),
+        ]);
+
+        assert!(should_skip_tracked_path(
+            worktree,
+            &worktree.join(".claude/skills/gwt-pr/SKILL.md"),
+            &protected_roots,
+        ));
+        assert!(should_skip_tracked_path(
+            worktree,
+            &worktree.join(".codex/skills/gwt-agent/SKILL.md"),
+            &protected_roots,
+        ));
     }
 
     fn init_git_repo(worktree: &Path) {
