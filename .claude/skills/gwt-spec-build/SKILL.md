@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-build
-description: "Implement code using test-first TDD methodology. Works in two modes: SPEC mode (driven by tasks.md with full progress tracking) and standalone mode (user-provided task, no SPEC artifacts needed). Use when user says 'implement this', 'build this', 'start coding', 'TDD this', or 'implement this spec'."
+description: "MUST invoke for all implementation work that changes observable behavior. Use proactively when coding begins — both SPEC-driven (tasks.md) and standalone. Enforces TDD Red-Green-Refactor loop. Triggers: 'implement', 'build', 'start coding', 'TDD'."
 ---
 
 # gwt-spec-build

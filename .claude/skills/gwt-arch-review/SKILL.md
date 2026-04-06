@@ -1,6 +1,6 @@
 ---
 name: gwt-arch-review
-description: "Scan codebase structure, analyze domain boundaries (DDD), evaluate module depth (Ousterhout), assess agent-friendliness, and generate a prioritized improvement report. Use when user says 'review architecture', 'codebase review', or 'コードレビュー'."
+description: "Use proactively after completing a major feature or weekly to maintain code quality. Scans domain boundaries (DDD), module depth (Ousterhout), testability, and agent-friendliness. Outputs prioritized improvement report. Triggers: 'review architecture', 'codebase review', 'コードレビュー'."
 ---
 
 # gwt-arch-review — Codebase Architecture Review

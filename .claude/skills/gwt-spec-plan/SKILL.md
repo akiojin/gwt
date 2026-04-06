@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-plan
-description: "Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Produces research.md, data-model.md, quickstart.md, contracts/*. Use when user says 'plan this spec', 'generate tasks', 'run analysis gate', or 'gwt-plan SPEC-X'."
+description: "MUST invoke after spec.md is ready and before implementation begins. Use proactively when a SPEC exists but has no plan.md or tasks.md. Generates SDD architecture, plan.md, tasks.md, and runs CLEAR/AUTO-FIXABLE/NEEDS-DECISION quality gate. Triggers: 'plan this spec', 'generate tasks'."
 ---
 
 # gwt-spec-plan

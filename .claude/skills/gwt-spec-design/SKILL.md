@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-design
-description: "Drive SPEC design from intake to planning-ready. Runs preflight search, one-question-at-a-time interview, DDD domain discovery, SPEC registration, and clarification. Use when user says 'design this feature', 'brainstorm', 'create a new spec', 'clarify the spec', 'deepen the spec', 'domain model this', or starts from a rough idea."
+description: "MUST invoke before any feat/refactor implementation. Use proactively when conversation moves toward new functionality or architectural changes. Runs DDD intake, domain discovery, SPEC registration, and clarification. Triggers: 'design', 'brainstorm', 'create a spec', 'clarify spec'."
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 argument-hint: "[rough idea or request | --deepen SPEC-N]"
 ---
