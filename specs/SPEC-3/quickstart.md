@@ -105,6 +105,12 @@
 40. Verify a single-entry Quick Start with no persisted model now promotes
    only the agent label into the popup title (`Quick Start — Codex`) instead
    of inventing a `default` model placeholder.
+41. From Branches, choose `Create new from selected`, finish the wizard, and
+    verify Launch Agent creates a sibling worktree for the requested branch
+    before the PTY starts.
+42. Repeat the new-branch launch from SPEC or Issue context and verify the
+    created worktree uses the new branch while the session metadata records
+    that actual launched path.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -118,6 +124,7 @@
 - `cargo test -p gwt-tui quick_start -- --nocapture`
 - `cargo test -p gwt-tui prepare_wizard_startup_starts_spec_prefill_at_branch_type_select -- --nocapture`
 - `cargo test -p gwt-tui build_launch_config_from_wizard -- --nocapture`
+- `cargo test -p gwt-tui base_branch -- --nocapture`
 - `cargo test -p gwt-tui load_custom_agents_from_path_parses_spec_schema -- --nocapture`
 - `cargo test -p gwt-tui save_stored_custom_agents_to_path_preserves_models_and_other_settings -- --nocapture`
 - `cargo test -p gwt-tui build_wizard_agent_options_with_custom_agents_appends_settings_agents -- --nocapture`
@@ -125,6 +132,7 @@
 - `cargo test -p gwt-tui custom_agents_category_loads_persisted_agent_fields -- --nocapture`
 - `cargo test -p gwt-tui custom_agents_add_edit_delete_persist_immediately -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with -- --nocapture`
+- `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`
 - `cargo test -p gwt-tui session_conversion`
 
 ## Expected Result
@@ -204,5 +212,8 @@
 - Multi-entry Quick Start now indents the plain `Start new` rows beneath the
   paired `Resume` rows so the old-TUI primary/secondary action hierarchy is
   visible again without adding standalone headers back.
+- New-branch launches now materialize a sibling worktree before PTY spawn, so
+  Launch Agent no longer drops back to the repository root checkout for the
+  new-branch flow.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

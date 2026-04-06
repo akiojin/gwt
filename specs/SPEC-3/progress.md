@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `181/181` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T11:05:03Z`
+- Task progress: `185/185` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T11:59:47Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -141,11 +141,25 @@
 - Launch Agent's Codex model list now matches the current Codex CLI snapshot,
   including `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`, while
   keeping `Default (Auto)` on the no-`--model` path.
+- New-branch launches now materialize a sibling git worktree before PTY
+  spawn, so Launch Agent no longer falls back to the repository root
+  checkout when creating a new branch.
+- Branch-origin launches now preserve the selected base branch for
+  worktree creation, while SPEC/Issue-prefilled launches default that base
+  branch to `develop`.
+- The actual launched worktree path is now persisted into session metadata
+  and exported through `GWT_PROJECT_ROOT`, so Quick Start / resume operate on
+  the materialized launch target instead of a repo-root alias.
 - Verification for the Codex model sync slice now includes `cargo test -p
   gwt-tui`, `cargo test -p gwt-core -p gwt-tui`,
   `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo build -p gwt-tui`, and `bunx markdownlint-cli2` on the refreshed
   SPEC-3 artifacts.
+- Focused verification for the worktree-materialization slice now includes
+  `cargo test -p gwt-git sibling_worktree_path_uses_repo_name_and_slugged_branch -- --nocapture`,
+  `cargo test -p gwt-git create_from_base_creates_new_branch_worktree -- --nocapture`,
+  `cargo test -p gwt-tui base_branch -- --nocapture`, and
+  `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

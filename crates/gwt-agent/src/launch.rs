@@ -85,6 +85,7 @@ pub struct LaunchConfig {
     pub env_vars: HashMap<String, String>,
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
+    pub base_branch: Option<String>,
     pub display_name: String,
     pub color: AgentColor,
     pub model: Option<String>,
@@ -113,6 +114,7 @@ pub struct AgentLaunchBuilder {
     agent_id: AgentId,
     working_dir: Option<PathBuf>,
     branch: Option<String>,
+    base_branch: Option<String>,
     model: Option<String>,
     version: Option<String>,
     fast_mode: bool,
@@ -131,6 +133,7 @@ impl AgentLaunchBuilder {
             agent_id,
             working_dir: None,
             branch: None,
+            base_branch: None,
             model: None,
             version: None,
             fast_mode: false,
@@ -151,6 +154,11 @@ impl AgentLaunchBuilder {
 
     pub fn branch(mut self, branch: impl Into<String>) -> Self {
         self.branch = Some(branch.into());
+        self
+    }
+
+    pub fn base_branch(mut self, branch: impl Into<String>) -> Self {
+        self.base_branch = Some(branch.into());
         self
     }
 
@@ -276,6 +284,7 @@ impl AgentLaunchBuilder {
             env_vars,
             working_dir: self.working_dir,
             branch: self.branch,
+            base_branch: self.base_branch,
             display_name,
             color,
             model,
@@ -433,6 +442,7 @@ mod tests {
         let builder = AgentLaunchBuilder::new(AgentId::ClaudeCode);
         assert_eq!(builder.agent_id, AgentId::ClaudeCode);
         assert!(builder.working_dir.is_none());
+        assert!(builder.base_branch.is_none());
         assert!(!builder.fast_mode);
         assert_eq!(builder.session_mode, SessionMode::Normal);
     }
@@ -458,6 +468,17 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT"),
             Some(&"/tmp/project".to_string())
         );
+    }
+
+    #[test]
+    fn build_carries_base_branch() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .branch("feature/demo")
+            .base_branch("develop")
+            .build();
+
+        assert_eq!(config.branch.as_deref(), Some("feature/demo"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
     }
 
     #[test]
