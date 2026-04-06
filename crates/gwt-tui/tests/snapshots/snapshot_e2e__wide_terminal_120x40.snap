@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Specs │ Issues │...───────────────┐┌ ▶ Shell ─────────────────────────────────────────────────────────────┐
+┌ Branches │ Specs │ Issues │...───────────────┐┌ › Shell ─────────────────────────────────────────────────────────────┐
 │ View: Local │ Sort: Default                  ││Session: Shell (80x24)                                                │
 │No branches loaded                            ││                                                                      │
 │                                              ││                                                                      │
@@ -41,4 +41,4 @@ expression: output
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
- ▣ Shell  branch: n/a  type: Shell  [Mgmt]  /tmp/test-repo  ↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:deta
+ ▣ Shell  │  ⎇ n/a  │  type: Shell  │  [Mgmt]  │  /tmp/test-repo  │  ↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  S

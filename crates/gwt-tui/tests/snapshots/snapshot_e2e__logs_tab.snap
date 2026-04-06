@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌...│ Versions │ Settings │ Logs ──────┐┌ ▶ Shell ─────────────────────────────┐
+┌...│ Versions │ Settings │ Logs ──────┐┌ › Shell ─────────────────────────────┐
 │ All │ Error │ Warn+ │ Info+ │ Debug+ ││Session: Shell (80x24)                │
 │No log entries                        ││                                      │
 │                                      ││                                      │
@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc term
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc t

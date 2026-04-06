@@ -2,11 +2,11 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Specs │ Issues │...───────┐┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │...───────┐┌ › Shell ─────────────────────────────┐
 │ View: Local │ Sort: Default          ││Session: Shell (80x24)                │
-│main ○ *                              ││                                      │
-│feature/api ○                         ││                                      │
-│feature/app-shell ○                   ││                                      │
+│▎main ◇ ▸                             ││                                      │
+│ feature/api ◇                        ││                                      │
+│ feature/app-shell ◇                  ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:main  [G]  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Esc→T
+ ▣ Sh  │  ⎇main  │  [G]  │  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  E

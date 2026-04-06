@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Specs │ Issues │...───────┐┌ ▶ Shell ─────────────────────────────┐
+┌ Branches │ Specs │ Issues │...───────┐┌ › Shell ─────────────────────────────┐
 │ View: Local │ Sort: Default          ││Session: Shell (80x24)                │
 │No branches loaded                    ││                                      │
 │                                      ││                                      │
@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:n/a  [G]  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Esc→T
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Es

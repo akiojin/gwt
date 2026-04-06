@@ -2,7 +2,7 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌...│ Issues │ PRs │ Profiles │...─────┐┌ ▶ Shell ─────────────────────────────┐
+┌...│ Issues │ PRs │ Profiles │...─────┐┌ › Shell ─────────────────────────────┐
 │PR Dashboard                          ││Session: Shell (80x24)                │
 │No pull requests loaded               ││                                      │
 │                                      ││                                      │
@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  br:n/a  [G]  ↑↓ sel  ↵ dtl  r rfsh  Tab pane  Esc term  ?
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ dtl  r rfsh  Tab pane  Esc term  ?
