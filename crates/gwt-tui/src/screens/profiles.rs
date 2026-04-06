@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// Current mode of the profiles screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -193,7 +195,7 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         let block = Block::default().title("Profiles");
         let paragraph = Paragraph::new("No profiles. Press 'c' to create one.")
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -211,20 +213,20 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
                 Span::styled(
                     active_marker.to_string(),
                     if profile.active {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(theme::color::SUCCESS)
                     } else {
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(theme::color::SURFACE)
                     },
                 ),
                 Span::styled(profile.name.clone(), style),
                 Span::styled(
                     format!("  ({} env vars)", profile.env_count),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::color::FOCUS),
                 ),
                 if !profile.description.is_empty() {
                     Span::styled(
                         format!(" - {}", profile.description),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::color::SURFACE),
                     )
                 } else {
                     Span::raw("")
@@ -235,11 +237,9 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().title("Profiles");
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -248,9 +248,9 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 /// Render a single form field with active/inactive styling.
 fn render_form_field(title: &str, value: &str, is_active: bool, frame: &mut Frame, area: Rect) {
     let text_style = if is_active {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme::color::ACTIVE)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme::color::TEXT_PRIMARY)
     };
 
     let display = if is_active {
@@ -298,7 +298,7 @@ fn render_form(state: &ProfilesState, frame: &mut Frame, area: Rect) {
     );
 
     let hints = Paragraph::new(" Tab: next field | Enter: confirm | Esc: cancel")
-        .style(Style::default().fg(Color::DarkGray));
+        .style(theme::style::muted_text());
     frame.render_widget(hints, chunks[2]);
 }
 
@@ -311,15 +311,16 @@ fn render_confirm_delete(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(theme::border::default())
         .title("Confirm Delete")
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(Style::default().fg(theme::color::ERROR));
 
     let text = Paragraph::new(format!(
         "Delete profile \"{}\"?\n\nEnter: confirm | Esc: cancel",
         name
     ))
     .block(block)
-    .style(Style::default().fg(Color::Red));
+    .style(Style::default().fg(theme::color::ERROR));
 
     frame.render_widget(text, area);
 }

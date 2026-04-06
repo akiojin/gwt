@@ -15,7 +15,7 @@ tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 vt100 = "0.15"
-crossterm = "0.28"
+crossterm = "0.29"
 
 [dev-dependencies]
 tempfile.workspace = true

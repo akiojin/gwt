@@ -5,11 +5,13 @@ use std::path::PathBuf;
 use gwt_agent::{custom::CustomAgentType, CustomCodingAgent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 use gwt_config::{ConfigError, Settings, VoiceConfig};
 use gwt_skills::assets::CLAUDE_SKILLS;
@@ -876,7 +878,7 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         let block = Block::default();
         let paragraph = Paragraph::new("No settings in this category")
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -908,10 +910,10 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
 
             let label_style = if is_selected {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(theme::color::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme::color::TEXT_PRIMARY)
             };
 
             let value_display = if is_editing {
@@ -921,18 +923,18 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
             };
 
             let value_style = match (&field.field_type, is_editing) {
-                (_, true) => Style::default().fg(Color::Yellow),
+                (_, true) => Style::default().fg(theme::color::ACTIVE),
                 (FieldType::Bool, false) => {
                     if field.value == "true" {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(theme::color::SUCCESS)
                     } else {
-                        Style::default().fg(Color::Red)
+                        Style::default().fg(theme::color::ERROR)
                     }
                 }
-                (FieldType::Choice, false) => Style::default().fg(Color::Cyan),
-                (FieldType::Action, false) => Style::default().fg(Color::Yellow),
-                (FieldType::Path, false) => Style::default().fg(Color::Cyan),
-                (FieldType::Text, false) => Style::default().fg(Color::White),
+                (FieldType::Choice, false) => Style::default().fg(theme::color::FOCUS),
+                (FieldType::Action, false) => Style::default().fg(theme::color::ACTIVE),
+                (FieldType::Path, false) => Style::default().fg(theme::color::FOCUS),
+                (FieldType::Text, false) => Style::default().fg(theme::color::TEXT_PRIMARY),
             };
 
             let type_indicator = match field.field_type {
@@ -944,16 +946,13 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
             };
 
             let bg_style = if is_selected {
-                Style::default().bg(Color::DarkGray)
+                Style::default().bg(theme::color::SURFACE)
             } else {
                 Style::default()
             };
 
             let line = Line::from(vec![
-                Span::styled(
-                    format!("[{}] ", type_indicator),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("[{}] ", type_indicator), theme::style::muted_text()),
                 Span::styled(format!("{}: ", field.label), label_style),
                 Span::styled(value_display, value_style),
             ]);
@@ -970,11 +969,9 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
     };
 
     let block = Block::default().title(format!("{}{}", state.category.label(), hints));
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
 
@@ -984,7 +981,7 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         let error_block = Block::default().title("Save failed");
         let error_paragraph = Paragraph::new(error.as_str())
             .block(error_block)
-            .style(Style::default().fg(Color::Red));
+            .style(Style::default().fg(theme::color::ERROR));
 
         let error_area = if chunks.len() > 1 { chunks[1] } else { area };
         frame.render_widget(error_paragraph, error_area);

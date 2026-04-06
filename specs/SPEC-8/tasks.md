@@ -56,15 +56,15 @@
 - [x] **T-033**: Implement PTY injection of extracted file paths.
 - [x] **T-034**: Verify T-030, T-031 pass (GREEN).
 
-## Phase 3: AI Branch Naming Wizard Integration
+## Phase 3: AI Branch Naming Wizard Integration (Dormant in Standard Launch Agent Flow from Branches / SPEC Detail / Issue Detail)
 
 ### 3.1 Branch Name Suggestion Display
 
 - [x] **T-035**: Write test for `BranchNameSuggester::suggest()` returning 3-5 valid names.
 - [x] **T-036**: Write test for all suggestions passing `git check-ref-format` validation.
-- [x] **T-037**: Write test for suggestion list rendering in wizard AgentSelect step.
+- [x] **T-037**: Write test for suggestion list rendering in the wizard AI suggestion step.
 - [x] **T-038**: Write test for "Manual input" option always present at bottom of list.
-- [x] **T-039**: Implement suggestion list UI in wizard AgentSelect step.
+- [x] **T-039**: Implement suggestion list UI in the wizard AI suggestion step.
 - [x] **T-040**: Wire `BranchNameSuggester::suggest()` call with SPEC title / Issue description context.
 - [x] **T-041**: Verify T-035 through T-038 pass (GREEN).
 
@@ -80,4 +80,4 @@
 
 - [x] **T-047**: Manual verification: voice input records, transcribes, and injects text into PTY. (runtime/session wiring is now verified by unit tests in `gwt-tui`, but concrete Qwen3-ASR capture remains pending real backend availability)
 - [x] **T-048**: Manual verification: file paste extracts paths from clipboard and injects into PTY. (obsolete: covered by unit tests on ClipboardFilePaste and PTY injection)
-- [x] **T-049**: Manual verification: wizard displays branch name suggestions and allows selection. (obsolete: covered by unit tests on BranchNameSuggester and wizard rendering)
+- [x] **T-049**: Manual verification: the dedicated wizard AI suggestion step displays branch name suggestions and allows selection. (obsolete: covered by unit tests on BranchNameSuggester and wizard rendering)

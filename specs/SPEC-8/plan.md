@@ -53,11 +53,13 @@
 
 ## Phase 3: AI Branch Naming Wizard Integration
 
-**Goal**: Integrate `BranchNameSuggester` into the wizard's AgentSelect step to display branch name candidates.
+**Goal**: Keep `BranchNameSuggester` integrated behind the wizard's dedicated
+AI suggestion step while the standard Launch Agent flow from Branches, SPEC
+detail, and Issue detail continues directly to manual branch input.
 
 ### Key Changes
 
-1. **gwt-tui**: In the wizard AgentSelect step, after SPEC/Issue context is available, call `BranchNameSuggester::suggest()`.
+1. **gwt-tui**: In the dedicated AI suggestion step, after SPEC/Issue context is available, call `BranchNameSuggester::suggest()`.
    - Display 3-5 suggestions as a selectable list.
    - Add "Manual input" option at the bottom.
    - Show a loading spinner while waiting for suggestions.
@@ -67,7 +69,7 @@
    - Strip or replace invalid characters.
    - Enforce 255-byte maximum length.
 
-3. **gwt-tui**: Timeout handling.
+3. **gwt-tui**: Timeout handling for the dormant AI suggestion step.
    - 10-second timeout on suggestion generation.
    - On timeout, auto-select "Manual input" and show a brief notification.
 
@@ -80,4 +82,4 @@
 
 - **Qwen3-ASR integration complexity**: Start with a mock recorder for TUI development; swap in real backend once model loading is verified.
 - **Platform clipboard differences**: Use conditional compilation (`#[cfg(target_os)]`) with fallback to text-only paste.
-- **AI branch naming latency**: The 10-second timeout with manual fallback ensures the wizard never blocks indefinitely.
+- **AI branch naming latency**: When the AI suggestion step is enabled, the 10-second timeout with manual fallback ensures the wizard never blocks indefinitely.

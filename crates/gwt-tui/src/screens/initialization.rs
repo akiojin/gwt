@@ -7,11 +7,19 @@ use std::path::PathBuf;
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+
+use crate::theme;
+
+const GWT_LOGO: [&str; 3] = [
+    "\u{256D}\u{2500} gwt \u{2500}\u{256E}",
+    "\u{2502} \u{25C6} \u{25C7} \u{25C6} \u{2502}",
+    "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}",
+];
 
 /// Clone operation status.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -125,19 +133,21 @@ pub fn render(state: &InitializationState, frame: &mut Frame, area: Rect) {
 /// Render the clone wizard UI.
 fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rect) {
     // Center a dialog box
-    let dialog = centered_rect(60, 14, area);
+    let dialog = centered_rect(60, 17, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" gwt — Clone Repository ")
         .title_alignment(Alignment::Center)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::color::FOCUS))
+        .border_type(theme::border::modal());
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(4), // Logo + spacing
             Constraint::Length(2), // Instructions
             Constraint::Length(1), // Spacer
             Constraint::Length(1), // Label
@@ -147,105 +157,100 @@ fn render_clone_wizard(state: &InitializationState, frame: &mut Frame, area: Rec
         ])
         .split(inner);
 
+    // Logo
+    let logo_lines: Vec<Line> = GWT_LOGO
+        .iter()
+        .map(|line| Line::from(Span::styled(*line, theme::style::header())))
+        .collect();
+    let logo = Paragraph::new(logo_lines).alignment(Alignment::Center);
+    frame.render_widget(logo, chunks[0]);
+
     // Instructions
     let instructions = Paragraph::new("Enter a repository URL to clone into this directory.")
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(theme::color::TEXT_PRIMARY))
         .alignment(Alignment::Center);
-    frame.render_widget(instructions, chunks[0]);
+    frame.render_widget(instructions, chunks[1]);
 
     // Label
-    let label = Paragraph::new("Repository URL:").style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
-    frame.render_widget(label, chunks[2]);
+    let label = Paragraph::new("Repository URL:").style(theme::style::active_item());
+    frame.render_widget(label, chunks[3]);
 
     // Input field
     let input_style = match &state.clone_status {
-        CloneStatus::Error(_) => Style::default().fg(Color::Red),
-        _ => Style::default().fg(Color::White),
+        CloneStatus::Error(_) => Style::default().fg(theme::color::ERROR),
+        _ => Style::default().fg(theme::color::TEXT_PRIMARY),
     };
     let cursor = if state.clone_status == CloneStatus::Idle
         || matches!(state.clone_status, CloneStatus::Error(_))
     {
-        "\u{2588}" // Block cursor
+        theme::icon::BLOCK_CURSOR
     } else {
         ""
     };
     let input_text = format!("{}{}", state.url_input, cursor);
-    let input = Paragraph::new(input_text)
-        .style(input_style)
-        .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(input, chunks[3]);
+    let input = Paragraph::new(input_text).style(input_style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(theme::border::default()),
+    );
+    frame.render_widget(input, chunks[4]);
 
     // Status / help
     let status: Paragraph = match &state.clone_status {
         CloneStatus::Idle => {
             let help = Line::from(vec![
-                Span::styled(
-                    "Enter",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("Enter", theme::style::success_text()),
                 Span::raw(" Clone  "),
-                Span::styled(
-                    "Esc",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("Esc", theme::style::error_text()),
                 Span::raw(" Exit"),
             ]);
             Paragraph::new(help).alignment(Alignment::Center)
         }
         CloneStatus::Cloning => Paragraph::new("Cloning repository...")
-            .style(Style::default().fg(Color::Yellow))
+            .style(Style::default().fg(theme::color::ACTIVE))
             .alignment(Alignment::Center),
         CloneStatus::Success(_) => Paragraph::new("Clone successful! Loading workspace...")
-            .style(Style::default().fg(Color::Green))
+            .style(Style::default().fg(theme::color::SUCCESS))
             .alignment(Alignment::Center),
         CloneStatus::Error(err) => {
             let lines = vec![
                 Line::from(Span::styled(
                     format!("Error: {err}"),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(theme::color::ERROR),
                 )),
                 Line::from(vec![
                     Span::raw("Edit URL and press "),
-                    Span::styled(
-                        "Enter",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("Enter", theme::style::success_text()),
                     Span::raw(" to retry"),
                 ]),
             ];
             Paragraph::new(lines).alignment(Alignment::Center)
         }
     };
-    frame.render_widget(status, chunks[5]);
+    frame.render_widget(status, chunks[6]);
 }
 
 /// Render the bare repository migration instructions.
 fn render_bare_migration(frame: &mut Frame, area: Rect) {
-    let dialog = centered_rect(65, 16, area);
+    let dialog = centered_rect(65, 19, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" gwt — Bare Repository Detected ")
         .title_alignment(Alignment::Center)
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(Style::default().fg(theme::color::ERROR))
+        .border_type(theme::border::modal());
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
 
     let lines = vec![
+        Line::from(Span::styled(GWT_LOGO[0], theme::style::header())),
+        Line::from(Span::styled(GWT_LOGO[1], theme::style::header())),
+        Line::from(Span::styled(GWT_LOGO[2], theme::style::header())),
         Line::from(""),
         Line::from(Span::styled(
             "This directory contains a bare Git repository.",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            theme::style::active_item(),
         )),
         Line::from(""),
         Line::from("gwt requires a normal (non-bare) clone to work properly."),
@@ -253,25 +258,20 @@ fn render_bare_migration(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "  1. Move to a new directory",
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         )),
         Line::from(Span::styled(
             "  2. git clone --depth=1 <url> .",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::style::header(),
         )),
         Line::from(Span::styled(
             "  3. Launch gwt-tui in the new clone",
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         )),
         Line::from(""),
         Line::from(vec![
             Span::raw("Press "),
-            Span::styled(
-                "Esc",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("Esc", theme::style::error_text()),
             Span::raw(" to exit"),
         ]),
     ];
