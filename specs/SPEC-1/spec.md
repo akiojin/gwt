@@ -27,6 +27,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 3. Given I have scrolled up, when new output arrives, then the viewport stays at my scroll position (no auto-jump).
 4. Given the session has more history than fits on screen, when the terminal pane renders, then a vertical scrollbar appears on the right edge and its thumb tracks the visible scroll position.
 5. Given the host terminal is Terminal.app, when gwt enters the alternate screen and the user scrolls over the session pane with a trackpad, then the gesture reaches gwt as scroll input rather than being translated into cursor keys by the host terminal.
+6. Given Terminal.app reports a two-finger gesture as right-button drag events instead of wheel events, when the drag moves vertically over the session pane, then gwt maps that movement into scrollback navigation.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -79,6 +80,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-003**: Scrollback buffer stores up to 10,000 lines per pane, configurable via settings.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
+- **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
 - **FR-004a**: A vertical scrollbar is rendered on the right edge only when scrollback exceeds the visible terminal height.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
 - **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.

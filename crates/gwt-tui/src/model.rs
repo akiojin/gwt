@@ -603,6 +603,8 @@ pub struct Model {
     pub(crate) pending_pty_inputs: VecDeque<PendingPtyInput>,
     /// Live PTY handles keyed by session id.
     pub(crate) pty_handles: HashMap<String, gwt_terminal::PtyHandle>,
+    /// Last observed row for Terminal.app style right-drag trackpad fallback.
+    pub(crate) terminal_trackpad_scroll_row: Option<u16>,
     /// Sender for PTY output from background reader threads.
     pub(crate) pty_output_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
     /// Receiver for PTY output drained in the event loop.
@@ -619,6 +621,10 @@ impl std::fmt::Debug for Model {
             .field("sessions", &self.sessions.len())
             .field("active_session", &self.active_session)
             .field("pty_handles", &self.pty_handles.len())
+            .field(
+                "terminal_trackpad_scroll_row",
+                &self.terminal_trackpad_scroll_row,
+            )
             .field("repo_path", &self.repo_path)
             .finish()
     }
@@ -676,6 +682,7 @@ impl Model {
             voice_runtime: VoiceRuntimeState::default(),
             pending_pty_inputs: VecDeque::new(),
             pty_handles: HashMap::new(),
+            terminal_trackpad_scroll_row: None,
             pty_output_tx,
             pty_output_rx,
             initialization: None,

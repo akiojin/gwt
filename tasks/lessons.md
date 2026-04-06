@@ -20,6 +20,25 @@ scrollback に入らず、terminal 側で握りつぶされているように見
 2. outer terminal 初期化を触る変更では、ANSI sequence を直接検証する RED/GREEN テストを `src/main.rs` に追加して回帰を固定する。
 3. PTY scroll 不具合では app 内の handler だけでなく、host terminal が wheel を別入力へ変換していないかも最初に切り分ける。
 
+## 2026-04-07 — fix: Terminal.app では trackpad scroll が `Drag(Right)` に化けることがある
+
+### 事象
+
+`Allow Mouse Reporting` が有効で、alternate-scroll mode も無効化した状態でも、
+`Terminal.app` 上では trackpad scroll が `ScrollUp/ScrollDown` として届かず、gwt の session pane がスクロールしなかった。
+
+### 原因
+
+- 診断ログでは、二本指スクロール中の入力が `Down(Right)` / `Drag(Right)` / `Up(Right)` の列として観測された。
+- `gwt-tui` の mouse handler は `ScrollUp/ScrollDown` と left-button selection しか扱っておらず、
+  right-button drag を完全に捨てていた。
+
+### 再発防止策
+
+1. Terminal.app の trackpad 不具合は、`ScrollUp/ScrollDown` 前提で考えず、必ず診断ログで実イベント形を確認する。
+2. mouse fallback を入れるときは、left-button selection と right-button trackpad fallback を明示的に分離する。
+3. host terminal 診断用の小さい event dumper を残して、再発時に `events.log` で比較できるようにする。
+
 ## 2026-04-06 — fix: startup 時の agent detection は main thread で同期実行しない
 
 ### 事象

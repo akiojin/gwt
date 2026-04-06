@@ -38,3 +38,4 @@
 - [x] T025 Refresh SPEC-1 artifacts and rerun focused terminal interaction verification.
 - [x] T026 Fix regression: session-pane mouse wheel now re-focuses the terminal before applying scrollback.
 - [x] T027 Fix Terminal.app trackpad regression by disabling alternate-scroll mode during terminal startup and verify with focused startup + scroll/copy regression tests.
+- [x] T028 Fix Terminal.app right-drag trackpad fallback by mapping vertical `Drag(Right)` deltas into scrollback motion and verify focused regression coverage.

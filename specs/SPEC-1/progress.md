@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `27/27` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T12:06:34Z`
+- Task progress: `28/28` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T15:03:56Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -16,6 +16,7 @@
 - Mouse-wheel scrolling now freezes live follow against vt100 scrollback, and drag selection copies from the visible scrollback viewport through `contents_between()`.
 - Session-pane mouse interactions now re-focus the terminal before scrollback routing, so wheel scrolling works from the default management-focus state instead of dropping the first event.
 - Terminal startup now disables alternate-scroll mode so Terminal.app trackpad gestures are not rewritten into cursor keys while gwt owns the alternate screen.
+- Terminal.app-specific `Drag(Right)` gesture sequences now fall back to scrollback motion, matching the observed crossterm event stream when wheel events are absent.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

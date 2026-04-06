@@ -3336,6 +3336,9 @@ where
         mouse.kind,
         MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
+            | MouseEventKind::Down(MouseButton::Right)
+            | MouseEventKind::Drag(MouseButton::Right)
+            | MouseEventKind::Up(MouseButton::Right)
             | MouseEventKind::Down(MouseButton::Left)
             | MouseEventKind::Drag(MouseButton::Left)
             | MouseEventKind::Up(MouseButton::Left)
@@ -3344,28 +3347,27 @@ where
     }
 
     match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            if let Some(session) = model.active_session_tab_mut() {
-                session.vt.clear_selection();
-                let next = session
-                    .vt
-                    .scrollback()
-                    .saturating_add(1)
-                    .min(session.vt.max_scrollback());
-                session.vt.set_follow_live(false);
-                session.vt.set_scrollback(next);
-                return Ok(true);
-            }
+        MouseEventKind::ScrollUp => Ok(scroll_active_session_by_rows(model, 1)),
+        MouseEventKind::ScrollDown => Ok(scroll_active_session_by_rows(model, -1)),
+        MouseEventKind::Down(MouseButton::Right) => {
+            model.terminal_trackpad_scroll_row = Some(mouse.row);
             Ok(false)
         }
-        MouseEventKind::ScrollDown => {
-            if let Some(session) = model.active_session_tab_mut() {
-                session.vt.clear_selection();
-                let next = session.vt.scrollback().saturating_sub(1);
-                session.vt.set_scrollback(next);
-                session.vt.set_follow_live(next == 0);
-                return Ok(true);
+        MouseEventKind::Drag(MouseButton::Right) => {
+            let Some(previous_row) = model.terminal_trackpad_scroll_row.replace(mouse.row) else {
+                return Ok(false);
+            };
+            let delta_rows = i32::from(mouse.row) - i32::from(previous_row);
+            if delta_rows == 0 {
+                return Ok(false);
             }
+            Ok(scroll_active_session_by_rows(
+                model,
+                delta_rows.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+            ))
+        }
+        MouseEventKind::Up(MouseButton::Right) => {
+            model.terminal_trackpad_scroll_row = None;
             Ok(false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
@@ -3468,6 +3470,36 @@ fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
             .screen()
             .contents_between(start.row, start.col, end.row, end_col),
     )
+}
+
+fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
+    if delta_rows == 0 {
+        return false;
+    }
+
+    let Some(session) = model.active_session_tab_mut() else {
+        return false;
+    };
+
+    session.vt.clear_selection();
+    if delta_rows > 0 {
+        let next = session
+            .vt
+            .scrollback()
+            .saturating_add(delta_rows as usize)
+            .min(session.vt.max_scrollback());
+        session.vt.set_follow_live(false);
+        session.vt.set_scrollback(next);
+        return true;
+    }
+
+    let next = session
+        .vt
+        .scrollback()
+        .saturating_sub(delta_rows.unsigned_abs() as usize);
+    session.vt.set_scrollback(next);
+    session.vt.set_follow_live(next == 0);
+    true
 }
 
 fn normalize_selection(selection: TerminalSelection) -> (TerminalCell, TerminalCell) {
@@ -4818,6 +4850,52 @@ mod tests {
                 .scrollback()
                 > 0,
             "session mouse scroll should move the viewport away from live follow mode"
+        );
+    }
+
+    #[test]
+    fn right_drag_over_session_scrolls_terminal_for_terminal_app_trackpad_fallback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        update(&mut model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut model, "shell-0", &format!("line-{i}"));
+        }
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: area.x,
+                row: area.y + 3,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_focus,
+            FocusPane::Terminal,
+            "session right-drag fallback should move focus to the terminal pane"
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .scrollback()
+                > 0,
+            "Terminal.app style right-drag fallback should move the viewport away from live follow mode"
         );
     }
 
