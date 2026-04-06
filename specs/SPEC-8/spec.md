@@ -1,16 +1,18 @@
-# Input Extensions -- Voice Input, File Paste, AI Branch Naming
+# Input Extensions -- Voice Input, Terminal Paste, AI Branch Naming
 
 ## Background
 
-gwt-tui extends terminal input with voice transcription (Qwen3-ASR), file
-paste from clipboard, and AI-assisted branch naming. The voice path now
+gwt-tui extends terminal input with voice transcription (Qwen3-ASR), normal
+terminal paste, and AI-assisted branch naming. The voice path now
 routes start/stop/transcribe through a shared TUI runtime seam, but the
 concrete Qwen3-ASR backend remains a stub that returns model-loading errors.
 The AI branch naming flow remains implemented in the codebase, including
 explicit manual-entry fallback in the suggestion list and normalization to
 `3..=5` git-safe names, but the standard Launch Agent wizard currently skips
-that step and opens manual branch input directly. File paste now shell-quotes
-injected paths and parses `file://` clipboard payloads for safer PTY input.
+that step and opens manual branch input directly. Terminal paste now uses
+`Event::Paste` and forwards payloads to the active PTY as a single paste
+operation, wrapping with bracketed-paste control sequences only when the PTY
+application has requested that mode.
 
 ## User Stories
 
@@ -27,16 +29,24 @@ As a developer, I want to dictate commands using voice input so that I can inter
 5. Given 3 seconds of silence during recording, when silence is detected, then recording stops and transcription begins.
 6. Given voice input is disabled in settings, when I press Ctrl+G,v, then nothing happens.
 
-### US-2: Paste File Paths from Clipboard (P1) -- IMPLEMENTED
+### US-2: Paste Multi-line Text Like a Terminal (P1) -- IMPLEMENTED
 
-As a developer, I want to paste file paths from the system clipboard into the terminal so that I can quickly reference files without typing paths manually.
+As a developer, I want pasted terminal text to behave like a normal terminal
+paste so that multi-line commands are forwarded as one paste operation instead
+of being replayed as line-by-line Enter input.
 
 **Acceptance Scenarios**
 
-1. Given one or more files are copied to the system clipboard, when I press Ctrl+G,p, then the absolute file paths are pasted into the active PTY.
-2. Given multiple files are in the clipboard, when pasted, then each path appears on a separate line.
-3. Given the clipboard contains text (not file references), when I press Ctrl+G,p, then the text is pasted as-is.
-4. Given the clipboard is empty, when I press Ctrl+G,p, then nothing is pasted and no error is shown.
+1. Given text is pasted from the host terminal, when gwt receives the paste,
+   then the payload is forwarded to the active PTY as one paste operation.
+2. Given the active PTY application has enabled bracketed paste mode, when the
+   payload contains newlines, then gwt wraps the payload with
+   `ESC[200~ ... ESC[201~` before PTY injection.
+3. Given the active PTY application has not enabled bracketed paste mode, when
+   text is pasted, then gwt forwards the raw payload without converting it to
+   per-key `Enter` events.
+4. Given the pasted text is empty or whitespace only, when gwt receives the
+   paste event, then nothing is injected and no error is shown.
 
 ### US-3: Get AI-Suggested Branch Names in Wizard (P2) -- PARTIALLY IMPLEMENTED
 
@@ -60,7 +70,8 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 - Qwen3-ASR model file missing or corrupted at runtime.
 - Audio device disconnected during recording.
 - Clipboard contains binary data (images, non-text).
-- File paths in clipboard contain spaces or special characters.
+- Active PTY application has not enabled bracketed paste mode.
+- Pasted payload contains multiple newlines or shell metacharacters.
 - AI branch name suggestion returns names that exceed Git's 255-byte limit.
 - Network timeout during AI branch name generation.
 - Multiple rapid Ctrl+G,v presses (debounce needed).
@@ -77,12 +88,12 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 - **FR-005**: Status bar shows a recording indicator (microphone icon + elapsed time) during capture.
 - **FR-006**: Voice timeout: 30 seconds maximum recording duration; auto-stop on 3 seconds of silence.
 
-### File Paste
+### Terminal Paste
 
-- **FR-007**: File paste activation via Ctrl+G,p hotkey (chord: Ctrl+G followed by p).
-- **FR-008**: Extract file paths from system clipboard (macOS: NSPasteboard `public.file-url` type, Linux: xclip/wl-paste).
-- **FR-009**: Paths injected as newline-separated absolute path strings into the active PTY.
-- **FR-010**: Multi-file paste supported; one path per line, paths shell-escaped if they contain spaces.
+- **FR-007**: gwt enables outer-terminal bracketed paste mode while the TUI is running and disables it on shutdown.
+- **FR-008**: gwt consumes `crossterm::event::Event::Paste(String)` and preserves the pasted payload as a single text block.
+- **FR-009**: When the active PTY application has requested bracketed paste mode, gwt wraps the payload with `ESC[200~` and `ESC[201~` before PTY injection.
+- **FR-010**: `Ctrl+G,p` file-paste hotkey is not part of the product surface; normal paste is the canonical paste path.
 
 ### AI Branch Naming
 
@@ -98,7 +109,7 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 ## Non-Functional Requirements
 
 - **NFR-001**: Voice transcription completes within 5 seconds for 10-second audio input.
-- **NFR-002**: File paste operation completes within 100ms from hotkey press to PTY injection.
+- **NFR-002**: Terminal paste injection completes within 100ms from paste event receipt to PTY injection.
 - **NFR-003**: When enabled, AI branch name suggestion completes within 10 seconds; timeout triggers fallback.
 - **NFR-004**: Voice recording introduces no audible latency or glitches.
 - **NFR-005**: All hotkeys use the Ctrl+G chord prefix to avoid conflicts with terminal applications.
@@ -107,8 +118,8 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 
 - **SC-001**: Voice input records audio, transcribes via Qwen3-ASR, and injects text into PTY end-to-end.
 - **SC-002**: Status bar recording indicator appears during voice capture and disappears on completion.
-- **SC-003**: File paste correctly extracts and injects file paths from the system clipboard.
-- **SC-004**: Multi-file paste produces one path per line with correct shell escaping.
+- **SC-003**: Normal terminal paste forwards the pasted payload from the host terminal into the active PTY end-to-end.
+- **SC-004**: When the active PTY application requests bracketed paste mode, multi-line paste reaches the PTY as one bracketed payload instead of line-by-line `Enter` input.
 - **SC-005**: Standard Launch Agent new-branch flow reaches manual branch entry without AI configuration, and the dormant AI suggestion path still supports selection or manual override when explicitly enabled.
 - **SC-006**: All generated branch names pass Git naming validation.
 - **SC-007**: Timeout and fallback paths work correctly for both voice and AI branch naming.

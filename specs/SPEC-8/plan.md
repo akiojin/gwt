@@ -29,27 +29,30 @@
 - SPEC-7 Phase 1 (VoiceConfig must exist for model path and device configuration).
 - Qwen3-ASR model binary (user-provided, not bundled).
 
-## Phase 2: File Paste
+## Phase 2: Terminal Paste
 
-**Goal**: Implement clipboard file path extraction and PTY injection via Ctrl+G,p hotkey.
+**Goal**: Make normal terminal paste behave like a real paste operation in the
+active PTY, including bracketed-paste passthrough when requested by the PTY
+application.
 
 ### Key Changes
 
-1. **gwt-tui**: Register Ctrl+G,p chord in the keybinding system.
+1. **gwt-tui**: Enable bracketed paste support in the outer terminal runtime.
+   - Turn on crossterm bracketed-paste handling during terminal setup.
+   - Turn it off during shutdown and panic recovery.
 
-2. **gwt-core**: Implement `ClipboardFilePaste` module.
-   - macOS: Read `NSPasteboard` for `public.file-url` pasteboard type.
-   - Linux: Read from xclip (`xclip -selection clipboard -t text/uri-list -o`) or wl-paste (`wl-paste --type text/uri-list`).
-   - Parse `file://` URIs to absolute paths.
-   - Fallback: If no file URIs found, paste clipboard text content as-is.
+2. **gwt-tui**: Route `Event::Paste(String)` through a dedicated paste path.
+   - Keep the pasted payload intact instead of translating it into per-key input.
+   - Ignore empty / whitespace-only payloads.
 
-3. **gwt-tui**: Inject paths into active PTY.
-   - One path per line, shell-escaped with quotes if paths contain spaces.
-   - No trailing newline after the last path.
+3. **gwt-tui**: Inject pasted text into the active PTY.
+   - Detect whether the active PTY screen has requested bracketed paste mode.
+   - Wrap payloads with `ESC[200~ ... ESC[201~` only when that mode is enabled.
+   - Remove the deprecated `Ctrl+G,p` file-paste keybinding from the UI surface.
 
 ### Dependencies
 
-- Platform clipboard access (no new crate needed; use `std::process::Command` for xclip/wl-paste, `objc` crate for NSPasteboard).
+- crossterm bracketed-paste events and vt100 screen-mode tracking.
 
 ## Phase 3: AI Branch Naming Wizard Integration
 
@@ -81,5 +84,5 @@ detail, and Issue detail continues directly to manual branch input.
 ## Risk Mitigation
 
 - **Qwen3-ASR integration complexity**: Start with a mock recorder for TUI development; swap in real backend once model loading is verified.
-- **Platform clipboard differences**: Use conditional compilation (`#[cfg(target_os)]`) with fallback to text-only paste.
+- **Bracketed paste compatibility**: Respect the active PTY screen's input mode so shells that enable bracketed paste get wrapped payloads without showing escape sequences to programs that do not.
 - **AI branch naming latency**: When the AI suggestion step is enabled, the 10-second timeout with manual fallback ensures the wizard never blocks indefinitely.

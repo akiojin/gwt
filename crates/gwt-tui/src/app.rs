@@ -527,11 +527,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
-        Message::PasteFiles => {
-            if let Some(bytes) = read_clipboard_input_bytes() {
-                push_input_to_active_session(model, bytes);
-            }
-        }
+        Message::PasteInput(text) => route_paste_input(model, text),
         Message::OpenSessionConversion => {
             open_session_conversion(model);
         }
@@ -2270,6 +2266,31 @@ fn handle_voice_message(model: &mut Model, msg: VoiceInputMessage, voice_enabled
     }
 }
 
+fn route_paste_input(model: &mut Model, text: String) {
+    if model.help_visible
+        || model.wizard.is_some()
+        || !model.error_queue.is_empty()
+        || model.service_select.is_some()
+        || model.confirm.visible
+        || model
+            .docker_progress
+            .as_ref()
+            .is_some_and(|progress| progress.visible)
+    {
+        return;
+    }
+
+    match model.active_layer {
+        ActiveLayer::Initialization => {}
+        ActiveLayer::Management => {
+            if matches!(model.active_focus, FocusPane::Terminal) {
+                handle_paste_input(model, text);
+            }
+        }
+        _ => handle_paste_input(model, text),
+    }
+}
+
 trait VoiceRuntime {
     fn configure(&mut self, config: &VoiceConfig);
     fn start_recording(&mut self) -> Result<(), String>;
@@ -3134,15 +3155,38 @@ fn run_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<Ag
     }
 }
 
-fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
-    if let Ok(paths) = gwt_clipboard::ClipboardFilePaste::extract_file_paths() {
-        if let Some(bytes) = clipboard_payload_to_bytes(&paths, "") {
-            return Some(bytes);
-        }
+fn handle_paste_input(model: &mut Model, text: String) {
+    let bracketed_paste_enabled = model
+        .active_session_tab()
+        .map(|session| vt_requests_bracketed_paste(&session.vt))
+        .unwrap_or(false);
+
+    if let Some(bytes) = build_paste_input_bytes(&text, bracketed_paste_enabled) {
+        push_input_to_active_session(model, bytes);
+    }
+}
+
+fn vt_requests_bracketed_paste(vt: &crate::model::VtState) -> bool {
+    vt.screen()
+        .input_mode_formatted()
+        .windows(b"\x1b[?2004h".len())
+        .any(|window| window == b"\x1b[?2004h")
+}
+
+fn build_paste_input_bytes(text: &str, bracketed_paste_enabled: bool) -> Option<Vec<u8>> {
+    if text.trim().is_empty() {
+        return None;
     }
 
-    let text = gwt_clipboard::ClipboardText::get_text().ok()?;
-    clipboard_payload_to_bytes(&[], &text)
+    if bracketed_paste_enabled {
+        let mut bytes = Vec::with_capacity(text.len() + 12);
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        Some(bytes)
+    } else {
+        Some(text.as_bytes().to_vec())
+    }
 }
 
 fn apply_pending_session_conversion_with(
@@ -3203,24 +3247,6 @@ fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
         crate::model::AgentColor::Yellow => Color::Yellow,
         crate::model::AgentColor::Magenta => Color::Magenta,
         crate::model::AgentColor::Gray => Color::Gray,
-    }
-}
-
-fn clipboard_payload_to_bytes(paths: &[PathBuf], fallback_text: &str) -> Option<Vec<u8>> {
-    if !paths.is_empty() {
-        let payload = paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Some(payload.into_bytes());
-    }
-
-    let text = fallback_text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -7944,28 +7970,82 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_prefers_paths() {
-        let bytes = clipboard_payload_to_bytes(
-            &[
-                std::path::PathBuf::from("/tmp/one.txt"),
-                std::path::PathBuf::from("/tmp/two.txt"),
-            ],
-            "",
-        )
-        .unwrap();
-
-        assert_eq!(bytes, b"/tmp/one.txt\n/tmp/two.txt".to_vec());
+    fn build_paste_input_bytes_wraps_payload_when_bracketed_paste_is_enabled() {
+        let bytes = build_paste_input_bytes("git status\npwd", true).unwrap();
+        assert_eq!(bytes, b"\x1b[200~git status\npwd\x1b[201~".to_vec());
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_falls_back_to_text() {
-        let bytes = clipboard_payload_to_bytes(&[], "echo hello").unwrap();
+    fn build_paste_input_bytes_keeps_plain_text_when_bracketed_paste_is_disabled() {
+        let bytes = build_paste_input_bytes("echo hello", false).unwrap();
         assert_eq!(bytes, b"echo hello".to_vec());
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_ignores_empty_payload() {
-        assert!(clipboard_payload_to_bytes(&[], "   ").is_none());
+    fn build_paste_input_bytes_ignores_empty_payload() {
+        assert!(build_paste_input_bytes("   ", false).is_none());
+    }
+
+    #[test]
+    fn vt_state_reports_bracketed_paste_when_requested_by_session() {
+        let mut vt = crate::model::VtState::new(24, 80);
+        assert!(!vt_requests_bracketed_paste(&vt));
+
+        vt.process(b"\x1b[?2004h");
+        assert!(vt_requests_bracketed_paste(&vt));
+
+        vt.process(b"\x1b[?2004l");
+        assert!(!vt_requests_bracketed_paste(&vt));
+    }
+
+    #[test]
+    fn handle_paste_input_queues_bracketed_payload_for_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model
+            .active_session_tab_mut()
+            .expect("active session")
+            .vt
+            .process(b"\x1b[?2004h");
+
+        handle_paste_input(&mut model, "git status\npwd".into());
+
+        let forwarded = model.pending_pty_inputs().back().unwrap();
+        assert_eq!(forwarded.session_id, "shell-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[200~git status\npwd\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn handle_paste_input_ignores_blank_text() {
+        let mut model = test_model();
+
+        handle_paste_input(&mut model, "   ".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_ignores_management_paste_when_terminal_is_not_focused() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        route_paste_input(&mut model, "git status".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_ignores_paste_when_wizard_is_open() {
+        let mut model = test_model();
+        model.wizard = Some(screens::wizard::WizardState::default());
+
+        route_paste_input(&mut model, "git status".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
     }
 
     #[test]

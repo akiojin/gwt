@@ -15,7 +15,5 @@ pub mod screens;
 pub mod theme;
 pub mod widgets;
 
-pub use gwt_clipboard::clipboard_payload_to_bytes;
-
 #[cfg(test)]
 pub(crate) static DOCKER_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
