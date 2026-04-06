@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `283/283` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T05:14:42Z`
+- Task progress: `288/288` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T05:38:09Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -60,6 +60,7 @@
 - The main event loop now drains queued PTY output before blocking on terminal input and rechecks it in short slices, so shell/agent echo is no longer gated by the next 100 ms tick.
 - `Ctrl+G,g` pane toggles now resize live PTYs and vt100 parsers immediately to the new visible session geometry, keeping placeholder chrome and actual terminal width aligned.
 - Exited PTY-backed sessions now remove their tabs automatically, clamp the active session safely, and notify with the auto-close result instead of leaving dead tabs behind.
+- Session PTYs now also expose an explicit prefixed focus-escape path: `Ctrl+G,Tab` and `Ctrl+G,Shift+Tab` cycle focus without stealing the raw plain-`Tab` key from Shell or Agent processes.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

@@ -672,6 +672,18 @@ Close the remaining workspace-shell regressions where PTY output feels one tick 
 - Re-run focused session/event-loop tests after the implementation turns green.
 - Refresh SPEC-2 artifacts and progress evidence with the new terminal responsiveness and auto-cleanup contract.
 
+### Phase 49: Add Prefixed Focus Escape From Session Panes (5 tasks)
+Close the remaining workspace-shell usability gap where session PTYs rightfully keep raw `Tab`, but users still need an explicit `Ctrl+G`-based route to cycle focus out of Shell/Agent panes.
+
+49.1: Prefix focus contract (2 tasks)
+- Teach the `Ctrl+G` keybind registry to treat `Tab` / `Shift+Tab` as explicit focus-cycle commands.
+- Apply those commands at the app layer so hidden management chrome becomes visible before focus moves, matching the existing pane topology.
+
+49.2: Verification and artifact sync (3 tasks)
+- Add RED coverage for prefixed forward and reverse focus escape from session panes.
+- Re-run focused keybind/workspace-shell verification after the implementation turns green.
+- Refresh SPEC-2 artifacts and progress evidence with the prefixed focus-escape contract.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

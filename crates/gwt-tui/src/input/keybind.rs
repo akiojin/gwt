@@ -89,6 +89,16 @@ impl KeybindRegistry {
                 category: KeybindingCategory::Global,
             },
             Keybinding {
+                keys: "Ctrl+G, Tab".into(),
+                description: "Focus next pane".into(),
+                category: KeybindingCategory::Global,
+            },
+            Keybinding {
+                keys: "Ctrl+G, Shift+Tab".into(),
+                description: "Focus previous pane".into(),
+                category: KeybindingCategory::Global,
+            },
+            Keybinding {
                 keys: "Ctrl+G, ]".into(),
                 description: "Next session".into(),
                 category: KeybindingCategory::Sessions,
@@ -230,6 +240,11 @@ impl KeybindRegistry {
                 self.prefix_state = PrefixState::Idle;
                 match key.code {
                     KeyCode::Char('g') => Some(Message::ToggleLayer),
+                    KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        Some(Message::CycleFocusBackward)
+                    }
+                    KeyCode::Tab => Some(Message::CycleFocusForward),
+                    KeyCode::BackTab => Some(Message::CycleFocusBackward),
                     KeyCode::Char(']') => Some(Message::NextSession),
                     KeyCode::Char('[') => Some(Message::PrevSession),
                     KeyCode::Char('z') => Some(Message::ToggleSessionLayout),
@@ -406,6 +421,26 @@ mod tests {
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Char('p'), KeyModifiers::NONE));
         assert!(matches!(result, Some(Message::PasteFiles)));
+    }
+
+    #[test]
+    fn prefix_tab_cycles_focus_forward_even_when_terminal_is_focused() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key_with_focus(key(KeyCode::Char('g'), KeyModifiers::CONTROL), true);
+        let result = reg.process_key_with_focus(key(KeyCode::Tab, KeyModifiers::NONE), true);
+        assert!(matches!(result, Some(Message::CycleFocusForward)));
+    }
+
+    #[test]
+    fn prefix_shift_tab_cycles_focus_backward() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert!(matches!(result, Some(Message::CycleFocusBackward)));
+
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(matches!(result, Some(Message::CycleFocusBackward)));
     }
 
     #[test]

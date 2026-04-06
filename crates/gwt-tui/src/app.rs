@@ -195,6 +195,12 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
+        Message::CycleFocusForward => {
+            cycle_focus_with_shortcut(model, false);
+        }
+        Message::CycleFocusBackward => {
+            cycle_focus_with_shortcut(model, true);
+        }
         Message::SwitchManagementTab(tab) => {
             switch_management_tab(model, tab);
         }
@@ -1895,6 +1901,20 @@ fn next_management_focus(model: &Model, reverse: bool) -> FocusPane {
         (FocusPane::Terminal, true) => FocusPane::TabContent,
         (FocusPane::TabContent, true) => FocusPane::Terminal,
         (FocusPane::BranchDetail, true) => FocusPane::TabContent,
+    }
+}
+
+fn cycle_focus_with_shortcut(model: &mut Model, reverse: bool) {
+    match model.active_layer {
+        ActiveLayer::Initialization => {}
+        ActiveLayer::Main => {
+            model.active_layer = ActiveLayer::Management;
+            model.active_focus = next_management_focus(model, reverse);
+            sync_session_viewports(model);
+        }
+        ActiveLayer::Management => {
+            model.active_focus = next_management_focus(model, reverse);
+        }
     }
 }
 
@@ -9244,6 +9264,32 @@ CUSTOM_ENV = "enabled"
         );
 
         assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn update_cycle_focus_forward_from_main_reveals_management_and_targets_next_pane() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::Terminal;
+
+        update(&mut model, Message::CycleFocusForward);
+
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_cycle_focus_backward_from_main_on_branches_targets_branch_detail() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::Terminal;
+
+        update(&mut model, Message::CycleFocusBackward);
+
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 
     #[test]

@@ -483,3 +483,11 @@ banner in favor of pane-title chrome.
 - [x] T308 Update `app.rs` PTY exit cleanup to remove exited sessions, preserve a valid active session, and notify with the auto-close result.
 - [x] T309 Refresh `SPEC-2` artifacts to describe the new terminal responsiveness and session auto-cleanup contract.
 - [x] T310 Run focused workspace-shell verification for event loop, resize sync, and PTY exit cleanup.
+
+## Phase 49: Add Prefixed Focus Escape From Session Panes
+
+- [x] T311 [P] Write RED test: `Ctrl+G,Tab` from a session pane resolves to an explicit forward focus-cycle message instead of being discarded by the prefix state machine.
+- [x] T312 [P] Write RED test: `Ctrl+G,Shift+Tab` / `Ctrl+G,BackTab` resolves to the reverse focus-cycle message.
+- [x] T313 [P] Write RED test: applying the forward focus-cycle message from `ActiveLayer::Main` reveals management and lands on the next logical pane instead of forwarding `Tab` into the PTY.
+- [x] T314 Update the keybind registry and app update path so prefixed focus-cycle commands work consistently from Shell and Agent panes.
+- [x] T315 Refresh `SPEC-2` artifacts and focused verification evidence for the prefixed focus-escape contract.
