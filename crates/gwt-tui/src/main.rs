@@ -209,6 +209,7 @@ fn run_app(
     }
 
     let mut keybinds = KeybindRegistry::new();
+    let mut input_normalizer = event::InputNormalizer::default();
 
     loop {
         drain_pty_output_into_model(&mut model);
@@ -226,11 +227,24 @@ fn run_app(
         // Event: poll
         let deadline = event::next_tick_deadline();
         loop {
+            if let Some(msg) = input_normalizer.pop_pending(std::time::Instant::now()) {
+                app::update(&mut model, msg);
+                break;
+            }
+
             if drain_pty_output_into_model(&mut model) {
                 break;
             }
 
             let Some(msg) = event::poll_event_slice(deadline, PTY_OUTPUT_POLL_SLICE) else {
+                continue;
+            };
+
+            let terminal_focused = model.active_layer != ActiveLayer::Initialization
+                && model.active_focus == gwt_tui::model::FocusPane::Terminal;
+            let Some(msg) =
+                input_normalizer.normalize(msg, std::time::Instant::now(), terminal_focused)
+            else {
                 continue;
             };
 

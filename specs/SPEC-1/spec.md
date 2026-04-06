@@ -30,6 +30,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 6. Given Terminal.app reports a two-finger gesture as right-button drag events instead of wheel events, when the drag moves vertically over the session pane, then gwt maps that movement into scrollback navigation.
 7. Given a pane redraws a full-screen UI without accumulating vt100 row scrollback, when multiple frames arrive and I scroll up, then recent earlier frames become visible from gwt's pane-local in-memory snapshot cache.
 8. Given I am viewing an older in-memory snapshot, when new output arrives, then the viewport stays on that older frame until I scroll back to the newest frame.
+9. Given Terminal.app leaks an SGR mouse report instead of a parsed mouse event, when that sequence reaches gwt, then it is consumed as mouse input and never rendered into the session pane as literal `[<...M` text.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -87,6 +88,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
 - **FR-004a**: A vertical scrollbar is rendered on the right edge only when row scrollback or snapshot history exceeds the visible terminal height / frame count.
+- **FR-004d**: If the outer terminal leaks an SGR mouse report as an escape-key sequence, gwt normalizes it back into mouse input (or swallows it) before PTY forwarding so literal mouse-report text is never echoed inside the pane.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
 - **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.
 - **FR-005b**: While the user is viewing an older snapshot-backed frame, new output appends to the history cache without forcing the viewport back to live until the user scrolls down to the newest frame.
@@ -106,6 +108,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **NFR-002a**: Snapshot-backed scrollback uses a fixed-size in-memory ring buffer (256 frames) so full-screen panes remain bounded without transcript persistence.
 - **NFR-003**: Cross-platform support via crossterm backend (macOS, Linux, Windows).
 - **NFR-004**: No visible flicker during rapid output (smooth rendering pipeline).
+- **NFR-004a**: Hover-only mouse-move floods do not trigger session redraw work because gwt does not use pointer-move hover semantics in the terminal pane.
 - **NFR-005**: Clipboard operations complete within 100ms.
 - **NFR-006**: URL detection adds no measurable latency to normal rendering path.
 

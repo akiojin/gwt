@@ -43,3 +43,5 @@
 - [x] T030 [P] Write RED test: snapshot-backed scrollback stays on the selected historical frame while new output arrives and only returns to live at the newest frame.
 - [x] T031 Implement pane-local in-memory screen snapshot history in `model.rs` with a fixed ring buffer and no transcript preload.
 - [x] T032 Route render / selection / URL hit testing / scrollbar logic through the currently visible live-or-snapshot surface and verify focused regressions.
+- [x] T033 [P] Write RED tests: ignore `MouseEventKind::Moved` floods and normalize leaked SGR wheel reports back into terminal mouse input without forwarding raw `[<...M` text to the PTY.
+- [x] T034 Implement terminal-focus input normalization in `event.rs` / `main.rs` so leaked SGR mouse reports are swallowed or converted, and hover-only move events are dropped before redraw.

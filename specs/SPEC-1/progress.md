@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `32/32` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T15:59:22Z`
+- Task progress: `34/34` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T16:59:22Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -19,6 +19,8 @@
 - Terminal.app-specific `Drag(Right)` gesture sequences now fall back to scrollback motion, matching the observed crossterm event stream when wheel events are absent.
 - Full-screen panes that keep `max_scrollback == 0` now maintain a pane-local in-memory snapshot history, render scrollbar chrome against that cache, and keep selection/copy aligned with the visible historical frame.
 - Snapshot-backed scrollback stays frozen on the chosen historical frame while new output arrives and only returns to live-follow when the user scrolls back to the newest frame.
+- Terminal-focus input is now normalized so leaked SGR wheel reports are converted back into mouse input instead of being echoed into the pane as literal `[<...M` text.
+- Hover-only `Moved` floods are now dropped at the event layer, reducing redraw pressure during Terminal.app trackpad gestures.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

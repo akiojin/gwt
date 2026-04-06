@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: trackpad 修正後の遅さは `Moved` flood と leaked SGR mouse report を分けて見る
+
+### 事象
+
+Terminal.app 上で scroll 自体は動くようになったが、session pane に `[<64;175;43M` のような
+mouse report が混ざって表示され、スクロール反応も極端に重かった。
+
+### 原因
+
+- 既存ログでは trackpad 1 gesture あたりに大量の `ScrollDown` と `Moved` が届いており、
+  gwt は hover を使わないのに毎回 update/render を回していた。
+- さらに、Terminal.app / crossterm の組み合わせでは SGR mouse report がまれに key escape sequence として漏れ、
+  terminal focus 時に PTY へ誤転送される余地があった。
+
+### 再発防止策
+
+1. trackpad の体感遅延は、scroll handler だけでなく `MouseEventKind::Moved` の event flood 有無を必ず確認する。
+2. terminal focus 中の raw key input には、SGR mouse report (`ESC [ < ... M/m`) の正規化レイヤを挟み、
+   leaked sequence が PTY に入らないようにする。
+3. outer terminal の mouse leak 対策を入れるときは、通常の `Esc` キーが壊れない timeout 付き test も一緒に追加する。
+
 ## 2026-04-07 — fix: `max_scrollback == 0` の pane では transcript ではなく live screen snapshot を先に疑う
 
 ### 事象
