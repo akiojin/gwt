@@ -388,6 +388,7 @@ agent_label = "Claude Code"
 agent_session_id = "session-xxx"  # for resume
 tool_version = "1.0.0"
 model = "claude-sonnet-4-5"
+skip_permissions = false
 codex_fast_mode = false
 created_at = "2026-01-01T00:00:00Z"
 updated_at = "2026-01-01T00:00:00Z"

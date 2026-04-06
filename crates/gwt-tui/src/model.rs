@@ -244,6 +244,8 @@ pub struct SessionTab {
     pub name: String,
     pub tab_type: SessionTabType,
     pub vt: VtState,
+    /// When this session was created (used for startup spinner animation).
+    pub created_at: std::time::Instant,
 }
 
 /// Buffered PTY input waiting to be written to the active session.
@@ -339,11 +341,18 @@ impl BranchDetailWorker {
 impl Drop for BranchDetailWorker {
     fn drop(&mut self) {
         self.cancel_active();
+        self.reap_finished();
         if let Some(handle) = self.active.take() {
-            self.retired.push(handle);
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                self.retired.push(handle);
+            }
         }
         for handle in self.retired.drain(..) {
-            let _ = handle.join();
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -531,6 +540,7 @@ impl Model {
             name: "Shell".to_string(),
             tab_type: SessionTabType::Shell,
             vt: VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         };
         let (notification_bus, notification_receiver) = NotificationBus::new();
         let (pty_output_tx, pty_output_rx) = std::sync::mpsc::channel();
@@ -986,12 +996,14 @@ mod tests {
             name: "Shell 2".to_string(),
             tab_type: SessionTabType::Shell,
             vt: VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         });
         model.sessions.push(SessionTab {
             id: "shell-2".to_string(),
             name: "Shell 3".to_string(),
             tab_type: SessionTabType::Shell,
             vt: VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         });
         model.save_session_state(&path).unwrap();
 

@@ -347,14 +347,19 @@ impl AgentLaunchBuilder {
             args.push("model_reasoning_summaries=detailed".to_string());
         }
 
-        if self.fast_mode {
-            args.push("-c".to_string());
-            args.push("service_tier=fast".to_string());
-        }
-
         // Version-dependent flags
         let version_str = self.version.as_deref().unwrap_or("");
         let parsed_version = semver::Version::parse(version_str).ok();
+
+        if self.fast_mode {
+            if parsed_version
+                .as_ref()
+                .is_some_and(|ver| *ver >= semver::Version::new(0, 110, 0))
+            {
+                args.push("-c".to_string());
+                args.push("service_tier=fast".to_string());
+            }
+        }
 
         // Web search args
         if let Some(ref ver) = parsed_version {
@@ -469,14 +474,29 @@ mod tests {
     fn build_codex_fast_mode() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .fast_mode(true)
+            .version("0.113.0")
             .build();
 
-        assert_eq!(config.command, "codex");
-        assert!(config.args.contains(&"-c".to_string()));
-        assert!(config.args.contains(&"service_tier=fast".to_string()));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
         assert!(!config.args.contains(&"--full-auto".to_string()));
         assert!(config.codex_fast_mode);
         assert!(!config.skip_permissions);
+    }
+
+    #[test]
+    fn build_codex_fast_mode_omits_service_tier_for_older_versions() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .fast_mode(true)
+            .version("0.109.0")
+            .build();
+
+        assert!(!config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
     }
 
     #[test]

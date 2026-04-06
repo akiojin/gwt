@@ -5,6 +5,9 @@
 
 use gwt_core::{GwtError, Result};
 use std::ffi::OsString;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 /// Status of a Docker container.
@@ -53,17 +56,64 @@ fn docker_binary() -> OsString {
     std::env::var_os("GWT_DOCKER_BIN").unwrap_or_else(|| OsString::from("docker"))
 }
 
+fn docker_timeout() -> Duration {
+    const DEFAULT_TIMEOUT_MS: u64 = 5_000;
+    std::env::var("GWT_DOCKER_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS))
+}
+
+fn run_docker_with_timeout(args: &[&str], action: &str) -> Result<Output> {
+    let mut child = Command::new(docker_binary())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| GwtError::Docker(format!("failed to run {action}: {e}")))?;
+
+    let timeout = docker_timeout();
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(GwtError::Docker(format!(
+                        "{action} timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                return Err(GwtError::Docker(format!(
+                    "failed while waiting for {action}: {e}"
+                )));
+            }
+        }
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|e| GwtError::Docker(format!("failed to collect {action} output: {e}")))
+}
+
 /// List all containers (including stopped ones).
 pub fn list_containers() -> Result<Vec<ContainerInfo>> {
-    let output = std::process::Command::new(docker_binary())
-        .args([
+    let output = run_docker_with_timeout(
+        &[
             "ps",
             "-a",
             "--format",
             "{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Image}}\t{{.Ports}}",
-        ])
-        .output()
-        .map_err(|e| GwtError::Docker(format!("failed to run docker ps: {e}")))?;
+        ],
+        "docker ps",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -99,10 +149,7 @@ pub fn list_containers() -> Result<Vec<ContainerInfo>> {
 
 /// Run a docker lifecycle command (`start`, `stop`, `restart`) on a container.
 fn lifecycle(action: &str, id: &str) -> Result<()> {
-    let output = std::process::Command::new(docker_binary())
-        .args([action, id])
-        .output()
-        .map_err(|e| GwtError::Docker(format!("failed to {action} container: {e}")))?;
+    let output = run_docker_with_timeout(&[action, id], &format!("docker {action}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(GwtError::Docker(format!(
@@ -321,5 +368,28 @@ mod tests {
             format!("{err:?}").contains("docker start failed: permission denied"),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn list_containers_times_out_when_docker_is_unresponsive() {
+        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 1\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, |_| {
+            let previous_timeout = std::env::var_os("GWT_DOCKER_TIMEOUT_MS");
+            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "50");
+
+            let result = list_containers();
+
+            match previous_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_TIMEOUT_MS"),
+            }
+
+            let err = result.expect_err("list_containers should time out");
+            assert!(
+                err.to_string().contains("docker ps timed out"),
+                "unexpected timeout error: {err}"
+            );
+        });
     }
 }

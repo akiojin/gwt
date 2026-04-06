@@ -335,6 +335,29 @@ impl BranchesState {
             .retain(|branch_name| branch_names.contains(branch_name));
     }
 
+    fn worktree_sources(&self) -> HashMap<String, Option<std::path::PathBuf>> {
+        self.branches
+            .iter()
+            .map(|branch| (branch.name.clone(), branch.worktree_path.clone()))
+            .collect()
+    }
+
+    fn evict_changed_detail_sources(
+        &mut self,
+        previous_sources: &HashMap<String, Option<std::path::PathBuf>>,
+    ) {
+        for branch in &self.branches {
+            if previous_sources
+                .get(&branch.name)
+                .is_some_and(|previous| previous == &branch.worktree_path)
+            {
+                continue;
+            }
+            self.detail_cache.remove(&branch.name);
+            self.loading_branches.remove(&branch.name);
+        }
+    }
+
     pub(crate) fn begin_detail_refresh(&mut self) -> (u64, Vec<BranchItem>) {
         self.detail_generation = self.detail_generation.wrapping_add(1);
         self.loading_branches = self
@@ -472,7 +495,9 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             // Signal to reload branches — handled by caller
         }
         BranchesMessage::SetBranches(branches) => {
+            let previous_sources = state.worktree_sources();
             state.branches = branches;
+            state.evict_changed_detail_sources(&previous_sources);
             state.prune_detail_cache();
             state.clamp_selected();
             state.detail_session_selected = 0;
@@ -1260,6 +1285,36 @@ mod tests {
         update(&mut state, BranchesMessage::SetBranches(sample_branches()));
         assert_eq!(state.branches.len(), 5);
         assert_eq!(state.selected, 3); // clamped to last visible local row
+    }
+
+    #[test]
+    fn set_branches_evicts_cached_detail_when_worktree_changes() {
+        let mut state = BranchesState::default();
+        let branch = BranchItem {
+            name: "feature/api".to_string(),
+            is_head: false,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/worktree-a")),
+        };
+        state.branches = vec![branch.clone()];
+        state.detail_cache.insert(
+            branch.name.clone(),
+            BranchDetailData {
+                files: vec!["stale.txt".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let mut updated_branch = branch.clone();
+        updated_branch.worktree_path = Some(PathBuf::from("/tmp/worktree-b"));
+        update(
+            &mut state,
+            BranchesMessage::SetBranches(vec![updated_branch.clone()]),
+        );
+
+        assert!(!state.detail_cache.contains_key(&updated_branch.name));
+        assert!(state.detail_files.is_empty());
     }
 
     #[test]

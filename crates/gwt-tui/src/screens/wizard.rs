@@ -1,8 +1,8 @@
 //! Wizard overlay screen — branch-first agent launch wizard.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    layout::{Alignment, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
@@ -795,7 +795,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 apply_selection(state);
                 if let Some(next) = next_step(state.step, state) {
                     state.step = next;
-                    state.selected = 0;
+                    state.selected = step_default_selection(next, state);
                     if matches!(next, WizardStep::ModelSelect | WizardStep::VersionSelect) {
                         state.sync_selected_agent_options();
                     }
@@ -819,7 +819,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
         WizardMessage::Back => {
             if let Some(prev) = prev_step(state.step, state) {
                 state.step = prev;
-                state.selected = 0;
+                state.selected = step_default_selection(prev, state);
             } else {
                 // First step — Esc cancels
                 state.cancelled = true;
@@ -901,6 +901,14 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 ensure_branch_name_seed(state);
             }
         }
+    }
+}
+
+fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
+    match step {
+        WizardStep::SkipPermissions => usize::from(!state.skip_perms),
+        WizardStep::CodexFastMode => usize::from(!state.codex_fast_mode),
+        _ => 0,
     }
 }
 
@@ -1517,6 +1525,75 @@ fn quick_start_start_new_marker(is_selected: bool, single_entry: bool) -> &'stat
     }
 }
 
+/// Compute popup width based on actual content (title + options + hints).
+///
+/// Mirrors old-TUI `wizard_popup_width`: measure the widest content line,
+/// add border + padding, then clamp to [min_width, max_width].
+fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
+    let min_width = 40u16.min(max_width);
+
+    let mut max_line = 0usize;
+
+    // Title + [ESC] badge
+    let title_len = popup_title(state).len() + " [ESC] ".len() + 4;
+    max_line = max_line.max(title_len);
+
+    // Measure rendered content width per step type.
+    // Fixed-width steps use `format_fixed_width_line` with a column width;
+    // version and model steps use label-description pairs.
+    match state.step {
+        WizardStep::ExecutionMode => {
+            for &(label, desc) in &EXECUTION_MODE_DISPLAY_OPTIONS {
+                // marker(2) + max(label_width, label.len)(12) + space(1) + description
+                max_line = max_line.max(2 + 12.max(label.len()) + 1 + desc.len());
+            }
+        }
+        WizardStep::ReasoningLevel => {
+            for &(label, desc) in &REASONING_DISPLAY_OPTIONS {
+                max_line = max_line.max(2 + 10.max(label.len()) + 1 + desc.len());
+            }
+        }
+        WizardStep::SkipPermissions => {
+            for &(label, desc) in &SKIP_PERMISSION_DISPLAY_OPTIONS {
+                max_line = max_line.max(2 + 6.max(label.len()) + 1 + desc.len());
+            }
+        }
+        WizardStep::ModelSelect => {
+            for opt in model_display_options(&state.agent_id) {
+                // marker(4) + label + " - " + description
+                max_line = max_line.max(4 + opt.label.len() + 3 + opt.description.len());
+            }
+        }
+        WizardStep::VersionSelect => {
+            for opt in &state.version_options {
+                // marker(2) + label + " - " + description (description from render)
+                // Version render uses format_label_description_line which adds description
+                max_line = max_line.max(2 + opt.label.len() + 30);
+            }
+        }
+        _ => {
+            for opt in state.current_options() {
+                max_line = max_line.max(opt.len() + 4);
+            }
+        }
+    }
+
+    // Hint line width
+    let hint_len = match state.step {
+        WizardStep::SkipPermissions if state.agent_is_codex() => {
+            " Up/Down: select | Enter: next | Esc: back".len()
+        }
+        WizardStep::SkipPermissions => "[Enter] Launch  [Esc] Back  [Up/Down] Navigate".len(),
+        WizardStep::CodexFastMode => " Up/Down: select | Enter: launch | Esc: back".len(),
+        _ => "[Enter] Select  [Esc] Back  [Up/Down] Navigate".len(),
+    };
+    max_line = max_line.max(hint_len);
+
+    // borders(2) + H_PAD on each side (2*2=4)
+    let desired = (max_line as u16).saturating_add(2 + 4);
+    desired.max(min_width).min(max_width)
+}
+
 fn popup_title(state: &WizardState) -> String {
     if state.step == WizardStep::QuickStart && state.quick_start_entries.len() == 1 {
         format!(
@@ -1665,58 +1742,71 @@ fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
 
 /// Render the wizard overlay.
 pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
-    // Centered modal — 60% width, 70% height
-    let width = (area.width * 60 / 100).max(40);
-    let height = (area.height * 70 / 100).max(12);
-    let overlay = super::centered_rect(width, height, area);
+    // Dark overlay background — dims the content behind the modal
+    let overlay_bg = Block::default().style(Style::default().bg(Color::Rgb(20, 20, 30)));
+    frame.render_widget(overlay_bg, area);
 
-    // Clear the area behind the overlay
-    frame.render_widget(Clear, overlay);
+    // Content-aware width, 60% height (matches old-TUI sizing)
+    let max_width = area.width.saturating_sub(2).max(1);
+    let width = wizard_popup_width(state, max_width);
+    let height = (area.height * 60 / 100).max(15);
+    let popup = super::centered_rect(width, height, area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Popup chrome
-            Constraint::Min(0),    // Content
-            Constraint::Length(1), // Hints
-        ])
-        .split(overlay);
+    frame.render_widget(Clear, popup);
 
-    // Popup chrome
-    let title_block = Block::default()
+    // Single outer border wrapping the entire modal
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(theme::border::modal())
         .border_style(Style::default().fg(theme::color::FOCUS))
-        .title_top(Line::from(popup_title(state)).style(theme::style::header()))
+        .title_top(
+            Line::from(format!(" {} ", popup_title(state))).style(
+                Style::default()
+                    .fg(theme::color::FOCUS)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
         .title_top(Line::from(" [ESC] ").right_aligned());
-    frame.render_widget(title_block, chunks[0]);
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Horizontal padding + vertical margins inside the border
+    const H_PAD: u16 = 2;
+    let content_area = Rect::new(
+        inner.x + H_PAD,
+        inner.y + 1,
+        inner.width.saturating_sub(H_PAD * 2),
+        inner.height.saturating_sub(4), // top margin(1) + bottom gap(2) + footer(1)
+    );
 
     // Content — either a list of options or a text input
-    render_step_content(state, frame, chunks[1]);
+    render_step_content(state, frame, content_area);
 
-    // Hints
+    // Footer — centered keybind hints at the bottom with margin
+    let footer_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(2),
+        inner.width,
+        1,
+    );
     let hint = match state.step {
-        WizardStep::BranchNameInput | WizardStep::IssueSelect => {
-            " Type to input | Enter: next | Esc: back"
-        }
-        WizardStep::AIBranchSuggest if state.ai_suggest.loading => {
-            " Loading AI suggestions... | Esc: skip to manual input"
-        }
+        WizardStep::BranchNameInput | WizardStep::IssueSelect => "[Enter] Confirm  [Esc] Back",
+        WizardStep::AIBranchSuggest if state.ai_suggest.loading => "[Esc] Cancel",
         WizardStep::AIBranchSuggest if state.ai_suggest.error.is_some() => {
-            " Enter/Esc: manual input"
+            "[Enter] Manual input  [Esc] Retry"
         }
-        WizardStep::AIBranchSuggest => {
-            " Up/Down: select | Enter: accept | e: edit | Esc: manual input"
-        }
+        WizardStep::AIBranchSuggest => "[Enter] Select  [Esc] Back  [Up/Down] Navigate",
         WizardStep::SkipPermissions if state.agent_is_codex() => {
             " Up/Down: select | Enter: next | Esc: back"
         }
-        WizardStep::SkipPermissions => " Up/Down: select | Enter: launch | Esc: back",
+        WizardStep::SkipPermissions => "[Enter] Launch  [Esc] Back  [Up/Down] Navigate",
         WizardStep::CodexFastMode => " Up/Down: select | Enter: launch | Esc: back",
-        _ => " Up/Down: select | Enter: next | Esc: back",
+        _ => "[Enter] Select  [Esc] Back  [Up/Down] Navigate",
     };
-    let hints = Paragraph::new(hint).style(theme::style::muted_text());
-    frame.render_widget(hints, chunks[2]);
+    let footer = Paragraph::new(hint)
+        .style(theme::style::muted_text())
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, footer_area);
 }
 
 /// Render the content area for the current wizard step.
@@ -2419,12 +2509,14 @@ mod tests {
     fn skip_permissions_for_codex_advances_to_fast_mode_step() {
         let mut state = WizardState::default();
         state.agent_id = "codex".to_string();
+        state.codex_fast_mode = false;
         state.step = WizardStep::SkipPermissions;
         state.selected = 1; // "No"
 
         update(&mut state, WizardMessage::Select);
 
         assert_eq!(state.step, WizardStep::CodexFastMode);
+        assert_eq!(state.selected, 1);
         assert!(!state.completed);
         assert!(!state.skip_perms);
     }
@@ -2440,6 +2532,20 @@ mod tests {
 
         assert!(state.completed);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn codex_fast_mode_step_reentry_preserves_saved_selection() {
+        let mut state = WizardState::default();
+        state.agent_id = "codex".to_string();
+        state.step = WizardStep::SkipPermissions;
+        state.selected = 0; // "Yes"
+        state.codex_fast_mode = false; // previously saved "Off"
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::CodexFastMode);
+        assert_eq!(state.selected, 1); // "Off"
     }
 
     #[test]
@@ -2598,7 +2704,7 @@ mod tests {
             "input value should render on a row below the prompt"
         );
         assert!(
-            text.matches('╔').count() == 1,
+            text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1,
             "branch input should reuse the popup chrome instead of adding a second boxed title inside the content area"
         );
     }
@@ -2621,7 +2727,7 @@ mod tests {
             "input value should render on a row below the prompt"
         );
         assert!(
-            text.matches('╔').count() == 1,
+            text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1,
             "issue input should use the same inline prompt style instead of adding another boxed title"
         );
     }
@@ -3091,7 +3197,7 @@ mod tests {
         let text = render_text(&state, 90, 24);
 
         assert!(text.contains("Use selected branch"));
-        assert!(text.matches('╔').count() == 1);
+        assert!(text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1);
     }
 
     #[test]
@@ -3123,7 +3229,7 @@ mod tests {
         assert!(text.contains("> Opus 4.6 - Most capable for complex work"));
         assert!(text.contains("  Sonnet 4.5 - Best for everyday tasks"));
         assert!(text.contains("  Haiku 4.5 - Fastest for quick answers"));
-        assert!(text.contains("Up/Down: select | Enter: next | Esc: back"));
+        assert!(text.contains("[Enter] Select  [Esc] Back  [Up/Down] Navigate"));
     }
 
     #[test]
@@ -3136,7 +3242,7 @@ mod tests {
         let text = render_text(&state, 160, 24);
 
         assert!(text.contains("Default (recommended) - Opus 4.6"));
-        assert!(text.matches('╔').count() == 1);
+        assert!(text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1);
     }
 
     #[test]
@@ -3198,7 +3304,7 @@ mod tests {
         assert!(text.contains("Skip Permissions"));
         assert!(text.contains("  Yes    Skip permission prompts"));
         assert!(text.contains("> No     Show permission prompts"));
-        assert!(text.contains("Up/Down: select | Enter: launch | Esc: back"));
+        assert!(text.contains("[Enter] Launch  [Esc] Back  [Up/Down] Navigate"));
     }
 
     #[test]
@@ -3304,7 +3410,7 @@ mod tests {
         let text = render_text(&state, 90, 24);
 
         assert!(text.contains("Installed (v1.0.0) - Use installed version"));
-        assert!(text.matches('╔').count() == 1);
+        assert!(text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1);
     }
 
     #[test]
@@ -3497,7 +3603,7 @@ mod tests {
         assert!(text.contains("feature/oauth-flow"));
         assert!(text.contains("Manual input"));
         assert!(
-            text.matches('╔').count() == 1,
+            text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1,
             "AI suggestions should reuse the popup chrome instead of adding inner boxes"
         );
     }
@@ -3601,7 +3707,7 @@ mod tests {
             loading_y > context_y,
             "loading text should render below the context line"
         );
-        assert!(text.matches('╔').count() == 1);
+        assert!(text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1);
     }
 
     #[test]
@@ -3651,7 +3757,7 @@ mod tests {
             error_y > context_y,
             "error copy should render below the context line"
         );
-        assert!(text.matches('╔').count() == 1);
+        assert!(text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1);
     }
 
     #[test]
