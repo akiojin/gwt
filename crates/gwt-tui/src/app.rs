@@ -4082,56 +4082,94 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Build session tab title line (same pattern as management tabs in Block title).
 fn build_session_title(model: &Model, width: u16) -> Line<'static> {
-    if should_compact_session_title(model, width) {
-        if let Some(active) = model.active_session_tab() {
+    build_session_title_with(model, width, &gwt_sessions_dir())
+}
+
+fn build_session_title_with(model: &Model, width: u16, sessions_dir: &Path) -> Line<'static> {
+    let entries: Vec<(String, Style, &'static str)> = model
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| {
+            (
+                session_title_label(session, sessions_dir),
+                session_title_style(session, i == model.active_session),
+                session.tab_type.icon(),
+            )
+        })
+        .collect();
+
+    if should_compact_session_title(width, &entries) {
+        if let Some((label, style, icon)) = entries.get(model.active_session) {
             let position = model.active_session.saturating_add(1);
             let total = model.sessions.len();
-            let label = format!(
-                " {position}/{total} {} {} ",
-                active.tab_type.icon(),
-                active.name
-            );
-            return Line::from(vec![Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )]);
+            let title = format!(" {position}/{total} {icon} {label} ");
+            return Line::from(vec![Span::styled(title, *style)]);
         }
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, s) in model.sessions.iter().enumerate() {
+    for (i, (label, style, icon)) in entries.into_iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("│"));
+            spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
         }
-        let label = format!(" {} {} ", s.tab_type.icon(), s.name);
-        if i == model.active_session {
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
-        }
+        spans.push(Span::styled(format!(" {icon} {label} "), style));
     }
     Line::from(spans)
 }
 
-fn should_compact_session_title(model: &Model, width: u16) -> bool {
+fn session_title_label(session: &crate::model::SessionTab, sessions_dir: &Path) -> String {
+    match &session.tab_type {
+        SessionTabType::Agent { .. } => load_persisted_branch_label(&session.id, sessions_dir)
+            .unwrap_or_else(|| session.name.clone()),
+        SessionTabType::Shell => session.name.clone(),
+    }
+}
+
+fn load_persisted_branch_label(session_id: &str, sessions_dir: &Path) -> Option<String> {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let persisted = AgentSession::load(&path).ok()?;
+    let branch = persisted.branch.trim();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(persisted.branch)
+    }
+}
+
+fn session_title_style(session: &crate::model::SessionTab, is_active: bool) -> Style {
+    match &session.tab_type {
+        SessionTabType::Shell => {
+            if is_active {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(Color::Gray)
+            }
+        }
+        SessionTabType::Agent { color, .. } => {
+            let style = Style::default().fg(agent_color_to_ratatui(*color));
+            if is_active {
+                style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                style.add_modifier(Modifier::DIM)
+            }
+        }
+    }
+}
+
+fn should_compact_session_title(width: u16, entries: &[(String, Style, &'static str)]) -> bool {
     let available_title_width = width.saturating_sub(2) as usize;
     if available_title_width == 0 {
         return false;
     }
 
-    let full_strip_width: usize = model
-        .sessions
+    let full_strip_width: usize = entries
         .iter()
         .enumerate()
-        .map(|(i, session)| {
-            let label_width = format!(" {} {} ", session.tab_type.icon(), session.name).len();
+        .map(|(i, (label, _, icon))| {
+            let label_width = format!(" {icon} {label} ").len();
             if i == 0 {
                 label_width
             } else {
@@ -4479,7 +4517,7 @@ mod tests {
     use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
     use ratatui::widgets::Widget;
     use ratatui::{buffer::Buffer, Terminal};
@@ -4584,6 +4622,47 @@ mod tests {
             .draw(|frame| view(model, frame))
             .expect("draw model");
         terminal.backend().buffer().clone()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn persist_agent_tab(
+        sessions_dir: &Path,
+        branch: &str,
+        agent_id: AgentId,
+        color: crate::model::AgentColor,
+    ) -> (crate::model::SessionTab, PathBuf) {
+        fs::create_dir_all(sessions_dir).expect("create sessions dir");
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let session_id = format!("test-session-{}-{unique}", agent_id.command());
+
+        let mut session = AgentSession::new("/tmp/test-worktree", branch, agent_id.clone());
+        session.id = session_id.clone();
+        session.display_name = agent_id.display_name().to_string();
+        session.save(sessions_dir).expect("persist session");
+
+        (
+            crate::model::SessionTab {
+                id: session_id.clone(),
+                name: agent_id.display_name().to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: agent_id.command().to_string(),
+                    color,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+            sessions_dir.join(format!("{session_id}.toml")),
+        )
     }
 
     fn append_session_line(model: &mut Model, session_id: &str, line: &str) {
@@ -5526,6 +5605,166 @@ mod tests {
             !first_line.contains("2/4"),
             "extra-wide panes should keep the full strip rather than the compact index/count chrome"
         );
+    }
+
+    #[test]
+    fn build_session_title_agent_tabs_prefer_persisted_branch_names_in_full_strip() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let (claude, claude_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/claude-branch",
+            AgentId::ClaudeCode,
+            crate::model::AgentColor::Yellow,
+        );
+        let (codex, codex_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/codex-branch",
+            AgentId::Codex,
+            crate::model::AgentColor::Cyan,
+        );
+
+        let mut model = test_model();
+        model.sessions = vec![claude, codex];
+        model.active_session = 0;
+
+        let title = build_session_title_with(&model, 220, sessions_dir.path());
+        let text = line_text(&title);
+
+        assert!(text.contains("feature/claude-branch"));
+        assert!(text.contains("feature/codex-branch"));
+        assert!(!text.contains("Claude Code"));
+        assert!(!text.contains("Codex"));
+
+        let _ = fs::remove_file(claude_path);
+        let _ = fs::remove_file(codex_path);
+    }
+
+    #[test]
+    fn build_session_title_compact_agent_tabs_show_active_branch_name_and_count() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut cleanup = Vec::new();
+        let mut sessions = Vec::new();
+
+        for (branch, agent_id, color) in [
+            (
+                "feature/branch-one",
+                AgentId::ClaudeCode,
+                crate::model::AgentColor::Yellow,
+            ),
+            (
+                "feature/branch-two",
+                AgentId::Codex,
+                crate::model::AgentColor::Cyan,
+            ),
+            (
+                "feature/branch-three",
+                AgentId::Gemini,
+                crate::model::AgentColor::Magenta,
+            ),
+            (
+                "feature/branch-four",
+                AgentId::ClaudeCode,
+                crate::model::AgentColor::Yellow,
+            ),
+            (
+                "feature/branch-five",
+                AgentId::Codex,
+                crate::model::AgentColor::Cyan,
+            ),
+            (
+                "feature/branch-six",
+                AgentId::Gemini,
+                crate::model::AgentColor::Magenta,
+            ),
+            (
+                "feature/branch-seven",
+                AgentId::ClaudeCode,
+                crate::model::AgentColor::Yellow,
+            ),
+            (
+                "feature/branch-eight",
+                AgentId::Codex,
+                crate::model::AgentColor::Cyan,
+            ),
+        ] {
+            let (session, path) = persist_agent_tab(sessions_dir.path(), branch, agent_id, color);
+            sessions.push(session);
+            cleanup.push(path);
+        }
+
+        let mut model = test_model();
+        model.sessions = sessions;
+        model.active_session = 5;
+
+        let title = build_session_title_with(&model, 40, sessions_dir.path());
+        let text = line_text(&title);
+
+        assert!(text.contains("6/8"));
+        assert!(text.contains("feature/branch-six"));
+        assert!(!text.contains("Gemini CLI"));
+
+        for path in cleanup {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn build_session_title_agent_tabs_keep_identity_colors_and_use_modifiers_for_active_state() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let (claude, claude_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/claude-active",
+            AgentId::ClaudeCode,
+            crate::model::AgentColor::Yellow,
+        );
+        let (codex, codex_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/codex-idle",
+            AgentId::Codex,
+            crate::model::AgentColor::Cyan,
+        );
+        let (gemini, gemini_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/gemini-idle",
+            AgentId::Gemini,
+            crate::model::AgentColor::Magenta,
+        );
+
+        let mut model = test_model();
+        model.sessions = vec![claude, codex, gemini];
+        model.active_session = 0;
+
+        let title = build_session_title_with(&model, 220, sessions_dir.path());
+        let claude_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/claude-active"))
+            .expect("claude span");
+        let codex_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/codex-idle"))
+            .expect("codex span");
+        let gemini_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/gemini-idle"))
+            .expect("gemini span");
+
+        assert_eq!(claude_span.style.fg, Some(Color::Yellow));
+        assert!(claude_span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(claude_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+        assert_eq!(codex_span.style.fg, Some(Color::Cyan));
+        assert!(codex_span.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(gemini_span.style.fg, Some(Color::Magenta));
+        assert!(gemini_span.style.add_modifier.contains(Modifier::DIM));
+
+        let _ = fs::remove_file(claude_path);
+        let _ = fs::remove_file(codex_path);
+        let _ = fs::remove_file(gemini_path);
     }
 
     #[test]
@@ -7318,7 +7557,7 @@ CUSTOM_ENV = "enabled"
             session_tab.tab_type,
             SessionTabType::Agent {
                 agent_id: "claude".to_string(),
-                color: crate::model::AgentColor::Green,
+                color: crate::model::AgentColor::Yellow,
             }
         );
 
@@ -7745,7 +7984,7 @@ CUSTOM_ENV = "enabled"
             converted.tab_type,
             SessionTabType::Agent {
                 agent_id: "codex".to_string(),
-                color: crate::model::AgentColor::Blue,
+                color: crate::model::AgentColor::Cyan,
             }
         );
         assert_eq!(converted.vt.rows(), 30);

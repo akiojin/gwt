@@ -684,6 +684,21 @@ Close the remaining workspace-shell usability gap where session PTYs rightfully 
 - Re-run focused keybind/workspace-shell verification after the implementation turns green.
 - Refresh SPEC-2 artifacts and progress evidence with the prefixed focus-escape contract.
 
+### Phase 50: Make Agent Session Titles Branch-First And Color-Stable (5 tasks)
+Make the right-side agent tabs identify workstreams by branch name instead of by agent name, while
+keeping agent identity visible through fixed colors that do not collapse when Claude Code is active.
+
+50.1: Session-title contract (2 tasks)
+- Agent session titles prefer persisted branch names over agent display names in both full-width and compact title chrome, while shell tabs keep their existing session-name labels.
+- Claude Code, Codex, and Gemini titles keep fixed Yellow/Cyan/Magenta identity colors, and active-state emphasis uses modifiers instead of a shared active-only foreground color.
+
+50.2: Focused coverage (2 tasks)
+- Add RED coverage for full-width and compact agent titles showing persisted branch names with `n/N` context preserved in compact mode.
+- Add RED coverage for identity-color stability plus modifier-based active emphasis, and refresh launch/conversion expectations to the new agent color contract.
+
+50.3: Verification (1 task)
+- Re-run focused session-title / launch-color tests, broad workspace verification, and refresh SPEC-2 artifacts and progress tracking.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
