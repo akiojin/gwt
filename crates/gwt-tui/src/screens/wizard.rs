@@ -1736,9 +1736,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         1,
     );
     let hint = match state.step {
-        WizardStep::BranchNameInput | WizardStep::IssueSelect => {
-            "[Enter] Confirm  [Esc] Back"
-        }
+        WizardStep::BranchNameInput | WizardStep::IssueSelect => "[Enter] Confirm  [Esc] Back",
         WizardStep::AIBranchSuggest if state.ai_suggest.loading => "[Esc] Cancel",
         WizardStep::AIBranchSuggest if state.ai_suggest.error.is_some() => {
             "[Enter] Manual input  [Esc] Retry"

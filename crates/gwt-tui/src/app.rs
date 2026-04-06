@@ -3300,8 +3300,9 @@ fn render_session_surface(
         match &session.tab_type {
             crate::model::SessionTabType::Agent { agent_id, color } => {
                 // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
-                const SPINNER: [char; 6] =
-                    ['\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}'];
+                const SPINNER: [char; 6] = [
+                    '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
+                ];
                 let elapsed = session.created_at.elapsed().as_millis() as usize;
                 let ch = SPINNER[(elapsed / 200) % SPINNER.len()];
                 let agent_fg = agent_color_to_ratatui(*color);
@@ -3319,9 +3320,7 @@ fn render_session_surface(
                     ),
                     Span::styled(
                         session.name.clone(),
-                        Style::default()
-                            .fg(agent_fg)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(agent_fg).add_modifier(Modifier::BOLD),
                     ),
                 ]));
                 lines.push(Line::from(""));
@@ -3337,8 +3336,7 @@ fn render_session_surface(
                     "Waiting for agent output",
                     Style::default().fg(theme::color::TEXT_DISABLED),
                 )));
-                let paragraph =
-                    Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+                let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
                 frame.render_widget(paragraph, area);
             }
             _ => {
