@@ -2959,7 +2959,7 @@ fn prepare_wizard_startup(
         },
         is_new_branch: starts_new_branch,
         gh_cli_available: gwt_core::process::command_exists("gh"),
-        ai_enabled: true,
+        ai_enabled: false,
         branch_name,
         spec_context,
         ..Default::default()
@@ -6831,6 +6831,23 @@ mod tests {
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
         assert_eq!(wizard.branch_name, "feature/spec-42-my-feature");
+    }
+
+    #[test]
+    fn prepare_wizard_startup_disables_ai_branch_suggestions_by_default() {
+        let cache = VersionCache::new();
+
+        let (wizard, _) = prepare_wizard_startup(
+            Some(screens::wizard::SpecContext::new(
+                "SPEC-99",
+                "AI-disabled flow",
+                "",
+            )),
+            vec![],
+            &cache,
+        );
+
+        assert!(!wizard.ai_enabled);
     }
 
     #[test]
