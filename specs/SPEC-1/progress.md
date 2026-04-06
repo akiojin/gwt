@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `42/42` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T17:46:32Z`
+- Task progress: `44/44` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T17:55:50Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -25,6 +25,7 @@
 - Snapshot-backed scrollbar metrics now use the pane viewport height as the thumb baseline, so short frame histories render a legible scrollbar length instead of a single-cell indicator.
 - PTY output chunks are now coalesced per session within each event-loop drain before `Message::PtyOutput` dispatch, so snapshot-backed scrollback tracks drawn frames instead of reader-chunk intermediate states.
 - Full-screen cache history now advances only when the visible viewport shifts vertically; overwrite-or-clear redraws replace the latest cached viewport in place so stale cleared lines no longer leak into scrollback.
+- Snapshot viewport-shift detection now ignores blank-only overlap, so transient empty frames are replaced instead of entering history and scrolling to the oldest frame no longer produces a blank screen.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

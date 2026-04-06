@@ -418,6 +418,10 @@ fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
         .collect()
 }
 
+fn slice_contains_non_blank_content(lines: &[String]) -> bool {
+    lines.iter().any(|line| !line.trim().is_empty())
+}
+
 fn snapshots_capture_viewport_shift(previous: &ScreenSnapshot, current: &ScreenSnapshot) -> bool {
     if previous.rows != current.rows
         || previous.cols != current.cols
@@ -432,10 +436,15 @@ fn snapshots_capture_viewport_shift(previous: &ScreenSnapshot, current: &ScreenS
     }
 
     for shift in 1..line_count {
-        if previous.visible_lines[shift..] == current.visible_lines[..line_count - shift] {
+        let previous_suffix = &previous.visible_lines[shift..];
+        let current_prefix = &current.visible_lines[..line_count - shift];
+        if previous_suffix == current_prefix && slice_contains_non_blank_content(previous_suffix) {
             return true;
         }
-        if previous.visible_lines[..line_count - shift] == current.visible_lines[shift..] {
+
+        let previous_prefix = &previous.visible_lines[..line_count - shift];
+        let current_suffix = &current.visible_lines[shift..];
+        if previous_prefix == current_suffix && slice_contains_non_blank_content(previous_prefix) {
             return true;
         }
     }
@@ -1188,6 +1197,66 @@ mod tests {
         let vt = VtState::new(40, 120);
         assert_eq!(vt.rows(), 40);
         assert_eq!(vt.cols(), 120);
+    }
+
+    #[test]
+    fn viewport_shift_detection_ignores_blank_only_overlap() {
+        let previous = ScreenSnapshot {
+            rows: 5,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec!["".to_string(); 5],
+        };
+        let current = ScreenSnapshot {
+            rows: 5,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec![
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "tail-frame".to_string(),
+            ],
+        };
+
+        assert!(
+            !snapshots_capture_viewport_shift(&previous, &current),
+            "blank overlap should not be treated as a viewport shift because it keeps a transient empty frame in history"
+        );
+    }
+
+    #[test]
+    fn viewport_shift_detection_accepts_non_blank_overlap() {
+        let previous = ScreenSnapshot {
+            rows: 5,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec![
+                "line-1".to_string(),
+                "line-2".to_string(),
+                "line-3".to_string(),
+                "line-4".to_string(),
+                "line-5".to_string(),
+            ],
+        };
+        let current = ScreenSnapshot {
+            rows: 5,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec![
+                "line-2".to_string(),
+                "line-3".to_string(),
+                "line-4".to_string(),
+                "line-5".to_string(),
+                "line-6".to_string(),
+            ],
+        };
+
+        assert!(
+            snapshots_capture_viewport_shift(&previous, &current),
+            "non-blank overlapping rows should still be treated as a viewport shift"
+        );
     }
 
     // ---- SessionState tests ----

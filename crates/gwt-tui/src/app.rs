@@ -5243,6 +5243,50 @@ mod tests {
     }
 
     #[test]
+    fn bottom_aligned_first_frame_does_not_leave_blank_snapshot_history() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+
+        enter_alt_screen_with_text(&mut model, "shell-0", "");
+        let rows = model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .rows();
+        replace_alt_screen_text(
+            &mut model,
+            "shell-0",
+            &format!("\u{1b}[{};1Htail-frame", rows),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert_eq!(
+            session.vt.snapshot_count(),
+            1,
+            "first visible full-screen frame should replace the transient blank frame instead of extending history"
+        );
+        assert!(
+            !session.vt.has_snapshot_scrollback(),
+            "scrollback must stay disabled when only one meaningful frame exists"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        let text = render_model_text(&model, 24, 8);
+        assert!(text.contains("tail-frame"));
+    }
+
+    #[test]
     fn snapshot_scrollback_reveals_previous_full_screen_viewport_after_line_shift() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;

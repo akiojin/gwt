@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: blank-only overlap を viewport shift と誤判定しない
+
+### 事象
+
+full-screen pane で 2 画面程度の履歴を上までスクロールすると、
+最古フレームが空画面になって何も表示されないことがあった。
+
+### 原因
+
+- snapshot history 追加条件が「行配列の shift 一致」だけだった。
+- 直前フレームがほぼ空白で次フレームが下端にだけ文字を描くケースで、
+  空白部分の一致を viewport shift と誤判定していた。
+- その結果、過渡的な空フレームが history に残り、最上端で空表示になった。
+
+### 再発防止策
+
+1. viewport shift 判定は「重なり行が非空白を含む」ことを必須条件にする。
+2. blank frame -> bottom-aligned first draw の回帰テストを追加し、`snapshot_count == 1` を固定する。
+3. 「最上端スクロールで空表示」は render だけでなく snapshot append 条件の誤検知を疑う。
+
 ## 2026-04-07 — fix: full-screen cache history は viewport shift のときだけ伸ばす
 
 ### 事象
