@@ -94,6 +94,8 @@ fn run_app(
                 ),
             );
         }
+        let size = terminal.size()?;
+        sync_startup_terminal_size(&mut model, size.width, size.height);
     }
     // Load initial data (branches, specs, tags) — best-effort
     if model.active_layer != ActiveLayer::Initialization {
@@ -188,9 +190,14 @@ fn persist_session_state_for_shutdown_with(model: &Model, path: &Path) -> Result
     model.save_session_state(path)
 }
 
+fn sync_startup_terminal_size(model: &mut Model, width: u16, height: u16) {
+    app::update(model, Message::Resize(width, height));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_tui::app;
     use gwt_tui::model::{ManagementTab, SessionLayout};
 
     #[test]
@@ -237,5 +244,18 @@ mod tests {
             .expect("persist session state for shutdown");
 
         assert!(path.exists());
+    }
+
+    #[test]
+    fn sync_startup_terminal_size_updates_model_and_active_vt_before_spawn() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+
+        sync_startup_terminal_size(&mut model, 120, 40);
+
+        assert_eq!(model.terminal_size(), (120, 40));
+        let (cols, rows) = app::session_content_size(&model);
+        let active = model.active_session_tab().expect("active session");
+        assert_eq!(active.vt.cols(), cols);
+        assert_eq!(active.vt.rows(), rows);
     }
 }

@@ -89,6 +89,11 @@ impl KeybindRegistry {
                 category: KeybindingCategory::Global,
             },
             Keybinding {
+                keys: "Ctrl+G, Tab/Shift+Tab".into(),
+                description: "Cycle focus".into(),
+                category: KeybindingCategory::Global,
+            },
+            Keybinding {
                 keys: "Ctrl+G, ]".into(),
                 description: "Next session".into(),
                 category: KeybindingCategory::Sessions,
@@ -233,6 +238,14 @@ impl KeybindRegistry {
                     KeyCode::Char(']') => Some(Message::NextSession),
                     KeyCode::Char('[') => Some(Message::PrevSession),
                     KeyCode::Char('z') => Some(Message::ToggleSessionLayout),
+                    KeyCode::Tab => {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            Some(Message::FocusPrev)
+                        } else {
+                            Some(Message::FocusNext)
+                        }
+                    }
+                    KeyCode::BackTab => Some(Message::FocusPrev),
                     KeyCode::Char('c') => Some(Message::NewShell),
                     KeyCode::Char('x') => Some(Message::CloseSession),
                     KeyCode::Char('q') => Some(Message::Quit),
@@ -324,6 +337,22 @@ mod tests {
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Char('z'), KeyModifiers::NONE));
         assert!(matches!(result, Some(Message::ToggleSessionLayout)));
+    }
+
+    #[test]
+    fn prefix_tab_cycles_focus_forward() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::FocusNext)));
+    }
+
+    #[test]
+    fn prefix_backtab_cycles_focus_backward() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(matches!(result, Some(Message::FocusPrev)));
     }
 
     #[test]

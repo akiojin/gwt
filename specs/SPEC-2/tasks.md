@@ -85,9 +85,9 @@
 
 - [x] T053 Add FocusPane enum to model.rs: TabContent, BranchDetail, Terminal (3 panes, no TabHeader)
 - [x] T054 Add active_focus: FocusPane field to Model
-- [x] T055 Write RED test: Tab cycles through 3 focus panes in order
-- [x] T056 Write RED test: Shift+Tab cycles in reverse
-- [x] T057 Implement Tab/Shift+Tab focus cycling in app.rs update()
+- [x] T055 Write RED test: Ctrl+G, Tab cycles through 3 focus panes in order
+- [x] T056 Write RED test: Ctrl+G, Shift+Tab cycles in reverse
+- [x] T057 Implement Ctrl+G, Tab/Shift+Tab focus cycling in app.rs update()
 - [x] T058 Implement focus-aware border colors: Cyan (focused) / Gray (unfocused)
 - [x] T059 Write render test: focused pane has Cyan border
 
@@ -105,7 +105,7 @@
 - [x] T066 TabHeader focus: Left/Right switch tabs, Enter moves focus to TabContent
 - [x] T067 TabContent focus: ↑↓ navigate list, Enter select, / search, r refresh
 - [x] T068 BranchDetail focus: ←→ switch sections, ↑↓ navigate actions, Enter execute
-- [x] T069 Terminal focus: forward all keys to PTY (except Tab and Ctrl+G prefix)
+- [x] T069 Terminal focus: forward all keys to PTY (except Ctrl+G prefix; Ctrl+G, Tab/Shift+Tab reserved for focus cycling)
 - [x] T070 Write 10+ tests for focus-aware key routing
 
 ### 5.4: Update Overlay Key Routing
@@ -315,10 +315,10 @@ banner in favor of pane-title chrome.
 - [x] T203 Refresh `SPEC-2` artifacts to describe hint parity with the supplemental escape contract.
 - [x] T204 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
 
-## Phase 28: Tab-Aware Management Focus Cycle
+## Phase 28: Ctrl+G Management Focus Cycle
 
-- [x] T205 [P] Write RED test: `Tab` on a non-Branches management tab skips `BranchDetail` and returns focus to `Terminal`.
-- [x] T206 [P] Write RED test: `BackTab` on a non-Branches management tab skips `BranchDetail` and returns focus to `TabContent`.
+- [x] T205 [P] Write RED test: `Ctrl+G, Tab` on a non-Branches management tab skips `BranchDetail` and returns focus to `Terminal`.
+- [x] T206 [P] Write RED test: `Ctrl+G, Shift+Tab` on a non-Branches management tab skips `BranchDetail` and returns focus to `TabContent`.
 - [x] T207 [P] Write RED test: `Branches` still retains the old three-surface focus cycle and can enter `BranchDetail`.
 - [x] T208 Update `app.rs` management focus cycling so non-Branches tabs use a two-state `Terminal <-> TabContent` loop while Branches keeps the three-state loop.
 - [x] T209 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
@@ -350,7 +350,7 @@ banner in favor of pane-title chrome.
 ## Phase 32: Make Terminal Footer Hints Survive Standard Width
 
 - [x] T225 [P] Write RED test: the compact grouped terminal footer hint remains visible at `80x24`.
-- [x] T226 [P] Write RED test: `Tab:focus` and `^C×2` remain visible in the terminal footer at `80x24`.
+- [x] T226 [P] Write RED test: `C-g Tab:focus` and `^C×2` remain visible in the terminal footer at `80x24`.
 - [x] T227 Update `status_bar.rs` and `app.rs` so narrow terminal footers compact context and use grouped shortcut notation.
 - [x] T228 Refresh `SPEC-2` artifacts to describe the standard-width compact-footer contract precisely.
 - [x] T229 Verify focused tests, snapshot refresh, workspace checks, and SPEC-2 artifact sync.
@@ -426,3 +426,49 @@ banner in favor of pane-title chrome.
 - [x] T272 Update `app.rs` grid-session title rendering to include `n:` plus the session-type icon before the session label.
 - [x] T273 Refresh grid-layout snapshots and `SPEC-2` artifacts to describe split-grid title parity.
 - [x] T274 Verify focused tests, snapshot verification, broad workspace verification, and artifact sync.
+
+## Phase 42: Cache Branch Detail Data Off The Input Path
+
+- [x] T275 [P] Write RED test: `Branches` list navigation switches to cached detail immediately without synchronously reloading the newly selected branch.
+- [x] T276 [P] Write RED test: asynchronous branch-detail preload/refresh populates cached detail and updates the selected branch when results arrive.
+- [x] T277 Implement branch-detail cache plus asynchronous preload/refresh wiring in `app.rs` / `model.rs` / `branches.rs`.
+- [x] T278 Refresh `SPEC-2` artifacts and progress tracking to describe cached asynchronous branch-detail loading.
+- [x] T279 Verify focused tests, broad workspace verification, and artifact sync.
+
+## Phase 43: Normalize Reverse Focus Keys And Startup PTY Geometry
+
+- [x] T280 [P] Write RED test: `Shift+Tab` arriving as `KeyCode::Tab` + `KeyModifiers::SHIFT` still moves focus backward on management panes.
+- [x] T281 [P] Write RED test: startup terminal-size synchronization seeds the initial shell geometry from the live terminal frame instead of the stale `80x24` default.
+- [x] T282 Update `app.rs` focus routing to normalize reverse-tab key encodings before pane cycling decisions.
+- [x] T283 Update `main.rs` startup initialization so the model receives the live terminal size before computing the default shell PTY rows/cols.
+- [x] T284 Refresh `SPEC-2` artifacts, progress evidence, and verification results for the reverse-focus and startup-geometry fixes.
+
+## Phase 44: Stop Branch List Wrap, Prefer Local Branches, And Keep Nearby Tabs Visible
+
+- [x] T285 [P] Write RED test: Branches list `Up` on the first row and `Down` on the last row stop at the edge instead of wrapping.
+- [x] T286 [P] Write RED test: `ViewMode::All` keeps local branches ahead of remote branches for default and name/date sort modes.
+- [x] T287 [P] Write RED test: standard-width management pane titles keep the active tab plus nearby tabs visible instead of collapsing to the active label only.
+- [x] T288 Update `branches.rs` and `app.rs` to stop Branches-list wraparound, apply local-first ordering in `All`, and render nearby-tab management titles with ellipsis when tabs are hidden.
+- [x] T289 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the Branches and management-title visibility fixes.
+
+## Phase 45: Default Branches Filter To Local
+
+- [x] T290 [P] Write RED test: Branches default state starts in `ViewMode::Local`.
+- [x] T291 [P] Write RED test: the Branches view-mode cycle now starts at `Local` and still reaches `Remote` and `All`.
+- [x] T292 [P] Refresh reviewer guidance and snapshots so the initial Branches surface shows `View: Local`.
+- [x] T293 Update `branches.rs` so the default `ViewMode` is `Local` without changing the rest of the filter behavior.
+- [x] T294 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the default-local Branches filter.
+
+## Phase 46: Stabilize Branch Detail Prefetch
+
+- [x] T295 [P] Write RED test: canceling a superseded branch-detail preload worker stops it before it starts loading later branches.
+- [x] T296 [P] Write RED test: one branch-detail preload refresh performs exactly one Docker container discovery even when multiple branches are prefetched.
+- [x] T297 Update `app.rs` to track and cancel/reap branch-detail preload workers instead of replacing the completion queue and detaching stale workers.
+- [x] T298 Update `branches.rs` so branch-detail loading consumes a per-refresh Docker snapshot instead of calling Docker per branch.
+- [x] T299 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the stabilized Branch Detail preload path.
+
+## Phase 47: Keep Branches List Responsive During Detail Backfill
+
+- [x] T300 [P] Write RED test: one `Tick` does not fully drain a large branch-detail preload queue, so preload work cannot monopolize a frame.
+- [x] T301 Update `app.rs` branch-detail event draining to apply a bounded per-tick batch budget while preserving generation/branch validation.
+- [x] T302 Refresh `SPEC-2` artifacts and focused verification evidence for the incremental preload-drain contract.
