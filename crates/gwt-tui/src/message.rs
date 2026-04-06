@@ -27,9 +27,9 @@ pub enum Message {
     Quit,
     /// Toggle between Main (sessions) and Management layers.
     ToggleLayer,
-    /// Move focus to the next pane (management layer only).
+    /// Move focus to the next logical pane.
     FocusNext,
-    /// Move focus to the previous pane (management layer only).
+    /// Move focus to the previous logical pane.
     FocusPrev,
     /// Switch to a specific management tab.
     SwitchManagementTab(ManagementTab),

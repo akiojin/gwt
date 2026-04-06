@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `17/17` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T15:20:00Z`
+- Task progress: `25/25` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T05:14:42Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -12,6 +12,8 @@
 - `PtyOutput` now feeds a per-session vt100 surface and the session pane renders live terminal content instead of a placeholder.
 - `Ctrl+click` URL open now resolves visible URL regions from the active session pane and invokes the platform opener with the full URL.
 - Wrapped URLs are now detected across soft-wrapped terminal rows and remain underlined/clickable across every visible segment.
+- Terminal sessions now keep viewport-local scrollback state, expose overflow-only scrollbar chrome, and restore the cursor against the text area even when the gutter is present.
+- Mouse-wheel scrolling now freezes live follow against vt100 scrollback, and drag selection copies from the visible scrollback viewport through `contents_between()`.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

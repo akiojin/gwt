@@ -25,3 +25,14 @@
 - [x] T015 Run full existing test suite (17+ keybind tests, viewport tests) and verify no regressions.
 - [x] T016 Run `cargo clippy` and `cargo fmt` on all changed files.
 - [x] T017 Update SPEC-1 progress artifacts with verification results.
+
+## Phase 4: Scrollback Interaction, Selection, And Scrollbar
+
+- [x] T018 [P] Write RED test: mouse-wheel scroll moves the terminal viewport into scrollback and keeps live-follow disabled until the viewport returns to the bottom.
+- [x] T019 [P] Write RED test: overflowing terminal history renders a right-edge scrollbar, while non-overflowing history does not reserve scrollbar chrome.
+- [x] T020 [P] Write RED test: drag selection across visible scrollback copies the expected single-line and multi-line payload via `contents_between()`.
+- [x] T021 Extend terminal session state with viewport and selection tracking in `model.rs`.
+- [x] T022 Implement mouse-wheel scrollback control and live-follow restoration in `app.rs`.
+- [x] T023 Implement drag-selection extraction/highlighting and clipboard copy in `app.rs` / `renderer.rs`.
+- [x] T024 Render the overflow-only terminal scrollbar in the session surface and keep cursor placement correct when the gutter is present.
+- [x] T025 Refresh SPEC-1 artifacts and rerun focused terminal interaction verification.

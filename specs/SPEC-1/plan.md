@@ -2,7 +2,7 @@
 
 ## Summary
 
-Complete the terminal emulation layer by first adding a real vt100-backed session surface in `gwt-tui`, then layering URL opening and alt-screen verification on top of it. Low-level renderer tests exist, but the interactive session pane is still missing the state needed for click routing and wrapped URL handling.
+Complete the terminal emulation layer by first adding a real vt100-backed session surface in `gwt-tui`, then layering URL opening, scrollback interaction, selection, and alt-screen verification on top of it. Low-level renderer tests exist, but the interactive session pane is still missing the remaining state needed for viewport routing, selection, and scrollbar handling.
 
 ## Technical Context
 
@@ -45,6 +45,13 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 2. Verify main scrollback is preserved after alt-screen round-trip.
 3. Verify cursor position and screen content after alt-screen exit.
 4. Document any vt100 crate limitations in edge cases.
+
+### Phase 3: Viewport Interaction, Selection, And Scrollbar
+
+1. Extend session terminal state with viewport/follow-live state and the minimum selection state needed to map mouse drag coordinates back into the visible scrollback.
+2. Route mouse wheel input into `vt100::Parser::set_scrollback()` and keep new PTY output from snapping the viewport back to live while the user is reviewing history.
+3. Use `vt100::Screen::contents_between()` for copy extraction so wrapped rows and wide characters are copied from the rendered viewport contract instead of from ad-hoc transcript slicing.
+4. Reserve a right-side gutter only when history overflows the visible pane and render a scrollbar whose thumb matches the current viewport position.
 
 ## Dependencies
 
