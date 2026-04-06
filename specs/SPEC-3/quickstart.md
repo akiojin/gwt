@@ -108,7 +108,7 @@
 41. From Branches, choose `Create new from selected`, finish the wizard, and
     verify Launch Agent creates a sibling worktree for the requested branch
     before the PTY starts, even when the selected base branch already has its
-    own worktree.
+    own linked worktree such as `develop`.
 42. Repeat the new-branch launch from SPEC or Issue context and verify the
     created worktree uses the new branch while the session metadata records
     that actual launched path.
@@ -135,6 +135,8 @@
 - `cargo test -p gwt-tui materialize_pending_launch_with -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`
 - `cargo test -p gwt-tui from_selected_branch -- --nocapture`
+- `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`
+- `cargo test -p gwt-tui linked_worktree_uses_main_repo_sibling_layout -- --nocapture`
 - `cargo test -p gwt-tui session_conversion`
 
 ## Expected Result

@@ -111,6 +111,40 @@ impl WorktreeManager {
     }
 }
 
+/// Resolve the main worktree root for a repository or linked worktree path.
+pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::Git(format!("rev-parse --git-common-dir: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(GwtError::Git(format!(
+            "rev-parse --git-common-dir: {stderr}"
+        )));
+    }
+
+    let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if common_dir.as_os_str().is_empty() {
+        return Err(GwtError::Git(
+            "rev-parse --git-common-dir returned an empty path".to_string(),
+        ));
+    }
+
+    if common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        return common_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
+            GwtError::Git(format!(
+                "git common dir has no parent repository: {}",
+                common_dir.display()
+            ))
+        });
+    }
+
+    Ok(repo_path.to_path_buf())
+}
+
 /// Derive a sibling worktree path from the repo root and branch name.
 pub fn sibling_worktree_path(repo_path: &Path, branch: &str) -> PathBuf {
     let repo_name = repo_path
@@ -334,6 +368,38 @@ prunable gitdir file points to non-existent location
         let repo_path = Path::new("/tmp/my-repo");
         let worktree = sibling_worktree_path(repo_path, "feature/banner");
         assert_eq!(worktree, PathBuf::from("/tmp/my-repo-feature-banner"));
+    }
+
+    #[test]
+    fn main_worktree_root_returns_primary_repo_for_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("gwt");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let linked_worktree = tmp.path().join("develop");
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "develop",
+                linked_worktree.to_str().unwrap(),
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add -b");
+        assert!(
+            output.status.success(),
+            "git worktree add -b failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(
+            main_worktree_root(&linked_worktree).unwrap(),
+            std::fs::canonicalize(&repo_path).unwrap()
+        );
     }
 
     #[test]

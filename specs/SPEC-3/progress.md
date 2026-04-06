@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `185/185` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T00:20:00Z`
+- Artifact refresh: `2026-04-07T01:10:00Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -151,6 +151,9 @@
   existing worktree into `LaunchConfig`, so launch-time materialization now
   still creates the requested sibling worktree instead of silently reusing
   `develop`.
+- Launches started from a linked worktree such as `develop` now resolve the
+  main repository root before deriving the sibling layout, so new branches no
+  longer materialize under `develop-*` paths like `develop-feature-test`.
 - The actual launched worktree path is now persisted into session metadata
   and exported through `GWT_PROJECT_ROOT`, so Quick Start / resume operate on
   the materialized launch target instead of a repo-root alias.
@@ -162,8 +165,10 @@
 - Focused verification for the worktree-materialization slice now includes
   `cargo test -p gwt-git sibling_worktree_path_uses_repo_name_and_slugged_branch -- --nocapture`,
   `cargo test -p gwt-git create_from_base_creates_new_branch_worktree -- --nocapture`,
+  `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`,
   `cargo test -p gwt-tui base_branch -- --nocapture`, and
   `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`,
+  `cargo test -p gwt-tui linked_worktree_uses_main_repo_sibling_layout -- --nocapture`,
   plus `cargo test -p gwt-tui from_selected_branch -- --nocapture`.
 
 ## Next

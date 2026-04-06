@@ -2736,9 +2736,11 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         return Ok(());
     }
 
-    let worktree_path = gwt_git::worktree::sibling_worktree_path(repo_path, &branch_name);
-    let manager = gwt_git::WorktreeManager::new(repo_path);
-    if local_branch_exists(repo_path, &branch_name)? {
+    let main_repo_path =
+        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
+    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    if local_branch_exists(&main_repo_path, &branch_name)? {
         manager
             .create(&branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
@@ -7412,6 +7414,8 @@ CUSTOM_ENV = "enabled"
             .expect("repo dir parent")
             .join(format!("{repo_name}-feature-materialized-launch"));
         assert!(expected_worktree.exists(), "new worktree should exist");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
 
         let branch_output = std::process::Command::new("git")
             .args(["branch", "--show-current"])
@@ -7473,6 +7477,8 @@ CUSTOM_ENV = "enabled"
             .expect("repo dir parent")
             .join(format!("{repo_name}-feature-launch-from-selected"));
         assert!(expected_worktree.exists(), "new worktree should exist");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
 
         let branch_output = std::process::Command::new("git")
             .args(["branch", "--show-current"])
@@ -7497,6 +7503,85 @@ CUSTOM_ENV = "enabled"
             .path();
         let persisted = AgentSession::load(&session_entry).expect("load persisted session");
         assert_eq!(persisted.branch, "feature/launch-from-selected");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_linked_worktree_uses_main_repo_sibling_layout() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let develop_worktree = workspace_dir.path().join("develop");
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "develop",
+                develop_worktree.to_str().expect("develop worktree path"),
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add -b");
+        assert!(
+            output.status.success(),
+            "git worktree add -b failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/test".to_string(),
+            worktree_path: Some(develop_worktree.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(develop_worktree.clone());
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let expected_worktree = workspace_dir.path().join("gwt-feature-test");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
+        assert!(
+            expected_worktree.exists(),
+            "new sibling worktree should exist"
+        );
+        assert!(
+            !workspace_dir.path().join("develop-feature-test").exists(),
+            "linked worktree name must not be used as sibling-layout repo prefix"
+        );
+
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&expected_worktree)
+            .output()
+            .expect("read worktree branch");
+        assert!(
+            branch_output.status.success(),
+            "git branch --show-current failed: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/test"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .next()
+            .expect("session entry")
+            .expect("dir entry")
+            .path();
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
         assert_eq!(persisted.worktree_path, expected_worktree);
     }
 

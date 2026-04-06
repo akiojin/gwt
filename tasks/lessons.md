@@ -2,6 +2,25 @@
 
 ## 2026-04-06 — fix: startup 時の agent detection は main thread で同期実行しない
 
+## 2026-04-07 — fix: sibling worktree path は linked worktree 名ではなく main repo 名を基準にする
+
+### 事象
+
+Launch Agent の新規ブランチ導線で、`develop` linked worktree 上から `feature/test` を起動すると
+worktree path が `.../develop-feature-test` になり、SPEC-10 の sibling layout と一致しなかった。
+
+### 原因
+
+- `resolve_launch_worktree()` が `model.repo_path` をそのまま `sibling_worktree_path()` に渡していた。
+- app を linked worktree (`.../develop`) から起動している場合、`repo_path.file_name()` が main repo 名ではなく
+  linked worktree 名の `develop` になるため、path prefix が誤っていた。
+
+### 再発防止策
+
+1. sibling layout を導出する前に、`git rev-parse --git-common-dir` 等で main worktree root を解決する。
+2. worktree path のテストは main repo 直下だけでなく、linked worktree を起点にした Launch Agent 経路でも固定する。
+3. `git worktree` 系の path 期待値は macOS の `/var` → `/private/var` 正規化を考慮して canonical path で比較する。
+
 ### 事象
 
 `load_initial_data_prefetches_branch_detail_async` が GitHub Actions で約 5 秒ブロックし、
