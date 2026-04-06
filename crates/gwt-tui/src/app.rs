@@ -43,6 +43,7 @@ use crate::{
 use crate::custom_agents::{load_custom_agents_from_path, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV};
 
 static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// Cap branch-detail preload event application per tick so one refresh burst
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
@@ -2796,21 +2797,39 @@ fn schedule_startup_version_cache_refresh() {
     schedule_startup_version_cache_refresh_with(
         wizard_version_cache_path(),
         AgentDetector::detect_all,
+        |task| {
+            let _ = thread::spawn(task);
+        },
         schedule_wizard_version_cache_refresh,
     );
 }
 
-fn schedule_startup_version_cache_refresh_with<Detect, Schedule>(
+fn schedule_startup_version_cache_refresh_with<Detect, Spawn, Schedule>(
     cache_path: PathBuf,
     detect_agents: Detect,
+    spawn_task: Spawn,
     schedule_refresh: Schedule,
 ) where
-    Detect: FnOnce() -> Vec<DetectedAgent>,
-    Schedule: FnOnce(PathBuf, Vec<AgentId>),
+    Detect: FnOnce() -> Vec<DetectedAgent> + Send + 'static,
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>),
+    Schedule: FnOnce(PathBuf, Vec<AgentId>) + Send + 'static,
 {
-    let cache = VersionCache::load(&cache_path);
-    let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
-    schedule_refresh(cache_path, refresh_targets);
+    if STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    spawn_task(Box::new(move || {
+        let cache = VersionCache::load(&cache_path);
+        let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+        if refresh_targets.is_empty() {
+            return;
+        }
+        schedule_refresh(cache_path, refresh_targets);
+    }));
 }
 
 fn prepare_wizard_startup(
@@ -4265,6 +4284,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Once;
     use tempfile::TempDir;
+
+    static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
@@ -7106,6 +7127,11 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn schedule_startup_version_cache_refresh_with_schedules_stale_refreshable_agents() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
         let mut cache = VersionCache::new();
@@ -7118,7 +7144,9 @@ CUSTOM_ENV = "enabled"
             .insert("codex".into(), version_entry(&["0.5.0"], 60));
         cache.save(&cache_path).unwrap();
 
-        let scheduled = std::cell::RefCell::new(None);
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let scheduled_capture = scheduled.clone();
         schedule_startup_version_cache_refresh_with(
             cache_path.clone(),
             || {
@@ -7128,12 +7156,17 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.2.0")),
                 ]
             },
-            |path, targets| {
-                *scheduled.borrow_mut() = Some((path, targets));
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
         );
 
-        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
         // Claude stale, Codex fresh, Gemini missing → Claude + Gemini need refresh
         assert!(targets.contains(&AgentId::ClaudeCode));
@@ -7143,9 +7176,16 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn schedule_startup_version_cache_refresh_with_schedules_missing_cache_entries() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
-        let scheduled = std::cell::RefCell::new(None);
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let scheduled_capture = scheduled.clone();
 
         schedule_startup_version_cache_refresh_with(
             cache_path.clone(),
@@ -7155,12 +7195,17 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.4.0")),
                 ]
             },
-            |path, targets| {
-                *scheduled.borrow_mut() = Some((path, targets));
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
         );
 
-        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
         // All npm agents (Claude, Codex, Gemini) need refresh from empty cache
         assert!(targets.contains(&AgentId::ClaudeCode));
@@ -7169,7 +7214,50 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn schedule_startup_version_cache_refresh_with_defers_detection_until_spawned_task_runs() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+        let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let detected_flag = detected.clone();
+        let scheduled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let scheduled_flag = scheduled.clone();
+
+        schedule_startup_version_cache_refresh_with(
+            PathBuf::from("/tmp/agent-versions.json"),
+            move || {
+                detected_flag.store(true, Ordering::Release);
+                vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
+            },
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+            move |_, _| {
+                scheduled_flag.store(true, Ordering::Release);
+            },
+        );
+
+        assert!(!detected.load(Ordering::Acquire));
+        assert!(!scheduled.load(Ordering::Acquire));
+        assert!(spawned.borrow().is_some());
+        assert!(STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
+
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+
+        assert!(detected.load(Ordering::Acquire));
+        assert!(scheduled.load(Ordering::Acquire));
+        assert!(!STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn schedule_wizard_version_cache_refresh_with_defers_refresh_until_spawned_task_runs() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
 
         let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
