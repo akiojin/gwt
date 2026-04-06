@@ -338,8 +338,8 @@ As a developer, I want to convert an existing session to a different agent type 
 | Flag | Description |
 |------|-------------|
 | `--print` | Non-interactive mode (SDK mode) |
-| `--permission-mode auto` | Auto mode — execute without prompts (recommended over --dangerously-skip-permissions) |
-| `--permission-mode bypassPermissions` | Bypass all permission checks (legacy: `--dangerously-skip-permissions`) |
+| `--dangerously-skip-permissions` | Skip permission prompts (legacy behavior) |
+| `--permission-mode bypassPermissions` | Bypass all permission checks (alternate permission-mode form) |
 | `--enable-auto-mode` | Unlock auto mode in Shift+Tab cycle |
 | `--model <model>` | Model selection (alias: `sonnet`, `opus`, or full name) |
 | `--allowedTools <tools>` | Tools that execute without prompting (pattern matching supported) |
@@ -365,7 +365,7 @@ Model list snapshot: **2026-04-06**.
 | `-c model_reasoning_effort=<level>` | Reasoning level: low/medium/high |
 | `-c service_tier=fast` | Fast mode (Codex-only speed tier). Independent from skip-permission settings |
 | `--full-auto` | Approval/sandbox automation convenience alias (not a Fast mode toggle) |
-| `--dangerously-bypass-approvals-and-sandbox` | Skip permissions (v0.80.0+) |
+| `--yolo` | Skip permissions (Codex legacy flag) |
 | `--enable web_search` | Enable web search (v0.90.0+) |
 | `--enable collaboration_modes` | Enable collaboration (v0.91.0+) |
 | `-c shell_environment_policy=inherit` | Shell policy |
@@ -375,6 +375,13 @@ Model list snapshot: **2026-04-06**.
 | Flag | Description |
 |------|-------------|
 | `--non-interactive` | Non-interactive mode |
+| `--yolo` | Skip permissions (Gemini legacy flag) |
+
+#### GitHub Copilot
+
+| Flag | Description |
+|------|-------------|
+| `--yolo` | Skip permissions (Copilot legacy flag) |
 
 ### Session File Schema (`~/.gwt/sessions/{base64_path}.toml`)
 
@@ -409,6 +416,7 @@ displayName = "My Agent"
 agentType = "command"  # command | path | bunx
 command = "my-agent-cli"
 defaultArgs = ["--flag"]
+skipPermissionsArgs = ["--yolo"]
 
 [tools.customCodingAgents.my-agent.modeArgs]
 normal = []

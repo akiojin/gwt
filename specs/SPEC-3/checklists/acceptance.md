@@ -1,7 +1,7 @@
 # Acceptance Checklist: SPEC-3 - Agent Management
 
 - [x] The local artifact set now includes supporting planning and execution files.
-- [x] `177/177` task progress is reflected in `progress.md` and related notes.
+- [x] `181/181` task progress is reflected in `progress.md` and related notes.
 - [x] The artifact set now consistently describes the implemented session metadata swap instead of a full PTY relaunch.
 - [x] `analysis.md` now matches the repaired session-conversion semantics.
 - [x] The artifact set now consistently describes dedicated version selection
