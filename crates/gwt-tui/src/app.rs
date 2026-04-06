@@ -2773,6 +2773,19 @@ fn materialize_pending_launch_with(
         s.vt.resize(rows, cols);
     }
 
+    // Prepare hook assets before the agent process starts so the first turn
+    // can emit runtime state immediately.
+    let worktree = config.working_dir.as_deref().unwrap_or(&model.repo_path);
+    if let Err(e) = distribute_to_worktree(worktree) {
+        tracing::warn!("skill distribution failed: {e}");
+    }
+    if let Err(e) = update_git_exclude(worktree) {
+        tracing::warn!("git exclude update failed: {e}");
+    }
+    if let Err(e) = generate_settings_local(worktree) {
+        tracing::warn!("settings.local.json generation failed: {e}");
+    }
+
     // Spawn PTY process for the agent session.
     let mut pty_env = config.env_vars.clone();
     inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
@@ -2793,18 +2806,6 @@ fn materialize_pending_launch_with(
                 format!("Agent PTY spawn failed: {e}"),
             ),
         );
-    }
-
-    // Distribute embedded skills to the worktree (best-effort; never block launch).
-    let worktree = config.working_dir.as_deref().unwrap_or(&model.repo_path);
-    if let Err(e) = distribute_to_worktree(worktree) {
-        tracing::warn!("skill distribution failed: {e}");
-    }
-    if let Err(e) = update_git_exclude(worktree) {
-        tracing::warn!("git exclude update failed: {e}");
-    }
-    if let Err(e) = generate_settings_local(worktree) {
-        tracing::warn!("settings.local.json generation failed: {e}");
     }
 
     apply_notification(
@@ -7546,6 +7547,51 @@ CUSTOM_ENV = "enabled"
             value["hooks"]["PreToolUse"][1]["matcher"],
             serde_json::Value::String("Bash".to_string())
         );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_prepares_claude_settings_before_agent_process_starts() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-spec-42");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let marker = dir.path().join("settings-check.txt");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Custom("my-agent".to_string()),
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "if [ -f .claude/settings.local.json ]; then printf present > \"$1\"; else printf missing > \"$1\"; fi".to_string(),
+                "sh".to_string(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree),
+            branch: Some("feature/spec-42".to_string()),
+            display_name: "My Agent".to_string(),
+            color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let mut observed = None;
+        for _ in 0..50 {
+            if let Ok(value) = fs::read_to_string(&marker) {
+                observed = Some(value);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(observed.as_deref(), Some("present"));
     }
 
     #[test]

@@ -93,6 +93,7 @@ As a developer, I want the Branches list to show hook-derived live session state
 4. Given multiple active agent sessions belong to the same branch, when the Branches list renders, then exactly one right-aligned summary is shown and `Running` wins over `WaitingInput`.
 5. Given the management pane is narrow, when the Branches list cannot fit both the branch label and the full session summary, then the branch name and core branch icons stay visible and the session summary shortens or disappears before the left side becomes unreadable.
 6. Given gwt materializes a launched worktree for Claude Code, when it writes `.claude/settings.local.json`, then the file uses Claude's native `hooks` schema, preserves non-gwt hook entries and unrelated settings, and replaces stale gwt-managed hook entries instead of emitting an internal `managed_hooks` / `user_hooks` schema.
+7. Given gwt launches a Claude Code or Codex agent in a worktree that needs managed hook assets, when the PTY process starts, then the required hook scripts and settings have already been written so the first agent turn can emit runtime state immediately.
 
 ## Edge Cases
 
@@ -160,6 +161,7 @@ As a developer, I want the Branches list to show hook-derived live session state
 - **FR-006u**: Session cleanup is authoritative for terminal-backed reality. When an agent PTY exits or the user closes its tab, gwt marks the persisted session `Stopped` and removes that branch's live-session indicator from the list on the next render.
 - **FR-006v**: Branch-row live session summaries are width-aware. When space is limited, the right-aligned summary shortens before the branch label or branch icons are truncated, and extremely narrow layouts may omit the right side entirely.
 - **FR-006w**: Launch-time Claude hook distribution writes `.claude/settings.local.json` in Claude's native `hooks` schema. Existing non-gwt hooks and unrelated Claude settings are preserved, while legacy gwt-managed entries and the obsolete `managed_hooks` / `user_hooks` schema are replaced during regeneration.
+- **FR-006x**: Managed hook assets are prepared before the agent PTY is spawned. A newly launched Claude Code or Codex process must see the hook scripts and settings on its very first turn, not only on subsequent launches.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-008a**: PTY exit detection removes the corresponding session tab automatically, clamps the active session index to the nearest surviving tab, and drops the stale PTY handle in the same tick.

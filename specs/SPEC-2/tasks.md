@@ -510,3 +510,4 @@ banner in favor of pane-title chrome.
 - [x] T326 [P] Write RED test: `.claude/settings.local.json` regeneration emits Claude's native `hooks` schema and removes the obsolete `managed_hooks` / `user_hooks` keys.
 - [x] T327 [P] Write RED test: Claude settings regeneration preserves non-gwt user hooks while replacing stale gwt-managed commands.
 - [x] T328 Update `gwt-skills` / `app.rs` launch materialization to generate Claude hook settings through a typed Claude-schema merge instead of the internal hooks-merge schema.
+- [x] T329 [P] Write RED test and fix: managed hook assets/settings are written before agent PTY spawn so the first launch turn can emit runtime state.
