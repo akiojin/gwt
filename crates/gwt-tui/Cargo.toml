@@ -25,7 +25,7 @@ gwt-skills = { workspace = true }
 gwt-terminal = { workspace = true }
 gwt-voice = { workspace = true }
 ratatui = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
 tokio = { workspace = true }
 vt100 = "0.15"
 serde_json = { workspace = true }
