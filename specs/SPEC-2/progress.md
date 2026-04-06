@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `346/346` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T12:01:17Z`
+- Task progress: `349/349` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T15:09:52Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -71,6 +71,7 @@
 - Claude launch materialization now regenerates `.claude/settings.local.json` in Claude's native `hooks` schema, preserving user hooks and unrelated settings while replacing the stale internal `managed_hooks` / `user_hooks` layout that prevented Claude hook execution.
 - Codex launch materialization now also generates `.codex/hooks.json` for untracked worktrees, preserves tracked hook files, and uses direct shell commands instead of Node-based live-state forwarders.
 - gwt startup now resets only its own runtime PID namespace before restore, so stale indicators from earlier gwt runs disappear without touching sibling gwt processes.
+- Codex launch configs now add the current `~/.gwt/sessions/runtime/<pid>` namespace as an extra writable root, so Codex hooks can persist live spinner sidecars even under `workspace-write` sandboxing.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

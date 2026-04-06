@@ -537,3 +537,9 @@ banner in favor of pane-title chrome.
 - [x] T344 [P] Write RED test: Gemini branch spinner uses `Magenta` in the Branches strip.
 - [x] T345 Implement branch-only built-in agent palette mapping in `app.rs` / `branches.rs` with fallback for custom agents.
 - [x] T346 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for the Branches spinner palette mapping.
+
+## Phase 55: Codex Runtime Namespace Sandboxing
+
+- [x] T347 [P] Write RED test: Codex launch adds the `GWT_SESSION_RUNTIME_PATH` parent directory as a writable root.
+- [x] T348 Implement Codex runtime namespace writable-root injection in `crates/gwt-agent/src/launch.rs`.
+- [x] T349 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for Codex runtime sidecar writes.

@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: Codex の hook runtime sidecar は sandbox writable root を明示しないと `~/.gwt` に書けない
+
+### 事象
+
+`feature/branches` の `gwt-tui` から起動した Codex では `codex_hooks` と `GWT_SESSION_RUNTIME_PATH` が入っていても、
+Branches の live spinner 用 sidecar が一切生成されなかった。
+
+### 原因
+
+- runtime sidecar の保存先を `~/.gwt/sessions/runtime/<pid>/<session>.json` にしていた。
+- Codex は `workspace-write` sandbox で動くため、追加 writable root を付けない限り `~/.gwt/...` への書き込みが拒否される。
+- hook command は fail-open でエラーを握りつぶすため、設定が入っていても無症状で sidecar だけ欠落した。
+
+### 再発防止策
+
+1. Codex hook が workspace 外へ書く設計にした場合は、launch args に対応する `--add-dir` も RED テストで固定する。
+2. `GWT_SESSION_RUNTIME_PATH` が入っていることだけで「書ける」と判断しない。sandbox writable roots まで確認する。
+3. hook 不具合では `argv/env` だけでなく、実際に sidecar が生成されるかを同じ runtime path で手動再現して切り分ける。
+
 ## 2026-04-06 — fix: Codex の hooks は `hooks.json` だけでは起動せず launch feature flag も必要
 
 ### 事象

@@ -106,6 +106,9 @@
 - [x] **T-138**: Verify focused and broad `gwt-skills` / `gwt-tui` tests pass after Claude/Codex runtime hook normalization.
 - [x] **T-139**: Write RED test: gwt-managed Codex launch configs include `--enable codex_hooks`.
 - [x] **T-140**: Implement Codex launch feature-flag enablement in `crates/gwt-agent/src/launch.rs` and rerun focused plus broad verification.
+- [x] **T-141**: Write RED test: Codex launch configs add the `GWT_SESSION_RUNTIME_PATH` parent directory as a writable root.
+- [x] **T-142**: Implement Codex runtime writable-root injection in `crates/gwt-agent/src/launch.rs` so `~/.gwt/sessions/runtime/<pid>` remains writable under `workspace-write`.
+- [x] **T-143**: Refresh `SPEC-9` artifacts and rerun focused plus broad verification for Codex runtime sidecar sandbox access.
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 

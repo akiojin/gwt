@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
 use crate::types::{AgentColor, AgentId, SessionMode};
 
 /// Resolved runner command for agent execution.
@@ -400,6 +401,20 @@ impl AgentLaunchBuilder {
         args.push("shell_environment_policy.ignore_default_excludes=true".to_string());
         args.push("-c".to_string());
         args.push("shell_environment_policy.experimental_use_profile=true".to_string());
+
+        if let Some(runtime_dir) = self.codex_runtime_writable_root(env_vars) {
+            args.push("--add-dir".to_string());
+            args.push(runtime_dir);
+        }
+    }
+
+    fn codex_runtime_writable_root(&self, env_vars: &HashMap<String, String>) -> Option<String> {
+        self.env_overrides
+            .get(GWT_SESSION_RUNTIME_PATH_ENV)
+            .or_else(|| env_vars.get(GWT_SESSION_RUNTIME_PATH_ENV))
+            .map(PathBuf::from)
+            .and_then(|runtime_path| runtime_path.parent().map(|dir| dir.to_path_buf()))
+            .map(|dir| dir.to_string_lossy().into_owned())
     }
 
     fn build_gemini_args(&self, args: &mut Vec<String>) {
@@ -608,6 +623,20 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
+    }
+
+    #[test]
+    fn build_codex_adds_runtime_namespace_as_writable_root() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .env(
+                "GWT_SESSION_RUNTIME_PATH",
+                "/Users/akiojin/.gwt/sessions/runtime/36610/session-123.json",
+            )
+            .build();
+
+        assert!(config.args.windows(2).any(|pair| {
+            pair[0] == "--add-dir" && pair[1] == "/Users/akiojin/.gwt/sessions/runtime/36610"
+        }));
     }
 
     #[test]
