@@ -6,11 +6,11 @@ gwt-tui extends terminal input with voice transcription (Qwen3-ASR), file
 paste from clipboard, and AI-assisted branch naming. The voice path now
 routes start/stop/transcribe through a shared TUI runtime seam, but the
 concrete Qwen3-ASR backend remains a stub that returns model-loading errors.
-The AI branch
-naming flow is live in the wizard, including explicit manual-entry fallback in
-the suggestion list and normalization to `3..=5` git-safe names. File paste
-now shell-quotes injected paths and parses `file://` clipboard payloads for
-safer PTY input.
+The AI branch naming flow remains implemented in the codebase, including
+explicit manual-entry fallback in the suggestion list and normalization to
+`3..=5` git-safe names, but the standard Launch Agent wizard currently skips
+that step and opens manual branch input directly. File paste now shell-quotes
+injected paths and parses `file://` clipboard payloads for safer PTY input.
 
 ## User Stories
 
@@ -38,17 +38,21 @@ As a developer, I want to paste file paths from the system clipboard into the te
 3. Given the clipboard contains text (not file references), when I press Ctrl+G,p, then the text is pasted as-is.
 4. Given the clipboard is empty, when I press Ctrl+G,p, then nothing is pasted and no error is shown.
 
-### US-3: Get AI-Suggested Branch Names in Wizard (P2) -- IMPLEMENTED
+### US-3: Get AI-Suggested Branch Names in Wizard (P2) -- PARTIALLY IMPLEMENTED
 
 As a developer, I want AI-suggested branch names when creating a new worktree so that I can quickly pick a well-formatted name.
 
 **Acceptance Scenarios**
 
-1. Given I am in the wizard at the AgentSelect step, when the SPEC title or Issue description is available, then 3-5 AI-generated branch name suggestions are displayed.
-2. Given suggestions are displayed, when I select one, then it is used as the branch name.
-3. Given I prefer a custom name, when I select "Manual input", then I can type a branch name freely.
-4. Given the AI provider is unavailable or times out (10s), when suggestions fail, then manual input is shown as the fallback.
+1. Given I create a new worktree through the standard Launch Agent flow from
+   Branches, SPEC detail, or Issue detail, when I continue past branch type
+   and issue selection, then the wizard opens manual branch input directly
+   without requiring AI settings.
+2. Given the AI suggestion step is explicitly re-enabled, when the SPEC title or Issue description is available, then 3-5 AI-generated branch name suggestions are displayed.
+3. Given suggestions are displayed, when I select one, then it is used as the branch name.
+4. Given I prefer a custom name or the AI provider is unavailable or times out (10s), when I choose manual input, then I can type a branch name freely.
 5. Given a suggestion is selected, when validated, then it conforms to Git branch naming rules (no spaces, no special chars except /-_).
+6. Given I use the current product surface, when I configure Launch Agent, then no public control is available to re-enable the dormant AI suggestion step.
 
 ## Edge Cases
 
@@ -82,16 +86,20 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 
 ### AI Branch Naming
 
-- **FR-011**: AI branch name suggestion displayed in wizard AgentSelect step when creating a new worktree.
-- **FR-012**: `BranchNameSuggester` generates 3-5 candidate names from the SPEC title or Issue description.
-- **FR-013**: Fallback to manual text input if AI is unavailable or timeout exceeds 10 seconds.
-- **FR-014**: All generated branch names validated against Git branch naming rules before display.
+- **FR-011**: The standard new-worktree Launch Agent flow from Branches,
+  SPEC detail, and Issue detail skips AI branch suggestion and opens manual
+  branch input without requiring active AI settings.
+- **FR-012**: When the AI suggestion step is explicitly enabled, `BranchNameSuggester` generates 3-5 candidate names from the SPEC title or Issue description.
+- **FR-013**: When the AI suggestion step is enabled, manual text input remains available if AI is unavailable or timeout exceeds 10 seconds.
+- **FR-014**: All generated branch names are validated against Git branch naming rules before display.
+- **FR-015**: The dormant AI suggestion step is implementation-only in this
+  slice; no public UI or settings affordance re-enables it.
 
 ## Non-Functional Requirements
 
 - **NFR-001**: Voice transcription completes within 5 seconds for 10-second audio input.
 - **NFR-002**: File paste operation completes within 100ms from hotkey press to PTY injection.
-- **NFR-003**: AI branch name suggestion completes within 10 seconds; timeout triggers fallback.
+- **NFR-003**: When enabled, AI branch name suggestion completes within 10 seconds; timeout triggers fallback.
 - **NFR-004**: Voice recording introduces no audible latency or glitches.
 - **NFR-005**: All hotkeys use the Ctrl+G chord prefix to avoid conflicts with terminal applications.
 
@@ -101,6 +109,6 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 - **SC-002**: Status bar recording indicator appears during voice capture and disappears on completion.
 - **SC-003**: File paste correctly extracts and injects file paths from the system clipboard.
 - **SC-004**: Multi-file paste produces one path per line with correct shell escaping.
-- **SC-005**: AI branch naming displays 3-5 suggestions in the wizard and allows selection or manual override.
+- **SC-005**: Standard Launch Agent new-branch flow reaches manual branch entry without AI configuration, and the dormant AI suggestion path still supports selection or manual override when explicitly enabled.
 - **SC-006**: All generated branch names pass Git naming validation.
 - **SC-007**: Timeout and fallback paths work correctly for both voice and AI branch naming.

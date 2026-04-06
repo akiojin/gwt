@@ -3,11 +3,13 @@
 use gwt_notification::Severity;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 pub use gwt_notification::Notification as LogEntry;
 
@@ -191,7 +193,8 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
     let mut tab_title = super::build_tab_title(&labels, active_idx);
     // Append debug visibility indicator
     tab_title.spans.push(Span::raw(format!(
-        " \u{2502} Debug: {}",
+        " {} Debug: {}",
+        theme::icon::SEPARATOR_VERT,
         if state.show_debug { "on" } else { "off" }
     )));
 
@@ -223,7 +226,7 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
         };
         let paragraph = Paragraph::new(msg)
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -238,7 +241,7 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(
                     format!("{:<32}", entry.timestamp),
-                    Style::default().fg(Color::DarkGray),
+                    theme::style::muted_text(),
                 ),
                 Span::raw(" "),
                 Span::styled(
@@ -248,7 +251,7 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
                 Span::raw(" "),
                 Span::styled(
                     format!("{:<12}", entry.source),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::color::FOCUS),
                 ),
                 Span::raw(" "),
                 Span::styled(entry.message.clone(), style),
@@ -258,11 +261,9 @@ fn render_log_list(state: &LogsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().title(" Enter: detail | r: refresh");
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -284,13 +285,13 @@ fn render_detail(state: &LogsState, frame: &mut Frame, area: Rect) {
             }
             let paragraph = Paragraph::new(text)
                 .block(block)
-                .style(Style::default().fg(Color::White));
+                .style(Style::default().fg(theme::color::TEXT_PRIMARY));
             frame.render_widget(paragraph, area);
         }
         None => {
             let paragraph = Paragraph::new("No entry selected")
                 .block(block)
-                .style(Style::default().fg(Color::DarkGray));
+                .style(theme::style::muted_text());
             frame.render_widget(paragraph, area);
         }
     }
@@ -298,10 +299,10 @@ fn render_detail(state: &LogsState, frame: &mut Frame, area: Rect) {
 
 fn severity_color(severity: Severity) -> Color {
     match severity {
-        Severity::Error => Color::Red,
-        Severity::Warn => Color::Yellow,
-        Severity::Info => Color::Green,
-        Severity::Debug => Color::DarkGray,
+        Severity::Error => theme::color::ERROR,
+        Severity::Warn => theme::color::ACTIVE,
+        Severity::Info => theme::color::SUCCESS,
+        Severity::Debug => theme::color::SURFACE,
     }
 }
 

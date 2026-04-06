@@ -8,6 +8,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::theme;
+
 /// PR state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrState {
@@ -29,9 +31,9 @@ impl PrState {
     /// Color for display.
     pub fn color(self) -> Color {
         match self {
-            Self::Open => Color::Green,
-            Self::Closed => Color::Red,
-            Self::Merged => Color::Magenta,
+            Self::Open => theme::color::SUCCESS,
+            Self::Closed => theme::color::ERROR,
+            Self::Merged => theme::color::ACCENT,
         }
     }
 }
@@ -137,7 +139,7 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         let block = Block::default().title("PR Dashboard");
         let paragraph = Paragraph::new("No pull requests loaded")
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -151,23 +153,23 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
             let style = super::list_item_style(idx == state.selected);
 
             let ci_color = match pr.ci_status.as_str() {
-                "pass" | "success" => Color::Green,
-                "fail" | "failure" => Color::Red,
-                "pending" => Color::Yellow,
-                _ => Color::DarkGray,
+                "pass" | "success" => theme::color::SUCCESS,
+                "fail" | "failure" => theme::color::ERROR,
+                "pending" => theme::color::ACTIVE,
+                _ => theme::color::SURFACE,
             };
 
             let merge_indicator = if pr.mergeable { "OK" } else { "!!" };
             let merge_color = if pr.mergeable {
-                Color::Green
+                theme::color::SUCCESS
             } else {
-                Color::Red
+                theme::color::ERROR
             };
 
             let line = Line::from(vec![
                 Span::styled(
                     format!("#{:<5} ", pr.number),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::color::ACTIVE),
                 ),
                 Span::styled(
                     format!("{:<8} ", pr.state.label()),
@@ -184,7 +186,7 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
                 ),
                 Span::styled(
                     format!(" Review:{}", pr.review_status),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::color::FOCUS),
                 ),
             ]);
             ListItem::new(line)
@@ -192,11 +194,9 @@ fn render_list(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().title(title);
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -210,7 +210,7 @@ fn render_detail(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
             let block = Block::default().title("PR Detail");
             let paragraph = Paragraph::new("No PR selected")
                 .block(block)
-                .style(Style::default().fg(Color::DarkGray));
+                .style(theme::style::muted_text());
             frame.render_widget(paragraph, area);
             return;
         }
@@ -239,7 +239,7 @@ fn render_detail(state: &PrDashboardState, frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(detail_text)
         .block(block)
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(theme::color::FOCUS));
     frame.render_widget(paragraph, area);
 }
 
@@ -278,11 +278,11 @@ fn render_check_badge_line(check: &str) -> Line<'static> {
         .unwrap_or_else(|| (check.trim().to_string(), "unknown".to_string()));
 
     let (badge, color) = match status.as_str() {
-        "success" | "passing" | "pass" | "ok" => ("[PASS]", Color::Green),
-        "failure" | "failing" | "fail" | "error" => ("[FAIL]", Color::Red),
-        "pending" | "queued" | "running" | "in_progress" => ("[PENDING]", Color::Yellow),
-        "skipped" | "neutral" => ("[SKIP]", Color::DarkGray),
-        _ => ("[INFO]", Color::Cyan),
+        "success" | "passing" | "pass" | "ok" => ("[PASS]", theme::color::SUCCESS),
+        "failure" | "failing" | "fail" | "error" => ("[FAIL]", theme::color::ERROR),
+        "pending" | "queued" | "running" | "in_progress" => ("[PENDING]", theme::color::ACTIVE),
+        "skipped" | "neutral" => ("[SKIP]", theme::color::SURFACE),
+        _ => ("[INFO]", theme::color::FOCUS),
     };
 
     Line::from(vec![
@@ -292,7 +292,7 @@ fn render_check_badge_line(check: &str) -> Line<'static> {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(name, Style::default().fg(Color::White)),
+        Span::styled(name, Style::default().fg(theme::color::TEXT_PRIMARY)),
     ])
 }
 

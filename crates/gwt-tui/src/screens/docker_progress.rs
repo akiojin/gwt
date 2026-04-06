@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Gauge, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// Docker build/launch stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,15 +153,16 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, dialog);
 
     let border_color = if state.stage == DockerStage::Failed {
-        Color::Red
+        theme::color::ERROR
     } else if state.stage == DockerStage::Ready {
-        Color::Green
+        theme::color::SUCCESS
     } else {
-        Color::Cyan
+        theme::color::FOCUS
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(theme::border::modal())
         .title("Docker")
         .border_style(Style::default().fg(border_color));
 
@@ -181,12 +184,12 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
     if let Some(ref err) = state.error {
         lines.push(Line::from(Span::styled(
             format!("Error: {err}"),
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme::color::ERROR),
         )));
     } else if !state.message.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("Message: {}", state.message),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         )));
     }
     lines.push(Line::from(""));
@@ -194,15 +197,21 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
     for &stage in &DockerStage::PROGRESS {
         let (icon, style) = if stage == state.stage && stage != DockerStage::Ready {
             (
-                "\u{25B6} ", // right-pointing triangle (spinner stand-in)
+                concat!("\u{25B6}", " "), // theme::icon::ARROW_RIGHT + space
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::color::ACTIVE)
                     .add_modifier(Modifier::BOLD),
             )
         } else if stage.index() < state.stage.index() || state.stage == DockerStage::Ready {
-            ("\u{2714} ", Style::default().fg(Color::Green)) // check mark
+            (
+                concat!("\u{2714}", " "), // theme::icon::CHECKMARK + space
+                Style::default().fg(theme::color::SUCCESS),
+            )
         } else {
-            ("\u{25CB} ", Style::default().fg(Color::DarkGray)) // circle
+            (
+                concat!("\u{25CB}", " "), // theme::icon::CIRCLE_EMPTY + space
+                Style::default().fg(theme::color::SURFACE),
+            )
         };
         lines.push(Line::from(Span::styled(
             format!("{icon}{}", stage.label()),
@@ -228,7 +237,7 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, text_area);
 
     let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(border_color).bg(Color::DarkGray))
+        .gauge_style(Style::default().fg(border_color).bg(theme::color::SURFACE))
         .ratio(state.stage.ratio());
     frame.render_widget(gauge, gauge_area);
 }

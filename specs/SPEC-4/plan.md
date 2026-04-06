@@ -45,6 +45,27 @@
 - GraphQL primary (`gh api graphql`) for batched PR + check data
 - REST fallback (`gh api repos/{owner}/{repo}/pulls`) when GraphQL is unavailable
 
+## Phase 3: Issue Detail Launch Agent
+
+**Goal:** Keep Issue detail launches wired to the shared Launch Agent wizard.
+
+### Approach
+
+- Reuse the existing wizard startup path instead of building an issue-only
+  launch flow.
+- Seed issue-derived branch context plus the issue number before the wizard
+  renders.
+
+### Components
+
+1. **Issue detail shortcut** — `Shift+Enter` from Issue detail opens the
+   wizard.
+2. **Issue context prefill** — The selected issue title/body seed the
+   branch context, and the numeric issue id pre-populates `IssueSelect`.
+3. **Shared wizard flow** — Issue-origin launches follow
+   `BranchType -> Issue -> Branch Name` with AI suggestion dormant by
+   default.
+
 ## Dependencies
 
 - `gwt-core::git::pr_status` module (PrStatus struct) — exists

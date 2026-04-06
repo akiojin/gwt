@@ -21,6 +21,8 @@ pub mod wizard;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
+use crate::theme;
+
 /// Clamp a selection index to [0, len-1]. Sets to 0 if len is 0.
 pub fn clamp_index(selected: &mut usize, len: usize) {
     if len == 0 {
@@ -53,12 +55,9 @@ pub fn move_down(selected: &mut usize, len: usize) {
 /// Style for a list item: highlighted if selected, default otherwise.
 pub fn list_item_style(is_selected: bool) -> Style {
     if is_selected {
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+        theme::style::selected_item()
     } else {
-        Style::default().fg(Color::White)
+        theme::style::text()
     }
 }
 
@@ -78,23 +77,33 @@ pub fn build_tab_title(labels: &[&str], active: usize) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, label) in labels.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("│"));
+            spans.push(Span::styled("│", theme::style::tab_separator()));
         }
         if i == active {
             spans.push(Span::styled(
                 format!(" {} ", label),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme::style::tab_active(),
             ));
         } else {
             spans.push(Span::styled(
                 format!(" {} ", label),
-                Style::default().fg(Color::Gray),
+                theme::style::tab_inactive(),
             ));
         }
     }
     Line::from(spans)
+}
+
+/// Selection prefix: accent bar when selected, space otherwise.
+pub fn selection_prefix(is_selected: bool) -> Span<'static> {
+    if is_selected {
+        Span::styled(
+            theme::icon::LEFT_ACCENT,
+            Style::default().fg(theme::color::ACTIVE),
+        )
+    } else {
+        Span::raw(" ")
+    }
 }
 
 /// Render an empty list placeholder (borderless).
@@ -106,6 +115,6 @@ pub fn render_empty_list(frame: &mut Frame, area: Rect, has_data: bool, noun: &s
     };
     let p = Paragraph::new(msg)
         .block(Block::default())
-        .style(Style::default().fg(Color::DarkGray));
+        .style(theme::style::muted_text());
     frame.render_widget(p, area);
 }

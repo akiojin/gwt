@@ -4,13 +4,13 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders},
     Frame,
 };
 
 use crate::model::Model;
+use crate::theme;
 
 /// Render the session tab bar as a bordered block with tab title.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
@@ -22,19 +22,15 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         let icon = s.tab_type.icon();
         let label = format!(" {icon} {} ", s.name);
         if i == model.active_session {
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(label, theme::style::tab_active()));
         } else {
-            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(label, theme::style::tab_inactive()));
         }
     }
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(theme::border::default())
         .title(Line::from(spans));
     frame.render_widget(block, area);
 }

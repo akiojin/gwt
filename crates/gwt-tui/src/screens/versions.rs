@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// A single version tag entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +85,7 @@ fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
         let block = Block::default().title("Versions");
         let paragraph = Paragraph::new("No version tags found")
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
     }
@@ -98,18 +100,15 @@ fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(
                     format!("{} ", tag.name),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(if idx == state.selected {
+                    Style::default().fg(theme::color::SUCCESS).add_modifier(
+                        if idx == state.selected {
                             Modifier::BOLD
                         } else {
                             Modifier::empty()
-                        }),
+                        },
+                    ),
                 ),
-                Span::styled(
-                    format!("({}) ", tag.date),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("({}) ", tag.date), theme::style::muted_text()),
                 Span::styled(tag.message.clone(), style),
             ]);
             ListItem::new(line)
@@ -117,11 +116,9 @@ fn render_tag_list(state: &VersionsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default().title("Versions");
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -136,13 +133,13 @@ fn render_tag_detail(state: &VersionsState, frame: &mut Frame, area: Rect) {
             let text = format!(" {} — {} — {}", tag.name, tag.date, tag.message);
             let paragraph = Paragraph::new(text)
                 .block(block)
-                .style(Style::default().fg(Color::Cyan));
+                .style(Style::default().fg(theme::color::FOCUS));
             frame.render_widget(paragraph, area);
         }
         None => {
             let paragraph = Paragraph::new("No tag selected")
                 .block(block)
-                .style(Style::default().fg(Color::DarkGray));
+                .style(theme::style::muted_text());
             frame.render_widget(paragraph, area);
         }
     }

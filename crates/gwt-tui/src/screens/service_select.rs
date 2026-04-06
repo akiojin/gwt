@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
+
+use crate::theme;
 
 /// State for the service selection overlay.
 #[derive(Debug, Clone, Default)]
@@ -104,13 +106,14 @@ pub fn render(state: &ServiceSelectState, frame: &mut Frame, area: Rect) {
         } else {
             state.title.as_str()
         })
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_type(theme::border::default())
+        .border_style(Style::default().fg(theme::color::FOCUS));
 
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
 
     if state.services.is_empty() {
-        let empty = Paragraph::new("No services found").style(Style::default().fg(Color::DarkGray));
+        let empty = Paragraph::new("No services found").style(theme::style::muted_text());
         frame.render_widget(empty, inner);
         return;
     }
@@ -122,14 +125,14 @@ pub fn render(state: &ServiceSelectState, frame: &mut Frame, area: Rect) {
         .map(|(i, svc)| {
             let style = if i == state.selected {
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
+                    .fg(theme::color::TEXT_PRIMARY)
+                    .bg(theme::color::AGENT)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme::color::TEXT_PRIMARY)
             };
             let icon = if i == state.selected {
-                "\u{25B6} "
+                concat!("\u{25B6}", " ") // ▶ (theme::icon::ARROW_RIGHT with space)
             } else {
                 "  "
             };

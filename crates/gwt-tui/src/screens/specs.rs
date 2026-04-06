@@ -7,12 +7,13 @@ use std::{
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
+use crate::theme;
 use crate::widgets;
 
 /// Detail sections available for a spec.
@@ -926,7 +927,7 @@ fn render_header(state: &SpecsState, frame: &mut Frame, area: Rect) {
     let block = Block::default().title("Specs");
     let paragraph = Paragraph::new(header_text)
         .block(block)
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(theme::color::FOCUS));
     frame.render_widget(paragraph, area);
 }
 
@@ -945,11 +946,11 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, spec)| {
             let status_color = match spec.status.as_str() {
-                "done" | "completed" => Color::Green,
-                "in-progress" | "active" => Color::Yellow,
-                "draft" | "planned" => Color::Cyan,
-                "blocked" => Color::Red,
-                _ => Color::DarkGray,
+                "done" | "completed" => theme::color::SUCCESS,
+                "in-progress" | "active" => theme::color::ACTIVE,
+                "draft" | "planned" => theme::color::FOCUS,
+                "blocked" => theme::color::ERROR,
+                _ => theme::color::SURFACE,
             };
 
             let style = super::list_item_style(idx == state.selected);
@@ -963,16 +964,16 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
             };
 
             let phase_style = if is_editing {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(theme::color::ACTIVE)
             } else {
-                Style::default().fg(Color::Magenta)
+                Style::default().fg(theme::color::ACCENT)
             };
 
             let title_line = if let Some(result) = search_results.get(idx) {
                 Line::from(vec![
                     Span::styled(
                         format!("{:<10} ", spec.id),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme::color::ACTIVE),
                     ),
                     Span::styled(spec.title.clone(), style),
                     Span::styled(phase_display, phase_style),
@@ -982,14 +983,14 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
                     ),
                     Span::styled(
                         format!("score {}", result.score),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(theme::color::FOCUS),
                     ),
                 ])
             } else {
                 Line::from(vec![
                     Span::styled(
                         format!("{:<10} ", spec.id),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme::color::ACTIVE),
                     ),
                     Span::styled(spec.title.clone(), style),
                     Span::styled(phase_display, phase_style),
@@ -1005,7 +1006,7 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
                     title_line,
                     Line::from(Span::styled(
                         format!("  {}", result.snippet),
-                        Style::default().fg(Color::DarkGray),
+                        theme::style::muted_text(),
                     )),
                 ])
             } else {
@@ -1015,11 +1016,9 @@ fn render_spec_list(state: &SpecsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default();
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::style::active_item());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -1033,7 +1032,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
             let block = Block::default().title("Spec Detail");
             let paragraph = Paragraph::new("No spec selected")
                 .block(block)
-                .style(Style::default().fg(Color::DarkGray));
+                .style(theme::style::muted_text());
             frame.render_widget(paragraph, area);
             return;
         }
@@ -1069,7 +1068,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
     let header_block = Block::default().title("Spec Detail");
     let header = Paragraph::new(header_text)
         .block(header_block)
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(theme::color::FOCUS));
     frame.render_widget(header, chunks[0]);
 
     let sections = current_spec_markdown_sections(state);
@@ -1099,7 +1098,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         let content = Paragraph::new(content_text)
             .block(content_block)
             .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(theme::color::TEXT_PRIMARY));
         frame.render_widget(content, chunks[1]);
         return;
     }
@@ -1132,7 +1131,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
         let content = Paragraph::new(content_text)
             .block(content_block)
             .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(theme::color::TEXT_PRIMARY));
         frame.render_widget(content, chunks[1]);
         return;
     }
@@ -1203,7 +1202,7 @@ fn render_detail(state: &SpecsState, frame: &mut Frame, area: Rect) {
     let content = Paragraph::new(content_text)
         .block(content_block)
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(theme::color::TEXT_PRIMARY));
     frame.render_widget(content, chunks[1]);
 }
 

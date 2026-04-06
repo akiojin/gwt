@@ -2,11 +2,13 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
     Frame,
 };
+
+use crate::theme;
 
 /// Render markdown text with basic formatting.
 ///
@@ -55,32 +57,32 @@ fn style_line(line: &str) -> Line<'static> {
         Line::from(Span::styled(
             line.to_string(),
             Style::default()
-                .fg(Color::Green)
+                .fg(theme::color::SUCCESS)
                 .add_modifier(Modifier::BOLD),
         ))
     } else if line.starts_with("## ") {
         Line::from(Span::styled(
             line.to_string(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::color::ACTIVE)
                 .add_modifier(Modifier::BOLD),
         ))
     } else if line.starts_with("# ") {
         Line::from(Span::styled(
             line.to_string(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme::color::FOCUS)
                 .add_modifier(Modifier::BOLD),
         ))
     } else if line.starts_with("```") {
         Line::from(Span::styled(
             line.to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::color::SURFACE),
         ))
     } else if line.starts_with("- ") || line.starts_with("* ") {
         Line::from(Span::styled(
-            format!("  \u{2022} {}", &line[2..]),
-            Style::default().fg(Color::White),
+            format!("  {} {}", theme::icon::BULLET, &line[2..]),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
         ))
     } else {
         Line::from(line.to_string())

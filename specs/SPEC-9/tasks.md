@@ -184,3 +184,38 @@
 - [x] **T-075**: Verify postinstall script on macOS arm64. (obsolete: CI-level verification)
 - [x] **T-076**: Verify postinstall script on Linux x86_64. (obsolete: CI-level verification)
 - [x] **T-077**: Verify T-072 through T-074 pass (GREEN). (obsolete: script validation is CI-level)
+
+## Phase 5: Skill System Consolidation (22 → 8 methodology-based skills)
+
+> Motivation: aihero.dev comparison revealed structural gaps (no architecture feedback loop, TDD locked in pipeline, poor composability). Skill count explosion (22) made it unclear which skill to use when. Solution: consolidate into 8 methodology-based skills with DDD/SDD/TDD embedded.
+
+### 5a. Core Methodology Skills (new)
+
+- [P] [x] **T-078**: Create `gwt-design` SKILL.md + references/ (DDD-embedded design skill absorbing brainstorm, register, clarify, deepen).
+- [P] [x] **T-079**: Create `gwt-plan` SKILL.md + references/ (SDD-embedded planning skill absorbing spec-plan, spec-tasks, spec-analyze).
+- [P] [x] **T-080**: Create `gwt-build` SKILL.md + references/ (TDD-embedded build skill absorbing spec-implement, standalone mode).
+- [P] [x] **T-081**: Create `gwt-review` SKILL.md + references/ (new architecture feedback loop skill).
+
+### 5b. Integration Skills (consolidated)
+
+- [P] [x] **T-082**: Create `gwt-issue` SKILL.md + references/ (unified issue-register + issue-resolve with auto-detect).
+- [P] [x] **T-083**: Rewrite `gwt-pr` SKILL.md + references/ (unified pr + pr-check + pr-fix with auto-detect).
+- [P] [x] **T-084**: Create `gwt-search` SKILL.md (unified spec-search + issue-search + project-search).
+- [P] [x] **T-085**: Create `gwt-agent` SKILL.md (unified agent-discover + agent-read + agent-send + agent-lifecycle).
+
+### 5c. Cleanup
+
+- [x] **T-086**: Move `spec_artifact.py` to `.claude/scripts/spec_artifact.py` (shared location).
+- [x] **T-087**: Delete 21 old skill directories.
+- [x] **T-088**: Update AGENTS.md with new 8-skill structure and recommended workflow.
+- [x] **T-089**: Update SPEC-9 spec.md with US-5 through US-7, FR-024 through FR-035.
+- [x] **T-090**: Update SPEC-9 tasks.md with Phase 5 tasks.
+
+### 5d. Verification
+
+- [ ] **T-091**: Verify `gwt-design` standalone invocation works.
+- [ ] **T-092**: Verify `gwt-plan SPEC-X` standalone invocation works.
+- [ ] **T-093**: Verify `gwt-build` standalone TDD mode works.
+- [ ] **T-094**: Verify `gwt-review` generates report on gwt repository.
+- [ ] **T-095**: Verify `gwt-issue`, `gwt-pr`, `gwt-search`, `gwt-agent` auto-detect modes.
+- [ ] **T-096**: Verify design → plan → build → review chain suggestions.
