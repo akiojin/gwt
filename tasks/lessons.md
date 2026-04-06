@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: Terminal.app のトラックパッド scroll は alternate-scroll mode を先に疑う
+
+### 事象
+
+`Terminal.app` 上で session pane の drag selection copy は動いていたが、二本指スクロールだけが
+scrollback に入らず、terminal 側で握りつぶされているように見えた。
+
+### 原因
+
+- gwt は alternate screen + mouse capture を有効化していたが、outer terminal startup で
+  alternate-scroll mode (`CSI ? 1007 l`) を明示的に無効化していなかった。
+- Terminal.app では alternate-scroll mode が有効なままだと、trackpad scroll が mouse wheel ではなく
+  cursor-key fallback に変換され、gwt 側の scroll handler に届かないことがある。
+
+### 再発防止策
+
+1. macOS `Terminal.app` で「copy は動くが trackpad scroll だけ死ぬ」報告を受けたら、まず outer terminal の `?1007` 状態を確認する。
+2. outer terminal 初期化を触る変更では、ANSI sequence を直接検証する RED/GREEN テストを `src/main.rs` に追加して回帰を固定する。
+3. PTY scroll 不具合では app 内の handler だけでなく、host terminal が wheel を別入力へ変換していないかも最初に切り分ける。
+
 ## 2026-04-06 — fix: startup 時の agent detection は main thread で同期実行しない
 
 ### 事象

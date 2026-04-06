@@ -52,6 +52,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 2. Route mouse wheel input into `vt100::Parser::set_scrollback()` and keep new PTY output from snapping the viewport back to live while the user is reviewing history.
 3. Use `vt100::Screen::contents_between()` for copy extraction so wrapped rows and wide characters are copied from the rendered viewport contract instead of from ad-hoc transcript slicing.
 4. Reserve a right-side gutter only when history overflows the visible pane and render a scrollbar whose thumb matches the current viewport position.
+5. During outer-terminal initialization, explicitly disable alternate-scroll mode so Terminal.app does not translate trackpad gestures into cursor-key input while gwt owns the alternate screen.
 
 ## Dependencies
 

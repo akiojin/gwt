@@ -12,10 +12,9 @@ use crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    Command,
 };
 
-#[cfg(test)]
-use crossterm::Command;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use gwt_git::RepoType;
@@ -28,6 +27,22 @@ use gwt_tui::{
 };
 
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAlternateScrollMode;
+
+impl Command for DisableAlternateScrollMode {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        // Terminal.app can translate trackpad scrolling in the alternate screen
+        // into cursor keys unless alternate-scroll mode is explicitly disabled.
+        f.write_str("\u{1b}[?1007l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 fn drain_pty_output_into_model(model: &mut Model) -> bool {
     let mut drained = false;
@@ -42,6 +57,7 @@ fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
     execute!(
         writer,
         EnterAlternateScreen,
+        DisableAlternateScrollMode,
         EnableMouseCapture,
         EnableBracketedPaste,
     )
@@ -62,6 +78,9 @@ fn terminal_enter_commands_ansi() -> String {
     EnterAlternateScreen
         .write_ansi(&mut ansi)
         .expect("enter alternate screen ansi");
+    DisableAlternateScrollMode
+        .write_ansi(&mut ansi)
+        .expect("disable alternate scroll ansi");
     EnableMouseCapture
         .write_ansi(&mut ansi)
         .expect("enable mouse capture ansi");
@@ -375,6 +394,15 @@ mod tests {
     fn terminal_enter_commands_enable_bracketed_paste() {
         let ansi = terminal_enter_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004h"));
+    }
+
+    #[test]
+    fn terminal_enter_commands_disable_alternate_scroll_mode() {
+        let ansi = terminal_enter_commands_ansi();
+        assert!(
+            ansi.contains("\u{1b}[?1007l"),
+            "terminal startup should disable alternate-scroll mode so Terminal.app delivers wheel events to gwt"
+        );
     }
 
     #[test]
