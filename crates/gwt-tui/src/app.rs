@@ -2102,7 +2102,6 @@ fn handle_voice_message(model: &mut Model, msg: VoiceInputMessage, voice_enabled
 
 fn route_paste_input(model: &mut Model, text: String) {
     if model.help_visible
-        || model.wizard.is_some()
         || !model.error_queue.is_empty()
         || model.service_select.is_some()
         || model.confirm.visible
@@ -2114,6 +2113,10 @@ fn route_paste_input(model: &mut Model, text: String) {
         return;
     }
 
+    if route_non_terminal_paste(model, &text) {
+        return;
+    }
+
     match model.active_layer {
         ActiveLayer::Initialization => {}
         ActiveLayer::Management => {
@@ -2122,6 +2125,72 @@ fn route_paste_input(model: &mut Model, text: String) {
             }
         }
         _ => handle_paste_input(model, text),
+    }
+}
+
+fn route_non_terminal_paste(model: &mut Model, text: &str) -> bool {
+    if let Some(wizard) = model.wizard.as_mut() {
+        paste_text_input_chars(text, |ch| {
+            screens::wizard::update(wizard, screens::wizard::WizardMessage::InputChar(ch));
+        });
+        return true;
+    }
+
+    match model.active_layer {
+        ActiveLayer::Initialization => {
+            if let Some(state) = model.initialization.as_mut() {
+                paste_text_input_chars(text, |ch| {
+                    screens::initialization::update(
+                        state,
+                        screens::initialization::InitializationMessage::InputChar(ch),
+                    );
+                });
+                return true;
+            }
+            false
+        }
+        ActiveLayer::Management if !matches!(model.active_focus, FocusPane::Terminal) => {
+            match model.management_tab {
+                ManagementTab::Branches if model.branches.search_active => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::branches::update(
+                            &mut model.branches,
+                            screens::branches::BranchesMessage::SearchInput(ch),
+                        );
+                    });
+                    true
+                }
+                ManagementTab::Issues if model.issues.search_active => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::issues::update(
+                            &mut model.issues,
+                            screens::issues::IssuesMessage::SearchInput(ch),
+                        );
+                    });
+                    true
+                }
+                ManagementTab::Settings if model.settings.editing => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::settings::update(
+                            &mut model.settings,
+                            screens::settings::SettingsMessage::InputChar(ch),
+                        );
+                    });
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn paste_text_input_chars(text: &str, mut push_char: impl FnMut(char)) {
+    for ch in text.chars() {
+        if matches!(ch, '\r' | '\n') {
+            continue;
+        }
+        push_char(ch);
     }
 }
 
@@ -3018,7 +3087,7 @@ fn vt_requests_bracketed_paste(vt: &crate::model::VtState) -> bool {
 }
 
 fn build_paste_input_bytes(text: &str, bracketed_paste_enabled: bool) -> Option<Vec<u8>> {
-    if text.trim().is_empty() {
+    if text.is_empty() {
         return None;
     }
 
@@ -7632,7 +7701,13 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn build_paste_input_bytes_ignores_empty_payload() {
-        assert!(build_paste_input_bytes("   ", false).is_none());
+        assert!(build_paste_input_bytes("", false).is_none());
+    }
+
+    #[test]
+    fn build_paste_input_bytes_preserves_whitespace_payload() {
+        let bytes = build_paste_input_bytes("   \n", false).unwrap();
+        assert_eq!(bytes, b"   \n".to_vec());
     }
 
     #[test]
@@ -7668,10 +7743,10 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn handle_paste_input_ignores_blank_text() {
+    fn handle_paste_input_ignores_empty_text() {
         let mut model = test_model();
 
-        handle_paste_input(&mut model, "   ".into());
+        handle_paste_input(&mut model, "".into());
 
         assert!(model.pending_pty_inputs().is_empty());
     }
@@ -7695,6 +7770,63 @@ CUSTOM_ENV = "enabled"
         route_paste_input(&mut model, "git status".into());
 
         assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_initialization_appends_url_input() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Initialization;
+        model.initialization = Some(crate::screens::initialization::InitializationState::default());
+
+        route_paste_input(&mut model, "https://example.com/repo.git".into());
+
+        assert_eq!(
+            model.initialization.as_ref().unwrap().url_input,
+            "https://example.com/repo.git"
+        );
+    }
+
+    #[test]
+    fn route_paste_input_wizard_branch_name_appends_text() {
+        let mut model = test_model();
+        let mut wizard = screens::wizard::WizardState::default();
+        wizard.step = screens::wizard::WizardStep::BranchNameInput;
+        model.wizard = Some(wizard);
+
+        route_paste_input(&mut model, "feature/paste".into());
+
+        assert_eq!(
+            model.wizard.as_ref().unwrap().branch_name,
+            "feature/paste"
+        );
+    }
+
+    #[test]
+    fn route_paste_input_branches_search_appends_query() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.search_active = true;
+
+        route_paste_input(&mut model, "feat".into());
+
+        assert_eq!(model.branches.search_query, "feat");
+    }
+
+    #[test]
+    fn route_paste_input_settings_edit_appends_buffer() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Settings;
+        model.settings.load_category_fields();
+        model.settings.editing = true;
+        model.settings.edit_buffer.clear();
+
+        route_paste_input(&mut model, "dark".into());
+
+        assert_eq!(model.settings.edit_buffer, "dark");
     }
 
     #[test]

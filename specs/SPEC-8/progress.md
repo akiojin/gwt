@@ -3,7 +3,7 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `49/49` checked in `tasks.md` after Phase 2 was refreshed to terminal paste.
+- Task progress: `50/50` checked in `tasks.md` after the terminal-paste follow-up fixes.
 - Artifact refresh: `2026-04-06T13:15:00Z`
 
 ## Done
@@ -18,6 +18,11 @@
 - Normal terminal paste now routes through `Event::Paste(String)` instead of a bespoke clipboard hotkey path.
 - Terminal setup / teardown now enables and disables bracketed paste so gwt receives host-terminal paste events reliably.
 - Paste injection now checks the active VT screen's bracketed-paste mode and wraps payloads with `ESC[200~ ... ESC[201~` only when requested by the PTY application.
+- Paste now routes into active non-terminal text inputs (initialization, wizard,
+  branch/issue search, settings edit) instead of being dropped when the host
+  terminal emits bracketed-paste events.
+- Whitespace-only terminal paste payloads are preserved; only the truly empty
+  string is ignored.
 - The deprecated `Ctrl+G,p` file-paste shortcut is removed from the keybinding surface.
 - Startup version-cache refresh now defers agent detection to a background task,
   so `load_initial_data()` no longer blocks on `AgentDetector::detect_all()`

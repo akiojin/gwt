@@ -55,6 +55,7 @@
 - [x] **T-032**: Enable bracketed paste during terminal setup / restore in `crates/gwt-tui/src/main.rs`.
 - [x] **T-033**: Implement normal paste PTY injection in `crates/gwt-tui/src/app.rs`.
 - [x] **T-034**: Remove the deprecated `Ctrl+G,p` shortcut and verify the focused paste tests pass (GREEN).
+- [x] **T-035**: Preserve whitespace-only paste payloads and route paste into active non-terminal text inputs.
 
 ## Phase 3: AI Branch Naming Wizard Integration (Dormant in Standard Launch Agent Flow from Branches / SPEC Detail / Issue Detail)
 

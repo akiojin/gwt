@@ -45,8 +45,14 @@ of being replayed as line-by-line Enter input.
 3. Given the active PTY application has not enabled bracketed paste mode, when
    text is pasted, then gwt forwards the raw payload without converting it to
    per-key `Enter` events.
-4. Given the pasted text is empty or whitespace only, when gwt receives the
-   paste event, then nothing is injected and no error is shown.
+4. Given the pasted text is whitespace only, when gwt receives the paste event
+   for the active PTY, then the payload is still forwarded unchanged.
+5. Given the pasted text is empty, when gwt receives the paste event, then
+   nothing is injected and no error is shown.
+6. Given the focused surface is a non-terminal text input (for example the
+   initialization URL field, wizard text entry, branch/issue search, or
+   settings edit field), when text is pasted, then gwt inserts the payload into
+   that field instead of dropping it.
 
 ### US-3: Get AI-Suggested Branch Names in Wizard (P2) -- PARTIALLY IMPLEMENTED
 
@@ -93,17 +99,18 @@ As a developer, I want AI-suggested branch names when creating a new worktree so
 - **FR-007**: gwt enables outer-terminal bracketed paste mode while the TUI is running and disables it on shutdown.
 - **FR-008**: gwt consumes `crossterm::event::Event::Paste(String)` and preserves the pasted payload as a single text block.
 - **FR-009**: When the active PTY application has requested bracketed paste mode, gwt wraps the payload with `ESC[200~` and `ESC[201~` before PTY injection.
-- **FR-010**: `Ctrl+G,p` file-paste hotkey is not part of the product surface; normal paste is the canonical paste path.
+- **FR-010**: When the focused surface is a non-terminal text input, gwt routes pasted text into that input instead of discarding it.
+- **FR-011**: `Ctrl+G,p` file-paste hotkey is not part of the product surface; normal paste is the canonical paste path.
 
 ### AI Branch Naming
 
-- **FR-011**: The standard new-worktree Launch Agent flow from Branches,
+- **FR-012**: The standard new-worktree Launch Agent flow from Branches,
   SPEC detail, and Issue detail skips AI branch suggestion and opens manual
   branch input without requiring active AI settings.
-- **FR-012**: When the AI suggestion step is explicitly enabled, `BranchNameSuggester` generates 3-5 candidate names from the SPEC title or Issue description.
-- **FR-013**: When the AI suggestion step is enabled, manual text input remains available if AI is unavailable or timeout exceeds 10 seconds.
-- **FR-014**: All generated branch names are validated against Git branch naming rules before display.
-- **FR-015**: The dormant AI suggestion step is implementation-only in this
+- **FR-013**: When the AI suggestion step is explicitly enabled, `BranchNameSuggester` generates 3-5 candidate names from the SPEC title or Issue description.
+- **FR-014**: When the AI suggestion step is enabled, manual text input remains available if AI is unavailable or timeout exceeds 10 seconds.
+- **FR-015**: All generated branch names are validated against Git branch naming rules before display.
+- **FR-016**: The dormant AI suggestion step is implementation-only in this
   slice; no public UI or settings affordance re-enables it.
 
 ## Non-Functional Requirements

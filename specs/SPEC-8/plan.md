@@ -43,7 +43,9 @@ application.
 
 2. **gwt-tui**: Route `Event::Paste(String)` through a dedicated paste path.
    - Keep the pasted payload intact instead of translating it into per-key input.
-   - Ignore empty / whitespace-only payloads.
+   - Ignore only truly empty payloads; preserve whitespace-only paste content.
+   - When focus is on a non-terminal text input, route the pasted text into that
+     field instead of dropping it.
 
 3. **gwt-tui**: Inject pasted text into the active PTY.
    - Detect whether the active PTY screen has requested bracketed paste mode.
