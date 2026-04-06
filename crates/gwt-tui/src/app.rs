@@ -2962,7 +2962,7 @@ fn prepare_wizard_startup(
         },
         is_new_branch: starts_new_branch,
         gh_cli_available: gwt_core::process::command_exists("gh"),
-        ai_enabled: true,
+        ai_enabled: false,
         branch_name,
         spec_context,
         ..Default::default()
@@ -3343,8 +3343,19 @@ where
         return Ok(true);
     }
 
-    if model.active_focus != FocusPane::Terminal || !mouse_hits_active_session(model, mouse) {
+    if !mouse_hits_active_session(model, mouse) {
         return Ok(false);
+    }
+
+    if matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
+    ) {
+        model.active_focus = FocusPane::Terminal;
     }
 
     match mouse.kind {
@@ -4757,6 +4768,43 @@ mod tests {
     }
 
     #[test]
+    fn mouse_scroll_up_over_session_focuses_terminal_and_scrolls() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        update(&mut model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut model, "shell-0", &format!("line-{i}"));
+        }
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_focus,
+            FocusPane::Terminal,
+            "session mouse scroll should move focus to the terminal pane"
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .scrollback()
+                > 0,
+            "session mouse scroll should move the viewport away from live follow mode"
+        );
+    }
+
+    #[test]
     fn render_model_text_terminal_overflow_draws_scrollbar_only_when_needed() {
         let mut overflow_model = test_model();
         overflow_model.active_layer = ActiveLayer::Main;
@@ -5573,9 +5621,10 @@ mod tests {
     }
 
     #[test]
-    fn click_without_ctrl_does_not_invoke_opener() {
+    fn click_without_ctrl_does_not_invoke_opener_and_focuses_terminal() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::TabContent;
         let expected_url = "https://example.com";
         update(
             &mut model,
@@ -5610,8 +5659,9 @@ mod tests {
         )
         .expect("mouse handler succeeds");
 
-        assert!(!opened_result);
+        assert!(opened_result);
         assert!(!opened);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
     }
 
     fn init_git_repo(path: &std::path::Path) {
@@ -6785,6 +6835,23 @@ mod tests {
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
         assert_eq!(wizard.branch_name, "feature/spec-42-my-feature");
+    }
+
+    #[test]
+    fn prepare_wizard_startup_disables_ai_branch_suggestions_by_default() {
+        let cache = VersionCache::new();
+
+        let (wizard, _) = prepare_wizard_startup(
+            Some(screens::wizard::SpecContext::new(
+                "SPEC-99",
+                "AI-disabled flow",
+                "",
+            )),
+            vec![],
+            &cache,
+        );
+
+        assert!(!wizard.ai_enabled);
     }
 
     #[test]
