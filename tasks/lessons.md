@@ -18,6 +18,25 @@
 2. 「1 Tick で全件 drain しない」ことを固定する RED テストを追加し、回帰で即検知できるようにする。
 3. `Branches` 系のレスポンス不具合では、I/O の非同期化だけでなく「メインスレッド適用量」の上限有無まで確認する。
 
+## 2026-04-06 — fix: git exclude では tracked な配布先のブランチ汚染は防げない
+
+### 事象
+
+Agent launch 時の skill distribution が、他ブランチの `.claude/skills/gwt-*` など tracked なソース資産まで上書きし、
+作業していないブランチでも差分が発生した。
+
+### 原因
+
+- `distribute_to_worktree()` が `.claude/skills` / `.claude/commands` / `.claude/hooks` / `.codex/skills`
+  を無条件で overwrite していた。
+- `.git/info/exclude` は untracked file には効くが、すでに Git 管理下のファイルが書き換わること自体は防げない。
+
+### 再発防止策
+
+1. 配布先が Git worktree の場合は、まず `git ls-files` で gwt 管理対象 path の tracked 状態を確認する。
+2. tracked な `.claude/*` / `.codex/*` 資産は distribution で上書きせず、untracked な生成物だけ更新する。
+3. `.git/info/exclude` の追加だけで「ブランチが汚れない」と判断しない。tracked / untracked を分けて検証する。
+
 ## 2026-04-04 — fix: Docker 系 broad verification は Cargo を並列実行しない
 
 ### 事象

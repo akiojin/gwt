@@ -2,9 +2,11 @@
 
 use crate::assets::{CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_SKILLS};
 use include_dir::Dir;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Result of a distribution operation.
 #[derive(Debug, Default)]
@@ -24,37 +26,55 @@ pub struct DistributeReport {
 /// - `.codex/skills/gwt-*/`  (same skill content)
 pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
+    let tracked_paths = tracked_gwt_asset_paths(worktree);
 
     // Claude Code targets
     write_dir_assets(
         &CLAUDE_SKILLS,
+        worktree,
         &worktree.join(".claude/skills"),
+        &tracked_paths,
         &mut report,
     )?;
     write_dir_assets(
         &CLAUDE_COMMANDS,
+        worktree,
         &worktree.join(".claude/commands"),
+        &tracked_paths,
         &mut report,
     )?;
     write_dir_assets(
         &CLAUDE_HOOKS,
+        worktree,
         &worktree.join(".claude/hooks/scripts"),
+        &tracked_paths,
         &mut report,
     )?;
 
     // Codex targets (skills only)
-    write_dir_assets(&CLAUDE_SKILLS, &worktree.join(".codex/skills"), &mut report)?;
+    write_dir_assets(
+        &CLAUDE_SKILLS,
+        worktree,
+        &worktree.join(".codex/skills"),
+        &tracked_paths,
+        &mut report,
+    )?;
 
     Ok(report)
 }
 
 fn write_dir_assets(
     source: &Dir<'_>,
+    worktree: &Path,
     dest: &Path,
+    tracked_paths: &HashSet<PathBuf>,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
     for file in source.files() {
         let target = dest.join(file.path().file_name().unwrap_or_default());
+        if should_skip_tracked_path(worktree, &target, tracked_paths) {
+            continue;
+        }
         if let Some(parent) = target.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent)?;
@@ -67,10 +87,56 @@ fn write_dir_assets(
 
     for subdir in source.dirs() {
         let subdir_name = subdir.path().file_name().unwrap_or_default();
-        write_dir_assets(subdir, &dest.join(subdir_name), report)?;
+        write_dir_assets(
+            subdir,
+            worktree,
+            &dest.join(subdir_name),
+            tracked_paths,
+            report,
+        )?;
     }
 
     Ok(())
+}
+
+fn should_skip_tracked_path(
+    worktree: &Path,
+    target: &Path,
+    tracked_paths: &HashSet<PathBuf>,
+) -> bool {
+    target
+        .strip_prefix(worktree)
+        .ok()
+        .map(|relative| tracked_paths.contains(relative))
+        .unwrap_or(false)
+}
+
+fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
+    const TRACKED_ROOTS: &[&str] = &[
+        ".claude/skills",
+        ".claude/commands",
+        ".claude/hooks/scripts",
+        ".codex/skills",
+    ];
+
+    let output = match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--")
+        .args(TRACKED_ROOTS)
+        .output()
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        _ => return HashSet::new(),
+    };
+
+    String::from_utf8_lossy(&output)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 #[cfg(test)]
@@ -124,5 +190,60 @@ mod tests {
         let content = fs::read_to_string(&skill_md).unwrap();
         assert_ne!(content, "old content");
         assert!(content.contains("gwt-pr"));
+    }
+
+    #[test]
+    fn distribute_preserves_tracked_claude_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        let tracked_skill = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-pr.md");
+        let tracked_hook = dir
+            .path()
+            .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
+
+        fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
+        fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
+        fs::create_dir_all(tracked_hook.parent().unwrap()).unwrap();
+        fs::write(&tracked_skill, "tracked skill").unwrap();
+        fs::write(&tracked_command, "tracked command").unwrap();
+        fs::write(&tracked_hook, "tracked hook").unwrap();
+
+        track_path(dir.path(), ".claude/skills/gwt-pr/SKILL.md");
+        track_path(dir.path(), ".claude/commands/gwt-pr.md");
+        track_path(dir.path(), ".claude/hooks/scripts/gwt-forward-hook.mjs");
+
+        distribute_to_worktree(dir.path()).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked_skill).unwrap(), "tracked skill");
+        assert_eq!(
+            fs::read_to_string(&tracked_command).unwrap(),
+            "tracked command"
+        );
+        assert_eq!(fs::read_to_string(&tracked_hook).unwrap(), "tracked hook");
+
+        let codex_skill = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
+        assert!(codex_skill.exists(), "expected {}", codex_skill.display());
+    }
+
+    fn init_git_repo(worktree: &Path) {
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg(worktree)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn track_path(worktree: &Path, relative_path: &str) {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .arg("add")
+            .arg(relative_path)
+            .status()
+            .unwrap()
+            .success());
     }
 }

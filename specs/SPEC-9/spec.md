@@ -36,11 +36,12 @@ As a developer, I want gwt to bundle all embedded skills, commands, and hooks in
 **Acceptance Scenarios**
 
 1. Given an agent is launched from gwt, when the launch completes, then `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.codex/skills/` are written to the target worktree with the bundled skill files.
-2. Given the target worktree already has older skill files, when an agent is launched, then all gwt-managed skill files are overwritten with the latest bundled versions.
-3. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` is generated with gwt-managed hooks, preserving any existing user-defined hooks via merge logic.
-4. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.claude/settings.local.json`).
-5. Given the gwt binary is built, when build.rs runs, then all SKILL.md files are validated for YAML frontmatter syntax errors, and the build fails with a clear error if any SKILL.md has malformed YAML.
-6. Given all skills are bundled, when the binary starts, then no runtime file I/O is needed to read skill definitions — skills are embedded in the binary via `include_dir`.
+2. Given the target worktree already has older untracked gwt-managed skill files, when an agent is launched, then those generated files are overwritten with the latest bundled versions.
+3. Given the target worktree tracks `.claude/*` or `.codex/*` gwt asset paths in Git, when an agent is launched, then distribution preserves those tracked files and only writes untracked generated targets.
+4. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` is generated with gwt-managed hooks, preserving any existing user-defined hooks via merge logic.
+5. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.claude/settings.local.json`).
+6. Given the gwt binary is built, when build.rs runs, then all SKILL.md files are validated for YAML frontmatter syntax errors, and the build fails with a clear error if any SKILL.md has malformed YAML.
+7. Given all skills are bundled, when the binary starts, then no runtime file I/O is needed to read skill definitions — skills are embedded in the binary via `include_dir`.
 
 ### US-4: Merge hooks.json Preserving User Hooks (P1) -- PARTIALLY IMPLEMENTED
 
@@ -66,6 +67,7 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - `.claude/settings.local.json` contains user-defined hooks that conflict with gwt-managed hooks.
 - SKILL.md frontmatter contains YAML syntax errors (caught at build time).
 - Agent launch is interrupted mid-distribution (partial write).
+- Target worktree tracks bundled `.claude/*` or `.codex/*` assets in Git; distribution must not dirty tracked source files.
 - npm postinstall script runs in an environment without internet access.
 - GitHub Release workflow runs but binary compilation fails on one platform.
 
@@ -103,7 +105,8 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
   - `.claude/commands/gwt-*.md` — Claude Code slash commands
   - `.claude/hooks/scripts/gwt-*.mjs` — Claude Code hooks
   - `.codex/skills/gwt-*/` — Codex skill definitions (same content as Claude)
-- **FR-013**: Distribution uses full overwrite: all gwt-managed files are replaced unconditionally on each agent launch.
+- **FR-013**: Distribution overwrites untracked gwt-managed generated files on each agent launch.
+- **FR-013a**: Distribution must skip writes for gwt-managed asset paths that are already tracked by Git in the target worktree.
 - **FR-014**: `.claude/settings.local.json` is generated on each agent launch. gwt-managed hooks are merged using `hooks.rs` merge logic, preserving user-defined hooks.
 - **FR-015**: `.git/info/exclude` is updated on each agent launch to exclude gwt-managed asset paths. Existing user entries are preserved; gwt-managed entries are delimited by `# gwt-managed-begin` / `# gwt-managed-end` markers.
 
