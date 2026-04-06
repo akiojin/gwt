@@ -78,12 +78,12 @@
 
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
-- `gwt-design` を使って DDD ベースの SPEC 設計を行う（ドメイン分析 → SPEC 登録 → 仕様明確化）
+- `gwt-spec-design` を使って DDD ベースの SPEC 設計を行う（ドメイン分析 → SPEC 登録 → 仕様明確化）
 - SPEC ディレクトリ内の `spec.md` に最低限以下を含める:
   - ユーザーシナリオとテスト（受け入れシナリオ）
   - 機能要件（FR-\*）
   - 成功基準
-- `gwt-plan` で `plan.md`、`tasks.md` も策定してから実装に入る
+- `gwt-spec-plan` で `plan.md`、`tasks.md` も策定してから実装に入る
 - 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
 - 現在のコンバセーションでは SPEC 登録までで完了とする
 
@@ -96,7 +96,7 @@
 
 #### 2. TDD（テストファースト）
 
-- `gwt-build` を使って TDD ベースで実装する（SPEC モードまたはスタンドアロンモード）
+- `gwt-spec-build` を使って TDD ベースで実装する（SPEC モードまたはスタンドアロンモード）
 - 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
 - Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
 - テストが RED（失敗）状態であることを確認してから実装に進む
@@ -245,10 +245,10 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-design | `/gwt:gwt-design` | Drive SPEC design from intake to planning-ready with DDD methodology. Runs preflight search, one-question-at-a-time interview, domain discovery (Bounded Context, Ubiquitous Language), SPEC registration, and clarification. |
-| gwt-plan | `/gwt:gwt-plan` | Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Produces research.md, data-model.md, quickstart.md, contracts/*. Runs CLEAR/AUTO-FIXABLE/NEEDS-DECISION analysis. |
-| gwt-build | `/gwt:gwt-build` | Implement code using test-first TDD methodology. Works in SPEC mode (tasks.md-driven) or standalone mode (no SPEC needed). Red-Green-Refactor loop, verification, PR flow, completion gate. |
-| gwt-review | `/gwt:gwt-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-design. |
+| gwt-spec-design | `/gwt:gwt-spec-design` | Drive SPEC design from intake to planning-ready with DDD methodology. Runs preflight search, one-question-at-a-time interview, domain discovery (Bounded Context, Ubiquitous Language), SPEC registration, and clarification. |
+| gwt-spec-plan | `/gwt:gwt-spec-plan` | Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Produces research.md, data-model.md, quickstart.md, contracts/*. Runs CLEAR/AUTO-FIXABLE/NEEDS-DECISION analysis. |
+| gwt-spec-build | `/gwt:gwt-spec-build` | Implement code using test-first TDD methodology. Works in SPEC mode (tasks.md-driven) or standalone mode (no SPEC needed). Red-Green-Refactor loop, verification, PR flow, completion gate. |
+| gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-spec-design. |
 
 ### Issue & PR Management
 
@@ -261,7 +261,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-design and gwt-issue. |
+| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-spec-design and gwt-issue. |
 | gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; pane ID + message → send input; stop/close + pane ID → stop pane. |
 
 ### TUI Design
@@ -273,15 +273,15 @@ Commands can be invoked as `/gwt:<command-name>`.
 ### Recommended Workflow
 
 ```
-gwt-design → gwt-plan → gwt-build → gwt-review
+gwt-spec-design → gwt-spec-plan → gwt-spec-build → gwt-arch-review
      ↑                                    |
      └────────────────────────────────────┘
 ```
 
-1. **Design a feature** → `gwt-design` (DDD intake → SPEC creation)
-2. **Plan implementation** → `gwt-plan` (SDD architecture → tasks)
-3. **Build with TDD** → `gwt-build` (Red-Green-Refactor → PR)
-4. **Review architecture** → `gwt-review` (analysis → improvement proposals)
+1. **Design a feature** → `gwt-spec-design` (DDD intake → SPEC creation)
+2. **Plan implementation** → `gwt-spec-plan` (SDD architecture → tasks)
+3. **Build with TDD** → `gwt-spec-build` (Red-Green-Refactor → PR)
+4. **Review architecture** → `gwt-arch-review` (analysis → improvement proposals)
 5. **Manage issues** → `gwt-issue` (register or resolve)
 6. **Manage PRs** → `gwt-pr` (create, check, or fix)
 <!-- END gwt managed skills -->

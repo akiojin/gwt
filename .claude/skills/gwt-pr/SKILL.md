@@ -1,6 +1,6 @@
 ---
 name: gwt-pr
-description: "Unified GitHub PR lifecycle manager. Auto-detects mode: creates PRs when none exist, pushes to open PRs, checks PR status, and fixes CI failures/merge conflicts/reviewer comments. Use when user says 'create PR', 'check PR', 'fix CI', 'PR status', 'fix the PR', or 'open a PR'."
+description: "Use proactively after implementation work to create, check, or fix PRs. Auto-detects mode from branch PR state: no PR creates one, open PR pushes updates, CI failures/conflicts/reviews triggers fix mode. Triggers: 'create PR', 'check PR', 'fix CI', 'PR status'."
 ---
 
 # gwt-pr — Unified PR Lifecycle Manager

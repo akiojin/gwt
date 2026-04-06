@@ -1,9 +1,9 @@
 ---
-name: gwt-review
-description: "Scan codebase structure, analyze domain boundaries (DDD), evaluate module depth (Ousterhout), assess agent-friendliness, and generate a prioritized improvement report. Use when user says 'review architecture', 'codebase review', or 'コードレビュー'."
+name: gwt-arch-review
+description: "Use proactively after completing a major feature or weekly to maintain code quality. Scans domain boundaries (DDD), module depth (Ousterhout), testability, and agent-friendliness. Outputs prioritized improvement report. Triggers: 'review architecture', 'codebase review', 'コードレビュー'."
 ---
 
-# gwt-review — Codebase Architecture Review
+# gwt-arch-review — Codebase Architecture Review
 
 Perform a structured architectural review of any codebase and produce a prioritized improvement report. This skill is read-only — it analyzes and reports but never modifies code.
 
@@ -22,7 +22,7 @@ Perform a structured architectural review of any codebase and produce a prioriti
 Regular architectural review directly improves agent output quality. This skill closes the feedback loop:
 
 ```text
-gwt-design → gwt-plan → gwt-build → gwt-review
+gwt-spec-design → gwt-spec-plan → gwt-spec-build → gwt-arch-review
      ↑                                    |
      └────────────────────────────────────┘
 ```
@@ -181,7 +181,7 @@ Reference: `references/report-format.md`
 **Repository**: <name>
 **Scope**: <full | subset description>
 **Date**: <date>
-**Reviewed by**: gwt-review
+**Reviewed by**: gwt-arch-review
 
 ## Executive Summary
 
@@ -227,7 +227,7 @@ Priority-ordered list of concrete improvements:
 1. **<proposal title>** — Addresses [C1], [H2]
    - Estimated effort: <small/medium/large>
    - Suggested approach: <1-2 sentences>
-   - Create SPEC via: `gwt-design`
+   - Create SPEC via: `gwt-spec-design`
 
 2. ...
 
@@ -235,9 +235,9 @@ Priority-ordered list of concrete improvements:
 
 To act on these findings:
 1. Pick the top 1-3 proposals
-2. Use `gwt-design` to create improvement SPECs
-3. Follow the normal gwt-plan → gwt-build pipeline
-4. Run `gwt-review` again after implementation to verify improvement
+2. Use `gwt-spec-design` to create improvement SPECs
+3. Follow the normal gwt-spec-plan → gwt-spec-build pipeline
+4. Run `gwt-arch-review` again after implementation to verify improvement
 ```
 
 ## Execution rules
