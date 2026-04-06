@@ -19,7 +19,7 @@ use gwt_notification::{Notification, Severity};
 use gwt_skills::{distribute_to_worktree, generate_settings_local, update_git_exclude};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -190,6 +190,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 name: format!("Shell {}", idx + 1),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             };
             let session_id = session.id.clone();
             model.sessions.push(session);
@@ -1644,6 +1645,7 @@ fn check_branch_pending_actions(model: &mut Model) {
                     name: format!("Shell: {}", branch.name),
                     tab_type: crate::model::SessionTabType::Shell,
                     vt: crate::model::VtState::new(24, 80),
+                    created_at: std::time::Instant::now(),
                 };
                 let session_id = session.id.clone();
                 model.sessions.push(session);
@@ -2476,6 +2478,7 @@ fn materialize_pending_launch_with(
             color: tui_agent_color(config.color),
         },
         vt: crate::model::VtState::new(24, 80),
+        created_at: std::time::Instant::now(),
     };
     let tab_id = tab.id.clone();
     model.sessions.push(tab);
@@ -3006,6 +3009,18 @@ fn tui_agent_color(color: gwt_agent::AgentColor) -> crate::model::AgentColor {
     }
 }
 
+/// Map `AgentColor` to a ratatui `Color` for rendering.
+fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
+    match color {
+        crate::model::AgentColor::Green => Color::Green,
+        crate::model::AgentColor::Blue => Color::Blue,
+        crate::model::AgentColor::Cyan => Color::Cyan,
+        crate::model::AgentColor::Yellow => Color::Yellow,
+        crate::model::AgentColor::Magenta => Color::Magenta,
+        crate::model::AgentColor::Gray => Color::Gray,
+    }
+}
+
 fn clipboard_payload_to_bytes(paths: &[PathBuf], fallback_text: &str) -> Option<Vec<u8>> {
     if !paths.is_empty() {
         let payload = paths
@@ -3282,14 +3297,61 @@ fn render_session_surface(
     show_cursor: bool,
 ) {
     if session.vt.screen().contents().trim().is_empty() {
-        let placeholder = Paragraph::new(format!(
-            "Session: {} ({}x{})",
-            session.name,
-            session.vt.cols(),
-            session.vt.rows()
-        ))
-        .style(Style::default().fg(theme::color::TEXT_DISABLED));
-        frame.render_widget(placeholder, area);
+        match &session.tab_type {
+            crate::model::SessionTabType::Agent { agent_id, color } => {
+                // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
+                const SPINNER: [char; 6] =
+                    ['\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}'];
+                let elapsed = session.created_at.elapsed().as_millis() as usize;
+                let ch = SPINNER[(elapsed / 200) % SPINNER.len()];
+                let agent_fg = agent_color_to_ratatui(*color);
+
+                // Center the startup display vertically
+                let top_pad = area.height.saturating_sub(5) / 2;
+                let mut lines: Vec<Line<'_>> = Vec::new();
+                for _ in 0..top_pad {
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", theme::icon::SESSION_AGENT),
+                        Style::default().fg(agent_fg),
+                    ),
+                    Span::styled(
+                        session.name.clone(),
+                        Style::default()
+                            .fg(agent_fg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{ch} "), Style::default().fg(agent_fg)),
+                    Span::styled(
+                        format!("Starting {agent_id}..."),
+                        Style::default().fg(theme::color::TEXT_SECONDARY),
+                    ),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Waiting for agent output",
+                    Style::default().fg(theme::color::TEXT_DISABLED),
+                )));
+                let paragraph =
+                    Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+                frame.render_widget(paragraph, area);
+            }
+            _ => {
+                let placeholder = Paragraph::new(format!(
+                    "Session: {} ({}x{})",
+                    session.name,
+                    session.vt.cols(),
+                    session.vt.rows()
+                ))
+                .style(Style::default().fg(theme::color::TEXT_DISABLED));
+                frame.render_widget(placeholder, area);
+            }
+        }
     } else {
         frame.render_widget(
             crate::widgets::terminal_view::TerminalView::new(session.vt.screen()),
@@ -3995,6 +4057,7 @@ mod tests {
                 color,
             },
             vt: crate::model::VtState::new(30, 100),
+            created_at: std::time::Instant::now(),
         }
     }
 
@@ -4184,6 +4247,7 @@ mod tests {
             name: "Shell: feature/status-bar".to_string(),
             tab_type: SessionTabType::Shell,
             vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         };
 
         let rendered = render_model_text(&model, 220, 24);
@@ -4458,6 +4522,7 @@ mod tests {
             name: name.to_string(),
             tab_type: SessionTabType::Shell,
             vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         }
     }
 
@@ -4607,6 +4672,7 @@ mod tests {
             name: "Shell: feature/compact-footer".to_string(),
             tab_type: SessionTabType::Shell,
             vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
         };
 
         let rendered = render_model_text(&model, 80, 24);
@@ -6067,6 +6133,7 @@ mod tests {
                     color: crate::model::AgentColor::Blue,
                 },
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
             crate::model::SessionTab {
                 id: stale_branch.id.clone(),
@@ -6076,6 +6143,7 @@ mod tests {
                     color: crate::model::AgentColor::Green,
                 },
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
             crate::model::SessionTab {
                 id: stale_worktree.id.clone(),
@@ -6085,12 +6153,14 @@ mod tests {
                     color: crate::model::AgentColor::Cyan,
                 },
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
             crate::model::SessionTab {
                 id: "shell-branch".to_string(),
                 name: "Shell: feature/test".to_string(),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
         ];
         model.active_session = 0;
@@ -7556,12 +7626,14 @@ CUSTOM_ENV = "enabled"
                 name: "Shell: feature/test".to_string(),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
             crate::model::SessionTab {
                 id: "shell-1".to_string(),
                 name: "Shell: feature/test".to_string(),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
         ];
 
@@ -7591,12 +7663,14 @@ CUSTOM_ENV = "enabled"
                 name: "Shell: feature/test".to_string(),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
             crate::model::SessionTab {
                 id: "shell-1".to_string(),
                 name: "Shell: feature/test".to_string(),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
         ];
         model.branches.detail_session_selected = 1;
@@ -7626,12 +7700,14 @@ CUSTOM_ENV = "enabled"
                 name: "Shell: feature/test".to_string(),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
             crate::model::SessionTab {
                 id: "shell-1".to_string(),
                 name: "Shell: feature/test".to_string(),
                 tab_type: SessionTabType::Shell,
                 vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
             },
         ];
         model.branches.detail_session_selected = 99;
