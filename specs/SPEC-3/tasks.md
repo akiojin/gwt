@@ -9,6 +9,13 @@
 - [x] T-A05 Write test: Claude Code build with PermissionMode::Auto emits --permission-mode auto
 - [x] T-A06 Update SPEC-3 spec.md with complete env var table and CLI flags
 
+## Phase 0b: SkipPermissions Legacy Flags
+
+- [x] T-A07 Write RED tests: SkipPermissions adds legacy flags per agent (Claude: --dangerously-skip-permissions, Codex/Gemini/Copilot: --yolo).
+- [x] T-A08 Write RED tests: Custom Agent schema accepts skipPermissionsArgs and applies them on launch.
+- [x] T-A09 Update launch builder + wizard to use legacy SkipPermissions flags and custom args.
+- [x] T-A10 Update SPEC-3 spec.md with legacy flags and custom agent schema field.
+
 ## Phase 1: Version Cache -- Core
 
 - [x] T001 [P] Write RED test: cache file round-trip (write versions, read back, verify content matches).
