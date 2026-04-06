@@ -99,6 +99,27 @@ agent PTY が起動しなかった。
 2. bare workspace を使う実運用が残っている間は、tempdir 上の `gwt.git + develop/` fixture を app 層の RED テストに含める。
 3. `git-common-dir` を使う path 変換では、`repo name` と `git control dir` を同一視しない。
 
+## 2026-04-07 — fix: Launch Agent の worktree path は repo 名 flatten ではなく branch 階層を使う
+
+### 事象
+
+Launch Agent で `feature/aaa` を新規作成すると、worktree path が
+`.../gwt-feature-aaa` になり、既存 workspace の `feature/...` layout と
+一致していなかった。
+
+### 原因
+
+- `sibling_worktree_path()` が branch 名全体を slug 化し、repo 名 prefix
+  (`gwt-`) を付けた単一ディレクトリへ flatten していた。
+- linked worktree 名の誤用は修正済みでも、layout 契約そのものが既存
+  workspace とずれたままだった。
+
+### 再発防止策
+
+1. Launch Agent の worktree path は repo 名由来の prefix ではなく、branch 名の `/` をそのままディレクトリ階層に反映する。
+2. worktree path の RED テストは `feature/aaa -> ../feature/aaa` を明示的に固定し、`gwt-*` の flatten path を期待値に残さない。
+3. SPEC-10 の workspace layout 例と SPEC-3 の Launch Agent acceptance を同じ path 契約で更新し、実装と文書を分離させない。
+
 ## 2026-04-06 — fix: process-wide fake docker env は並列 app テストの観測値を汚す
 
 ### 事象

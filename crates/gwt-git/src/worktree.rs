@@ -146,48 +146,22 @@ pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
 }
 
 /// Derive a sibling worktree path from the repo root and branch name.
+///
+/// The layout root stays at the same directory level as the repository or
+/// bare common-dir, while the branch name itself becomes the relative
+/// directory hierarchy (for example `feature/aaa` -> `../feature/aaa`).
 pub fn sibling_worktree_path(repo_path: &Path, branch: &str) -> PathBuf {
-    let repo_name = repo_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.strip_suffix(".git").unwrap_or(name))
-        .filter(|name| !name.is_empty())
-        .unwrap_or("repo");
-    let suffix = slug_branch_for_path(branch);
-    let dir_name = if suffix.is_empty() {
-        repo_name.to_string()
-    } else {
-        format!("{repo_name}-{suffix}")
-    };
+    let layout_root = repo_path.parent().unwrap_or(repo_path);
+    let mut path = layout_root.to_path_buf();
 
-    repo_path.parent().unwrap_or(repo_path).join(dir_name)
-}
-
-fn slug_branch_for_path(branch: &str) -> String {
-    let mut out = String::with_capacity(branch.len());
-    let mut prev_dash = false;
-
-    for ch in branch.trim().chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else if matches!(ch, '-' | '_') {
-            ch
-        } else {
-            '-'
-        };
-
-        if mapped == '-' {
-            if !prev_dash {
-                out.push(mapped);
-            }
-            prev_dash = true;
-        } else {
-            out.push(mapped);
-            prev_dash = false;
+    for segment in branch.trim_matches('/').split('/') {
+        if segment.is_empty() {
+            continue;
         }
+        path.push(segment);
     }
 
-    out.trim_matches('-').to_string()
+    path
 }
 
 /// Parse `git worktree list --porcelain` output into `WorktreeInfo` entries.
@@ -398,10 +372,10 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
-    fn sibling_worktree_path_uses_repo_name_and_slugged_branch() {
+    fn sibling_worktree_path_preserves_branch_hierarchy() {
         let repo_path = Path::new("/tmp/my-repo");
         let worktree = sibling_worktree_path(repo_path, "feature/banner");
-        assert_eq!(worktree, PathBuf::from("/tmp/my-repo-feature-banner"));
+        assert_eq!(worktree, PathBuf::from("/tmp/feature/banner"));
     }
 
     #[test]
@@ -482,19 +456,21 @@ prunable gitdir file points to non-existent location
         let expected_parent = std::fs::canonicalize(tmp.path()).unwrap();
         assert_eq!(
             sibling_worktree_path(&layout_root, "feature/banner"),
-            expected_parent.join("gwt-feature-banner")
+            expected_parent.join("feature").join("banner")
         );
     }
 
     #[test]
     fn create_from_base_creates_new_branch_worktree() {
         let tmp = tempfile::tempdir().unwrap();
-        init_git_repo(tmp.path());
-        git_commit_allow_empty(tmp.path(), "initial commit");
-        git_checkout_new_branch(tmp.path(), "develop");
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
 
-        let manager = WorktreeManager::new(tmp.path());
-        let worktree_path = sibling_worktree_path(tmp.path(), "feature/materialized");
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = sibling_worktree_path(&repo_path, "feature/materialized");
 
         manager
             .create_from_base("develop", "feature/materialized", &worktree_path)

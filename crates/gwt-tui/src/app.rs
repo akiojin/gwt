@@ -7675,13 +7675,15 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path() {
-        let repo_dir = tempfile::tempdir().expect("temp repo dir");
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
-        init_git_repo(repo_dir.path());
-        git_commit_allow_empty(repo_dir.path(), "initial commit");
-        git_checkout_new_branch(repo_dir.path(), "develop");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
 
-        let mut model = Model::new(repo_dir.path().to_path_buf());
+        let mut model = Model::new(repo_path.clone());
         model.pending_launch_config = Some(LaunchConfig {
             agent_id: AgentId::Custom("my-agent".to_string()),
             command: "/bin/echo".to_string(),
@@ -7704,16 +7706,10 @@ CUSTOM_ENV = "enabled"
         materialize_pending_launch_with(&mut model, sessions_dir.path())
             .expect("materialize launch");
 
-        let repo_name = repo_dir
+        let expected_worktree = workspace_dir
             .path()
-            .file_name()
-            .expect("repo dir name")
-            .to_string_lossy();
-        let expected_worktree = repo_dir
-            .path()
-            .parent()
-            .expect("repo dir parent")
-            .join(format!("{repo_name}-feature-materialized-launch"));
+            .join("feature")
+            .join("materialized-launch");
         assert!(expected_worktree.exists(), "new worktree should exist");
         let expected_worktree =
             std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
@@ -7746,37 +7742,33 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn materialize_pending_launch_with_new_branch_from_selected_branch_creates_new_worktree() {
-        let repo_dir = tempfile::tempdir().expect("temp repo dir");
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
-        init_git_repo(repo_dir.path());
-        git_commit_allow_empty(repo_dir.path(), "initial commit");
-        git_checkout_new_branch(repo_dir.path(), "develop");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
 
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
             is_new_branch: true,
             base_branch_name: Some("develop".to_string()),
             branch_name: "feature/launch-from-selected".to_string(),
-            worktree_path: Some(repo_dir.path().to_path_buf()),
+            worktree_path: Some(repo_path.clone()),
             ..Default::default()
         };
 
-        let mut model = Model::new(repo_dir.path().to_path_buf());
+        let mut model = Model::new(repo_path);
         model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
 
         materialize_pending_launch_with(&mut model, sessions_dir.path())
             .expect("materialize launch");
 
-        let repo_name = repo_dir
+        let expected_worktree = workspace_dir
             .path()
-            .file_name()
-            .expect("repo dir name")
-            .to_string_lossy();
-        let expected_worktree = repo_dir
-            .path()
-            .parent()
-            .expect("repo dir parent")
-            .join(format!("{repo_name}-feature-launch-from-selected"));
+            .join("feature")
+            .join("launch-from-selected");
         assert!(expected_worktree.exists(), "new worktree should exist");
         let expected_worktree =
             std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
@@ -7808,7 +7800,7 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn materialize_pending_launch_with_linked_worktree_uses_main_repo_sibling_layout() {
+    fn materialize_pending_launch_with_linked_worktree_uses_main_repo_branch_layout() {
         let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
         let repo_path = workspace_dir.path().join("gwt");
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
@@ -7849,7 +7841,7 @@ CUSTOM_ENV = "enabled"
         materialize_pending_launch_with(&mut model, sessions_dir.path())
             .expect("materialize launch");
 
-        let expected_worktree = workspace_dir.path().join("gwt-feature-test");
+        let expected_worktree = workspace_dir.path().join("feature").join("test");
         let expected_worktree =
             std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
         assert!(
@@ -7887,7 +7879,8 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn materialize_pending_launch_with_bare_workspace_linked_worktree_uses_repo_name_layout() {
+    fn materialize_pending_launch_with_bare_workspace_linked_worktree_uses_branch_hierarchy_layout()
+    {
         let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
         let bare_repo_path = workspace_dir.path().join("gwt.git");
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
@@ -7943,7 +7936,7 @@ CUSTOM_ENV = "enabled"
         materialize_pending_launch_with(&mut model, sessions_dir.path())
             .expect("materialize launch");
 
-        let expected_worktree = workspace_dir.path().join("gwt-feature-test");
+        let expected_worktree = workspace_dir.path().join("feature").join("test");
         let expected_worktree =
             std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
         assert!(
@@ -8029,7 +8022,7 @@ CUSTOM_ENV = "enabled"
             .expect("materialize launch");
 
         assert!(
-            !workspace_dir.path().join("gwt-feature-test").exists(),
+            !workspace_dir.path().join("feature").join("test").exists(),
             "launch should reuse the existing branch worktree instead of trying to create a new sibling path"
         );
 
