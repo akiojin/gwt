@@ -1,6 +1,6 @@
 # Lessons Learned
 
-## 2026-04-06 — fix: startup timing tests must stub unrelated gh CLI surfaces
+## 2026-04-06 — fix: startup timing tests must exclude synchronous agent detection
 
 ### 事象
 
@@ -8,14 +8,16 @@
 
 ### 原因
 
-- `load_initial_data()` の計測に `gh pr view` / `gh pr list` の同期 CLI 呼び出しが含まれていた。
-- テストの意図は branch detail preload が docker snapshot を待たずに返ることの確認だったが、PR surface の遅延まで同じ wall-clock に混入していた。
+- `load_initial_data()` 冒頭の `schedule_startup_version_cache_refresh()` が
+  `AgentDetector::detect_all()` を同期実行していた。
+- agent version 検出は branch detail preload と無関係だが、同じ startup
+  wall-clock に載っていたため、遅い CI 環境で 5 秒超のブロッキングとして観測された。
 
 ### 再発防止策
 
-1. 起動時の非同期 preload を測るテストでは、無関係な CLI / network surface を helper injection で stub する。
-2. wall-clock 閾値テストを追加するときは、計測対象以外の同期処理が同じ関数に残っていないか先に棚卸しする。
-3. CI only の遅延失敗では、まず外部 CLI (`gh`, `docker`, `git fetch`) の同期呼び出し混入を疑う。
+1. startup で「schedule」と名付けた処理は、検出・列挙も含めてメインスレッドで同期実行しない。
+2. wall-clock 閾値テストを追加するときは、計測対象以外の同期初期化 (`detect_all`, cache load, CLI version probes) を棚卸しする。
+3. CI only の遅延失敗では、外部 CLI 呼び出しだけでなく「同期 agent detection / version probe」の混入も最初に疑う。
 
 ## 2026-04-06 — fix: session pane mouse interaction は keyboard focus 前提で捨てない
 

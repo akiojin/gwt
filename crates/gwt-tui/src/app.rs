@@ -2782,20 +2782,27 @@ fn schedule_startup_version_cache_refresh() {
         wizard_version_cache_path(),
         AgentDetector::detect_all,
         schedule_wizard_version_cache_refresh,
+        |task| {
+            let _ = thread::spawn(task);
+        },
     );
 }
 
-fn schedule_startup_version_cache_refresh_with<Detect, Schedule>(
+fn schedule_startup_version_cache_refresh_with<Detect, Schedule, Spawn>(
     cache_path: PathBuf,
     detect_agents: Detect,
     schedule_refresh: Schedule,
+    spawn_task: Spawn,
 ) where
-    Detect: FnOnce() -> Vec<DetectedAgent>,
-    Schedule: FnOnce(PathBuf, Vec<AgentId>),
+    Detect: FnOnce() -> Vec<DetectedAgent> + Send + 'static,
+    Schedule: FnOnce(PathBuf, Vec<AgentId>) + Send + 'static,
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>),
 {
-    let cache = VersionCache::load(&cache_path);
-    let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
-    schedule_refresh(cache_path, refresh_targets);
+    spawn_task(Box::new(move || {
+        let cache = VersionCache::load(&cache_path);
+        let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
+        schedule_refresh(cache_path, refresh_targets);
+    }));
 }
 
 fn prepare_wizard_startup(
@@ -7028,7 +7035,8 @@ CUSTOM_ENV = "enabled"
             .insert("codex".into(), version_entry(&["0.5.0"], 60));
         cache.save(&cache_path).unwrap();
 
-        let scheduled = std::cell::RefCell::new(None);
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let scheduled_capture = scheduled.clone();
         schedule_startup_version_cache_refresh_with(
             cache_path.clone(),
             || {
@@ -7038,12 +7046,13 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.2.0")),
                 ]
             },
-            |path, targets| {
-                *scheduled.borrow_mut() = Some((path, targets));
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
+            |task| task(),
         );
 
-        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
         assert_eq!(scheduled_path, cache_path);
         // Claude stale, Codex fresh, Gemini missing → Claude + Gemini need refresh
         assert!(targets.contains(&AgentId::ClaudeCode));
@@ -7055,7 +7064,8 @@ CUSTOM_ENV = "enabled"
     fn schedule_startup_version_cache_refresh_with_schedules_missing_cache_entries() {
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
-        let scheduled = std::cell::RefCell::new(None);
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let scheduled_capture = scheduled.clone();
 
         schedule_startup_version_cache_refresh_with(
             cache_path.clone(),
@@ -7065,17 +7075,54 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.4.0")),
                 ]
             },
-            |path, targets| {
-                *scheduled.borrow_mut() = Some((path, targets));
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
+            |task| task(),
         );
 
-        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
         assert_eq!(scheduled_path, cache_path);
         // All npm agents (Claude, Codex, Gemini) need refresh from empty cache
         assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(targets.contains(&AgentId::Codex));
         assert!(targets.contains(&AgentId::Gemini));
+    }
+
+    #[test]
+    fn schedule_startup_version_cache_refresh_with_defers_detection_until_spawned_task_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("agent-versions.json");
+        let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let detected_flag = detected.clone();
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None::<(PathBuf, Vec<AgentId>)>));
+        let scheduled_capture = scheduled.clone();
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+
+        schedule_startup_version_cache_refresh_with(
+            cache_path.clone(),
+            move || {
+                detected_flag.store(true, Ordering::Release);
+                vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
+            },
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
+            },
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+        );
+
+        assert!(!detected.load(Ordering::Acquire));
+        assert!(scheduled.lock().unwrap().is_none());
+
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+
+        assert!(detected.load(Ordering::Acquire));
+        let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
+        assert_eq!(scheduled_path, cache_path);
+        assert!(targets.contains(&AgentId::ClaudeCode));
     }
 
     #[test]

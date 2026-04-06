@@ -19,8 +19,9 @@
 - Terminal setup / teardown now enables and disables bracketed paste so gwt receives host-terminal paste events reliably.
 - Paste injection now checks the active VT screen's bracketed-paste mode and wraps payloads with `ESC[200~ ... ESC[201~` only when requested by the PTY application.
 - The deprecated `Ctrl+G,p` file-paste shortcut is removed from the keybinding surface.
-- The branch-detail async preload regression test now stubs PR-related `gh`
-  surfaces so CI latency in `gh pr view` / `gh pr list` does not mask preload timing.
+- Startup version-cache refresh now defers agent detection to a background task,
+  so `load_initial_data()` no longer blocks on `AgentDetector::detect_all()`
+  before branch-detail preload begins.
 - AI branch suggestion parsing now enforces `3..=5` git-safe names before the wizard displays them.
 - The wizard AI suggestion step now keeps an explicit `Manual input` option at the bottom of the list.
 - The standard Launch Agent new-branch flow now skips the AI suggestion step
