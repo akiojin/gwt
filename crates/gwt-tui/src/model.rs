@@ -265,6 +265,10 @@ pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
 /// Shared queue of branch-detail preload results produced in the background.
 pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
+#[cfg(test)]
+pub(crate) type BranchDetailDockerSnapshotter =
+    Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>;
+
 /// Tracked branch-detail preload worker state.
 pub(crate) struct BranchDetailWorker {
     events: BranchDetailQueue,
@@ -337,18 +341,11 @@ impl BranchDetailWorker {
 impl Drop for BranchDetailWorker {
     fn drop(&mut self) {
         self.cancel_active();
-        self.reap_finished();
         if let Some(handle) = self.active.take() {
-            if handle.is_finished() {
-                let _ = handle.join();
-            } else {
-                self.retired.push(handle);
-            }
+            let _ = handle.join();
         }
         for handle in self.retired.drain(..) {
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
+            let _ = handle.join();
         }
     }
 }
@@ -585,6 +582,9 @@ pub struct Model {
     pub(crate) docker_progress_events: Option<DockerProgressQueue>,
     /// Tracked branch-detail preload worker and completion queue polled from the tick loop.
     pub(crate) branch_detail_worker: Option<BranchDetailWorker>,
+    /// Test-only override for branch-detail docker snapshots.
+    #[cfg(test)]
+    pub(crate) branch_detail_docker_snapshotter: Option<BranchDetailDockerSnapshotter>,
     /// Service selection overlay state.
     pub(crate) service_select: Option<ServiceSelectState>,
     /// Port conflict resolution overlay state.
@@ -665,6 +665,8 @@ impl Model {
             docker_progress: None,
             docker_progress_events: None,
             branch_detail_worker: None,
+            #[cfg(test)]
+            branch_detail_docker_snapshotter: None,
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),
@@ -704,6 +706,14 @@ impl Model {
     /// Number of sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_branch_detail_docker_snapshotter<F>(&mut self, snapshotter: F)
+    where
+        F: Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync + 'static,
+    {
+        self.branch_detail_docker_snapshotter = Some(Arc::new(snapshotter));
     }
 
     /// Get the active session, if any.
@@ -940,6 +950,8 @@ impl Default for SessionState {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn model_new_defaults() {
@@ -1044,6 +1056,31 @@ mod tests {
     fn load_session_state_missing_file_returns_error() {
         let result = Model::load_session_state(Path::new("/nonexistent/path/session.toml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn branch_detail_worker_drop_waits_for_worker_exit() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_flag = completed.clone();
+        let cancel_flag = cancel.clone();
+        let handle = std::thread::spawn(move || {
+            while !cancel_flag.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            completed_flag.store(true, Ordering::SeqCst);
+        });
+
+        {
+            let _worker = BranchDetailWorker::new(events, cancel, handle);
+        }
+
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "dropping the worker should wait for the cancelled thread to exit"
+        );
     }
 
     #[test]

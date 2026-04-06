@@ -9,6 +9,8 @@
 - [x] The reopened Quick Start restoration slice has RED tests in place before implementation changes land.
 - [x] The reopened AgentSelect / popup-chrome slice has RED tests in place before implementation changes land.
 - [x] The latest implementation slice has spec-focused verification evidence attached to it.
+- [x] The Codex model snapshot sync slice was driven by failing wizard tests
+  before the Launch Agent model list was updated.
 - [x] The reviewer flow in `quickstart.md` has been captured as repeatable
   completion evidence, including launch-config and launch-materialization
   commands.

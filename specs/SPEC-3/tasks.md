@@ -324,3 +324,9 @@
 - [x] T166 Write RED test: `Shift+Enter` on Issue detail opens the wizard with prefilled issue context and the standard new-branch flow.
 - [x] T167 Restore the Issues detail route in `app.rs` so `Shift+Enter` opens the wizard, seeds issue-derived branch context, and prefills `issue_id`.
 - [x] T168 Verify focused issue-launch tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 46: Codex Model Snapshot Sync
+
+- [x] T169 Write RED test: Codex model options and old-TUI model-step rendering match the current Codex CLI snapshot.
+- [x] T170 Update `wizard.rs` so the Launch Agent Codex model list and descriptions match the current CLI snapshot while keeping `Default (Auto)` as the non-explicit override.
+- [x] T171 Verify focused wizard tests, broad workspace checks, and refresh SPEC-3 artifacts.

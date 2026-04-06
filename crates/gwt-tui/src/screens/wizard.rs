@@ -1085,10 +1085,13 @@ fn default_model_options(agent_id: &str) -> Vec<String> {
         ],
         "codex" => vec![
             "Default (Auto)".to_string(),
+            "gpt-5.4".to_string(),
+            "gpt-5.4-mini".to_string(),
             "gpt-5.3-codex".to_string(),
+            "gpt-5.3-codex-spark".to_string(),
             "gpt-5.2-codex".to_string(),
-            "gpt-5.1-codex-max".to_string(),
             "gpt-5.2".to_string(),
+            "gpt-5.1-codex-max".to_string(),
             "gpt-5.1-codex-mini".to_string(),
         ],
         "gemini" => vec![
@@ -1128,26 +1131,38 @@ const CLAUDE_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 4] = [
     },
 ];
 
-const CODEX_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 6] = [
+const CODEX_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 9] = [
     ModelDisplayOption {
         label: "Default (Auto)",
         description: "Use Codex default model",
     },
     ModelDisplayOption {
-        label: "gpt-5.3-codex",
+        label: "gpt-5.4",
         description: "Latest frontier agentic coding model.",
     },
     ModelDisplayOption {
-        label: "gpt-5.2-codex",
-        description: "Codex flagship with extra-high reasoning support.",
+        label: "gpt-5.4-mini",
+        description: "Smaller frontier agentic coding model.",
     },
     ModelDisplayOption {
-        label: "gpt-5.1-codex-max",
-        description: "Codex-optimized flagship for deep and fast reasoning.",
+        label: "gpt-5.3-codex",
+        description: "Frontier Codex-optimized agentic coding model.",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.3-codex-spark",
+        description: "Ultra-fast coding model.",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.2-codex",
+        description: "Frontier agentic coding model.",
     },
     ModelDisplayOption {
         label: "gpt-5.2",
-        description: "Latest frontier model with improvements across knowledge and coding.",
+        description: "Optimized for professional work and long-running agents.",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.1-codex-max",
+        description: "Codex-optimized model for deep and fast reasoning.",
     },
     ModelDisplayOption {
         label: "gpt-5.1-codex-mini",
@@ -3230,6 +3245,83 @@ mod tests {
         assert!(text.contains("  Sonnet 4.5 - Best for everyday tasks"));
         assert!(text.contains("  Haiku 4.5 - Fastest for quick answers"));
         assert!(text.contains("[Enter] Select  [Esc] Back  [Up/Down] Navigate"));
+    }
+
+    #[test]
+    fn codex_model_options_match_latest_cli_snapshot() {
+        assert_eq!(
+            default_model_options("codex"),
+            vec![
+                "Default (Auto)".to_string(),
+                "gpt-5.4".to_string(),
+                "gpt-5.4-mini".to_string(),
+                "gpt-5.3-codex".to_string(),
+                "gpt-5.3-codex-spark".to_string(),
+                "gpt-5.2-codex".to_string(),
+                "gpt-5.2".to_string(),
+                "gpt-5.1-codex-max".to_string(),
+                "gpt-5.1-codex-mini".to_string(),
+            ]
+        );
+
+        let display_options = model_display_options("codex");
+        let labels = display_options
+            .iter()
+            .map(|option| option.label)
+            .collect::<Vec<_>>();
+        let descriptions = display_options
+            .iter()
+            .map(|option| option.description)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "Default (Auto)",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex",
+                "gpt-5.3-codex-spark",
+                "gpt-5.2-codex",
+                "gpt-5.2",
+                "gpt-5.1-codex-max",
+                "gpt-5.1-codex-mini",
+            ]
+        );
+        assert_eq!(
+            descriptions,
+            vec![
+                "Use Codex default model",
+                "Latest frontier agentic coding model.",
+                "Smaller frontier agentic coding model.",
+                "Frontier Codex-optimized agentic coding model.",
+                "Ultra-fast coding model.",
+                "Frontier agentic coding model.",
+                "Optimized for professional work and long-running agents.",
+                "Codex-optimized model for deep and fast reasoning.",
+                "Optimized for codex. Cheaper, faster, but less capable.",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_model_step_for_codex_shows_latest_cli_snapshot() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ModelSelect;
+        state.agent_id = "codex".to_string();
+        state.detected_agents = sample_agents();
+        state.selected = 1;
+
+        let text = render_text(&state, 180, 24);
+
+        assert!(text.contains("Select Model"));
+        assert!(text.contains("Default (Auto) - Use Codex default model"));
+        assert!(text.contains("> gpt-5.4 - Latest frontier agentic coding model."));
+        assert!(text.contains("  gpt-5.4-mini - Smaller frontier agentic coding model."));
+        assert!(text.contains("  gpt-5.3-codex-spark - Ultra-fast coding model."));
+        assert!(text.contains(
+            "  gpt-5.1-codex-mini - Optimized for codex. Cheaper, faster, but less capable."
+        ));
     }
 
     #[test]

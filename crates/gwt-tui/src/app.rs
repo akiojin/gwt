@@ -43,6 +43,7 @@ use crate::{
 use crate::custom_agents::{load_custom_agents_from_path, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV};
 
 static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// Cap branch-detail preload event application per tick so one refresh burst
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
@@ -558,6 +559,7 @@ where
     F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
 {
     schedule_startup_version_cache_refresh();
+    let has_git_remote = repo_has_git_remote(&model.repo_path);
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -633,10 +635,31 @@ where
         gwt_git::diff::get_status,
         |repo_path| gwt_git::commit::recent_commits(repo_path, 10),
         gwt_git::branch::list_branches,
-        load_pr_link,
+        |repo_path| {
+            if has_git_remote {
+                load_pr_link(repo_path)
+            } else {
+                Ok(None)
+            }
+        },
     );
 
-    load_pr_dashboard_with(model, load_prs);
+    if has_git_remote {
+        load_pr_dashboard_with(model, load_prs);
+    }
+}
+
+fn repo_has_git_remote(repo_path: &std::path::Path) -> bool {
+    let output = match Command::new("git")
+        .args(["remote"])
+        .current_dir(repo_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
 }
 
 fn load_git_view_with<S, C, B, P>(
@@ -1912,7 +1935,13 @@ fn schedule_branch_detail_prefetch(model: &mut Model) {
     let (generation, branches) = model.branches.begin_detail_refresh();
     let events = Arc::new(Mutex::new(VecDeque::new()));
     let cancel = Arc::new(AtomicBool::new(false));
-    let handle = spawn_branch_detail_worker(events.clone(), cancel.clone(), generation, branches);
+    let handle = spawn_branch_detail_worker(
+        events.clone(),
+        cancel.clone(),
+        generation,
+        branches,
+        branch_detail_docker_snapshotter(model),
+    );
 
     if let Some(worker) = model.branch_detail_worker.as_mut() {
         worker.replace(events, cancel, handle);
@@ -1928,12 +1957,13 @@ fn spawn_branch_detail_worker(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
+    docker_snapshotter: Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         if cancel.load(Ordering::SeqCst) {
             return;
         }
-        let docker_containers = gwt_docker::list_containers().unwrap_or_default();
+        let docker_containers = docker_snapshotter();
         if cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -1946,6 +1976,17 @@ fn spawn_branch_detail_worker(
             screens::branches::load_branch_detail,
         );
     })
+}
+
+fn branch_detail_docker_snapshotter(
+    _model: &Model,
+) -> Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync> {
+    #[cfg(test)]
+    if let Some(snapshotter) = _model.branch_detail_docker_snapshotter.as_ref() {
+        return snapshotter.clone();
+    }
+
+    Arc::new(|| gwt_docker::list_containers().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -2850,26 +2891,37 @@ fn schedule_startup_version_cache_refresh() {
     schedule_startup_version_cache_refresh_with(
         wizard_version_cache_path(),
         AgentDetector::detect_all,
-        schedule_wizard_version_cache_refresh,
         |task| {
             let _ = thread::spawn(task);
         },
+        schedule_wizard_version_cache_refresh,
     );
 }
 
-fn schedule_startup_version_cache_refresh_with<Detect, Schedule, Spawn>(
+fn schedule_startup_version_cache_refresh_with<Detect, Spawn, Schedule>(
     cache_path: PathBuf,
     detect_agents: Detect,
-    schedule_refresh: Schedule,
     spawn_task: Spawn,
+    schedule_refresh: Schedule,
 ) where
     Detect: FnOnce() -> Vec<DetectedAgent> + Send + 'static,
-    Schedule: FnOnce(PathBuf, Vec<AgentId>) + Send + 'static,
     Spawn: FnOnce(Box<dyn FnOnce() + Send>),
+    Schedule: FnOnce(PathBuf, Vec<AgentId>) + Send + 'static,
 {
+    if STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
     spawn_task(Box::new(move || {
         let cache = VersionCache::load(&cache_path);
         let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+        if refresh_targets.is_empty() {
+            return;
+        }
         schedule_refresh(cache_path, refresh_targets);
     }));
 }
@@ -4332,6 +4384,8 @@ mod tests {
     use std::sync::Once;
     use tempfile::TempDir;
 
+    static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
@@ -4558,6 +4612,46 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
             None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        result
+    }
+
+    #[cfg(unix)]
+    fn write_fake_gh(script_body: &str) -> TempDir {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let script_path = dir.path().join("gh");
+        let mut file = fs::File::create(&script_path).expect("create fake gh");
+        file.write_all(script_body.as_bytes())
+            .expect("write fake gh");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = file.metadata().expect("stat fake gh").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod fake gh");
+
+        dir
+    }
+
+    #[cfg(unix)]
+    fn with_fake_gh<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::GH_PATH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = write_fake_gh(script_body);
+        let previous = std::env::var_os("PATH");
+        let mut entries = vec![dir.path().to_path_buf()];
+        if let Some(value) = previous.as_ref() {
+            entries.extend(std::env::split_paths(value));
+        }
+        let new_path = std::env::join_paths(entries).expect("join fake gh PATH");
+        std::env::set_var("PATH", &new_path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
 
         result
@@ -5860,9 +5954,56 @@ mod tests {
         init_git_repo(dir.path());
         git_commit_allow_empty(dir.path(), "initial commit");
 
-        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.set_branch_detail_docker_snapshotter(|| {
+            thread::sleep(std::time::Duration::from_millis(250));
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
+        });
 
-        with_fake_docker(script, || {
+        let start = std::time::Instant::now();
+        load_initial_data(&mut model);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(3000),
+            "initial data load should not block on branch detail preload: {elapsed:?}"
+        );
+        assert!(
+            model.branches.docker_containers.is_empty(),
+            "branch detail docker data should arrive asynchronously"
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| !model.branches.docker_containers.is_empty(),
+            "branch detail preload",
+        );
+
+        assert_eq!(model.branches.docker_containers[0].name, "web");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_initial_data_skips_github_cli_when_repo_has_no_remote() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+        assert!(
+            !repo_has_git_remote(dir.path()),
+            "test repo should not have any git remotes"
+        );
+
+        let gh_count = dir.path().join("gh-count.txt");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$2\" = \"--version\" ]; then\n  printf 'gh version test\\n'\n  exit 0\nfi\ncount_file=\"{}\"\ncount=0\nif [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\necho $((count + 1)) > \"$count_file\"\nsleep 5\nprintf '{{\"url\":\"https://example.com/pr/1\"}}'\n",
+            gh_count.display()
+        );
+
+        with_fake_gh(&script, || {
             let mut model = Model::new(dir.path().to_path_buf());
 
             let start = std::time::Instant::now();
@@ -5872,23 +6013,23 @@ mod tests {
                 |_repo_path| Ok(Vec::new()),
             );
             let elapsed = start.elapsed();
+            let gh_calls = fs::read_to_string(&gh_count)
+                .unwrap_or_else(|_| "0".to_string())
+                .trim()
+                .to_string();
 
             assert!(
-                elapsed < std::time::Duration::from_millis(3000),
-                "initial data load should not block on branch detail preload: {elapsed:?}"
+                elapsed < std::time::Duration::from_millis(1500),
+                "load_initial_data should skip gh lookups when the repo has no remote: {elapsed:?} (gh calls: {gh_calls})"
             );
             assert!(
-                model.branches.docker_containers.is_empty(),
-                "branch detail docker data should arrive asynchronously"
+                !gh_count.exists(),
+                "gh should not be invoked for repos without remotes"
             );
-
-            drive_ticks_until(
-                &mut model,
-                |model| !model.branches.docker_containers.is_empty(),
-                "branch detail preload",
+            assert!(
+                model.pr_dashboard.prs.is_empty(),
+                "repos without remotes should not try to populate PR dashboard data"
             );
-
-            assert_eq!(model.branches.docker_containers[0].name, "web");
         });
     }
 
@@ -5900,33 +6041,30 @@ mod tests {
         git_create_branch(dir.path(), "feature/one");
         git_create_branch(dir.path(), "feature/two");
 
-        let counter_path = dir.path().join("docker-count.txt");
-        fs::write(&counter_path, "0\n").expect("write docker counter");
-        let script = format!(
-            "#!/bin/sh\ncount_file=\"{}\"\ncount=$(cat \"$count_file\")\necho $((count + 1)) > \"$count_file\"\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n",
-            counter_path.display()
+        let docker_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let docker_calls_for_worker = docker_calls.clone();
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.set_branch_detail_docker_snapshotter(move || {
+            docker_calls_for_worker.fetch_add(1, Ordering::SeqCst);
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
+        });
+        load_initial_data(&mut model);
+
+        drive_ticks_until(
+            &mut model,
+            |model| !model.branches.docker_containers.is_empty(),
+            "branch detail preload docker snapshot",
         );
 
-        with_fake_docker(&script, || {
-            let mut model = Model::new(dir.path().to_path_buf());
-            load_initial_data(&mut model);
-
-            drive_ticks_until(
-                &mut model,
-                |model| !model.branches.docker_containers.is_empty(),
-                "branch detail preload docker snapshot",
-            );
-
-            let docker_calls = fs::read_to_string(&counter_path)
-                .expect("read docker counter")
-                .trim()
-                .parse::<usize>()
-                .expect("parse docker counter");
-            assert!(
-                (1..=2).contains(&docker_calls),
-                "branch detail preload should snapshot docker state at most once per worker refresh cycle (actual: {docker_calls})"
-            );
-        });
+        let docker_calls = docker_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            docker_calls, 1,
+            "branch detail preload should snapshot docker state exactly once per refresh cycle"
+        );
     }
 
     #[test]
@@ -7092,6 +7230,11 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn schedule_startup_version_cache_refresh_with_schedules_stale_refreshable_agents() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
         let mut cache = VersionCache::new();
@@ -7104,6 +7247,7 @@ CUSTOM_ENV = "enabled"
             .insert("codex".into(), version_entry(&["0.5.0"], 60));
         cache.save(&cache_path).unwrap();
 
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
         let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
         let scheduled_capture = scheduled.clone();
         schedule_startup_version_cache_refresh_with(
@@ -7115,15 +7259,18 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.2.0")),
                 ]
             },
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
             move |path, targets| {
                 *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
-            |task| task(),
         );
 
-        let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        // Claude stale, Codex fresh, Gemini missing → Claude + Gemini need refresh
         assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(!targets.contains(&AgentId::Codex));
         assert!(targets.contains(&AgentId::Gemini));
@@ -7131,8 +7278,14 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn schedule_startup_version_cache_refresh_with_schedules_missing_cache_entries() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
         let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
         let scheduled_capture = scheduled.clone();
 
@@ -7144,15 +7297,18 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.4.0")),
                 ]
             },
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
             move |path, targets| {
                 *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
-            |task| task(),
         );
 
-        let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        // All npm agents (Claude, Codex, Gemini) need refresh from empty cache
         assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(targets.contains(&AgentId::Codex));
         assert!(targets.contains(&AgentId::Gemini));
@@ -7160,13 +7316,17 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn schedule_startup_version_cache_refresh_with_defers_detection_until_spawned_task_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache_path = dir.path().join("agent-versions.json");
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
+        let cache_path = PathBuf::from("/tmp/agent-versions.json");
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
         let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let detected_flag = detected.clone();
         let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None::<(PathBuf, Vec<AgentId>)>));
         let scheduled_capture = scheduled.clone();
-        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
 
         schedule_startup_version_cache_refresh_with(
             cache_path.clone(),
@@ -7174,16 +7334,18 @@ CUSTOM_ENV = "enabled"
                 detected_flag.store(true, Ordering::Release);
                 vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
             },
-            move |path, targets| {
-                *scheduled_capture.lock().unwrap() = Some((path, targets));
-            },
             |task| {
                 *spawned.borrow_mut() = Some(task);
+            },
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
         );
 
         assert!(!detected.load(Ordering::Acquire));
         assert!(scheduled.lock().unwrap().is_none());
+        assert!(spawned.borrow().is_some());
+        assert!(STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
 
         let task = spawned.borrow_mut().take().unwrap();
         task();
@@ -7192,10 +7354,14 @@ CUSTOM_ENV = "enabled"
         let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
         assert_eq!(scheduled_path, cache_path);
         assert!(targets.contains(&AgentId::ClaudeCode));
+        assert!(!STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
     }
 
     #[test]
     fn schedule_wizard_version_cache_refresh_with_defers_refresh_until_spawned_task_runs() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
 
         let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
@@ -7795,10 +7961,7 @@ CUSTOM_ENV = "enabled"
 
         route_paste_input(&mut model, "feature/paste".into());
 
-        assert_eq!(
-            model.wizard.as_ref().unwrap().branch_name,
-            "feature/paste"
-        );
+        assert_eq!(model.wizard.as_ref().unwrap().branch_name, "feature/paste");
     }
 
     #[test]
@@ -8269,33 +8432,37 @@ CUSTOM_ENV = "enabled"
         init_git_repo(dir.path());
         git_commit_allow_empty(dir.path(), "initial commit");
 
-        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
-
-        with_fake_docker(script, || {
-            let mut model = Model::new(dir.path().to_path_buf());
-            model.management_tab = ManagementTab::Branches;
-
-            let start = std::time::Instant::now();
-            route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
-            let elapsed = start.elapsed();
-
-            assert!(
-                elapsed < std::time::Duration::from_millis(150),
-                "Branches refresh should not block on branch detail reload: {elapsed:?}"
-            );
-            assert!(
-                model.branches.docker_containers.is_empty(),
-                "detail refresh should update docker data asynchronously"
-            );
-
-            drive_ticks_until(
-                &mut model,
-                |model| !model.branches.docker_containers.is_empty(),
-                "branch detail refresh",
-            );
-
-            assert_eq!(model.branches.docker_containers[0].name, "web");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.management_tab = ManagementTab::Branches;
+        model.set_branch_detail_docker_snapshotter(|| {
+            thread::sleep(std::time::Duration::from_millis(250));
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
         });
+
+        let start = std::time::Instant::now();
+        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(150),
+            "Branches refresh should not block on branch detail reload: {elapsed:?}"
+        );
+        assert!(
+            model.branches.docker_containers.is_empty(),
+            "detail refresh should update docker data asynchronously"
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| !model.branches.docker_containers.is_empty(),
+            "branch detail refresh",
+        );
+
+        assert_eq!(model.branches.docker_containers[0].name, "web");
     }
 
     #[test]
@@ -8454,39 +8621,43 @@ CUSTOM_ENV = "enabled"
     fn route_key_to_management_branches_down_does_not_block_on_detail_reload() {
         let wt_a = tempfile::tempdir().expect("worktree a");
         let wt_b = tempfile::tempdir().expect("worktree b");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
-
-        with_fake_docker(script, || {
-            let mut model = test_model();
-            model.management_tab = ManagementTab::Branches;
-            model.active_focus = FocusPane::TabContent;
-            model.branches.branches = vec![
-                screens::branches::BranchItem {
-                    name: "feature/a".to_string(),
-                    is_head: false,
-                    is_local: true,
-                    category: screens::branches::BranchCategory::Feature,
-                    worktree_path: Some(wt_a.path().to_path_buf()),
-                },
-                screens::branches::BranchItem {
-                    name: "feature/b".to_string(),
-                    is_head: false,
-                    is_local: true,
-                    category: screens::branches::BranchCategory::Feature,
-                    worktree_path: Some(wt_b.path().to_path_buf()),
-                },
-            ];
-
-            let start = std::time::Instant::now();
-            route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
-            let elapsed = start.elapsed();
-
-            assert!(
-                elapsed < std::time::Duration::from_millis(150),
-                "Branches cursor movement should not block on detail reload: {elapsed:?}"
-            );
-            assert_eq!(model.branches.selected, 1);
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.set_branch_detail_docker_snapshotter(|| {
+            thread::sleep(std::time::Duration::from_millis(250));
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
         });
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/a".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(wt_a.path().to_path_buf()),
+            },
+            screens::branches::BranchItem {
+                name: "feature/b".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(wt_b.path().to_path_buf()),
+            },
+        ];
+
+        let start = std::time::Instant::now();
+        route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(150),
+            "Branches cursor movement should not block on detail reload: {elapsed:?}"
+        );
+        assert_eq!(model.branches.selected, 1);
     }
 
     #[test]

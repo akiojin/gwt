@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `178/178` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T09:16:20Z`
+- Task progress: `181/181` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T11:05:03Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -138,6 +138,14 @@
 - Shared custom-agent config helpers now preserve unrelated settings and
   unknown nested custom-agent sections such as `models`, so Settings edits do
   not erase GUI-era configuration value.
+- Launch Agent's Codex model list now matches the current Codex CLI snapshot,
+  including `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`, while
+  keeping `Default (Auto)` on the no-`--model` path.
+- Verification for the Codex model sync slice now includes `cargo test -p
+  gwt-tui`, `cargo test -p gwt-core -p gwt-tui`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo build -p gwt-tui`, and `bunx markdownlint-cli2` on the refreshed
+  SPEC-3 artifacts.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

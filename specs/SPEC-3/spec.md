@@ -357,7 +357,7 @@ As a developer, I want to convert an existing session to a different agent type 
 
 #### Codex
 
-Model list snapshot: **2026-04-05**.
+Model list snapshot: **2026-04-06**.
 
 | Flag | Description |
 |------|-------------|

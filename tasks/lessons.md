@@ -1,23 +1,80 @@
 # Lessons Learned
 
-## 2026-04-06 — fix: startup timing tests must exclude synchronous agent detection
+## 2026-04-06 — fix: startup 時の agent detection は main thread で同期実行しない
 
 ### 事象
 
-`load_initial_data_prefetches_branch_detail_async` が CI だけ 5 秒前後に膨らみ、branch detail preload の非同期性とは無関係に落ちた。
+`load_initial_data_prefetches_branch_detail_async` が GitHub Actions で約 5 秒ブロックし、
+branch detail preload 自体は非同期でも startup 全体が重く見えていた。
 
 ### 原因
 
-- `load_initial_data()` 冒頭の `schedule_startup_version_cache_refresh()` が
-  `AgentDetector::detect_all()` を同期実行していた。
-- agent version 検出は branch detail preload と無関係だが、同じ startup
-  wall-clock に載っていたため、遅い CI 環境で 5 秒超のブロッキングとして観測された。
+- `schedule_startup_version_cache_refresh()` が `AgentDetector::detect_all()` を呼び、
+  `gh copilot --version` などの version probe を main thread 上で同期実行していた。
+- branch detail preload の非同期性とは無関係な agent detection が、同じ startup path に混ざっていた。
 
 ### 再発防止策
 
-1. startup で「schedule」と名付けた処理は、検出・列挙も含めてメインスレッドで同期実行しない。
-2. wall-clock 閾値テストを追加するときは、計測対象以外の同期初期化 (`detect_all`, cache load, CLI version probes) を棚卸しする。
-3. CI only の遅延失敗では、外部 CLI 呼び出しだけでなく「同期 agent detection / version probe」の混入も最初に疑う。
+1. startup で補助的な cache refresh や probe を走らせる場合は、dispatch から background thread に逃がして UI/initial load を塞がない。
+2. 非同期 preload の test は、対象 worker だけでなく同じ code path 上の別 I/O が同期で混ざっていないか確認する。
+3. global in-flight flag を使う scheduler test は並列実行で干渉するため、test 側で lock を入れて検証を直列化する。
+
+## 2026-04-06 — fix: process-wide fake docker env は並列 app テストの観測値を汚す
+
+### 事象
+
+`load_initial_data_prefetches_docker_once_per_refresh` が CI の full suite でだけ不安定に失敗し、
+branch detail preload の docker snapshot 回数が期待より多く観測されることがあった。
+
+### 原因
+
+- app テストは `with_fake_docker()` で process-wide な `GWT_DOCKER_BIN` を差し替えていた。
+- 同時に走る別テストが `load_initial_data()` や branch refresh を通じて background preload を起動すると、
+  その worker も同じ fake docker を踏み、カウンタや応答を横取りしていた。
+
+### 再発防止策
+
+1. 並列実行される app テストで external command の観測値を固定したい場合は、process-wide env override ではなく model 単位の dependency injection を使う。
+2. background worker を含むテストでは、「fake binary の差し替えが同一 process 内の他テストから見えるか」を最初に確認する。
+3. call count や遅延を検証するテストは、外部コマンド自体を叩かず closure / function override で deterministic にする。
+
+## 2026-04-06 — fix: branch detail worker は Drop で detach せず join する
+
+### 事象
+
+`Test (Rust)` の `load_initial_data_prefetches_docker_once_per_refresh` が CI 全体実行でだけ不安定に失敗し、
+docker preload の呼び出し回数が 3 回まで増えることがあった。
+
+### 原因
+
+- `BranchDetailWorker::drop()` が未完了の background thread を `join()` せず detach していた。
+- app テストは `with_fake_docker()` で process-wide な `GWT_DOCKER_BIN` を差し替えるため、
+  前テストから漏れた worker が後続テストの fake docker を踏み、別テストの counter を増やしていた。
+
+### 再発防止策
+
+1. process-wide env var やグローバル fixture に依存する background worker は、Drop 時に cancel だけで終わらせず thread 終了まで `join()` する。
+2. 「単体実行では通るが full suite / CI だけ落ちる」docker 系テストでは、前テストの非同期 worker が detatch されていないかを最初に確認する。
+3. fake external binary を使うテストは、worker の終了保証まで含めて fixture の責務として扱う。
+
+## 2026-04-06 — fix: remote のない repo 起動時は gh 系メタデータ取得をスキップする
+
+### 事象
+
+`load_initial_data_prefetches_branch_detail_async` が GitHub Actions でだけ約 5 秒ブロックし、
+startup 時の branch detail preload が同期処理のように見えていた。
+
+### 原因
+
+- `load_initial_data()` は temp repo に remote がなくても `gh pr view` / `gh pr list` 系の取得経路を通していた。
+- local 環境では即失敗して目立たなかったが、CI runner では `gh` が repo 解決待ちで数秒ブロックし、
+  preload 非同期化の検証時間を食っていた。
+
+### 再発防止策
+
+1. startup 時の GitHub メタデータ取得は、先に `git remote` で remote の有無を確認し、remote なし repo ではスキップする。
+2. temp repo / bare repo を使う startup テストでは、fake `gh` を PATH に差し込んで「GitHub CLI を呼ばない」こと自体を RED/GREEN で固定する。
+3. startup の非同期性テストでは、目的外の CLI 呼び出し（`gh` など）が計測対象を汚していないかを先に点検する。
 
 ## 2026-04-06 — fix: session pane mouse interaction は keyboard focus 前提で捨てない
 
@@ -55,6 +112,25 @@ terminal pane の scrollback 実装自体は存在していたが、管理ビュ
 1. preload/バックグラウンド処理の「結果適用側」でも 1 Tick あたりの上限（frame budget）を明示的に持つ。
 2. 「1 Tick で全件 drain しない」ことを固定する RED テストを追加し、回帰で即検知できるようにする。
 3. `Branches` 系のレスポンス不具合では、I/O の非同期化だけでなく「メインスレッド適用量」の上限有無まで確認する。
+
+## 2026-04-06 — fix: git exclude では tracked な配布先のブランチ汚染は防げない
+
+### 事象
+
+Agent launch 時の skill distribution が、他ブランチの `.claude/skills/gwt-*` など tracked なソース資産まで上書きし、
+作業していないブランチでも差分が発生した。
+
+### 原因
+
+- `distribute_to_worktree()` が `.claude/skills` / `.claude/commands` / `.claude/hooks` / `.codex/skills`
+  を無条件で overwrite していた。
+- `.git/info/exclude` は untracked file には効くが、すでに Git 管理下のファイルが書き換わること自体は防げない。
+
+### 再発防止策
+
+1. 配布先が Git worktree の場合は、まず `git ls-files` で gwt 管理対象 path の tracked 状態を確認する。
+2. tracked な `.claude/*` / `.codex/*` 資産は distribution で上書きせず、untracked な生成物だけ更新する。
+3. `.git/info/exclude` の追加だけで「ブランチが汚れない」と判断しない。tracked / untracked を分けて検証する。
 
 ## 2026-04-06 — fix: Launch Agent の AI branch suggestion が復活しないことをテストで固定する
 

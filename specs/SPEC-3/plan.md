@@ -102,6 +102,16 @@ wizard UX and end-to-end custom-agent behavior.
    `BranchTypeSelect` and carry the selected issue through the `IssueSelect`
    step.
 
+### Phase 46: Codex Model Snapshot Sync
+
+1. Update the Launch Agent Codex model list to match the current Codex CLI
+   snapshot so the selectable models include `gpt-5.4`, `gpt-5.4-mini`,
+   and `gpt-5.3-codex-spark`.
+2. Keep `Default (Auto)` as the non-explicit selection so `--model` remains
+   omitted when the user keeps the default label selected.
+3. Add focused RED/GREEN coverage for the Codex model list values and rendered
+   old-TUI label/description rows before broad workspace verification.
+
 ### Phase 6: Old-TUI Wizard Option Formatting
 
 1. Restore old-TUI row formatting for `ModelSelect`, `ReasoningLevel`,

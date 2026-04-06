@@ -17,3 +17,5 @@ pub mod widgets;
 
 #[cfg(test)]
 pub(crate) static DOCKER_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+pub(crate) static GH_PATH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
