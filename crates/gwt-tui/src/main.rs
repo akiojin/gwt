@@ -48,11 +48,25 @@ impl Command for DisableAlternateScrollMode {
 
 fn drain_pty_output_into_model(model: &mut Model) -> bool {
     let mut drained = false;
-    for (session_id, data) in model.drain_pty_output() {
+    for (session_id, data) in coalesce_pty_output_chunks(model.drain_pty_output()) {
         app::update(model, Message::PtyOutput(session_id, data));
         drained = true;
     }
     drained
+}
+
+fn coalesce_pty_output_chunks(chunks: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    let mut merged: Vec<(String, Vec<u8>)> = Vec::new();
+    for (session_id, data) in chunks {
+        // Merge by session within the current drain pass so snapshot capture
+        // follows the drawn frame boundary rather than PTY reader chunking.
+        if let Some((_, existing)) = merged.iter_mut().find(|(id, _)| *id == session_id) {
+            existing.extend_from_slice(&data);
+        } else {
+            merged.push((session_id, data));
+        }
+    }
+    merged
 }
 
 fn is_mouse_scroll_message(msg: &Message) -> bool {
@@ -384,6 +398,25 @@ mod tests {
             row: 12,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    #[test]
+    fn coalesce_pty_output_chunks_merges_each_session_in_first_seen_order() {
+        let merged = coalesce_pty_output_chunks(vec![
+            ("shell-0".to_string(), b"frame".to_vec()),
+            ("agent-1".to_string(), b"AA".to_vec()),
+            ("shell-0".to_string(), b"-1".to_vec()),
+            ("agent-1".to_string(), b"BB".to_vec()),
+            ("shell-0".to_string(), b"\n".to_vec()),
+        ]);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("shell-0".to_string(), b"frame-1\n".to_vec()),
+                ("agent-1".to_string(), b"AABB".to_vec()),
+            ]
+        );
     }
 
     #[test]

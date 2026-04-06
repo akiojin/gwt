@@ -49,3 +49,5 @@
 - [x] T036 Implement bounded wheel-burst batching in `main.rs` so Terminal.app trackpad floods do not force one redraw per raw scroll event.
 - [x] T037 [P] Write RED test: snapshot-backed scrollbar metrics keep the thumb length proportional to the visible viewport height instead of collapsing to a single-cell frame indicator.
 - [x] T038 Adjust snapshot scrollbar metrics in `app.rs` so thumb length tracks the pane viewport while row scrollback behavior stays unchanged.
+- [x] T039 [P] Write RED test: PTY output chunks drained in one event-loop pass are coalesced per session so snapshot-backed scrollback does not expose intermediate chunk states.
+- [x] T040 Coalesce per-session PTY output in `main.rs` before dispatching `Message::PtyOutput`, keeping snapshot capture aligned with rendered frame boundaries.

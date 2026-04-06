@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot scrollback は PTY reader chunk ではなく drain 単位で切る
+
+### 事象
+
+full-screen pane で PTY 出力が流れている最中に scroll すると、scrollback 上の画面が崩れて見えた。
+
+### 原因
+
+- `spawn_pty_reader()` は PTY 出力を read chunk ごとに channel へ送っていた。
+- main loop はその chunk を 1 件ずつ `Message::PtyOutput` に変換していたため、
+  snapshot-backed scrollback が「1 フレーム」ではなく「reader chunk 境界」で刻まれていた。
+- full-screen UI の再描画が複数 chunk に分かれると、描きかけの中間状態まで snapshot 履歴に残っていた。
+
+### 再発防止策
+
+1. snapshot-backed scrollback の破綻は renderer だけでなく、`drain_pty_output_into_model()` が PTY chunk をどう束ねているかを確認する。
+2. 同一 event-loop drain 内の PTY 出力は session 単位で coalesce してから `Message::PtyOutput` に流し、snapshot が draw 境界に近い粒度になるようにする。
+3. `main.rs` の event-loop 調整では、「session ごとに byte order を保ったまま merge される」focused test を追加する。
+
 ## 2026-04-07 — fix: snapshot scrollbar の thumb 長は viewport 高さ基準で計算する
 
 ### 事象
