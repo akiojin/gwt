@@ -480,6 +480,7 @@ fn default_custom_agent(existing: &[StoredCustomAgent]) -> StoredCustomAgent {
         command: id,
         default_args: Vec::new(),
         mode_args: None,
+        skip_permissions_args: Vec::new(),
         env: std::collections::HashMap::new(),
     })
 }
