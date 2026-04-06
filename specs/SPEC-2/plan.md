@@ -699,6 +699,7 @@ Bring back the old-TUI scanability contract by letting Branches show live agent 
 - Store hook-derived runtime state in a lightweight sidecar next to the persisted session TOML and read it back without blocking or failing the list render.
 - Map `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` to `Running`, and `Stop` to `WaitingInput`.
 - When a PTY exits or the user closes a session tab, persist `Stopped` so stale waiting/running state cannot linger.
+- Materialize Claude worktree hooks in Claude's native `.claude/settings.local.json` `hooks` schema, preserving user hooks and replacing stale gwt-managed entries instead of emitting an internal merge schema that Claude ignores.
 
 50.2: Branches list rendering (4 tasks)
 - Derive one highest-priority live agent-session summary per branch from the existing session tabs plus the hook runtime sidecar.

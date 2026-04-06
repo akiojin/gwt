@@ -504,3 +504,9 @@ banner in favor of pane-title chrome.
 - [x] T323 Implement hook runtime sidecar persistence, launch env injection, and `Stopped` cleanup updates in `gwt-agent` / `app.rs`.
 - [x] T324 Implement branch-scoped live session summary extraction and right-aligned Branches row rendering in `app.rs` / `branches.rs`.
 - [x] T325 Refresh `SPEC-2` artifacts and run focused plus broad verification for hook-derived Branches session visibility.
+
+## Phase 51: Normalize Claude Hook Settings Materialization
+
+- [x] T326 [P] Write RED test: `.claude/settings.local.json` regeneration emits Claude's native `hooks` schema and removes the obsolete `managed_hooks` / `user_hooks` keys.
+- [x] T327 [P] Write RED test: Claude settings regeneration preserves non-gwt user hooks while replacing stale gwt-managed commands.
+- [x] T328 Update `gwt-skills` / `app.rs` launch materialization to generate Claude hook settings through a typed Claude-schema merge instead of the internal hooks-merge schema.

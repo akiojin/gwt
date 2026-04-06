@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `325/325` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T10:22:50Z`
+- Task progress: `328/328` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T10:43:02Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -66,6 +66,7 @@
 - Branches rows now show a right-aligned live agent summary again: running sessions animate with a spinner, waiting sessions render a distinct `wait` indicator, and narrow panes keep the branch label readable by shortening or omitting the right side first.
 - Explicit agent-session close and detected PTY exit now persist `Stopped`, so stale running/waiting indicators do not survive after the session is gone.
 - Embedded asset distribution now also writes `.codex/hooks/scripts/gwt-*.mjs`, so launched worktrees get the updated Codex hook script alongside the already-distributed Claude hook assets.
+- Claude launch materialization now regenerates `.claude/settings.local.json` in Claude's native `hooks` schema, preserving user hooks and unrelated settings while replacing the stale internal `managed_hooks` / `user_hooks` layout that prevented Claude hook execution.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

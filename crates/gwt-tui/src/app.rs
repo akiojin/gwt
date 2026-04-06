@@ -2803,7 +2803,7 @@ fn materialize_pending_launch_with(
     if let Err(e) = update_git_exclude(worktree) {
         tracing::warn!("git exclude update failed: {e}");
     }
-    if let Err(e) = generate_settings_local(worktree, &[]) {
+    if let Err(e) = generate_settings_local(worktree) {
         tracing::warn!("settings.local.json generation failed: {e}");
     }
 
@@ -7503,6 +7503,49 @@ CUSTOM_ENV = "enabled"
         assert_eq!(persisted.model.as_deref(), Some("sonnet"));
         assert_eq!(persisted.tool_version.as_deref(), Some("latest"));
         assert_eq!(persisted.display_name, "Claude Code");
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_generates_claude_settings_local_hooks() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-spec-42");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Custom("my-agent".to_string()),
+            command: "gwt-missing-custom-agent-command".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/spec-42".to_string()),
+            display_name: "My Agent".to_string(),
+            color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let settings_path = worktree.join(".claude/settings.local.json");
+        let content = fs::read_to_string(&settings_path).expect("read settings.local");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse settings");
+
+        assert_eq!(
+            value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            serde_json::Value::String(
+                "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()
+            )
+        );
+        assert_eq!(
+            value["hooks"]["PreToolUse"][1]["matcher"],
+            serde_json::Value::String("Bash".to_string())
+        );
     }
 
     #[test]

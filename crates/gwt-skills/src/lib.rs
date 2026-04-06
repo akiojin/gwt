@@ -554,8 +554,7 @@ mod tests {
         let exclude = std::fs::read_to_string(wt.join(".git/info/exclude")).unwrap();
         assert!(exclude.contains("gwt-managed-begin"));
 
-        let hooks = vec![make_hook("PreToolUse", "gwt-hook", true)];
-        generate_settings_local(wt, &hooks).unwrap();
+        generate_settings_local(wt).unwrap();
         assert!(wt.join(".claude/settings.local.json").exists());
 
         // Verify all distribution targets exist
