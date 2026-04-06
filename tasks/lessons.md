@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: `max_scrollback == 0` の pane では transcript ではなく live screen snapshot を先に疑う
+
+### 事象
+
+`Terminal.app` で scroll event 自体は gwt に届いていたが、Codex pane では scrollbar が出ず、
+二本指スクロールしても何も遡れなかった。
+
+### 原因
+
+- 診断ログでは `event=scroll` が発火していた一方、対象 pane の `max_scrollback` は常に `0` だった。
+- その pane は行ベースの terminal history を積むのではなく、同じ画面を描き直す full-screen UI として動いていた。
+- 問題は transcript file の有無ではなく、gwt 側が pane 存命中の recent screen state を一切保持していなかったことだった。
+
+### 再発防止策
+
+1. 「scroll は届くが scrollbar が出ない」不具合では、まず `event=scroll` と `max_scrollback` を同時に確認し、入力経路と履歴保持経路を切り分ける。
+2. `max_scrollback == 0` の pane では transcript ingest を先に足すのではなく、まず pane-local な live screen snapshot cache で十分かを検討する。
+3. full-screen redraw pane の修正では、前フレーム表示・scrollbar・selection copy・live-follow 維持を focused test で一緒に固定する。
+
 ## 2026-04-06 — fix: Terminal.app のトラックパッド scroll は alternate-scroll mode を先に疑う
 
 ### 事象

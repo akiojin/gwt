@@ -28,6 +28,8 @@ As a developer, I want to scroll through terminal history so that I can review p
 4. Given the session has more history than fits on screen, when the terminal pane renders, then a vertical scrollbar appears on the right edge and its thumb tracks the visible scroll position.
 5. Given the host terminal is Terminal.app, when gwt enters the alternate screen and the user scrolls over the session pane with a trackpad, then the gesture reaches gwt as scroll input rather than being translated into cursor keys by the host terminal.
 6. Given Terminal.app reports a two-finger gesture as right-button drag events instead of wheel events, when the drag moves vertically over the session pane, then gwt maps that movement into scrollback navigation.
+7. Given a pane redraws a full-screen UI without accumulating vt100 row scrollback, when multiple frames arrive and I scroll up, then recent earlier frames become visible from gwt's pane-local in-memory snapshot cache.
+8. Given I am viewing an older in-memory snapshot, when new output arrives, then the viewport stays on that older frame until I scroll back to the newest frame.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -72,18 +74,22 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - Scrollbar gutter on narrow terminals should not corrupt wrapped text layout or cursor placement.
 - Selection starting in visible history and ending after additional scroll movement should still copy the intended region.
 - Alt-screen app sends output after gwt session is backgrounded.
+- Pane closes while snapshot history exists; reopening the pane should start from live output only.
 
 ## Functional Requirements
 
 - **FR-001**: `vt100::Parser` processes raw PTY bytes into a screen buffer with cell-level color and attribute data.
 - **FR-002**: `renderer.rs` converts vt100 cells to ratatui `Buffer` with color mapping: Named to Named, Indexed to Indexed, RGB to Rgb.
 - **FR-003**: Scrollback buffer stores up to 10,000 lines per pane, configurable via settings.
+- **FR-003a**: When a pane's visible screen does not expose vt100 row scrollback, gwt keeps a pane-local in-memory ring buffer of recent distinct screen snapshots for the lifetime of that pane.
+- **FR-003b**: Snapshot scrollback is ephemeral only: gwt does not preload Codex / Claude transcript files for this feature, and the cache is discarded when the pane closes.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
-- **FR-004a**: A vertical scrollbar is rendered on the right edge only when scrollback exceeds the visible terminal height.
+- **FR-004a**: A vertical scrollbar is rendered on the right edge only when row scrollback or snapshot history exceeds the visible terminal height / frame count.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
 - **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.
+- **FR-005b**: While the user is viewing an older snapshot-backed frame, new output appends to the history cache without forcing the viewport back to live until the user scrolls down to the newest frame.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
 - **FR-006a**: Selection coordinates are tracked in viewport cell space and resolved against the active scrollback offset so copied text matches the currently visible history.
 - **FR-007**: Copy selected text to system clipboard via platform-native clipboard integration.
@@ -97,6 +103,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 
 - **NFR-001**: Rendering latency under 16ms per frame to maintain 60fps visual smoothness.
 - **NFR-002**: Memory usage proportional to scrollback size; 10,000 lines should consume under 50MB per pane.
+- **NFR-002a**: Snapshot-backed scrollback uses a fixed-size in-memory ring buffer (256 frames) so full-screen panes remain bounded without transcript persistence.
 - **NFR-003**: Cross-platform support via crossterm backend (macOS, Linux, Windows).
 - **NFR-004**: No visible flicker during rapid output (smooth rendering pipeline).
 - **NFR-005**: Clipboard operations complete within 100ms.
@@ -110,5 +117,6 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-004**: Alt-screen buffer activation/deactivation preserves main scrollback integrity.
 - **SC-005**: Color mapping tests cover Named, Indexed, and RGB color spaces.
 - **SC-006**: Scrollback eviction at 10,000-line boundary works without data corruption.
-- **SC-007**: Scrollbar chrome appears only for overflowing history and the thumb position changes when the user scrolls.
+- **SC-007**: Scrollbar chrome appears only for overflowing history or snapshot caches and the thumb position changes when the user scrolls.
 - **SC-008**: Drag selection across single-line and multi-line scrollback copies the expected plain-text payload to the clipboard.
+- **SC-009**: A full-screen pane with `max_scrollback == 0` still exposes recent frames through in-memory snapshot scrollback, and live-follow resumes only after the user returns to the newest frame.

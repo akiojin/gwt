@@ -2,26 +2,26 @@
 
 ## Summary
 
-Complete the terminal emulation layer by first adding a real vt100-backed session surface in `gwt-tui`, then layering URL opening, scrollback interaction, selection, and alt-screen verification on top of it. Low-level renderer tests exist, but the interactive session pane is still missing the remaining state needed for viewport routing, selection, and scrollbar handling.
+Complete the terminal emulation layer by first adding a real vt100-backed session surface in `gwt-tui`, then layering URL opening, scrollback interaction, selection, and alt-screen verification on top of it. Low-level renderer tests exist, but the interactive session pane still needs viewport routing, selection, scrollbar handling, and a fallback for full-screen panes whose redraw model leaves vt100 row scrollback at zero.
 
 ## Technical Context
 
 - **Renderer**: `crates/gwt-tui/src/renderer.rs` -- converts vt100 screen to ratatui Buffer
 - **vt100 crate**: Handles ANSI parsing, screen buffer, alt-screen (DECSET 1049)
-- **Current blocker**: `app.rs` still discards `PtyOutput`, `SessionTab` only stores terminal dimensions, and the session pane renders a placeholder instead of a vt100 surface
+- **Current blocker**: agent / full-screen panes can redraw in place without accumulating vt100 row scrollback, so the session pane needs a separate ephemeral snapshot history for recent review
 - **Existing tests**: renderer URL tests, alt-screen tests, and broader `gwt-tui` keybind coverage already exist
 
 ## Constitution Check
 
 - Spec before implementation: yes, this SPEC documents all terminal emulation requirements.
 - Test-first: URL detection and alt-screen tests must be RED before implementation.
-- No workaround-first: URL detection uses proper regex parsing, not ad-hoc string matching.
+- No workaround-first: URL detection uses proper regex parsing, not ad-hoc string matching, and full-screen scrollback uses pane-local snapshots rather than transcript scraping.
 - Minimal complexity: URL detection is a rendering overlay; does not modify the core vt100 pipeline.
 
 ## Complexity Tracking
 
-- Added complexity: URL regex matching per rendered line, click handler routing
-- Mitigation: URL detection runs only on visible lines, not full scrollback
+- Added complexity: URL regex matching per rendered line, click handler routing, ephemeral screen snapshot buffering
+- Mitigation: URL detection runs only on visible lines, not full scrollback, and snapshot history is bounded to a fixed ring buffer
 
 ## Phased Implementation
 
@@ -54,6 +54,8 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 4. Reserve a right-side gutter only when history overflows the visible pane and render a scrollbar whose thumb matches the current viewport position.
 5. During outer-terminal initialization, explicitly disable alternate-scroll mode so Terminal.app does not translate trackpad gestures into cursor-key input while gwt owns the alternate screen.
 6. Add a Terminal.app-specific fallback that maps `Down/Drag/Up(Right)` gesture sequences into vertical scrollback deltas because crossterm may not emit `ScrollUp/ScrollDown` for trackpad motion there.
+7. For panes whose visible screen has `max_scrollback == 0`, capture distinct live screen states into a pane-local in-memory ring buffer and route wheel scrolling through snapshot history instead of vt100 row scrollback.
+8. Keep snapshot history ephemeral: selection, URL hit testing, and scrollbar rendering must operate on the currently visible live or snapshot surface without preloading external transcript/session files.
 
 ## Dependencies
 

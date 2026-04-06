@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `28/28` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T15:03:56Z`
+- Task progress: `32/32` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T15:59:22Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -17,6 +17,8 @@
 - Session-pane mouse interactions now re-focus the terminal before scrollback routing, so wheel scrolling works from the default management-focus state instead of dropping the first event.
 - Terminal startup now disables alternate-scroll mode so Terminal.app trackpad gestures are not rewritten into cursor keys while gwt owns the alternate screen.
 - Terminal.app-specific `Drag(Right)` gesture sequences now fall back to scrollback motion, matching the observed crossterm event stream when wheel events are absent.
+- Full-screen panes that keep `max_scrollback == 0` now maintain a pane-local in-memory snapshot history, render scrollbar chrome against that cache, and keep selection/copy aligned with the visible historical frame.
+- Snapshot-backed scrollback stays frozen on the chosen historical frame while new output arrives and only returns to live-follow when the user scrolls back to the newest frame.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

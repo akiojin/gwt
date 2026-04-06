@@ -380,6 +380,29 @@ pub struct TerminalSelection {
 }
 
 /// Minimal vt100 screen state wrapper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenSnapshot {
+    rows: u16,
+    cols: u16,
+    state: Vec<u8>,
+}
+
+impl ScreenSnapshot {
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    pub fn state(&self) -> &[u8] {
+        &self.state
+    }
+}
+
+const SNAPSHOT_HISTORY_CAPACITY: usize = 256;
+
 pub struct VtState {
     parser: vt100::Parser,
     rows: u16,
@@ -387,6 +410,8 @@ pub struct VtState {
     max_scrollback: usize,
     follow_live: bool,
     selection: Option<TerminalSelection>,
+    snapshots: VecDeque<ScreenSnapshot>,
+    snapshot_cursor: Option<usize>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -413,6 +438,8 @@ impl Clone for VtState {
             max_scrollback: self.max_scrollback,
             follow_live: self.follow_live,
             selection: self.selection,
+            snapshots: self.snapshots.clone(),
+            snapshot_cursor: self.snapshot_cursor,
         }
     }
 }
@@ -426,6 +453,8 @@ impl VtState {
             max_scrollback: 0,
             follow_live: true,
             selection: None,
+            snapshots: VecDeque::new(),
+            snapshot_cursor: None,
         };
         state.refresh_scrollback_metrics();
         state
@@ -454,6 +483,9 @@ impl VtState {
         let previous_max_scrollback = self.max_scrollback;
         self.parser.process(bytes);
         self.refresh_scrollback_metrics();
+        if self.max_scrollback > 0 {
+            self.snapshot_cursor = None;
+        }
         if self.follow_live {
             self.parser.set_scrollback(0);
         } else {
@@ -464,6 +496,7 @@ impl VtState {
                     .min(self.max_scrollback),
             );
         }
+        self.capture_snapshot();
     }
 
     pub fn screen(&self) -> &vt100::Screen {
@@ -490,7 +523,67 @@ impl VtState {
         self.follow_live = follow_live;
         if follow_live {
             self.parser.set_scrollback(0);
+            self.snapshot_cursor = None;
         }
+    }
+
+    pub fn has_snapshot_scrollback(&self) -> bool {
+        self.max_scrollback == 0 && self.snapshots.len() > 1
+    }
+
+    pub fn snapshot_count(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    pub fn snapshot_position(&self) -> usize {
+        if self.snapshots.is_empty() {
+            0
+        } else {
+            self.snapshot_cursor
+                .unwrap_or(self.snapshots.len().saturating_sub(1))
+        }
+    }
+
+    pub fn snapshot_parser(&self) -> Option<vt100::Parser> {
+        let snapshot = self.active_snapshot()?;
+        let mut parser = vt100::Parser::new(snapshot.rows(), snapshot.cols(), 0);
+        parser.process(snapshot.state());
+        Some(parser)
+    }
+
+    pub fn scroll_snapshot_up(&mut self, rows: usize) -> bool {
+        if rows == 0 || !self.has_snapshot_scrollback() {
+            return false;
+        }
+
+        let last_past_snapshot = self.snapshots.len().saturating_sub(2);
+        self.snapshot_cursor = Some(
+            self.snapshot_cursor
+                .unwrap_or(last_past_snapshot)
+                .saturating_sub(rows),
+        );
+        self.follow_live = false;
+        true
+    }
+
+    pub fn scroll_snapshot_down(&mut self, rows: usize) -> bool {
+        let Some(current) = self.snapshot_cursor else {
+            return false;
+        };
+        if rows == 0 {
+            return false;
+        }
+
+        let last_snapshot = self.snapshots.len().saturating_sub(1);
+        let next = current.saturating_add(rows);
+        if next >= last_snapshot {
+            self.snapshot_cursor = None;
+            self.follow_live = true;
+        } else {
+            self.snapshot_cursor = Some(next);
+            self.follow_live = false;
+        }
+        true
     }
 
     pub fn selection(&self) -> Option<TerminalSelection> {
@@ -521,6 +614,42 @@ impl VtState {
         self.max_scrollback = self.parser.screen().scrollback();
         self.parser
             .set_scrollback(current_scrollback.min(self.max_scrollback));
+    }
+
+    fn active_snapshot(&self) -> Option<&ScreenSnapshot> {
+        if self.max_scrollback > 0 {
+            return None;
+        }
+        self.snapshot_cursor
+            .and_then(|index| self.snapshots.get(index))
+    }
+
+    fn capture_snapshot(&mut self) {
+        if self.max_scrollback > 0 {
+            return;
+        }
+
+        let snapshot = ScreenSnapshot {
+            rows: self.rows,
+            cols: self.cols,
+            state: self.parser.screen().state_formatted(),
+        };
+
+        if self
+            .snapshots
+            .back()
+            .is_some_and(|existing| *existing == snapshot)
+        {
+            return;
+        }
+
+        self.snapshots.push_back(snapshot);
+        if self.snapshots.len() > SNAPSHOT_HISTORY_CAPACITY {
+            self.snapshots.pop_front();
+            if let Some(cursor) = self.snapshot_cursor {
+                self.snapshot_cursor = Some(cursor.saturating_sub(1));
+            }
+        }
     }
 }
 

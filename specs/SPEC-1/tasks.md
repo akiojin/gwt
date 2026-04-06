@@ -39,3 +39,7 @@
 - [x] T026 Fix regression: session-pane mouse wheel now re-focuses the terminal before applying scrollback.
 - [x] T027 Fix Terminal.app trackpad regression by disabling alternate-scroll mode during terminal startup and verify with focused startup + scroll/copy regression tests.
 - [x] T028 Fix Terminal.app right-drag trackpad fallback by mapping vertical `Drag(Right)` deltas into scrollback motion and verify focused regression coverage.
+- [x] T029 [P] Write RED tests: a full-screen pane with `max_scrollback == 0` still reveals previous frames, renders a scrollbar, and copies from the visible snapshot surface.
+- [x] T030 [P] Write RED test: snapshot-backed scrollback stays on the selected historical frame while new output arrives and only returns to live at the newest frame.
+- [x] T031 Implement pane-local in-memory screen snapshot history in `model.rs` with a fixed ring buffer and no transcript preload.
+- [x] T032 Route render / selection / URL hit testing / scrollbar logic through the currently visible live-or-snapshot surface and verify focused regressions.
