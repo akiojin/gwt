@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: interactive Codex は launch 直後の `SessionStart` hook を前提にできない
+
+### 事象
+
+`feature/branches` の `gwt-tui` から `develop` worktree で Codex を起動すると、
+`--enable codex_hooks`、`GWT_SESSION_RUNTIME_PATH`、`--add-dir ~/.gwt/sessions/runtime/<pid>` が
+すべて入っていても、Branches の spinner sidecar が空のままだった。
+
+### 原因
+
+- launch wiring や `.codex/hooks.json` の no-Node runtime hook 生成自体は正しかった。
+- 最小再現では `codex exec` は `SessionStart` hook で sidecar を書く一方、
+  interactive Codex は launch 直後の `SessionStart` hook を発火しなかった。
+- そのため「hooks が最初の Running sidecar を作る」前提だと、起動直後の interactive Codex は
+  branch spinner に現れない。
+
+### 再発防止策
+
+1. Codex hooks 不具合では `hooks.json` / argv / env の確認だけで終わらせず、`exec` と interactive のイベント差も最小再現で確認する。
+2. interactive Codex の startup 可視化は `SessionStart` hook 前提にせず、successful spawn 時の PID-scoped runtime bootstrap を RED テストで固定する。
+3. hook contract を spec に書くときは「interactive Codex may delay SessionStart」を明記し、launch bootstrap との責務境界を残す。
+
 ## 2026-04-07 — fix: tracked な `.codex/hooks.json` の一律スキップは旧式 runtime hook worktree を永久に直せない
 
 ### 事象

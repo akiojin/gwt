@@ -196,6 +196,19 @@ fn persist_agent_session_stopped(sessions_dir: &Path, session_id: &str) {
     }
 }
 
+fn bootstrap_agent_session_running(sessions_dir: &Path, session_id: &str) {
+    let runtime_path = runtime_state_path(sessions_dir, session_id);
+    if runtime_path.exists() {
+        return;
+    }
+
+    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    runtime.source_event = Some("LaunchBootstrap".to_string());
+    if let Err(err) = runtime.save(&runtime_path) {
+        tracing::warn!(session_id, error = %err, "failed to bootstrap running runtime state");
+    }
+}
+
 fn inject_agent_hook_runtime_env(
     env: &mut HashMap<String, String>,
     sessions_dir: &Path,
@@ -2728,7 +2741,11 @@ fn materialize_pending_launch_with(
                 format!("Agent PTY spawn failed: {e}"),
             ),
         );
+    } else {
+        bootstrap_agent_session_running(sessions_dir, &session.id);
     }
+
+    refresh_branch_live_session_summaries_with(model, sessions_dir);
 
     apply_notification(
         model,
@@ -7461,6 +7478,7 @@ CUSTOM_ENV = "enabled"
         let mut entries = fs::read_dir(dir.path())
             .expect("read sessions dir")
             .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
             .collect::<Vec<_>>();
         entries.sort();
         assert_eq!(entries.len(), 1);
@@ -7718,6 +7736,84 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_bootstraps_running_runtime_sidecar_after_spawn() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-develop");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree),
+            branch: Some("develop".to_string()),
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let session_id = model
+            .sessions
+            .last()
+            .expect("launched session tab")
+            .id
+            .clone();
+        let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session_id))
+            .expect("bootstrap runtime state");
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(runtime.source_event.as_deref(), Some("LaunchBootstrap"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_does_not_leave_bootstrap_runtime_sidecar_on_spawn_failure() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-develop");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "gwt-missing-custom-agent-command".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree),
+            branch: Some("develop".to_string()),
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let session_id = model
+            .sessions
+            .last()
+            .expect("launched session tab")
+            .id
+            .clone();
+        assert!(
+            !runtime_state_path(dir.path(), &session_id).exists(),
+            "failed launches must not leave a stale running sidecar behind"
+        );
+    }
+
+    #[test]
     fn inject_agent_hook_runtime_env_sets_session_identifiers() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut env = HashMap::from([(String::from("EXISTING"), String::from("1"))]);
@@ -7889,10 +7985,9 @@ CUSTOM_ENV = "enabled"
 
         let entry = fs::read_dir(dir.path())
             .expect("read sessions dir")
-            .next()
-            .expect("session entry")
-            .expect("dir entry")
-            .path();
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
         let persisted = AgentSession::load(&entry).expect("load persisted session");
         assert_eq!(persisted.reasoning_level.as_deref(), Some("high"));
         assert!(persisted.skip_permissions);

@@ -244,3 +244,7 @@
 - [ ] **T-094**: Verify `gwt-review` generates report on gwt repository.
 - [ ] **T-095**: Verify `gwt-issue`, `gwt-pr`, `gwt-search`, `gwt-agent` auto-detect modes.
 - [ ] **T-096**: Verify design → plan → build → review chain suggestions.
+
+### 5e. Runtime Hook Contract Follow-up
+
+- [x] **T-149**: Document the interactive Codex `SessionStart` gap and downstream launch-bootstrap contract in `SPEC-9` artifacts.

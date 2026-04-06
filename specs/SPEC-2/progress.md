@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `355/355` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T17:06:20Z`
+- Task progress: `357/357` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T02:45:00Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -73,6 +73,7 @@
 - gwt startup now resets only its own runtime PID namespace before restore, so stale indicators from earlier gwt runs disappear without touching sibling gwt processes.
 - Codex launch configs now add the current `~/.gwt/sessions/runtime/<pid>` namespace as an extra writable root, so Codex hooks can persist live spinner sidecars even under `workspace-write` sandboxing.
 - Materialized Codex launches now append that writable root after the real persisted session id is allocated, so the spawned PTY args finally match the runtime sidecar path injected into the environment.
+- Interactive Codex launches now also bootstrap a PID-scoped `Running` runtime sidecar immediately after PTY spawn succeeds, covering the product gap where interactive Codex does not emit `SessionStart` before the first prompt. Hook events still overwrite that bootstrap state as soon as they arrive.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

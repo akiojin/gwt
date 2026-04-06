@@ -4,7 +4,7 @@
 
 gwt-tui's workspace shell manages terminal sessions (shell and agent) with two display modes: tab view (one session visible at a time) and split window (equal grid showing multiple sessions simultaneously). A management panel containing Branches, Issues, PRs, Profiles, Git View, Versions, Settings, and Logs tabs can be toggled on/off. All navigation uses a Ctrl+G prefix key system with a 2-second timeout. Session state is persisted for restore on restart. The application follows an Elm Architecture pattern (Model/Message/Update/View).
 
-The Branches surface also inherits the old-TUI branch-first discovery contract: developers should be able to scan the branch list and immediately see whether a branch currently has an active coding session and whether that session is still running tools or is waiting for user input. For Claude Code and Codex, that live state is derived from hook events distributed into each launched worktree.
+The Branches surface also inherits the old-TUI branch-first discovery contract: developers should be able to scan the branch list and immediately see whether a branch currently has an active coding session and whether that session is still running tools or is waiting for user input. For Claude Code and Codex, that live state is derived from hook events distributed into each launched worktree, with a launch-time bootstrap for sessions whose interactive runtime does not emit `SessionStart` before the first prompt.
 
 ## User Stories
 
@@ -96,6 +96,7 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 7. Given gwt launches a Claude Code or Codex agent in a worktree that needs managed hook assets, when the PTY process starts, then the required hook scripts plus `.claude/settings.local.json` / `.codex/hooks.json` have already been written so the first agent turn can emit runtime state immediately.
 8. Given gwt restarts after a previous run left runtime sidecars behind, when startup completes, then only the current gwt process PID namespace is visible to the Branches list and stale indicators from older runs do not reappear.
 9. Given two gwt processes are running at the same time, when their agents emit hook events, then each TUI reads only its own PID-scoped runtime sidecars and their branch indicators do not overwrite each other.
+10. Given an interactive Codex session is launched and Codex has not emitted any runtime hook event yet, when the PTY spawn succeeds, then gwt bootstraps that session's PID-scoped runtime sidecar to `Running` so the branch spinner appears before the first prompt is sent.
 
 ## Edge Cases
 
@@ -112,6 +113,7 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 - Hook runtime sidecar file is missing or malformed while the Branches list is rendering.
 - A session has emitted `Stop` (waiting for input) but the user closes the PTY before another hook event arrives.
 - Branch rows at narrow widths must keep the branch label and `◆` / `◇` / `▸` legible even when the live session indicator cannot fit.
+- Interactive Codex launches may not emit `SessionStart` before the first user prompt, but the branch list must still show the session as live immediately after spawn.
 
 ## Functional Requirements
 
@@ -160,6 +162,7 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 - **FR-006q**: The branch-row live-session surface uses animated spinner glyphs only: each visible session indicator reuses the existing TUI tick cadence and is colored by the session's agent color, without inline labels such as `run Codex` or `wait Claude Code`.
 - **FR-006q1**: Built-in agent colors in the Branches spinner strip are fixed to `Claude Code=Yellow`, `Codex=Cyan`, and `Gemini=Magenta`. Unknown/custom agents fall back to the session-provided agent color.
 - **FR-006r**: Branch-row live session state is derived from Claude Code / Codex hook events distributed into launched worktrees. `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` mark the session `Running`; `Stop` marks it `WaitingInput`.
+- **FR-006r1**: If an interactive agent session has successfully spawned but no hook-managed runtime sidecar exists yet, gwt bootstraps a PID-scoped `Running` sidecar once at launch time. The first hook event may overwrite that bootstrap state immediately.
 - **FR-006s**: Agent launches inject stable gwt session runtime environment into the spawned PTY so embedded hook scripts can update the correct session runtime record without user configuration.
 - **FR-006t**: Hook scripts persist lightweight runtime state in a per-session sidecar under `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`. The current gwt process reads only its own PID namespace, and Branches rendering safely ignores absent or malformed files.
 - **FR-006t1**: Codex launch configs must add the current runtime PID namespace directory as an extra writable root for `workspace-write` sessions so hook commands can write `GWT_SESSION_RUNTIME_PATH` even though the sidecar lives outside the worktree under `~/.gwt/`.

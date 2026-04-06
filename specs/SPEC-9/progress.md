@@ -4,8 +4,8 @@
 
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 40/40, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 13/19
-- Artifact refresh: `2026-04-06T17:06:20Z`
+- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 41/41, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 14/20
+- Artifact refresh: `2026-04-07T02:45:00Z`
 
 ## Done
 
@@ -15,6 +15,7 @@
 - Codex launch configs now explicitly enable `codex_hooks`, matching the current OpenAI Codex hooks contract so gwt-managed Codex sessions actually execute available `hooks.json` files.
 - Codex launch configs now also add the current runtime PID namespace directory as an explicit writable root, so runtime hooks can still write `~/.gwt/sessions/runtime/<pid>/...` while Codex is sandboxed with `workspace-write`.
 - Because the persisted session id is only known during launch materialization, `app.rs` now appends the effective Codex runtime writable root after the session record is created, keeping the final spawned argv aligned with the injected `GWT_SESSION_RUNTIME_PATH`.
+- SPEC-9 now also records the current Codex product caveat: interactive sessions may not emit `SessionStart` before the first prompt, so downstream launch code is allowed to bootstrap a `Running` runtime sidecar until the first real hook event arrives.
 - Phase 2c (Quality Improvement): All 21 SKILL.md rewritten per Anthropic guidelines. Progressive Disclosure applied to 7 complex skills. All files under 200 lines.
 - Phase 3 (Hooks Merge): All merge logic, backup/recovery, and polish completed.
 - Phase 4 (Build Distribution): Release workflow and npm distribution verified.

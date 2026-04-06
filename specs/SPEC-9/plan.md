@@ -82,6 +82,7 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
    - Skips tracked `.codex/hooks.json` files by default, but migrates tracked files that still contain gwt's legacy runtime forward hooks so launched worktrees do not stay pinned to stale Node-based runtime hooks.
 
 4. **gwt-tui (app.rs)**: Call `distribute_to_worktree()` in agent launch flow, after `PaneManager::launch_agent()` resolves the worktree path.
+   - Bootstrap a PID-scoped `Running` runtime sidecar immediately after successful PTY spawn, because interactive Codex may not emit `SessionStart` before the first prompt.
 
 5. **gwt-agent (launch.rs)**:
    - Enable Codex hooks explicitly in every gwt-managed Codex launch (`--enable codex_hooks`).
