@@ -51,6 +51,7 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// Cap branch-detail preload event application per tick so one refresh burst
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
+const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -606,11 +607,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
-        Message::PasteFiles => {
-            if let Some(bytes) = read_clipboard_input_bytes() {
-                push_input_to_active_session(model, bytes);
-            }
-        }
+        Message::PasteInput(text) => route_paste_input(model, text),
         Message::OpenSessionConversion => {
             open_session_conversion(model);
         }
@@ -632,6 +629,14 @@ pub fn update(model: &mut Model, msg: Message) {
 /// Populates branches, version tags, and worktree mappings.  Each section is
 /// best-effort: failures are silently ignored so the TUI still starts.
 pub fn load_initial_data(model: &mut Model) {
+    load_initial_data_with(model, fetch_current_pr_link, gwt_git::fetch_pr_list);
+}
+
+fn load_initial_data_with<P, F>(model: &mut Model, load_pr_link: P, load_prs: F)
+where
+    P: FnOnce(&std::path::Path) -> gwt_core::Result<Option<String>>,
+    F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+{
     schedule_startup_version_cache_refresh();
     let has_git_remote = repo_has_git_remote(&model.repo_path);
 
@@ -711,7 +716,7 @@ pub fn load_initial_data(model: &mut Model) {
         gwt_git::branch::list_branches,
         |repo_path| {
             if has_git_remote {
-                fetch_current_pr_link(repo_path)
+                load_pr_link(repo_path)
             } else {
                 Ok(None)
             }
@@ -719,7 +724,7 @@ pub fn load_initial_data(model: &mut Model) {
     );
 
     if has_git_remote {
-        load_pr_dashboard(model);
+        load_pr_dashboard_with(model, load_prs);
     }
 }
 
@@ -883,10 +888,6 @@ fn switch_management_tab_with<F, D>(
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
     }
-}
-
-fn load_pr_dashboard(model: &mut Model) {
-    load_pr_dashboard_with(model, gwt_git::fetch_pr_list);
 }
 
 fn refresh_pr_dashboard_with<F, D>(model: &mut Model, fetch_prs: F, fetch_detail: D)
@@ -2296,6 +2297,100 @@ fn handle_voice_message(model: &mut Model, msg: VoiceInputMessage, voice_enabled
     }
 }
 
+fn route_paste_input(model: &mut Model, text: String) {
+    if model.help_visible
+        || !model.error_queue.is_empty()
+        || model.service_select.is_some()
+        || model.confirm.visible
+        || model
+            .docker_progress
+            .as_ref()
+            .is_some_and(|progress| progress.visible)
+    {
+        return;
+    }
+
+    if route_non_terminal_paste(model, &text) {
+        return;
+    }
+
+    match model.active_layer {
+        ActiveLayer::Initialization => {}
+        ActiveLayer::Management => {
+            if matches!(model.active_focus, FocusPane::Terminal) {
+                handle_paste_input(model, text);
+            }
+        }
+        _ => handle_paste_input(model, text),
+    }
+}
+
+fn route_non_terminal_paste(model: &mut Model, text: &str) -> bool {
+    if let Some(wizard) = model.wizard.as_mut() {
+        paste_text_input_chars(text, |ch| {
+            screens::wizard::update(wizard, screens::wizard::WizardMessage::InputChar(ch));
+        });
+        return true;
+    }
+
+    match model.active_layer {
+        ActiveLayer::Initialization => {
+            if let Some(state) = model.initialization.as_mut() {
+                paste_text_input_chars(text, |ch| {
+                    screens::initialization::update(
+                        state,
+                        screens::initialization::InitializationMessage::InputChar(ch),
+                    );
+                });
+                return true;
+            }
+            false
+        }
+        ActiveLayer::Management if !matches!(model.active_focus, FocusPane::Terminal) => {
+            match model.management_tab {
+                ManagementTab::Branches if model.branches.search_active => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::branches::update(
+                            &mut model.branches,
+                            screens::branches::BranchesMessage::SearchInput(ch),
+                        );
+                    });
+                    true
+                }
+                ManagementTab::Issues if model.issues.search_active => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::issues::update(
+                            &mut model.issues,
+                            screens::issues::IssuesMessage::SearchInput(ch),
+                        );
+                    });
+                    true
+                }
+                ManagementTab::Settings if model.settings.editing => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::settings::update(
+                            &mut model.settings,
+                            screens::settings::SettingsMessage::InputChar(ch),
+                        );
+                    });
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn paste_text_input_chars(text: &str, mut push_char: impl FnMut(char)) {
+    for ch in text.chars() {
+        if matches!(ch, '\r' | '\n') {
+            continue;
+        }
+        push_char(ch);
+    }
+}
+
 trait VoiceRuntime {
     fn configure(&mut self, config: &VoiceConfig);
     fn start_recording(&mut self) -> Result<(), String>;
@@ -2530,12 +2625,17 @@ fn build_launch_config_from_wizard_with_custom_agents(
 
     let mut builder = AgentLaunchBuilder::new(agent_id);
 
-    if let Some(ref wt) = wizard.worktree_path {
-        builder = builder.working_dir(wt);
+    if !wizard.is_new_branch {
+        if let Some(ref wt) = wizard.worktree_path {
+            builder = builder.working_dir(wt);
+        }
     }
 
     if !wizard.branch_name.is_empty() {
         builder = builder.branch(&wizard.branch_name);
+    }
+    if let Some(base_branch) = wizard_launch_base_branch(wizard) {
+        builder = builder.base_branch(base_branch);
     }
 
     if is_explicit_model_selection(&wizard.model) {
@@ -2623,8 +2723,11 @@ fn build_custom_launch_config_from_wizard(
         command,
         args,
         env_vars,
-        working_dir: wizard.worktree_path.clone(),
+        working_dir: (!wizard.is_new_branch)
+            .then(|| wizard.worktree_path.clone())
+            .flatten(),
         branch: (!wizard.branch_name.is_empty()).then(|| wizard.branch_name.clone()),
+        base_branch: wizard_launch_base_branch(wizard),
         display_name: custom_agent.display_name.clone(),
         model: None,
         tool_version: None,
@@ -2638,6 +2741,19 @@ fn build_custom_launch_config_from_wizard(
 
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
+}
+
+fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<String> {
+    if !wizard.is_new_branch {
+        None
+    } else {
+        Some(
+            wizard
+                .base_branch_name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
+        )
+    }
 }
 
 fn materialize_pending_launch(model: &mut Model) {
@@ -2661,6 +2777,8 @@ fn materialize_pending_launch_with(
     let Some(mut config) = model.pending_launch_config.take() else {
         return Ok(());
     };
+
+    resolve_launch_worktree(&model.repo_path, &mut config)?;
 
     let worktree = config
         .working_dir
@@ -2780,6 +2898,114 @@ fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
         model.active_session = model.sessions.len() - 1;
     }
     refresh_branch_live_session_summaries_with(model, sessions_dir);
+}
+
+fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Result<(), String> {
+    let Some(branch_name) = config.branch.clone() else {
+        return Ok(());
+    };
+    if config.working_dir.is_some() {
+        return Ok(());
+    }
+
+    let current_branch = match current_git_branch(repo_path) {
+        Ok(branch) => branch,
+        Err(_) if config.base_branch.is_none() => return Ok(()),
+        Err(_) => config
+            .base_branch
+            .clone()
+            .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
+    };
+    if current_branch == branch_name {
+        config.working_dir = Some(repo_path.to_path_buf());
+        config.env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            repo_path.display().to_string(),
+        );
+        return Ok(());
+    }
+
+    let main_repo_path =
+        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = existing_worktree_for_branch(&main_repo_path, &branch_name)? {
+        config.working_dir = Some(existing_worktree.clone());
+        config.env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            existing_worktree.display().to_string(),
+        );
+        return Ok(());
+    }
+    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    if local_branch_exists(&main_repo_path, &branch_name)? {
+        manager
+            .create(&branch_name, &worktree_path)
+            .map_err(|err| err.to_string())?;
+    } else {
+        let base_branch = config.base_branch.clone().unwrap_or(current_branch);
+        manager
+            .create_from_base(&base_branch, &branch_name, &worktree_path)
+            .map_err(|err| err.to_string())?;
+    }
+
+    config.working_dir = Some(worktree_path.clone());
+    config.env_vars.insert(
+        "GWT_PROJECT_ROOT".to_string(),
+        worktree_path.display().to_string(),
+    );
+    Ok(())
+}
+
+fn existing_worktree_for_branch(
+    repo_path: &Path,
+    branch_name: &str,
+) -> Result<Option<PathBuf>, String> {
+    let manager = gwt_git::WorktreeManager::new(repo_path);
+    manager
+        .list()
+        .map_err(|err| err.to_string())
+        .map(|worktrees| {
+            worktrees
+                .into_iter()
+                .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
+                .map(|worktree| worktree.path)
+        })
+}
+
+fn current_git_branch(repo_path: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("git branch --show-current: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git branch --show-current: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        Err("git branch --show-current returned an empty branch name".to_string())
+    } else {
+        Ok(branch)
+    }
+}
+
+fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("git show-ref --verify refs/heads/{branch_name}: {err}"))?;
+
+    Ok(output.status.success())
 }
 
 fn configure_existing_branch_wizard_with_sessions(
@@ -3215,15 +3441,38 @@ fn run_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<Ag
     }
 }
 
-fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
-    if let Ok(paths) = gwt_clipboard::ClipboardFilePaste::extract_file_paths() {
-        if let Some(bytes) = clipboard_payload_to_bytes(&paths, "") {
-            return Some(bytes);
-        }
+fn handle_paste_input(model: &mut Model, text: String) {
+    let bracketed_paste_enabled = model
+        .active_session_tab()
+        .map(|session| vt_requests_bracketed_paste(&session.vt))
+        .unwrap_or(false);
+
+    if let Some(bytes) = build_paste_input_bytes(&text, bracketed_paste_enabled) {
+        push_input_to_active_session(model, bytes);
+    }
+}
+
+fn vt_requests_bracketed_paste(vt: &crate::model::VtState) -> bool {
+    vt.screen()
+        .input_mode_formatted()
+        .windows(b"\x1b[?2004h".len())
+        .any(|window| window == b"\x1b[?2004h")
+}
+
+fn build_paste_input_bytes(text: &str, bracketed_paste_enabled: bool) -> Option<Vec<u8>> {
+    if text.is_empty() {
+        return None;
     }
 
-    let text = gwt_clipboard::ClipboardText::get_text().ok()?;
-    clipboard_payload_to_bytes(&[], &text)
+    if bracketed_paste_enabled {
+        let mut bytes = Vec::with_capacity(text.len() + 12);
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        Some(bytes)
+    } else {
+        Some(text.as_bytes().to_vec())
+    }
 }
 
 fn apply_pending_session_conversion_with(
@@ -3284,24 +3533,6 @@ fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
         crate::model::AgentColor::Yellow => Color::Yellow,
         crate::model::AgentColor::Magenta => Color::Magenta,
         crate::model::AgentColor::Gray => Color::Gray,
-    }
-}
-
-fn clipboard_payload_to_bytes(paths: &[PathBuf], fallback_text: &str) -> Option<Vec<u8>> {
-    if !paths.is_empty() {
-        let payload = paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Some(payload.into_bytes());
-    }
-
-    let text = fallback_text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -4066,56 +4297,94 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Build session tab title line (same pattern as management tabs in Block title).
 fn build_session_title(model: &Model, width: u16) -> Line<'static> {
-    if should_compact_session_title(model, width) {
-        if let Some(active) = model.active_session_tab() {
+    build_session_title_with(model, width, &gwt_sessions_dir())
+}
+
+fn build_session_title_with(model: &Model, width: u16, sessions_dir: &Path) -> Line<'static> {
+    let entries: Vec<(String, Style, &'static str)> = model
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| {
+            (
+                session_title_label(session, sessions_dir),
+                session_title_style(session, i == model.active_session),
+                session.tab_type.icon(),
+            )
+        })
+        .collect();
+
+    if should_compact_session_title(width, &entries) {
+        if let Some((label, style, icon)) = entries.get(model.active_session) {
             let position = model.active_session.saturating_add(1);
             let total = model.sessions.len();
-            let label = format!(
-                " {position}/{total} {} {} ",
-                active.tab_type.icon(),
-                active.name
-            );
-            return Line::from(vec![Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )]);
+            let title = format!(" {position}/{total} {icon} {label} ");
+            return Line::from(vec![Span::styled(title, *style)]);
         }
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, s) in model.sessions.iter().enumerate() {
+    for (i, (label, style, icon)) in entries.into_iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("│"));
+            spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
         }
-        let label = format!(" {} {} ", s.tab_type.icon(), s.name);
-        if i == model.active_session {
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
-        }
+        spans.push(Span::styled(format!(" {icon} {label} "), style));
     }
     Line::from(spans)
 }
 
-fn should_compact_session_title(model: &Model, width: u16) -> bool {
+fn session_title_label(session: &crate::model::SessionTab, sessions_dir: &Path) -> String {
+    match &session.tab_type {
+        SessionTabType::Agent { .. } => load_persisted_branch_label(&session.id, sessions_dir)
+            .unwrap_or_else(|| session.name.clone()),
+        SessionTabType::Shell => session.name.clone(),
+    }
+}
+
+fn load_persisted_branch_label(session_id: &str, sessions_dir: &Path) -> Option<String> {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let persisted = AgentSession::load(&path).ok()?;
+    let branch = persisted.branch.trim();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(persisted.branch)
+    }
+}
+
+fn session_title_style(session: &crate::model::SessionTab, is_active: bool) -> Style {
+    match &session.tab_type {
+        SessionTabType::Shell => {
+            if is_active {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(Color::Gray)
+            }
+        }
+        SessionTabType::Agent { color, .. } => {
+            let style = Style::default().fg(agent_color_to_ratatui(*color));
+            if is_active {
+                style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                style.add_modifier(Modifier::DIM)
+            }
+        }
+    }
+}
+
+fn should_compact_session_title(width: u16, entries: &[(String, Style, &'static str)]) -> bool {
     let available_title_width = width.saturating_sub(2) as usize;
     if available_title_width == 0 {
         return false;
     }
 
-    let full_strip_width: usize = model
-        .sessions
+    let full_strip_width: usize = entries
         .iter()
         .enumerate()
-        .map(|(i, session)| {
-            let label_width = format!(" {} {} ", session.tab_type.icon(), session.name).len();
+        .map(|(i, (label, _, icon))| {
+            let label_width = format!(" {icon} {label} ").len();
             if i == 0 {
                 label_width
             } else {
@@ -4463,7 +4732,7 @@ mod tests {
     use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
     use ratatui::widgets::Widget;
     use ratatui::{buffer::Buffer, Terminal};
@@ -4568,6 +4837,47 @@ mod tests {
             .draw(|frame| view(model, frame))
             .expect("draw model");
         terminal.backend().buffer().clone()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn persist_agent_tab(
+        sessions_dir: &Path,
+        branch: &str,
+        agent_id: AgentId,
+        color: crate::model::AgentColor,
+    ) -> (crate::model::SessionTab, PathBuf) {
+        fs::create_dir_all(sessions_dir).expect("create sessions dir");
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let session_id = format!("test-session-{}-{unique}", agent_id.command());
+
+        let mut session = AgentSession::new("/tmp/test-worktree", branch, agent_id.clone());
+        session.id = session_id.clone();
+        session.display_name = agent_id.display_name().to_string();
+        session.save(sessions_dir).expect("persist session");
+
+        (
+            crate::model::SessionTab {
+                id: session_id.clone(),
+                name: agent_id.display_name().to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: agent_id.command().to_string(),
+                    color,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+            sessions_dir.join(format!("{session_id}.toml")),
+        )
     }
 
     fn append_session_line(model: &mut Model, session_id: &str, line: &str) {
@@ -5513,6 +5823,166 @@ mod tests {
     }
 
     #[test]
+    fn build_session_title_agent_tabs_prefer_persisted_branch_names_in_full_strip() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let (claude, claude_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/claude-branch",
+            AgentId::ClaudeCode,
+            crate::model::AgentColor::Yellow,
+        );
+        let (codex, codex_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/codex-branch",
+            AgentId::Codex,
+            crate::model::AgentColor::Cyan,
+        );
+
+        let mut model = test_model();
+        model.sessions = vec![claude, codex];
+        model.active_session = 0;
+
+        let title = build_session_title_with(&model, 220, sessions_dir.path());
+        let text = line_text(&title);
+
+        assert!(text.contains("feature/claude-branch"));
+        assert!(text.contains("feature/codex-branch"));
+        assert!(!text.contains("Claude Code"));
+        assert!(!text.contains("Codex"));
+
+        let _ = fs::remove_file(claude_path);
+        let _ = fs::remove_file(codex_path);
+    }
+
+    #[test]
+    fn build_session_title_compact_agent_tabs_show_active_branch_name_and_count() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut cleanup = Vec::new();
+        let mut sessions = Vec::new();
+
+        for (branch, agent_id, color) in [
+            (
+                "feature/branch-one",
+                AgentId::ClaudeCode,
+                crate::model::AgentColor::Yellow,
+            ),
+            (
+                "feature/branch-two",
+                AgentId::Codex,
+                crate::model::AgentColor::Cyan,
+            ),
+            (
+                "feature/branch-three",
+                AgentId::Gemini,
+                crate::model::AgentColor::Magenta,
+            ),
+            (
+                "feature/branch-four",
+                AgentId::ClaudeCode,
+                crate::model::AgentColor::Yellow,
+            ),
+            (
+                "feature/branch-five",
+                AgentId::Codex,
+                crate::model::AgentColor::Cyan,
+            ),
+            (
+                "feature/branch-six",
+                AgentId::Gemini,
+                crate::model::AgentColor::Magenta,
+            ),
+            (
+                "feature/branch-seven",
+                AgentId::ClaudeCode,
+                crate::model::AgentColor::Yellow,
+            ),
+            (
+                "feature/branch-eight",
+                AgentId::Codex,
+                crate::model::AgentColor::Cyan,
+            ),
+        ] {
+            let (session, path) = persist_agent_tab(sessions_dir.path(), branch, agent_id, color);
+            sessions.push(session);
+            cleanup.push(path);
+        }
+
+        let mut model = test_model();
+        model.sessions = sessions;
+        model.active_session = 5;
+
+        let title = build_session_title_with(&model, 40, sessions_dir.path());
+        let text = line_text(&title);
+
+        assert!(text.contains("6/8"));
+        assert!(text.contains("feature/branch-six"));
+        assert!(!text.contains("Gemini CLI"));
+
+        for path in cleanup {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn build_session_title_agent_tabs_keep_identity_colors_and_use_modifiers_for_active_state() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let (claude, claude_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/claude-active",
+            AgentId::ClaudeCode,
+            crate::model::AgentColor::Yellow,
+        );
+        let (codex, codex_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/codex-idle",
+            AgentId::Codex,
+            crate::model::AgentColor::Cyan,
+        );
+        let (gemini, gemini_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/gemini-idle",
+            AgentId::Gemini,
+            crate::model::AgentColor::Magenta,
+        );
+
+        let mut model = test_model();
+        model.sessions = vec![claude, codex, gemini];
+        model.active_session = 0;
+
+        let title = build_session_title_with(&model, 220, sessions_dir.path());
+        let claude_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/claude-active"))
+            .expect("claude span");
+        let codex_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/codex-idle"))
+            .expect("codex span");
+        let gemini_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/gemini-idle"))
+            .expect("gemini span");
+
+        assert_eq!(claude_span.style.fg, Some(Color::Yellow));
+        assert!(claude_span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(claude_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+        assert_eq!(codex_span.style.fg, Some(Color::Cyan));
+        assert!(codex_span.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(gemini_span.style.fg, Some(Color::Magenta));
+        assert!(gemini_span.style.add_modifier.contains(Modifier::DIM));
+
+        let _ = fs::remove_file(claude_path);
+        let _ = fs::remove_file(codex_path);
+        let _ = fs::remove_file(gemini_path);
+    }
+
+    #[test]
     fn render_model_text_grid_session_titles_include_index_and_icon() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -5794,6 +6264,44 @@ mod tests {
         assert!(name.status.success(), "git config user.name failed");
     }
 
+    fn init_bare_git_repo(path: &std::path::Path) {
+        let path_str = path.to_string_lossy().to_string();
+        let init = std::process::Command::new("git")
+            .args(["init", "--bare", &path_str])
+            .output()
+            .expect("init bare git repo");
+        assert!(init.status.success(), "git init --bare failed: {:?}", init);
+    }
+
+    fn git_clone_repo(src: &std::path::Path, dst: &std::path::Path) {
+        let output = std::process::Command::new("git")
+            .args([
+                "clone",
+                src.to_str().expect("clone src"),
+                dst.to_str().expect("clone dst"),
+            ])
+            .output()
+            .expect("clone git repo");
+        assert!(
+            output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_push_branch(path: &std::path::Path, name: &str) {
+        let output = std::process::Command::new("git")
+            .args(["push", "-u", "origin", name])
+            .current_dir(path)
+            .output()
+            .expect("push git branch");
+        assert!(
+            output.status.success(),
+            "git push -u origin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn git_commit_allow_empty(path: &std::path::Path, message: &str) {
         let output = std::process::Command::new("git")
             .args(["commit", "--allow-empty", "-m", message])
@@ -5816,6 +6324,29 @@ mod tests {
         assert!(
             output.status.success(),
             "git branch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_checkout_branch_or_create(path: &std::path::Path, name: &str) {
+        let checkout = std::process::Command::new("git")
+            .args(["checkout", name])
+            .current_dir(path)
+            .output()
+            .expect("checkout git branch");
+        if checkout.status.success() {
+            return;
+        }
+
+        let output = std::process::Command::new("git")
+            .args(["checkout", "-b", name])
+            .current_dir(path)
+            .output()
+            .expect("checkout new git branch");
+        assert!(
+            output.status.success(),
+            "git checkout/create failed: checkout stderr: {}; checkout -b stderr: {}",
+            String::from_utf8_lossy(&checkout.stderr),
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -6097,7 +6628,11 @@ mod tests {
             let mut model = Model::new(dir.path().to_path_buf());
 
             let start = std::time::Instant::now();
-            load_initial_data(&mut model);
+            load_initial_data_with(
+                &mut model,
+                |_repo_path| Ok(None),
+                |_repo_path| Ok(Vec::new()),
+            );
             let elapsed = start.elapsed();
             let gh_calls = fs::read_to_string(&gh_count)
                 .unwrap_or_else(|_| "0".to_string())
@@ -7347,6 +7882,59 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_carries_selected_base_branch_for_new_branch_flow() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("feature/source".to_string()),
+            branch_name: "feature/child".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.branch.as_deref(), Some("feature/child"));
+        assert_eq!(config.base_branch.as_deref(), Some("feature/source"));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_new_branch_ignores_selected_branch_worktree() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/child".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/wt-develop")),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.branch.as_deref(), Some("feature/child"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+        assert!(config.working_dir.is_none());
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_defaults_spec_prefill_base_branch_to_develop() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            branch_name: "feature/spec-42-my-feature".to_string(),
+            spec_context: Some(screens::wizard::SpecContext::new(
+                "SPEC-42",
+                "My Feature",
+                "",
+            )),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_keeps_selected_version() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -7471,7 +8059,7 @@ CUSTOM_ENV = "enabled"
             session_tab.tab_type,
             SessionTabType::Agent {
                 agent_id: "claude".to_string(),
-                color: crate::model::AgentColor::Green,
+                color: crate::model::AgentColor::Yellow,
             }
         );
 
@@ -7505,6 +8093,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: Some(worktree.clone()),
             branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
             display_name: "My Agent".to_string(),
             color: AgentId::Custom("my-agent".to_string()).default_color(),
             model: None,
@@ -7547,6 +8136,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: Some(worktree.clone()),
             branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
             display_name: "Codex".to_string(),
             color: AgentId::Codex.default_color(),
             model: None,
@@ -7619,6 +8209,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: Some(worktree.clone()),
             branch: Some("develop".to_string()),
+            base_branch: None,
             display_name: "Codex".to_string(),
             color: AgentId::Codex.default_color(),
             model: None,
@@ -7665,6 +8256,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: Some(worktree),
             branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
             display_name: "My Agent".to_string(),
             color: AgentId::Custom("my-agent".to_string()).default_color(),
             model: None,
@@ -7710,6 +8302,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: Some(worktree),
             branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
             display_name: "Codex".to_string(),
             color: AgentId::Codex.default_color(),
             model: None,
@@ -7749,6 +8342,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: Some(worktree),
             branch: Some("develop".to_string()),
+            base_branch: None,
             display_name: "Codex".to_string(),
             color: AgentId::Codex.default_color(),
             model: None,
@@ -7788,6 +8382,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: Some(worktree),
             branch: Some("develop".to_string()),
+            base_branch: None,
             display_name: "Codex".to_string(),
             color: AgentId::Codex.default_color(),
             model: None,
@@ -7846,6 +8441,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: None,
             branch: Some("develop".to_string()),
+            base_branch: None,
             display_name: "Codex".to_string(),
             color: AgentId::Codex.default_color(),
             model: None,
@@ -7996,6 +8592,366 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_branch_or_create(&repo_path, "develop");
+
+        let mut model = Model::new(repo_path.clone());
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Custom("my-agent".to_string()),
+            command: "/bin/echo".to_string(),
+            args: vec!["agent-test".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/alpha/beta".to_string()),
+            base_branch: None,
+            display_name: "My Agent".to_string(),
+            color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let expected_worktree = workspace_dir
+            .path()
+            .join("feature")
+            .join("alpha")
+            .join("beta");
+        assert!(expected_worktree.exists(), "new worktree should exist");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
+
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&expected_worktree)
+            .output()
+            .expect("read worktree branch");
+        assert!(
+            branch_output.status.success(),
+            "git branch --show-current failed: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/alpha/beta"
+        );
+
+        let session_entry = fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "feature/alpha/beta");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_new_branch_from_selected_branch_creates_new_worktree() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_branch_or_create(&repo_path, "develop");
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/launch-from-selected".to_string(),
+            worktree_path: Some(repo_path.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(repo_path);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let expected_worktree = workspace_dir
+            .path()
+            .join("feature")
+            .join("launch-from-selected");
+        assert!(expected_worktree.exists(), "new worktree should exist");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
+
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&expected_worktree)
+            .output()
+            .expect("read worktree branch");
+        assert!(
+            branch_output.status.success(),
+            "git branch --show-current failed: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/launch-from-selected"
+        );
+
+        let session_entry = fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "feature/launch-from-selected");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_linked_worktree_uses_main_repo_branch_layout() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let develop_worktree = workspace_dir.path().join("develop");
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "develop",
+                develop_worktree.to_str().expect("develop worktree path"),
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add -b");
+        assert!(
+            output.status.success(),
+            "git worktree add -b failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/test".to_string(),
+            worktree_path: Some(develop_worktree.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(develop_worktree.clone());
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let expected_worktree = workspace_dir.path().join("feature").join("test");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
+        assert!(
+            expected_worktree.exists(),
+            "new sibling worktree should exist"
+        );
+        assert!(
+            !workspace_dir.path().join("develop-feature-test").exists(),
+            "linked worktree name must not be used as sibling-layout repo prefix"
+        );
+
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&expected_worktree)
+            .output()
+            .expect("read worktree branch");
+        assert!(
+            branch_output.status.success(),
+            "git branch --show-current failed: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/test"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_bare_workspace_linked_worktree_uses_branch_hierarchy_layout()
+    {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let bare_repo_path = workspace_dir.path().join("gwt.git");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        init_bare_git_repo(&bare_repo_path);
+
+        let bootstrap_path = workspace_dir.path().join("bootstrap");
+        git_clone_repo(&bare_repo_path, &bootstrap_path);
+        let email = std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&bootstrap_path)
+            .output()
+            .expect("set git email");
+        assert!(email.status.success(), "git config user.email failed");
+        let name = std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&bootstrap_path)
+            .output()
+            .expect("set git name");
+        assert!(name.status.success(), "git config user.name failed");
+        git_checkout_branch_or_create(&bootstrap_path, "develop");
+        git_commit_allow_empty(&bootstrap_path, "initial commit");
+        git_push_branch(&bootstrap_path, "develop");
+
+        let develop_worktree = workspace_dir.path().join("develop");
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                develop_worktree.to_str().expect("develop worktree path"),
+                "develop",
+            ])
+            .current_dir(&bare_repo_path)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/test".to_string(),
+            worktree_path: Some(develop_worktree.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(develop_worktree);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let expected_worktree = workspace_dir.path().join("feature").join("test");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
+        assert!(
+            expected_worktree.exists(),
+            "new sibling worktree should exist for bare workspace layout"
+        );
+        assert!(
+            !workspace_dir.path().join("develop-feature-test").exists(),
+            "bare workspace linked worktree name must not be used as repo prefix"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_existing_branch_worktree_reuses_previous_path() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let develop_worktree = workspace_dir.path().join("develop");
+        let develop_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "develop",
+                develop_worktree.to_str().expect("develop worktree path"),
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add -b develop");
+        assert!(
+            develop_output.status.success(),
+            "git worktree add -b develop failed: {}",
+            String::from_utf8_lossy(&develop_output.stderr)
+        );
+
+        let stale_worktree = workspace_dir.path().join("develop-feature-test");
+        let stale_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/test",
+                stale_worktree.to_str().expect("stale worktree path"),
+                "develop",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add -b feature/test");
+        assert!(
+            stale_output.status.success(),
+            "git worktree add -b feature/test failed: {}",
+            String::from_utf8_lossy(&stale_output.stderr)
+        );
+        let stale_worktree =
+            std::fs::canonicalize(&stale_worktree).expect("canonicalize stale worktree");
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/test".to_string(),
+            worktree_path: Some(develop_worktree.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(develop_worktree);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        assert!(
+            !workspace_dir.path().join("feature").join("test").exists(),
+            "launch should reuse the existing branch worktree instead of trying to create a new sibling path"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "feature/test");
+        assert_eq!(persisted.worktree_path, stale_worktree);
+    }
+
+    #[test]
     fn materialize_pending_launch_with_spawn_failure_mentions_command() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut model = test_model();
@@ -8007,6 +8963,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: None,
             branch: Some("feature/custom-agent".to_string()),
+            base_branch: None,
             display_name: "My Agent".to_string(),
             color: AgentId::Custom("my-agent".to_string()).default_color(),
             model: None,
@@ -8068,7 +9025,6 @@ CUSTOM_ENV = "enabled"
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        // Claude stale, Codex fresh, Gemini missing → Claude + Gemini need refresh
         assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(!targets.contains(&AgentId::Codex));
         assert!(targets.contains(&AgentId::Gemini));
@@ -8107,7 +9063,6 @@ CUSTOM_ENV = "enabled"
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        // All npm agents (Claude, Codex, Gemini) need refresh from empty cache
         assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(targets.contains(&AgentId::Codex));
         assert!(targets.contains(&AgentId::Gemini));
@@ -8120,14 +9075,15 @@ CUSTOM_ENV = "enabled"
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
 
+        let cache_path = PathBuf::from("/tmp/agent-versions.json");
         let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
         let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let detected_flag = detected.clone();
-        let scheduled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let scheduled_flag = scheduled.clone();
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None::<(PathBuf, Vec<AgentId>)>));
+        let scheduled_capture = scheduled.clone();
 
         schedule_startup_version_cache_refresh_with(
-            PathBuf::from("/tmp/agent-versions.json"),
+            cache_path.clone(),
             move || {
                 detected_flag.store(true, Ordering::Release);
                 vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
@@ -8135,13 +9091,13 @@ CUSTOM_ENV = "enabled"
             |task| {
                 *spawned.borrow_mut() = Some(task);
             },
-            move |_, _| {
-                scheduled_flag.store(true, Ordering::Release);
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
         );
 
         assert!(!detected.load(Ordering::Acquire));
-        assert!(!scheduled.load(Ordering::Acquire));
+        assert!(scheduled.lock().unwrap().is_none());
         assert!(spawned.borrow().is_some());
         assert!(STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
 
@@ -8149,7 +9105,9 @@ CUSTOM_ENV = "enabled"
         task();
 
         assert!(detected.load(Ordering::Acquire));
-        assert!(scheduled.load(Ordering::Acquire));
+        let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
+        assert_eq!(scheduled_path, cache_path);
+        assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(!STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
     }
 
@@ -8238,7 +9196,7 @@ CUSTOM_ENV = "enabled"
             converted.tab_type,
             SessionTabType::Agent {
                 agent_id: "codex".to_string(),
-                color: crate::model::AgentColor::Blue,
+                color: crate::model::AgentColor::Cyan,
             }
         );
         assert_eq!(converted.vt.rows(), 30);
@@ -8650,28 +9608,142 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_prefers_paths() {
-        let bytes = clipboard_payload_to_bytes(
-            &[
-                std::path::PathBuf::from("/tmp/one.txt"),
-                std::path::PathBuf::from("/tmp/two.txt"),
-            ],
-            "",
-        )
-        .unwrap();
-
-        assert_eq!(bytes, b"/tmp/one.txt\n/tmp/two.txt".to_vec());
+    fn build_paste_input_bytes_wraps_payload_when_bracketed_paste_is_enabled() {
+        let bytes = build_paste_input_bytes("git status\npwd", true).unwrap();
+        assert_eq!(bytes, b"\x1b[200~git status\npwd\x1b[201~".to_vec());
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_falls_back_to_text() {
-        let bytes = clipboard_payload_to_bytes(&[], "echo hello").unwrap();
+    fn build_paste_input_bytes_keeps_plain_text_when_bracketed_paste_is_disabled() {
+        let bytes = build_paste_input_bytes("echo hello", false).unwrap();
         assert_eq!(bytes, b"echo hello".to_vec());
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_ignores_empty_payload() {
-        assert!(clipboard_payload_to_bytes(&[], "   ").is_none());
+    fn build_paste_input_bytes_ignores_empty_payload() {
+        assert!(build_paste_input_bytes("", false).is_none());
+    }
+
+    #[test]
+    fn build_paste_input_bytes_preserves_whitespace_payload() {
+        let bytes = build_paste_input_bytes("   \n", false).unwrap();
+        assert_eq!(bytes, b"   \n".to_vec());
+    }
+
+    #[test]
+    fn vt_state_reports_bracketed_paste_when_requested_by_session() {
+        let mut vt = crate::model::VtState::new(24, 80);
+        assert!(!vt_requests_bracketed_paste(&vt));
+
+        vt.process(b"\x1b[?2004h");
+        assert!(vt_requests_bracketed_paste(&vt));
+
+        vt.process(b"\x1b[?2004l");
+        assert!(!vt_requests_bracketed_paste(&vt));
+    }
+
+    #[test]
+    fn handle_paste_input_queues_bracketed_payload_for_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model
+            .active_session_tab_mut()
+            .expect("active session")
+            .vt
+            .process(b"\x1b[?2004h");
+
+        handle_paste_input(&mut model, "git status\npwd".into());
+
+        let forwarded = model.pending_pty_inputs().back().unwrap();
+        assert_eq!(forwarded.session_id, "shell-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[200~git status\npwd\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn handle_paste_input_ignores_empty_text() {
+        let mut model = test_model();
+
+        handle_paste_input(&mut model, "".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_ignores_management_paste_when_terminal_is_not_focused() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        route_paste_input(&mut model, "git status".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_ignores_paste_when_wizard_is_open() {
+        let mut model = test_model();
+        model.wizard = Some(screens::wizard::WizardState::default());
+
+        route_paste_input(&mut model, "git status".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_initialization_appends_url_input() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Initialization;
+        model.initialization = Some(crate::screens::initialization::InitializationState::default());
+
+        route_paste_input(&mut model, "https://example.com/repo.git".into());
+
+        assert_eq!(
+            model.initialization.as_ref().unwrap().url_input,
+            "https://example.com/repo.git"
+        );
+    }
+
+    #[test]
+    fn route_paste_input_wizard_branch_name_appends_text() {
+        let mut model = test_model();
+        let mut wizard = screens::wizard::WizardState::default();
+        wizard.step = screens::wizard::WizardStep::BranchNameInput;
+        model.wizard = Some(wizard);
+
+        route_paste_input(&mut model, "feature/paste".into());
+
+        assert_eq!(model.wizard.as_ref().unwrap().branch_name, "feature/paste");
+    }
+
+    #[test]
+    fn route_paste_input_branches_search_appends_query() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.search_active = true;
+
+        route_paste_input(&mut model, "feat".into());
+
+        assert_eq!(model.branches.search_query, "feat");
+    }
+
+    #[test]
+    fn route_paste_input_settings_edit_appends_buffer() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Settings;
+        model.settings.load_category_fields();
+        model.settings.editing = true;
+        model.settings.edit_buffer.clear();
+
+        route_paste_input(&mut model, "dark".into());
+
+        assert_eq!(model.settings.edit_buffer, "dark");
     }
 
     #[test]

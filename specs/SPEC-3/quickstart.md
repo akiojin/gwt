@@ -105,6 +105,21 @@
 40. Verify a single-entry Quick Start with no persisted model now promotes
    only the agent label into the popup title (`Quick Start — Codex`) instead
    of inventing a `default` model placeholder.
+41. From Branches, choose `Create new from selected`, finish the wizard, and
+    verify Launch Agent creates a sibling worktree whose path mirrors the
+    requested branch (`feature/aaa` -> `../feature/aaa`) before the PTY
+    starts, even when the selected base branch already has its own linked
+    worktree such as `develop`.
+42. Repeat the new-branch launch from SPEC or Issue context and verify the
+    created worktree uses the new branch while the session metadata records
+    that actual launched path.
+43. If a stale worktree for the same branch already exists from a previous
+    failed launch attempt, retry Launch Agent and verify it reuses that
+    existing branch worktree instead of failing to start.
+44. Repeat the new-branch launch from a legacy bare workspace layout
+    (`gwt.git` + `develop/`) and verify sibling paths still mirror the branch
+    hierarchy (`feature/test`), never the linked worktree name
+    (`develop-feature-test`) or bare repo-name prefixes (`gwt-feature-test`).
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -118,6 +133,7 @@
 - `cargo test -p gwt-tui quick_start -- --nocapture`
 - `cargo test -p gwt-tui prepare_wizard_startup_starts_spec_prefill_at_branch_type_select -- --nocapture`
 - `cargo test -p gwt-tui build_launch_config_from_wizard -- --nocapture`
+- `cargo test -p gwt-tui base_branch -- --nocapture`
 - `cargo test -p gwt-tui load_custom_agents_from_path_parses_spec_schema -- --nocapture`
 - `cargo test -p gwt-tui save_stored_custom_agents_to_path_preserves_models_and_other_settings -- --nocapture`
 - `cargo test -p gwt-tui build_wizard_agent_options_with_custom_agents_appends_settings_agents -- --nocapture`
@@ -125,6 +141,14 @@
 - `cargo test -p gwt-tui custom_agents_category_loads_persisted_agent_fields -- --nocapture`
 - `cargo test -p gwt-tui custom_agents_add_edit_delete_persist_immediately -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with -- --nocapture`
+- `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`
+- `cargo test -p gwt-tui from_selected_branch -- --nocapture`
+- `cargo test -p gwt-git sibling_worktree_path_preserves_branch_hierarchy -- --nocapture`
+- `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`
+- `cargo test -p gwt-git main_worktree_root_uses_bare_common_dir_for_linked_workspace_layout -- --nocapture`
+- `cargo test -p gwt-tui materialize_pending_launch_with_linked_worktree_uses_main_repo_branch_layout -- --nocapture`
+- `cargo test -p gwt-tui materialize_pending_launch_with_bare_workspace_linked_worktree_uses_branch_hierarchy_layout -- --nocapture`
+- `cargo test -p gwt-tui existing_branch_worktree_reuses_previous_path -- --nocapture`
 - `cargo test -p gwt-tui session_conversion`
 
 ## Expected Result
@@ -204,5 +228,8 @@
 - Multi-entry Quick Start now indents the plain `Start new` rows beneath the
   paired `Resume` rows so the old-TUI primary/secondary action hierarchy is
   visible again without adding standalone headers back.
+- New-branch launches now materialize a sibling worktree before PTY spawn, so
+  Launch Agent no longer drops back to the repository root checkout for the
+  new-branch flow.
 - Any missing behavior is logged against acceptance or reviewer gaps rather than unchecked implementation tasks.
 - No step should be treated as complete unless the code path is actually reachable today.

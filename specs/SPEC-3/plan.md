@@ -5,8 +5,9 @@
 Implement the version cache feature and complete the session conversion UI.
 Agent detection, launch wizard, Quick Start, config-backed custom-agent
 runtime integration, and Settings-backed custom-agent CRUD are implemented
-and tested. The remaining work is reviewer confirmation of the restored
-wizard UX and end-to-end custom-agent behavior.
+and tested. The latest reopened slice makes new-branch launches materialize
+the requested branch/worktree before PTY spawn so Launch Agent no longer
+falls back to the repository root checkout.
 
 ## Technical Context
 
@@ -101,6 +102,28 @@ wizard UX and end-to-end custom-agent behavior.
 3. Add focused RED/GREEN coverage proving issue-origin launches open at
    `BranchTypeSelect` and carry the selected issue through the `IssueSelect`
    step.
+
+### Phase 46: Codex Model Snapshot Sync
+
+1. Update the Launch Agent Codex model list to match the current Codex CLI
+   snapshot so the selectable models include `gpt-5.4`, `gpt-5.4-mini`,
+   and `gpt-5.3-codex-spark`.
+2. Keep `Default (Auto)` as the non-explicit selection so `--model` remains
+   omitted when the user keeps the default label selected.
+3. Add focused RED/GREEN coverage for the Codex model list values and rendered
+   old-TUI label/description rows before broad workspace verification.
+
+### Phase 47: New-Branch Launch Worktree Materialization
+
+1. Extend launch configuration so the wizard can carry a selected base branch
+   for new-branch launches, while SPEC/Issue-prefilled launches default to
+   `develop`.
+2. Materialize a sibling git worktree before PTY spawn whenever Launch Agent
+   targets a new branch without an existing worktree.
+3. Persist the actual launched worktree path into session metadata and
+   `GWT_PROJECT_ROOT` so Quick Start / resume operate on the correct target.
+4. Add focused RED/GREEN coverage for base-branch propagation and new-branch
+   worktree creation before broad workspace verification.
 
 ### Phase 6: Old-TUI Wizard Option Formatting
 

@@ -1,4 +1,4 @@
-# Analysis: SPEC-8 - Input extensions — voice input, file paste, AI branch naming
+# Analysis: SPEC-8 - Input extensions — voice input, terminal paste, AI branch naming
 
 ## Analysis Report: SPEC-8
 
@@ -18,12 +18,12 @@ Status: CLEAR
 - Notes: The TUI now routes voice start/stop/transcribe through a shared
   runtime seam, and toggle / stop-error paths are covered by focused unit
   tests in `app.rs`.
-- Notes: File-path paste now shell-quotes individual paths before PTY injection, reducing breakage for spaces and shell metacharacters.
-- Notes: File-path paste now also parses `file://` clipboard payloads into absolute paths, but native macOS clipboard extraction is still not complete enough to check off the platform-specific task.
+- Notes: Normal terminal paste now routes through `Event::Paste(String)` instead of a bespoke clipboard hotkey.
+- Notes: The active VT screen now determines whether pasted text should be wrapped as bracketed paste before PTY injection.
 - Notes: Branch-name parsing now rejects underspecified AI responses and truncates oversized valid lists to the supported `3..=5` window.
 - Notes: The AI branch-suggestion flow now exposes an in-list `Manual input` option instead of relying only on timeout/error fallback.
-- Notes: Dedicated tests now cover the voice crate, clipboard parsing, branch
-  suggestion normalization, `Ctrl+G,v` registration, and the rendered AI
+- Notes: Dedicated tests now cover the voice crate, terminal-paste routing,
+  branch suggestion normalization, `Ctrl+G,v` registration, and the rendered AI
   suggestion list content.
 - Notes: Pending manual verification and concrete voice-capture backend work
   do not block the artifact set itself.

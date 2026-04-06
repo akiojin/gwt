@@ -34,27 +34,28 @@
 - [x] **T-019**: Implement PTY text injection from voice transcription result.
 - [x] **T-020**: Verify T-017, T-018 pass (GREEN).
 
-## Phase 2: File Paste
+## Phase 2: Terminal Paste
 
-### 2.1 Clipboard File Path Extraction (gwt-core)
+### 2.1 Superseded File-Paste Experiment (Historical Trace)
 
-- [P] [x] **T-021**: Write test for extracting single file path from clipboard.
-- [P] [x] **T-022**: Write test for extracting multiple file paths from clipboard.
-- [P] [x] **T-023**: Write test for clipboard with text content (no file URIs) returning text as-is.
-- [P] [x] **T-024**: Write test for empty clipboard returning None.
-- [P] [x] **T-025**: Write test for file paths with spaces being shell-escaped.
-- [x] **T-026**: Implement `ClipboardFilePaste` module in `crates/gwt-core/src/clipboard.rs`. (implemented in `crates/gwt-clipboard/src/file_paste.rs`)
-- [x] **T-027**: Implement macOS NSPasteboard file URI extraction. (obsolete: using pbpaste CLI which handles file URIs via file:// URL parsing)
-- [x] **T-028**: Implement Linux xclip/wl-paste file URI extraction.
-- [x] **T-029**: Verify T-021 through T-025 pass (GREEN).
+- [x] **T-021**: Write test for extracting single file path from clipboard. (historical; no longer product surface)
+- [x] **T-022**: Write test for extracting multiple file paths from clipboard. (historical; no longer product surface)
+- [x] **T-023**: Write test for clipboard with text content (no file URIs) returning text as-is. (historical; no longer product surface)
+- [x] **T-024**: Write test for empty clipboard returning None. (historical; no longer product surface)
+- [x] **T-025**: Write test for file paths with spaces being shell-escaped. (historical; no longer product surface)
+- [x] **T-026**: Implement `ClipboardFilePaste` module in `crates/gwt-core/src/clipboard.rs`. (implemented in `crates/gwt-clipboard/src/file_paste.rs`; retained for historical trace)
+- [x] **T-027**: Implement macOS NSPasteboard file URI extraction. (historical; superseded by normal terminal paste)
+- [x] **T-028**: Implement Linux xclip/wl-paste file URI extraction. (historical; superseded by normal terminal paste)
+- [x] **T-029**: Verify T-021 through T-025 pass (GREEN). (historical)
 
-### 2.2 File Paste Hotkey and PTY Injection
+### 2.2 Normal Terminal Paste and PTY Injection
 
-- [x] **T-030**: Write test for Ctrl+G,p chord registration.
-- [x] **T-031**: Write test for multi-path injection producing one path per line.
-- [x] **T-032**: Implement Ctrl+G,p chord handler in `crates/gwt-tui/src/app.rs`.
-- [x] **T-033**: Implement PTY injection of extracted file paths.
-- [x] **T-034**: Verify T-030, T-031 pass (GREEN).
+- [x] **T-030**: Write test for routing `Event::Paste(String)` into a dedicated TUI message.
+- [x] **T-031**: Write test for bracketed-paste payload generation and mode detection from the active VT state.
+- [x] **T-032**: Enable bracketed paste during terminal setup / restore in `crates/gwt-tui/src/main.rs`.
+- [x] **T-033**: Implement normal paste PTY injection in `crates/gwt-tui/src/app.rs`.
+- [x] **T-034**: Remove the deprecated `Ctrl+G,p` shortcut and verify the focused paste tests pass (GREEN).
+- [x] **T-035**: Preserve whitespace-only paste payloads and route paste into active non-terminal text inputs.
 
 ## Phase 3: AI Branch Naming Wizard Integration (Dormant in Standard Launch Agent Flow from Branches / SPEC Detail / Issue Detail)
 
@@ -79,5 +80,5 @@
 ### 3.3 Integration Verification
 
 - [x] **T-047**: Manual verification: voice input records, transcribes, and injects text into PTY. (runtime/session wiring is now verified by unit tests in `gwt-tui`, but concrete Qwen3-ASR capture remains pending real backend availability)
-- [x] **T-048**: Manual verification: file paste extracts paths from clipboard and injects into PTY. (obsolete: covered by unit tests on ClipboardFilePaste and PTY injection)
+- [x] **T-048**: Manual verification: normal terminal paste reaches the active PTY as one paste operation when bracketed paste is enabled. (focused unit tests now cover event routing, payload wrapping, and keybinding removal)
 - [x] **T-049**: Manual verification: the dedicated wizard AI suggestion step displays branch name suggestions and allows selection. (obsolete: covered by unit tests on BranchNameSuggester and wizard rendering)

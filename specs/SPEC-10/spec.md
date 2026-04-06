@@ -118,13 +118,16 @@ git clone --depth=1 <url> .
 
 ### Worktree Location
 
-Worktrees are created at the same directory level as the repository (sibling layout):
+Worktrees are created at the same directory level as the repository, using the
+branch name itself as the relative directory hierarchy:
 ```
 /home/user/projects/
-├── my-repo/           ← main clone (develop checked out)
-├── my-repo-feature-1/ ← git worktree for feature/feature-1
-├── my-repo-feature-2/ ← git worktree for feature/feature-2
-└── my-repo-bugfix-1/  ← git worktree for bugfix/bugfix-1
+├── my-repo/            ← main clone (develop checked out)
+├── feature/
+│   ├── feature-1/      ← git worktree for feature/feature-1
+│   └── feature-2/      ← git worktree for feature/feature-2
+└── bugfix/
+    └── bugfix-1/       ← git worktree for bugfix/bugfix-1
 ```
 
 ### Full Initialization (on first launch in repo)
