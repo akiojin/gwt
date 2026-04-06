@@ -29,8 +29,9 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
    session is created with the configured parameters and the actual launched
    worktree path.
 5. Given I create a new branch from the Branches flow, when launch
-   materialization runs, then gwt creates a sibling worktree for that new
-   branch before spawning the agent PTY.
+   materialization runs, then gwt creates a sibling worktree whose path
+   mirrors that branch hierarchy (for example `feature/aaa` ->
+   `../feature/aaa`) before spawning the agent PTY.
 6. Given the new-branch flow starts from a selected branch, when launch
    materialization runs, then that selected branch is used as the base branch
    instead of always falling back to the repo root checkout.
@@ -474,5 +475,5 @@ default = { id = "default", label = "Default", arg = "" }
 - **SC-008**: Version selection remains separated from model selection and the
   launch summary shows the effective version that will be used.
 - **SC-009**: New-branch launches from Branches, SPEC detail, and Issue
-  detail start inside a materialized sibling worktree instead of falling back
-  to the repository root checkout.
+  detail start inside a materialized sibling worktree whose path mirrors the
+  branch hierarchy instead of falling back to the repository root checkout.

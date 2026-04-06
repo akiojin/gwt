@@ -156,9 +156,12 @@
   longer materialize under `develop-*` paths like `develop-feature-test`.
 - Launches started from a legacy bare workspace layout (`gwt.git` +
   `develop/`) now use the bare common-dir as the Git control path while
-  stripping the `.git` suffix from the repo name for sibling path derivation,
-  so new branches no longer materialize under `develop-*` paths like
-  `develop-feature-test2`.
+  deriving sibling paths from the branch hierarchy itself, so new branches no
+  longer materialize under `develop-*` paths like `develop-feature-test2`.
+- New-branch launches now mirror the requested branch hierarchy in the
+  sibling path itself (`feature/aaa` -> `../feature/aaa`) instead of
+  flattening that branch name into repo-name-prefixed directories such as
+  `gwt-feature-aaa`.
 - If a branch was already materialized into a stale worktree path from an
   earlier launch bug, Launch Agent now reuses that existing branch worktree
   instead of failing a second `git worktree add`.
@@ -171,14 +174,14 @@
   `cargo build -p gwt-tui`, and `bunx markdownlint-cli2` on the refreshed
   SPEC-3 artifacts.
 - Focused verification for the worktree-materialization slice now includes
-  `cargo test -p gwt-git sibling_worktree_path_uses_repo_name_and_slugged_branch -- --nocapture`,
+  `cargo test -p gwt-git sibling_worktree_path_preserves_branch_hierarchy -- --nocapture`,
   `cargo test -p gwt-git create_from_base_creates_new_branch_worktree -- --nocapture`,
   `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`,
   `cargo test -p gwt-git bare_common_dir -- --nocapture`,
   `cargo test -p gwt-tui base_branch -- --nocapture`, and
   `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`,
-  `cargo test -p gwt-tui linked_worktree_uses_main_repo_sibling_layout -- --nocapture`,
-  `cargo test -p gwt-tui bare_workspace_linked_worktree_uses_repo_name_layout -- --nocapture`,
+  `cargo test -p gwt-tui linked_worktree_uses_main_repo_branch_layout -- --nocapture`,
+  `cargo test -p gwt-tui bare_workspace_linked_worktree_uses_branch_hierarchy_layout -- --nocapture`,
   `cargo test -p gwt-tui existing_branch_worktree_reuses_previous_path -- --nocapture`,
   plus `cargo test -p gwt-tui from_selected_branch -- --nocapture`.
 
