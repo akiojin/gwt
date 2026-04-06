@@ -1,5 +1,22 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: startup timing tests must stub unrelated gh CLI surfaces
+
+### 事象
+
+`load_initial_data_prefetches_branch_detail_async` が CI だけ 5 秒前後に膨らみ、branch detail preload の非同期性とは無関係に落ちた。
+
+### 原因
+
+- `load_initial_data()` の計測に `gh pr view` / `gh pr list` の同期 CLI 呼び出しが含まれていた。
+- テストの意図は branch detail preload が docker snapshot を待たずに返ることの確認だったが、PR surface の遅延まで同じ wall-clock に混入していた。
+
+### 再発防止策
+
+1. 起動時の非同期 preload を測るテストでは、無関係な CLI / network surface を helper injection で stub する。
+2. wall-clock 閾値テストを追加するときは、計測対象以外の同期処理が同じ関数に残っていないか先に棚卸しする。
+3. CI only の遅延失敗では、まず外部 CLI (`gh`, `docker`, `git fetch`) の同期呼び出し混入を疑う。
+
 ## 2026-04-06 — fix: session pane mouse interaction は keyboard focus 前提で捨てない
 
 ### 事象

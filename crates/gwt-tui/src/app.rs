@@ -549,6 +549,14 @@ pub fn update(model: &mut Model, msg: Message) {
 /// Populates branches, version tags, and worktree mappings.  Each section is
 /// best-effort: failures are silently ignored so the TUI still starts.
 pub fn load_initial_data(model: &mut Model) {
+    load_initial_data_with(model, fetch_current_pr_link, gwt_git::fetch_pr_list);
+}
+
+fn load_initial_data_with<P, F>(model: &mut Model, load_pr_link: P, load_prs: F)
+where
+    P: FnOnce(&std::path::Path) -> gwt_core::Result<Option<String>>,
+    F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+{
     schedule_startup_version_cache_refresh();
 
     // -- Branches --
@@ -625,10 +633,10 @@ pub fn load_initial_data(model: &mut Model) {
         gwt_git::diff::get_status,
         |repo_path| gwt_git::commit::recent_commits(repo_path, 10),
         gwt_git::branch::list_branches,
-        fetch_current_pr_link,
+        load_pr_link,
     );
 
-    load_pr_dashboard(model);
+    load_pr_dashboard_with(model, load_prs);
 }
 
 fn load_git_view_with<S, C, B, P>(
@@ -778,10 +786,6 @@ fn switch_management_tab_with<F, D>(
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
     }
-}
-
-fn load_pr_dashboard(model: &mut Model) {
-    load_pr_dashboard_with(model, gwt_git::fetch_pr_list);
 }
 
 fn refresh_pr_dashboard_with<F, D>(model: &mut Model, fetch_prs: F, fetch_detail: D)
@@ -5786,7 +5790,11 @@ mod tests {
             let mut model = Model::new(dir.path().to_path_buf());
 
             let start = std::time::Instant::now();
-            load_initial_data(&mut model);
+            load_initial_data_with(
+                &mut model,
+                |_repo_path| Ok(None),
+                |_repo_path| Ok(Vec::new()),
+            );
             let elapsed = start.elapsed();
 
             assert!(
