@@ -58,6 +58,26 @@ worktree path が `.../develop-feature-test` になり、SPEC-10 の sibling lay
 2. worktree path のテストは main repo 直下だけでなく、linked worktree を起点にした Launch Agent 経路でも固定する。
 3. `git worktree` 系の path 期待値は macOS の `/var` → `/private/var` 正規化を考慮して canonical path で比較する。
 
+## 2026-04-07 — fix: 誤った旧 worktree が残る branch は再作成ではなく再利用する
+
+### 事象
+
+`develop-feature-test` のような誤った旧 worktree が残った状態で同じ branch を Launch Agent すると、
+session TOML は保存されるが `git worktree add` が「その branch は別 worktree で checkout 済み」で失敗し、
+agent PTY が起動しなかった。
+
+### 原因
+
+- path 生成の不具合を直した後も、`resolve_launch_worktree()` は branch の既存 worktree を見ずに
+  新しい sibling path を作ろうとしていた。
+- `feature/test` はすでに旧 path で checkout 済みのため、Git が二重 checkout を拒否していた。
+
+### 再発防止策
+
+1. new-branch launch でも、対象 branch が既存 worktree で checkout 済みなら `git worktree add` せずその path を再利用する。
+2. linked worktree path 修正の回帰テストだけで終わらせず、「旧 path が残っている再 launch」まで RED/GREEN で固定する。
+3. launch failure の切り分けでは `~/.gwt/sessions/*.toml` の増加有無と `git worktree list` を合わせて確認する。
+
 ## 2026-04-06 — fix: process-wide fake docker env は並列 app テストの観測値を汚す
 
 ### 事象
