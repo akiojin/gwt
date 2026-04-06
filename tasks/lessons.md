@@ -1,5 +1,22 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: Codex の hooks は `hooks.json` だけでは起動せず launch feature flag も必要
+
+### 事象
+
+Claude Code では Branches の live spinner が出るのに、Codex では同じブランチ上でも spinner が一切出なかった。
+
+### 原因
+
+- gwt は `.codex/hooks.json` を生成・配布していたが、Codex launch args に `--enable codex_hooks` を入れていなかった。
+- OpenAI Codex の現行 hooks は feature flag 前提のため、`hooks.json` が存在しても feature flag が無い session では hook 自体が実行されなかった。
+
+### 再発防止策
+
+1. Codex の hook 依存機能を追加・修正するときは、`hooks.json` の生成だけでなく launch args に `codex_hooks` 有効化が入っているかを RED テストで固定する。
+2. Claude と Codex で hook 設定方式が同じだと仮定しない。agent ごとに「設定ファイル」「feature flag」「runtime enablement」を分けて確認する。
+3. Hooks 不具合では、まず runtime sidecar の有無と launch config の feature flags を一緒に確認し、`hooks.json` 内容だけで原因判断しない。
+
 ## 2026-04-06 — fix: startup 時の agent detection は main thread で同期実行しない
 
 ### 事象

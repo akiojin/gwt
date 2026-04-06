@@ -104,6 +104,8 @@
 - [x] **T-136**: Implement `generate_codex_hooks()` and wire it into `crates/gwt-tui/src/app.rs` launch materialization.
 - [x] **T-137**: Update `.git/info/exclude` patterns and tracked `.codex/hooks.json` to the no-Node runtime hook shape.
 - [x] **T-138**: Verify focused and broad `gwt-skills` / `gwt-tui` tests pass after Claude/Codex runtime hook normalization.
+- [x] **T-139**: Write RED test: gwt-managed Codex launch configs include `--enable codex_hooks`.
+- [x] **T-140**: Implement Codex launch feature-flag enablement in `crates/gwt-agent/src/launch.rs` and rerun focused plus broad verification.
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 

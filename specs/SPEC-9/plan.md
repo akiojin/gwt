@@ -83,6 +83,10 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 4. **gwt-tui (app.rs)**: Call `distribute_to_worktree()` in agent launch flow, after `PaneManager::launch_agent()` resolves the worktree path.
 
+5. **gwt-agent (launch.rs)**:
+   - Enable Codex hooks explicitly in every gwt-managed Codex launch (`--enable codex_hooks`).
+   - Keep the flag alongside the existing web-search feature enablement so Codex hook execution does not depend on per-user `config.toml` state.
+
 ### Dependencies
 
 - Phase 2 (bundled assets available at runtime)
