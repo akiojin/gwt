@@ -64,6 +64,36 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Create a new worktree at `path`, creating `new_branch` from `base_branch`.
+    pub fn create_from_base(&self, base_branch: &str, new_branch: &str, path: &Path) -> Result<()> {
+        if path.exists() {
+            return Err(GwtError::Git(format!(
+                "worktree path already exists: {}",
+                path.display()
+            )));
+        }
+
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                new_branch,
+                path.to_str().unwrap_or(""),
+                base_branch,
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("worktree add -b: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
     /// Remove the worktree at `path`.
     pub fn remove(&self, path: &Path) -> Result<()> {
         let output = std::process::Command::new("git")
@@ -79,6 +109,50 @@ impl WorktreeManager {
 
         Ok(())
     }
+}
+
+/// Derive a sibling worktree path from the repo root and branch name.
+pub fn sibling_worktree_path(repo_path: &Path, branch: &str) -> PathBuf {
+    let repo_name = repo_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("repo");
+    let suffix = slug_branch_for_path(branch);
+    let dir_name = if suffix.is_empty() {
+        repo_name.to_string()
+    } else {
+        format!("{repo_name}-{suffix}")
+    };
+
+    repo_path.parent().unwrap_or(repo_path).join(dir_name)
+}
+
+fn slug_branch_for_path(branch: &str) -> String {
+    let mut out = String::with_capacity(branch.len());
+    let mut prev_dash = false;
+
+    for ch in branch.trim().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else if matches!(ch, '-' | '_') {
+            ch
+        } else {
+            '-'
+        };
+
+        if mapped == '-' {
+            if !prev_dash {
+                out.push(mapped);
+            }
+            prev_dash = true;
+        } else {
+            out.push(mapped);
+            prev_dash = false;
+        }
+    }
+
+    out.trim_matches('-').to_string()
 }
 
 /// Parse `git worktree list --porcelain` output into `WorktreeInfo` entries.
@@ -136,6 +210,54 @@ fn matches_annotation(line: &str, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn init_git_repo(path: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["init", path.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
+
+        let email = std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .output()
+            .expect("git config user.email");
+        assert!(email.status.success(), "git config user.email failed");
+
+        let name = std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .output()
+            .expect("git config user.name");
+        assert!(name.status.success(), "git config user.name failed");
+    }
+
+    fn git_commit_allow_empty(path: &Path, message: &str) {
+        let output = std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", message])
+            .current_dir(path)
+            .output()
+            .expect("git commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_checkout_new_branch(path: &Path, branch: &str) {
+        let output = std::process::Command::new("git")
+            .args(["checkout", "-b", branch])
+            .current_dir(path)
+            .output()
+            .expect("git checkout -b");
+        assert!(
+            output.status.success(),
+            "git checkout -b failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn parse_porcelain_single_entry() {
@@ -205,6 +327,40 @@ prunable gitdir file points to non-existent location
         let entries = parse_porcelain_output(output);
         assert_eq!(entries.len(), 1);
         assert!(entries[0].branch.is_none());
+    }
+
+    #[test]
+    fn sibling_worktree_path_uses_repo_name_and_slugged_branch() {
+        let repo_path = Path::new("/tmp/my-repo");
+        let worktree = sibling_worktree_path(repo_path, "feature/banner");
+        assert_eq!(worktree, PathBuf::from("/tmp/my-repo-feature-banner"));
+    }
+
+    #[test]
+    fn create_from_base_creates_new_branch_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        git_commit_allow_empty(tmp.path(), "initial commit");
+        git_checkout_new_branch(tmp.path(), "develop");
+
+        let manager = WorktreeManager::new(tmp.path());
+        let worktree_path = sibling_worktree_path(tmp.path(), "feature/materialized");
+
+        manager
+            .create_from_base("develop", "feature/materialized", &worktree_path)
+            .unwrap();
+
+        assert!(worktree_path.exists());
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&worktree_path)
+            .output()
+            .expect("git branch --show-current");
+        assert!(branch_output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/materialized"
+        );
     }
 
     #[test]

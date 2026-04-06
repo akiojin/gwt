@@ -26,8 +26,18 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
    step, then the launch completes directly without a trailing confirm
    screen.
 4. Given I confirm the wizard, when the agent launches, then a new persisted
-   session is created with the configured parameters.
-5. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
+   session is created with the configured parameters and the actual launched
+   worktree path.
+5. Given I create a new branch from the Branches flow, when launch
+   materialization runs, then gwt creates a sibling worktree for that new
+   branch before spawning the agent PTY.
+6. Given the new-branch flow starts from a selected branch, when launch
+   materialization runs, then that selected branch is used as the base branch
+   instead of always falling back to the repo root checkout.
+7. Given the new-branch flow starts from SPEC or Issue context without a
+   selected base branch, when launch materialization runs, then `develop` is
+   used as the default base branch.
+8. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
 
 ### US-7: Restore Old-TUI Wizard Step Machine (P0) -- IMPLEMENTED
 
@@ -284,6 +294,16 @@ As a developer, I want to convert an existing session to a different agent type 
   `CodexFastMode` only controls Codex service-tier behavior.
 - **FR-041**: When `CodexFastMode=On`, Codex launch args include
   `-c service_tier=fast`; when Off, that key is omitted.
+- **FR-042**: New-branch launches materialize the requested branch into a
+  sibling git worktree before PTY spawn, rather than running the agent from
+  the repository root.
+- **FR-043**: When the new-branch flow starts from Branches,
+  `BranchAction -> Create new from selected` preserves the selected branch as
+  the base branch for worktree creation; when no selected base branch exists,
+  Launch Agent defaults that base branch to `develop`.
+- **FR-044**: After launch materialization, `GWT_PROJECT_ROOT` and persisted
+  session metadata use the actual launched worktree path, and any
+  materialization error aborts launch before PTY spawn.
 
 ## Non-Functional Requirements
 
@@ -326,7 +346,7 @@ As a developer, I want to convert an existing session to a different agent type 
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `GWT_PROJECT_ROOT` | repo root path | Repository root for agent context |
+| `GWT_PROJECT_ROOT` | active worktree or repo root path | Launch target for agent context |
 | `TERM` | `xterm-256color` | Terminal type |
 | `COLORTERM` | `truecolor` | Color support |
 | Profile env vars | (from profile) | User-defined environment overrides |
@@ -453,3 +473,6 @@ default = { id = "default", label = "Default", arg = "" }
 - **SC-007**: Session conversion preserves repository context, updates agent identity safely, and handles errors gracefully.
 - **SC-008**: Version selection remains separated from model selection and the
   launch summary shows the effective version that will be used.
+- **SC-009**: New-branch launches from Branches, SPEC detail, and Issue
+  detail start inside a materialized sibling worktree instead of falling back
+  to the repository root checkout.
