@@ -554,6 +554,7 @@ pub fn update(model: &mut Model, msg: Message) {
 /// best-effort: failures are silently ignored so the TUI still starts.
 pub fn load_initial_data(model: &mut Model) {
     schedule_startup_version_cache_refresh();
+    let has_git_remote = repo_has_git_remote(&model.repo_path);
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -629,10 +630,31 @@ pub fn load_initial_data(model: &mut Model) {
         gwt_git::diff::get_status,
         |repo_path| gwt_git::commit::recent_commits(repo_path, 10),
         gwt_git::branch::list_branches,
-        fetch_current_pr_link,
+        |repo_path| {
+            if has_git_remote {
+                fetch_current_pr_link(repo_path)
+            } else {
+                Ok(None)
+            }
+        },
     );
 
-    load_pr_dashboard(model);
+    if has_git_remote {
+        load_pr_dashboard(model);
+    }
+}
+
+fn repo_has_git_remote(repo_path: &std::path::Path) -> bool {
+    let output = match Command::new("git")
+        .args(["remote"])
+        .current_dir(repo_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
 }
 
 fn load_git_view_with<S, C, B, P>(
@@ -4457,6 +4479,46 @@ mod tests {
         result
     }
 
+    #[cfg(unix)]
+    fn write_fake_gh(script_body: &str) -> TempDir {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let script_path = dir.path().join("gh");
+        let mut file = fs::File::create(&script_path).expect("create fake gh");
+        file.write_all(script_body.as_bytes())
+            .expect("write fake gh");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = file.metadata().expect("stat fake gh").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod fake gh");
+
+        dir
+    }
+
+    #[cfg(unix)]
+    fn with_fake_gh<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::GH_PATH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = write_fake_gh(script_body);
+        let previous = std::env::var_os("PATH");
+        let mut entries = vec![dir.path().to_path_buf()];
+        if let Some(value) = previous.as_ref() {
+            entries.extend(std::env::split_paths(value));
+        }
+        let new_path = std::env::join_paths(entries).expect("join fake gh PATH");
+        std::env::set_var("PATH", &new_path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        result
+    }
+
     fn drive_docker_worker_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
         for _ in 0..40 {
             update(model, Message::Tick);
@@ -5779,6 +5841,49 @@ mod tests {
             );
 
             assert_eq!(model.branches.docker_containers[0].name, "web");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_initial_data_skips_github_cli_when_repo_has_no_remote() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+        assert!(
+            !repo_has_git_remote(dir.path()),
+            "test repo should not have any git remotes"
+        );
+
+        let gh_count = dir.path().join("gh-count.txt");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$2\" = \"--version\" ]; then\n  printf 'gh version test\\n'\n  exit 0\nfi\ncount_file=\"{}\"\ncount=0\nif [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\necho $((count + 1)) > \"$count_file\"\nsleep 5\nprintf '{{\"url\":\"https://example.com/pr/1\"}}'\n",
+            gh_count.display()
+        );
+
+        with_fake_gh(&script, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+
+            let start = std::time::Instant::now();
+            load_initial_data(&mut model);
+            let elapsed = start.elapsed();
+            let gh_calls = fs::read_to_string(&gh_count)
+                .unwrap_or_else(|_| "0".to_string())
+                .trim()
+                .to_string();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(1500),
+                "load_initial_data should skip gh lookups when the repo has no remote: {elapsed:?} (gh calls: {gh_calls})"
+            );
+            assert!(
+                !gh_count.exists(),
+                "gh should not be invoked for repos without remotes"
+            );
+            assert!(
+                model.pr_dashboard.prs.is_empty(),
+                "repos without remotes should not try to populate PR dashboard data"
+            );
         });
     }
 
