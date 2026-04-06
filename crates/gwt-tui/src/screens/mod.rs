@@ -98,8 +98,8 @@ pub fn build_tab_title(labels: &[&str], active: usize) -> Line<'static> {
 pub fn selection_prefix(is_selected: bool) -> Span<'static> {
     if is_selected {
         Span::styled(
-            crate::theme::icon::LEFT_ACCENT,
-            Style::default().fg(crate::theme::color::ACTIVE),
+            theme::icon::LEFT_ACCENT,
+            Style::default().fg(theme::color::ACTIVE),
         )
     } else {
         Span::raw(" ")

@@ -653,11 +653,7 @@ fn e2e_branches_m_cycles_view_mode() {
 
     assert_eq!(
         model.filtered_branch_names(),
-        vec![
-            "main".to_string(),
-            "feature/api".to_string(),
-            "feature/app-shell".to_string(),
-        ]
+        vec!["origin/release/1.0".to_string()]
     );
 }
 

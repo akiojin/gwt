@@ -104,7 +104,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006f**: When the user has explicitly focused a management list/pane, `Esc` still behaves like a supplemental-surface escape hatch: if no search/detail/edit flow claims it and no warn notification is pending, focus returns to `Terminal`; warn dismissal keeps priority when a warn toast is present.
 - **FR-006g**: Branch Detail content stays chrome-light: once the pane border already shows the active section and selected branch context, the inner detail renderer must not repeat nested section titles such as `Overview`, `SPECs`, `Git Status`, or `Sessions`.
 - **FR-006g**: Management focus cycling is tab-aware: `Branches` keeps the old three-surface cycle (`Terminal <-> TabContent <-> BranchDetail`), while every other management tab only cycles between `Terminal` and `TabContent` so focus never lands on a non-existent detail pane.
-- **FR-006a**: Branch Detail view: Branches tab is split vertically — top 50% branch list, bottom 50% detail of selected branch (always visible). Cursor movement in the list updates the detail. Sections:
+- **FR-006a**: Branch Detail view: Branches tab is split vertically — top 50% branch list, bottom 50% detail of selected branch (always visible). Cursor movement in the list updates the visible detail from cached branch-detail data without waiting on synchronous external commands. Branch detail data is prefetched asynchronously at startup and refreshed asynchronously via `r`. Sections:
   - **Overview**: Branch name, head status, worktree path, linked Issues, PR status
   - **SPECs**: SPEC list from the branch's worktree `specs/` directory (worktree-only)
   - **Git Status**: Staged/unstaged/untracked files, recent commits
@@ -121,7 +121,13 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006b**: Branch line display: name + worktree icon (U+25CF/U+25CB) + HEAD indicator. No category headers.
 - **FR-006c**: Management chrome: there is no standalone header banner above the management panes. Context is carried by the pane titles themselves so the management pane keeps its full vertical space for list/detail content.
 - **FR-006d**: Branch list: Enter=Wizard, Shift+Enter=Shell, Space=select, Ctrl+C=delete
-- **FR-006h**: When the management pane is too narrow to fit the full tab strip in the pane title, the title collapses to the active management tab only so the current surface stays legible instead of showing a truncated strip.
+- **FR-006h**: When the management pane is too narrow to fit the full tab strip in the pane title, the title keeps the active management tab plus its nearest visible neighbors instead of collapsing to the active tab only. Hidden tabs are indicated with ellipsis so the current position in the strip stays legible without showing a truncated strip.
+- **FR-006i**: Branch list cursor movement is non-cyclic: `Up` on the first visible branch keeps the selection on the first row, and `Down` on the last visible branch keeps the selection on the last row.
+- **FR-006j**: In `Branches` view mode `All`, local branches are listed before remote branches. The active sort mode still applies within the local and remote groups.
+- **FR-006k**: The default `Branches` view filter is `Local`, so the initial management view opens on local branches without requiring an extra toggle from `All`.
+- **FR-006l**: Branch-detail preload keeps at most one active refresh worker. When startup, `r`, or a Docker action schedules a newer preload, any superseded worker is canceled and must not continue walking later branches in the background.
+- **FR-006m**: Docker container state used by Branch Detail preload is captured once per refresh and shared across every branch payload in that refresh; the preload path must not call `docker ps -a` once per branch.
+- **FR-006n**: Branch-detail preload results are applied incrementally. A single UI tick must not drain an unbounded number of preload events, so large branch sets cannot monopolize one frame and stall Branches list input.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-009**: Session navigation: Ctrl+G,] (next), Ctrl+G,[ (prev), Ctrl+G,1-9 (direct).
@@ -136,7 +142,8 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-013e**: Non-Branches management footer hints are mode-aware instead of generic: tabs without sub-tabs omit `Ctrl+←→:sub-tab`, detail drill-downs advertise `Esc:back`, and form/edit modes advertise `Esc:cancel`.
 - **FR-013f**: Non-Branches management footer hints are also action-aware: each tab advertises only its real primary action surface instead of a generic `Enter:action`, such as `Issues` list showing `/:search` and `Enter:detail`, `Git View` showing `Enter:expand`, `Versions` showing refresh-only, and `PR Dashboard` detail showing `Enter:close`.
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion. The current default split is responsive: wide terminals (`>=120 cols`) use `40% management / 60% session`, while standard or narrower terminals fall back to `50% / 50%` so management chrome remains legible.
-- **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border.
+- **FR-014a**: Session PTY geometry is initialized from the actual visible session-pane size at startup. The default shell must not stay on the stale `80x24` model default until a later terminal resize event arrives.
+- **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border. Reverse focus cycling must work whether the terminal reports `Shift+Tab` as `BackTab` or as `Tab` with the Shift modifier.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 
@@ -147,6 +154,10 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **NFR-003**: Ctrl+G prefix state machine handles rapid input without missed keys.
 - **NFR-004**: Split grid layout recalculates within one frame on session add/remove.
 - **NFR-005**: Session persistence file size remains under 100KB for typical usage.
+- **NFR-006**: Branch list selection changes complete without synchronous `git` / Docker / filesystem detail reloads on the input path.
+- **NFR-007**: Startup PTY geometry matches the visible session pane without requiring a manual terminal resize.
+- **NFR-008**: Branch-detail preload refresh cost scales with the number of branches for branch-local Git/filesystem reads only; Docker container discovery remains `O(1)` per refresh, not `O(branches)`.
+- **NFR-009**: Applying branch-detail preload results is frame-budgeted: each tick handles a bounded batch so Branches list navigation remains responsive while preload data continues to stream in.
 
 ## Implementation Details
 
@@ -166,6 +177,7 @@ Ctrl+G, Tab →  Tab Content (list) → Terminal → ...
 
 - Focused pane: **blue** border (`Color::Cyan`)
 - Unfocused pane: **white** border (`Color::Gray`)
+- Reverse focus cycling accepts both `BackTab` and `Shift+Tab` key encodings
 - Management tabs are rendered in the Block title of the management panel (Left/Right switches tabs within TabContent focus)
 - Session tabs are rendered in the Block title of the terminal content area (active session highlighted yellow/bold, inactive gray)
 - Ctrl+G,g toggles management panel visibility (same as before)
@@ -294,3 +306,5 @@ agent_id = "claude"  # only for agent type
 - **SC-004**: Session restore recreates previous layout after quit and restart.
 - **SC-005**: Management panel tabs all render content and preserve state between switches.
 - **SC-006**: Status bar updates within one frame of session or branch change.
+- **SC-007**: `Shift+Tab` moves focus backward on both Branches and non-Branches management tabs even when the terminal emits `Tab` with the Shift modifier instead of `BackTab`.
+- **SC-008**: On startup, the default shell PTY sees the same row/column geometry as the visible session pane before any manual terminal resize occurs.

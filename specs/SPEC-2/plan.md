@@ -23,7 +23,7 @@ Complete the workspace shell with branch detail view, help overlay, session pers
 
 | Risk | Mitigation |
 |------|-----------|
-| Branch detail sections need data from multiple sources | Load on cursor move, cache per branch |
+| Branch detail sections need data from multiple sources | Prefetch asynchronously, cache per branch, refresh explicitly |
 | SPECs tab removal affects tab indexing and keybinds | Update all ManagementTab references |
 | Agent launch from detail needs simplified wizard | Reuse WizardState with branch pre-filled |
 | Worktree delete is destructive | Confirmation dialog required |
@@ -566,6 +566,95 @@ session identity cues that tab mode already exposes.
 41.3: Verification (1 task)
 - Re-run focused tests, snapshot verification, broad workspace verification, and refresh SPEC-2 artifacts.
 
+### Phase 42: Cache Branch Detail Data Off The Input Path (5 tasks)
+Remove synchronous branch-detail reloads from `Branches` navigation so the list stays responsive
+even when Docker, git status, git log, or worktree filesystem reads are slow.
+
+42.1: Cached detail contract (2 tasks)
+- Prefetch branch detail data asynchronously at startup and keep it in a branch-keyed cache.
+- Route `Branches` selection changes to cached detail only, and use `r` for asynchronous refresh.
+
+42.2: Focused coverage (2 tasks)
+- Add RED coverage that cached detail switches immediately on `Up` / `Down` without reloading from disk.
+- Add RED coverage that startup/refresh asynchronous loads populate or refresh the cache without blocking navigation.
+
+42.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and refresh SPEC-2 artifacts and progress evidence.
+
+### Phase 43: Normalize Reverse Focus Keys And Startup PTY Geometry (5 tasks)
+Close two remaining usability regressions in the workspace shell: reverse focus cycling must honor
+all real `Shift+Tab` encodings, and the default shell PTY must start at the actual session-pane size
+instead of waiting for a later resize event.
+
+43.1: Input and geometry contract (2 tasks)
+- Accept both `BackTab` and `Tab`+`Shift` as reverse pane-focus navigation across Branches and non-Branches management tabs.
+- Seed startup PTY geometry from the live terminal frame size before the default shell is spawned so the right-side session pane is not born as `80x24`.
+
+43.2: Focused coverage (2 tasks)
+- Add RED coverage for reverse focus cycling when the key arrives as `KeyCode::Tab` plus the Shift modifier.
+- Add RED coverage for startup terminal-size synchronization so the initial shell geometry matches the computed session pane before any later resize event.
+
+43.3: Verification (1 task)
+- Re-run focused tests, broad workspace verification, and refresh SPEC-2 artifacts and progress evidence.
+
+### Phase 44: Stop Branch List Wrap, Prefer Local Branches, And Keep Nearby Tabs Visible (5 tasks)
+Tighten the daily Branches workflow by removing list wraparound, promoting local branches in the
+mixed list, and making narrow management titles preserve nearby tab context instead of showing the
+active tab alone.
+
+44.1: Branch list movement contract (2 tasks)
+- Make Branches list `Up`/`Down` stop at the first/last visible row instead of wrapping around.
+- Keep this change scoped to the Branches list so other management lists keep their current behavior.
+
+44.2: Branch ordering and title-context coverage (2 tasks)
+- In `ViewMode::All`, keep local branches ahead of remote branches while preserving the active sort mode inside each group.
+- Change narrow management titles from active-only collapse to a nearby-tab window that keeps the active tab and adjacent tabs visible, using ellipsis when tabs remain hidden off-screen.
+
+44.3: Verification (1 task)
+- Re-run focused and broad workspace verification, then refresh SPEC-2 artifacts and progress tracking.
+
+### Phase 45: Default Branches Filter To Local (5 tasks)
+Close the remaining mismatch between the intended branch-first workflow and the initial Branches
+view by making the screen open on local branches instead of `All`.
+
+45.1: Initial-view contract (2 tasks)
+- Change the default `Branches` filter from `All` to `Local`.
+- Keep the existing `m` / view-mode cycle semantics, but start the cycle from `Local`.
+
+45.2: Coverage and artifact sync (2 tasks)
+- Add RED coverage proving the default Branches state starts in `Local` and that the cycle still reaches `Remote` and `All`.
+- Refresh reviewer guidance and snapshots so the initial management render shows `View: Local`.
+
+45.3: Verification (1 task)
+- Re-run broad workspace verification, snapshot verification, and refresh SPEC-2 progress artifacts.
+
+### Phase 46: Stabilize Branch Detail Prefetch (5 tasks)
+Fix the async Branch Detail preload so repeated refreshes do not leave detached workers behind
+and so Docker state is captured once per refresh instead of once per branch.
+
+46.1: Worker lifecycle safety (2 tasks)
+- Keep the active branch-detail preload worker tracked in the model.
+- When a newer preload is scheduled, cancel the superseded worker and reap finished worker handles so stale refreshes do not continue shelling out in the background.
+
+46.2: Per-refresh Docker snapshot (2 tasks)
+- Move Docker container discovery out of `load_branch_detail()` and into the refresh worker so each preload performs at most one Docker scan.
+- Pass the shared Docker snapshot into each branch-detail load while keeping the visible Branch Detail payload unchanged.
+
+46.3: Verification (1 task)
+- Add focused coverage for canceling superseded workers and for single-snapshot Docker loading, then rerun broad verification and refresh SPEC-2 artifacts.
+
+### Phase 47: Keep Branches List Responsive During Detail Backfill (3 tasks)
+Fix the recurrence where Branch Detail backfill can still make Branches navigation feel sticky under larger branch sets.
+
+47.1: Tick budget for preload event application (1 task)
+- Bound branch-detail event draining per tick so one frame cannot consume the entire queue when preload has accumulated many branch payloads.
+
+47.2: Regression coverage (1 task)
+- Add a RED test proving one tick leaves remaining branch-detail preload events queued, then verify subsequent ticks continue draining incrementally.
+
+47.3: Verification and artifact sync (1 task)
+- Re-run focused preload/responsiveness tests and update SPEC-2 artifacts with the incremental drain contract.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
@@ -577,4 +666,6 @@ session identity cues that tab mode already exposes.
 1. `cargo test -p gwt-tui` — all pass
 2. `cargo test -p gwt-tui --test snapshot_e2e` — all E2E pass
 3. `cargo clippy -p gwt-tui --all-targets -- -D warnings` — clean
-4. Manual: launch gwt-tui, navigate branches, verify detail panel updates on cursor move
+4. Manual: launch gwt-tui, navigate branches, verify cached detail switches immediately on cursor move and `r` refresh repopulates details asynchronously
+5. Manual: verify `Shift+Tab` moves focus backward and the initial right-side session pane starts at the expected size without requiring a window resize
+6. Manual: in a repository with many branches, open Branches during preload and verify `Up`/`Down` remains responsive while detail rows continue to backfill.

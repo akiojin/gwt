@@ -5,8 +5,8 @@
 2. Move across terminal tabs and split panes using the documented keybindings.
 3. Open the management panel and verify the visible tabs match the current product shell, including the Git View tab and without assuming a live Specs tab.
 4. Press `Ctrl+G,?`, confirm the help overlay lists the current registered shortcuts grouped by category, and dismiss it with `Esc`.
-5. Return to Branches with `Ctrl+G,b`, confirm focus lands on the branch list, and verify the footer now advertises `Enter`, `Shift+Enter`, `Space`, `Ctrl+C`, `m`, `v`, `f`, and `?`.
-6. On Branches, verify rows render as a flat list with inline worktree and HEAD indicators, then confirm `Enter` opens the wizard, `Shift+Enter` opens a shell for a worktree branch, `Space` moves focus to the detail pane, and `Ctrl+C` opens delete confirmation.
+5. Return to Branches with `Ctrl+G,b`, confirm focus lands on the branch list, verify the default view mode is `Local`, and verify the footer now advertises `Enter`, `Shift+Enter`, `Space`, `Ctrl+C`, `m`, `v`, `f`, and `?`.
+6. On Branches, verify rows render as a flat list with inline worktree and HEAD indicators, local branches are shown by default, and `Enter` opens the wizard, `Shift+Enter` opens a shell for a worktree branch, `Space` moves focus to the detail pane, and `Ctrl+C` opens delete confirmation.
 7. While still on Branches, verify `m` cycles the local view mode, `v` jumps directly to Git View, `f` opens search input, and both `?` and `h` open the help overlay.
 8. Open Git View, confirm recent commits are listed for a non-empty repository, and press `r` to refresh after making a working-tree change.
 9. Toggle split/grid, switch the active management tab, quit, and restart `gwt-tui`; confirm the layout and visible panel state restore from the saved session file.
@@ -32,7 +32,7 @@
 29. Compare a wide terminal (`120x40`) and a standard terminal (`100x24`) and confirm the management pane uses `40/60` on the wider layout but falls back to `50/50` on the standard layout so the left-side chrome stays readable.
 30. In an `80x24` terminal with Terminal focus active and no notification occupying the footer, confirm the footer/status bar keeps the compact grouped hint fully visible: `Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2`.
 31. In an `80x24` terminal with no notification occupying the footer, move through Branches list, Branch Detail, and a generic management tab such as `Issues`, then confirm the footer/status bar keeps their compact pane-local hints visible instead of truncating them at the right edge.
-32. In an `80x24` terminal with the management pane visible, confirm the top-left pane title shows only the active management tab label instead of a truncated multi-tab strip; then widen to an extra-wide terminal such as `220x40` and confirm the full tab strip returns.
+32. In an `80x24` terminal with the management pane visible, confirm the top-left pane title keeps the active management tab plus nearby tabs (with ellipsis when more tabs are hidden) instead of collapsing to the active label only; then widen to an extra-wide terminal such as `220x40` and confirm the full tab strip returns.
 33. In a multi-session workspace at `80x24`, confirm the session pane title collapses to the active session while still showing the active `n/N` position (for example `2/4`); then widen to an extra-wide terminal such as `220x40` and confirm the full session strip returns and the compact `n/N` badge disappears.
 34. Switch to split/grid mode with at least three sessions open and confirm each pane title shows its stable `n:` position plus the session-type icon before the session label, so the visible panes still match the `Ctrl+G,1-9` muscle memory.
 35. Open `Issues` detail and confirm the footer says `Esc:back`; open `Profiles` create mode and confirm the footer says `Esc:cancel`; compare `Settings` and `Git View` list mode and confirm only `Settings` advertises `Ctrl+←→:sub-tab`.
@@ -66,7 +66,7 @@
 - The management/session width balance is now responsive instead of hard-coded: wide terminals keep the 40/60 emphasis on the session pane, while standard widths fall back to 50/50 to preserve management readability.
 - Terminal-focused footer hints now use a compact grouped form so the main workspace mnemonics, `C-g Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
 - Management and Branch Detail footers now use compact wording at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of dropping the trailing affordances.
-- Management pane titles now compact whenever the full tab strip would truncate, showing only the active tab label until the pane is wide enough to restore the full strip.
+- Management pane titles now compact whenever the full tab strip would truncate, keeping the active tab plus nearby tabs visible and using ellipsis until the pane is wide enough to restore the full strip.
 - Session pane titles now compact by the same fit-based rule, showing the active session plus its `n/N` position until the pane is wide enough to restore the full strip.
 - Split/grid pane titles now preserve old-TUI session identity too, showing each visible pane's `n:` shortcut position plus the session-type icon before the session label.
 - Non-Branches management footer hints now match the actual tab/mode contract instead of advertising one generic set of controls across list, detail, and form flows.
