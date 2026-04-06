@@ -25,7 +25,6 @@ use crate::screens::pr_dashboard::PrDashboardState;
 use crate::screens::profiles::ProfilesState;
 use crate::screens::service_select::ServiceSelectState;
 use crate::screens::settings::SettingsState;
-use crate::screens::specs::SpecsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
 use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
@@ -102,7 +101,7 @@ pub enum ActiveLayer {
     Initialization,
     /// Session panes (shell / agent terminals).
     Main,
-    /// Management panel (branches, specs, issues, etc.).
+    /// Management panel (branches, issues, PRs, settings, etc.).
     Management,
 }
 
@@ -153,7 +152,6 @@ pub enum SessionLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementTab {
     Branches,
-    Specs,
     Issues,
     PrDashboard,
     Profiles,
@@ -165,9 +163,8 @@ pub enum ManagementTab {
 
 impl ManagementTab {
     /// All tabs in display order.
-    pub const ALL: [ManagementTab; 9] = [
+    pub const ALL: [ManagementTab; 8] = [
         ManagementTab::Branches,
-        ManagementTab::Specs,
         ManagementTab::Issues,
         ManagementTab::PrDashboard,
         ManagementTab::Profiles,
@@ -181,7 +178,6 @@ impl ManagementTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Branches => "Branches",
-            Self::Specs => "Specs",
             Self::Issues => "Issues",
             Self::PrDashboard => "PRs",
             Self::Profiles => "Profiles",
@@ -564,8 +560,6 @@ pub struct Model {
     pub(crate) profiles: ProfilesState,
     /// Issues screen state.
     pub(crate) issues: IssuesState,
-    /// Specs screen state.
-    pub(crate) specs: SpecsState,
     /// Git view screen state.
     pub(crate) git_view: GitViewState,
     /// PR dashboard screen state.
@@ -655,7 +649,6 @@ impl Model {
             branches: BranchesState::default(),
             profiles: ProfilesState::default(),
             issues: IssuesState::default(),
-            specs: SpecsState::default(),
             git_view: GitViewState::default(),
             pr_dashboard: PrDashboardState::default(),
             settings: SettingsState::default(),
@@ -869,18 +862,22 @@ impl Model {
         } else {
             ActiveLayer::Main
         };
-        self.management_tab = match ManagementTab::ALL
-            .iter()
-            .copied()
-            .find(|tab| tab.label() == state.active_management_tab)
-        {
-            Some(tab) => tab,
-            None => {
-                warnings.push(format!(
-                    "unknown active_management_tab `{}`",
-                    state.active_management_tab
-                ));
-                ManagementTab::Branches
+        self.management_tab = if state.active_management_tab == "Specs" {
+            ManagementTab::Branches
+        } else {
+            match ManagementTab::ALL
+                .iter()
+                .copied()
+                .find(|tab| tab.label() == state.active_management_tab)
+            {
+                Some(tab) => tab,
+                None => {
+                    warnings.push(format!(
+                        "unknown active_management_tab `{}`",
+                        state.active_management_tab
+                    ));
+                    ManagementTab::Branches
+                }
             }
         };
 
@@ -975,8 +972,8 @@ mod tests {
                 .map(|tab| tab.label())
                 .collect::<Vec<_>>(),
             vec![
-                "Branches", "Specs", "Issues", "PRs", "Profiles", "Git View", "Versions",
-                "Settings", "Logs",
+                "Branches", "Issues", "PRs", "Profiles", "Git View", "Versions", "Settings",
+                "Logs",
             ]
         );
         assert_eq!(ManagementTab::Settings.label(), "Settings");
@@ -984,8 +981,8 @@ mod tests {
     }
 
     #[test]
-    fn management_tab_all_has_nine_entries() {
-        assert_eq!(ManagementTab::ALL.len(), 9);
+    fn management_tab_all_has_eight_entries() {
+        assert_eq!(ManagementTab::ALL.len(), 8);
     }
 
     #[test]
@@ -1174,5 +1171,27 @@ mod tests {
         assert_eq!(restored.session_layout, SessionLayout::Grid);
         assert_eq!(restored.active_layer, ActiveLayer::Main);
         assert_eq!(restored.management_tab, ManagementTab::Logs);
+    }
+
+    #[test]
+    fn restore_session_state_maps_legacy_specs_tab_to_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            r#"
+display_mode = "tab"
+panel_visible = true
+active_management_tab = "Specs"
+session_count = 1
+"#,
+        )
+        .unwrap();
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restored.restore_session_state_from_path(&path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.management_tab, ManagementTab::Branches);
     }
 }

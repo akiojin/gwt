@@ -623,9 +623,6 @@ pub fn load_initial_data(model: &mut Model) {
 
     schedule_branch_detail_prefetch(model);
 
-    // -- Specs --
-    load_specs(model);
-
     // -- Git View --
     load_git_view_with(
         model,
@@ -750,76 +747,6 @@ fn parse_current_pr_link_json(json: &str) -> gwt_core::Result<Option<String>> {
         .get("url")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned))
-}
-
-fn load_specs(model: &mut Model) {
-    model.specs.spec_root = Some(model.repo_path.clone());
-
-    let mut items = Vec::new();
-    let specs_dir = model.repo_path.join("specs");
-    if let Ok(entries) = std::fs::read_dir(specs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !dir_name.starts_with("SPEC-") {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(path.join("metadata.json")) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-                continue;
-            };
-
-            items.push(screens::specs::SpecItem {
-                id: value
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(dir_name)
-                    .to_string(),
-                title: value
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                phase: value
-                    .get("phase")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                status: value
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            });
-        }
-    }
-
-    items.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
-    screens::specs::update(
-        &mut model.specs,
-        screens::specs::SpecsMessage::SetSpecs(items),
-    );
-}
-
-fn read_spec_body(repo_path: &Path, spec_id: &str) -> String {
-    std::fs::read_to_string(repo_path.join("specs").join(spec_id).join("spec.md"))
-        .unwrap_or_default()
-}
-
-fn spec_sort_key(spec_id: &str) -> (u32, &str) {
-    let numeric = spec_id
-        .strip_prefix("SPEC-")
-        .unwrap_or(spec_id)
-        .parse::<u32>()
-        .unwrap_or(u32::MAX);
-    (numeric, spec_id)
 }
 
 fn switch_management_tab(model: &mut Model, tab: ManagementTab) {
@@ -1240,16 +1167,9 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
 
-    let specs_detail_handles_horizontal_navigation =
-        model.management_tab == ManagementTab::Specs && model.specs.detail_view;
-
     // Left/Right switches tabs when not in text input mode.
-    // Ctrl+Left/Right is reserved for sub-tab switching within individual tabs,
-    // and Specs detail owns plain Left/Right for artifact section navigation.
-    if !is_in_text_input_mode(model)
-        && !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !specs_detail_handles_horizontal_navigation
-    {
+    // Ctrl+Left/Right is reserved for sub-tab switching within individual tabs.
+    if !is_in_text_input_mode(model) && !key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Right => {
                 model.management_tab = model.management_tab.next();
@@ -1317,96 +1237,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::branches::update(&mut model.branches, m);
-            } else if key.code == KeyCode::Esc {
-                fallback_management_escape(model);
-            }
-        }
-        ManagementTab::Specs => {
-            use screens::specs::SpecsMessage;
-
-            if model.specs.detail_editing {
-                let msg = match key.code {
-                    KeyCode::Enter => Some(SpecsMessage::SaveSectionEdit),
-                    KeyCode::Esc => Some(SpecsMessage::CancelSectionEdit),
-                    KeyCode::Backspace => Some(SpecsMessage::SectionEditBackspace),
-                    KeyCode::Char(ch) => Some(SpecsMessage::SectionEditInput(ch)),
-                    _ => None,
-                };
-                if let Some(m) = msg {
-                    screens::specs::update(&mut model.specs, m);
-                }
-                return;
-            }
-
-            if model.specs.editing {
-                let msg = match key.code {
-                    KeyCode::Enter => Some(SpecsMessage::SaveEdit),
-                    KeyCode::Esc => Some(SpecsMessage::CancelEdit),
-                    KeyCode::Up => Some(SpecsMessage::MoveUp),
-                    KeyCode::Down => Some(SpecsMessage::MoveDown),
-                    _ => None,
-                };
-                if let Some(m) = msg {
-                    screens::specs::update(&mut model.specs, m);
-                }
-                return;
-            }
-
-            if model.specs.search_active && !model.specs.detail_view {
-                let msg = match key.code {
-                    KeyCode::Esc => Some(SpecsMessage::SearchClear),
-                    KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
-                    _ => search_input_char(&key).map(SpecsMessage::SearchInput),
-                };
-                if let Some(m) = msg {
-                    screens::specs::update(&mut model.specs, m);
-                    return;
-                }
-            }
-
-            let msg = match key.code {
-                KeyCode::Down => Some(SpecsMessage::MoveDown),
-                KeyCode::Up => Some(SpecsMessage::MoveUp),
-                KeyCode::Enter
-                    if !key.modifiers.contains(KeyModifiers::SHIFT) && !model.specs.detail_view =>
-                {
-                    Some(SpecsMessage::ToggleDetail)
-                }
-                KeyCode::Char('e')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && model.specs.detail_view =>
-                {
-                    Some(SpecsMessage::StartSectionEdit)
-                }
-                KeyCode::Char('E') if model.specs.detail_view => Some(SpecsMessage::StartFileEdit),
-                KeyCode::Char('e') if model.specs.detail_view => Some(SpecsMessage::StartEdit),
-                KeyCode::Char('s') if model.specs.detail_view => {
-                    Some(SpecsMessage::StartStatusEdit)
-                }
-                KeyCode::Esc if model.specs.detail_view => Some(SpecsMessage::ToggleDetail),
-                KeyCode::Left if model.specs.detail_view => Some(SpecsMessage::PrevSection),
-                KeyCode::Right if model.specs.detail_view => Some(SpecsMessage::NextSection),
-                KeyCode::Char('/') => Some(SpecsMessage::SearchStart),
-                KeyCode::Char('r') => {
-                    load_specs(model);
-                    return;
-                }
-                _ => None,
-            };
-
-            if let Some(m) = msg {
-                screens::specs::update(&mut model.specs, m);
-            } else if key.code == KeyCode::Enter
-                && key.modifiers.contains(KeyModifiers::SHIFT)
-                && model.specs.detail_view
-            {
-                if let Some(spec) = model.specs.selected_spec() {
-                    let spec_context = screens::wizard::SpecContext::new(
-                        spec.id.clone(),
-                        spec.title.clone(),
-                        read_spec_body(&model.repo_path, &spec.id),
-                    );
-                    update(model, Message::OpenWizardWithSpec(spec_context));
-                }
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -3291,9 +3121,6 @@ fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
-        ManagementTab::Specs => {
-            model.specs.search_active || model.specs.editing || model.specs.detail_editing
-        }
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -3958,7 +3785,6 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
         ManagementTab::Branches => {
             // Handled by render_management_panes directly
         }
-        ManagementTab::Specs => screens::specs::render(&model.specs, frame, area),
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -4102,15 +3928,6 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
         ManagementTab::Logs => logs_hint_text(model, compact),
         ManagementTab::PrDashboard => pr_dashboard_hint_text(model, compact),
         ManagementTab::Profiles => profiles_hint_text(model, compact),
-        ManagementTab::Specs => {
-            if model.specs.detail_editing {
-                generic_management_hint_text(compact, false, "cancel")
-            } else if model.specs.detail_view {
-                generic_management_hint_text(compact, false, "back")
-            } else {
-                generic_management_hint_text(compact, false, "term")
-            }
-        }
         ManagementTab::GitView => git_view_hint_text(compact),
         ManagementTab::Versions => versions_hint_text(compact),
     }
@@ -5236,15 +5053,15 @@ mod tests {
 
         assert!(first_line.contains("Branches"));
         assert!(
-            first_line.contains("Specs"),
+            first_line.contains("Issues"),
             "standard-width Branches title should keep the next nearby tab visible"
         );
         assert!(
-            first_line.contains("Issues"),
+            first_line.contains("PRs"),
             "standard-width Branches title should keep multiple nearby tabs visible"
         );
         assert!(
-            !first_line.contains("Settings"),
+            !first_line.contains("Profiles"),
             "standard-width Branches title should not try to render the full strip"
         );
     }
@@ -5259,23 +5076,23 @@ mod tests {
         let rendered = render_model_text(&model, 80, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
-        assert!(first_line.contains("Specs"));
+        assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
         assert!(
             first_line.contains("PRs"),
             "standard-width non-Branches title should keep the next nearby tab visible"
         );
         assert!(
-            !first_line.contains("Versions"),
+            !first_line.contains("Profiles"),
             "standard-width non-Branches title should not try to render distant tabs"
         );
     }
 
     #[test]
     fn compact_tab_window_start_keeps_active_tab_visible_for_single_slot_window() {
-        assert_eq!(compact_tab_window_start(9, 0, 1), 0);
-        assert_eq!(compact_tab_window_start(9, 3, 1), 3);
-        assert_eq!(compact_tab_window_start(9, 8, 1), 8);
+        assert_eq!(compact_tab_window_start(8, 0, 1), 0);
+        assert_eq!(compact_tab_window_start(8, 3, 1), 3);
+        assert_eq!(compact_tab_window_start(8, 7, 1), 7);
     }
 
     #[test]
@@ -5288,14 +5105,14 @@ mod tests {
         let rendered = render_model_text(&model, 120, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
-        assert!(first_line.contains("Specs"));
+        assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
         assert!(
             first_line.contains("PRs"),
             "when the full tab strip does not fit, medium-width panes should still keep nearby tabs visible"
         );
         assert!(
-            !first_line.contains("Logs"),
+            !first_line.contains("Profiles"),
             "medium-width panes should still omit distant tabs until the full strip fits"
         );
     }
@@ -5311,8 +5128,8 @@ mod tests {
         let first_line = rendered.lines().next().unwrap_or_default();
 
         assert!(first_line.contains("Branches"));
-        assert!(first_line.contains("Specs"));
         assert!(first_line.contains("Issues"));
+        assert!(!first_line.contains("Specs"));
     }
 
     fn shell_tab(id: &str, name: &str) -> crate::model::SessionTab {
@@ -5712,31 +5529,6 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-
-    fn write_spec_fixture(
-        repo_path: &std::path::Path,
-        spec_dir_name: &str,
-        id: &str,
-        title: &str,
-        phase: &str,
-        status: &str,
-    ) {
-        let spec_dir = repo_path.join("specs").join(spec_dir_name);
-        fs::create_dir_all(&spec_dir).expect("create spec dir");
-        fs::write(
-            spec_dir.join("metadata.json"),
-            serde_json::to_string_pretty(&serde_json::json!({
-                "id": id,
-                "title": title,
-                "phase": phase,
-                "status": status,
-            }))
-            .expect("serialize metadata"),
-        )
-        .expect("write metadata");
-        fs::write(spec_dir.join("spec.md"), format!("# {title}\n\nbody\n")).expect("write spec");
-    }
-
     #[test]
     fn update_quit_sets_flag() {
         let mut model = test_model();
@@ -5954,37 +5746,6 @@ mod tests {
             model.git_view.commits.is_empty(),
             "empty repo should not produce commit entries"
         );
-    }
-
-    #[test]
-    fn load_initial_data_populates_specs_from_metadata() {
-        let dir = tempfile::tempdir().expect("temp repo");
-        init_git_repo(dir.path());
-        write_spec_fixture(
-            dir.path(),
-            "SPEC-9",
-            "SPEC-9",
-            "Later spec",
-            "implementation",
-            "in-progress",
-        );
-        write_spec_fixture(
-            dir.path(),
-            "SPEC-2",
-            "SPEC-2",
-            "Earlier spec",
-            "done",
-            "done",
-        );
-
-        let mut model = Model::new(dir.path().to_path_buf());
-        load_initial_data(&mut model);
-
-        assert_eq!(model.specs.spec_root.as_deref(), Some(dir.path()));
-        assert_eq!(model.specs.specs.len(), 2);
-        assert_eq!(model.specs.specs[0].id, "SPEC-2");
-        assert_eq!(model.specs.specs[1].id, "SPEC-9");
-        assert_eq!(model.specs.specs[0].title, "Earlier spec");
     }
 
     #[test]
@@ -6427,203 +6188,15 @@ mod tests {
     }
 
     #[test]
-    fn route_key_to_management_specs_enter_opens_detail_and_escape_returns_list() {
+    fn route_key_to_management_right_from_branches_switches_directly_to_issues() {
         let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(model.specs.detail_view);
-
-        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!model.specs.detail_view);
-    }
-
-    #[test]
-    fn route_key_to_management_specs_left_right_cycle_sections_without_switching_tabs() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
+        model.management_tab = ManagementTab::Branches;
 
         route_key_to_management(&mut model, key(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(model.management_tab, ManagementTab::Specs);
-        assert_eq!(model.specs.detail_section, 1);
+        assert_eq!(model.management_tab, ManagementTab::Issues);
 
         route_key_to_management(&mut model, key(KeyCode::Left, KeyModifiers::NONE));
-        assert_eq!(model.management_tab, ManagementTab::Specs);
-        assert_eq!(model.specs.detail_section, 0);
-    }
-
-    #[test]
-    fn route_key_to_management_specs_shift_enter_opens_prefilled_wizard() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.spec_root = Some(model.repo_path.clone());
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5")).expect("create spec dir");
-        std::fs::write(
-            model.repo_path.join("specs/SPEC-5/spec.md"),
-            "# SPEC-5\n\nLocal SPEC detail body\n",
-        )
-        .expect("write spec body");
-
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
-
-        let wizard = model
-            .wizard
-            .as_ref()
-            .expect("wizard opened from spec detail");
-        let context = wizard.spec_context.as_ref().expect("spec context captured");
-        assert_eq!(context.spec_id, "SPEC-5");
-        assert_eq!(context.title, "Local SPEC Management");
-        assert_eq!(context.spec_body, "# SPEC-5\n\nLocal SPEC detail body\n");
-        assert_eq!(wizard.branch_name, "feature/spec-5-local-spec-management");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_e_starts_phase_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
-
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.edit_field, "implementation");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_ctrl_e_starts_section_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.spec_root = Some(model.repo_path.clone());
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5002".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5002")).expect("create spec dir");
-        std::fs::write(
-            model.repo_path.join("specs/SPEC-5002/spec.md"),
-            "# SPEC-5002\n\nSection edit body\n",
-        )
-        .expect("write spec body");
-
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::CONTROL));
-
-        assert!(model.specs.detail_editing);
-        assert!(model.specs.detail_edit_buffer.contains("Section edit body"));
-    }
-
-    #[test]
-    fn route_key_to_management_specs_shift_e_starts_raw_file_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.spec_root = Some(model.repo_path.clone());
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5003".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5003")).expect("create spec dir");
-        std::fs::write(
-            model.repo_path.join("specs/SPEC-5003/spec.md"),
-            "# SPEC-5003\n\n## Background\n\nfull file body\n",
-        )
-        .expect("write spec body");
-
-        route_key_to_management(&mut model, key(KeyCode::Char('E'), KeyModifiers::SHIFT));
-
-        assert!(model.specs.detail_editing);
-        assert!(model.specs.detail_edit_buffer.contains("# SPEC-5003"));
-        assert!(model.specs.detail_edit_buffer.contains("## Background"));
-    }
-
-    #[test]
-    fn route_key_to_management_specs_s_starts_status_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-
-        route_key_to_management(&mut model, key(KeyCode::Char('s'), KeyModifiers::NONE));
-
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.edit_field, "in-progress");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_search_to_detail_then_e_starts_phase_edit() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.search_active = true;
-        model.specs.search_query = "spec".into();
-
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
-
-        assert!(model.specs.detail_view);
-        assert!(!model.specs.search_active);
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.edit_field, "implementation");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_down_cycles_phase_selection_menu() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
-        route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
-
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.selected, 0);
-        assert_eq!(model.specs.edit_field, "done");
+        assert_eq!(model.management_tab, ManagementTab::Branches);
     }
 
     #[test]
