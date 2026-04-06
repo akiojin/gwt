@@ -89,13 +89,8 @@ impl KeybindRegistry {
                 category: KeybindingCategory::Global,
             },
             Keybinding {
-                keys: "Ctrl+G, Tab".into(),
-                description: "Focus next pane".into(),
-                category: KeybindingCategory::Global,
-            },
-            Keybinding {
-                keys: "Ctrl+G, Shift+Tab".into(),
-                description: "Focus previous pane".into(),
+                keys: "Ctrl+G, Tab/Shift+Tab".into(),
+                description: "Cycle focus".into(),
                 category: KeybindingCategory::Global,
             },
             Keybinding {
@@ -240,14 +235,17 @@ impl KeybindRegistry {
                 self.prefix_state = PrefixState::Idle;
                 match key.code {
                     KeyCode::Char('g') => Some(Message::ToggleLayer),
-                    KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        Some(Message::CycleFocusBackward)
-                    }
-                    KeyCode::Tab => Some(Message::CycleFocusForward),
-                    KeyCode::BackTab => Some(Message::CycleFocusBackward),
                     KeyCode::Char(']') => Some(Message::NextSession),
                     KeyCode::Char('[') => Some(Message::PrevSession),
                     KeyCode::Char('z') => Some(Message::ToggleSessionLayout),
+                    KeyCode::Tab => {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            Some(Message::FocusPrev)
+                        } else {
+                            Some(Message::FocusNext)
+                        }
+                    }
+                    KeyCode::BackTab => Some(Message::FocusPrev),
                     KeyCode::Char('c') => Some(Message::NewShell),
                     KeyCode::Char('x') => Some(Message::CloseSession),
                     KeyCode::Char('q') => Some(Message::Quit),
@@ -342,6 +340,22 @@ mod tests {
     }
 
     #[test]
+    fn prefix_tab_cycles_focus_forward() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(result, Some(Message::FocusNext)));
+    }
+
+    #[test]
+    fn prefix_backtab_cycles_focus_backward() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(matches!(result, Some(Message::FocusPrev)));
+    }
+
+    #[test]
     fn prefix_v_starts_voice_recording() {
         let mut reg = KeybindRegistry::new();
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
@@ -428,7 +442,7 @@ mod tests {
         let mut reg = KeybindRegistry::new();
         reg.process_key_with_focus(key(KeyCode::Char('g'), KeyModifiers::CONTROL), true);
         let result = reg.process_key_with_focus(key(KeyCode::Tab, KeyModifiers::NONE), true);
-        assert!(matches!(result, Some(Message::CycleFocusForward)));
+        assert!(matches!(result, Some(Message::FocusNext)));
     }
 
     #[test]
@@ -436,11 +450,11 @@ mod tests {
         let mut reg = KeybindRegistry::new();
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Tab, KeyModifiers::SHIFT));
-        assert!(matches!(result, Some(Message::CycleFocusBackward)));
+        assert!(matches!(result, Some(Message::FocusPrev)));
 
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert!(matches!(result, Some(Message::CycleFocusBackward)));
+        assert!(matches!(result, Some(Message::FocusPrev)));
     }
 
     #[test]

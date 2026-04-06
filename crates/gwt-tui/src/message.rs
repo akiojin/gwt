@@ -27,10 +27,10 @@ pub enum Message {
     Quit,
     /// Toggle between Main (sessions) and Management layers.
     ToggleLayer,
-    /// Cycle focus to the next logical pane.
-    CycleFocusForward,
-    /// Cycle focus to the previous logical pane.
-    CycleFocusBackward,
+    /// Move focus to the next logical pane.
+    FocusNext,
+    /// Move focus to the previous logical pane.
+    FocusPrev,
     /// Switch to a specific management tab.
     SwitchManagementTab(ManagementTab),
     /// Activate the next session tab.
@@ -117,8 +117,8 @@ mod tests {
     fn message_variants_are_constructible() {
         let _ = Message::Quit;
         let _ = Message::ToggleLayer;
-        let _ = Message::CycleFocusForward;
-        let _ = Message::CycleFocusBackward;
+        let _ = Message::FocusNext;
+        let _ = Message::FocusPrev;
         let _ = Message::SwitchManagementTab(ManagementTab::Branches);
         let _ = Message::NextSession;
         let _ = Message::PrevSession;

@@ -1,6 +1,6 @@
 # Registration Reference
 
-Detailed logic for Phase 3 of gwt-design.
+Detailed logic for Phase 3 of gwt-spec-design.
 
 ## Prerequisites
 
@@ -137,11 +137,11 @@ Later phases will add these files:
 specs/SPEC-{id}/
   metadata.json      # created in Phase 3
   spec.md            # created in Phase 3
-  plan.md            # created by gwt-plan
-  tasks.md           # created by gwt-plan/gwt-tasks
-  research.md        # created by gwt-plan
-  data-model.md      # created by gwt-plan
-  quickstart.md      # created by gwt-plan
-  contracts/         # created by gwt-plan
-  checklists/        # created by gwt-plan
+  plan.md            # created by gwt-spec-plan
+  tasks.md           # created by gwt-spec-plan/gwt-tasks
+  research.md        # created by gwt-spec-plan
+  data-model.md      # created by gwt-spec-plan
+  quickstart.md      # created by gwt-spec-plan
+  contracts/         # created by gwt-spec-plan
+  checklists/        # created by gwt-spec-plan
 ```

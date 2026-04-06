@@ -195,11 +195,15 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
-        Message::CycleFocusForward => {
-            cycle_focus_with_shortcut(model, false);
+        Message::FocusNext => {
+            if !is_in_text_input_mode(model) {
+                cycle_focus_with_shortcut(model, false);
+            }
         }
-        Message::CycleFocusBackward => {
-            cycle_focus_with_shortcut(model, true);
+        Message::FocusPrev => {
+            if !is_in_text_input_mode(model) {
+                cycle_focus_with_shortcut(model, true);
+            }
         }
         Message::SwitchManagementTab(tab) => {
             switch_management_tab(model, tab);
@@ -350,18 +354,6 @@ pub fn update(model: &mut Model, msg: Message) {
             if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
-                // Focus cycling with Tab/BackTab (before pane-specific dispatch)
-                if !is_in_text_input_mode(model) {
-                    if is_forward_focus_cycle_key(&key) {
-                        model.active_focus = next_management_focus(model, false);
-                        return;
-                    }
-                    if is_reverse_focus_cycle_key(&key) {
-                        model.active_focus = next_management_focus(model, true);
-                        return;
-                    }
-                }
-
                 // Dispatch based on focused pane
                 match model.active_focus {
                     FocusPane::TabContent => route_key_to_management(model, key),
@@ -1807,15 +1799,6 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
     }
 }
 
-fn is_forward_focus_cycle_key(key: &crossterm::event::KeyEvent) -> bool {
-    key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT)
-}
-
-fn is_reverse_focus_cycle_key(key: &crossterm::event::KeyEvent) -> bool {
-    key.code == KeyCode::BackTab
-        || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
-}
-
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
     let Some(bytes) = key_event_to_bytes(key) else {
         return;
@@ -3249,6 +3232,7 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Char(ch) => Some(ch.to_string().into_bytes()),
         KeyCode::Enter => Some(vec![b'\r']),
         KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Esc => Some(vec![0x1b]),
         KeyCode::Up => Some(b"\x1b[A".to_vec()),
@@ -4079,7 +4063,7 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 fn terminal_hint_text() -> String {
-    "Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2".to_string()
+    "Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2".to_string()
 }
 
 fn branches_list_hint_text(compact: bool) -> String {
@@ -4121,14 +4105,15 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
 fn issues_hint_text(model: &Model, compact: bool) -> String {
     if model.issues.detail_view {
         if compact {
-            "↑↓ mv  ↵ close  r rfsh  Tab pane  Esc back  ?".to_string()
+            "↑↓ mv  ↵ close  r rfsh  C-g Tab  Esc back  ?".to_string()
         } else {
-            "↑↓:move  Enter:close  r:refresh  Tab:focus  Esc:back  ?:help".to_string()
+            "↑↓:move  Enter:close  r:refresh  Ctrl+G, Tab:focus  Esc:back  ?:help".to_string()
         }
     } else if compact {
-        "↑↓ sel  ↵ dtl  / srch  r rfsh  Tab pane  Esc term  ?".to_string()
+        "↑↓ sel  ↵ dtl  / srch  r rfsh  C-g Tab  Esc term  ?".to_string()
     } else {
-        "↑↓:select  Enter:detail  /:search  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:detail  /:search  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help"
+            .to_string()
     }
 }
 
@@ -4149,19 +4134,19 @@ fn generic_management_hint_text(
     };
 
     if compact {
-        format!("↑↓ sel  ←→ tab{compact_sub_tab}  ↵ act  Tab pane  Esc {escape_action}  ?")
+        format!("↑↓ sel  ←→ tab{compact_sub_tab}  ↵ act  C-g Tab  Esc {escape_action}  ?")
     } else {
         format!(
-            "↑↓:select  ←→:tab{full_sub_tab}  Enter:action  Tab:focus  Esc:{escape_action}  ?:help"
+            "↑↓:select  ←→:tab{full_sub_tab}  Enter:action  Ctrl+G, Tab:focus  Esc:{escape_action}  ?:help"
         )
     }
 }
 
 fn settings_list_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  Tab pane  Esc term  ?".to_string()
+        "↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  C-g Tab  Esc term  ?".to_string()
     } else {
-        "↑↓:select  Enter:edit  Space:toggle  Ctrl+←→:sub-tab  Shift+S:save  Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:edit  Space:toggle  Ctrl+←→:sub-tab  Shift+S:save  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
     }
 }
 
@@ -4192,14 +4177,14 @@ fn logs_hint_text(model: &Model, compact: bool) -> String {
 fn pr_dashboard_hint_text(model: &Model, compact: bool) -> String {
     if model.pr_dashboard.detail_view {
         if compact {
-            "↑↓ mv  ↵ close  r rfsh  Tab pane  Esc back  ?".to_string()
+            "↑↓ mv  ↵ close  r rfsh  C-g Tab  Esc back  ?".to_string()
         } else {
-            "↑↓:move  Enter:close  r:refresh  Tab:focus  Esc:back  ?:help".to_string()
+            "↑↓:move  Enter:close  r:refresh  Ctrl+G, Tab:focus  Esc:back  ?:help".to_string()
         }
     } else if compact {
-        "↑↓ sel  ↵ dtl  r rfsh  Tab pane  Esc term  ?".to_string()
+        "↑↓ sel  ↵ dtl  r rfsh  C-g Tab  Esc term  ?".to_string()
     } else {
-        "↑↓:select  Enter:detail  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:detail  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
     }
 }
 
@@ -4207,25 +4192,25 @@ fn profiles_hint_text(model: &Model, compact: bool) -> String {
     if model.profiles.mode != screens::profiles::ProfileMode::List {
         generic_management_hint_text(compact, false, "cancel")
     } else if compact {
-        "↑↓ sel  ↵ tog  n new  e edit  d del  Tab pane  Esc term".to_string()
+        "↑↓ sel  ↵ tog  n new  e edit  d del  C-g Tab  Esc term".to_string()
     } else {
-        "↑↓:select  Enter:toggle  n:new  e:edit  d:delete  Tab:focus  Esc:term".to_string()
+        "↑↓:select  Enter:toggle  n:new  e:edit  d:delete  Ctrl+G, Tab:focus  Esc:term".to_string()
     }
 }
 
 fn git_view_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ mv  ↵ exp  r rfsh  Tab pane  Esc term  ?".to_string()
+        "↑↓ mv  ↵ exp  r rfsh  C-g Tab  Esc term  ?".to_string()
     } else {
-        "↑↓:move  Enter:expand  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:move  Enter:expand  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
     }
 }
 
 fn versions_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ mv  r rfsh  Tab pane  Esc term  ?".to_string()
+        "↑↓ mv  r rfsh  C-g Tab  Esc term  ?".to_string()
     } else {
-        "↑↓:move  r:refresh  Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:move  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
     }
 }
 
@@ -4255,9 +4240,9 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
             })
             .unwrap_or("");
         return match model.branches.detail_section {
-            0 => format!("←→ sec  ↵ act{direct_action_hints}{docker_hints}  mvf?  Tab↔P  Esc←"),
-            3 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  Tab↔P  Esc←".to_string(),
-            _ => format!("←→ sec  ↵ act{direct_action_hints}  mvf?  Tab↔P  Esc←"),
+            0 => format!("←→ sec  ↵ act{direct_action_hints}{docker_hints}  mvf?  C-g↔P  Esc←"),
+            3 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  C-g↔P  Esc←".to_string(),
+            _ => format!("←→ sec  ↵ act{direct_action_hints}  mvf?  C-g↔P  Esc←"),
         };
     }
     match model.branches.detail_section {
@@ -4275,12 +4260,14 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
                 })
                 .unwrap_or("");
             format!(
-                "←→:section  Enter:launch{direct_action_hints}{docker_hints}{local_mnemonics}  Tab:focus  Esc:back"
+                "←→:section  Enter:launch{direct_action_hints}{docker_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
             )
         }
-        3 => format!("↑↓:session  ←→:section  Enter:focus{local_mnemonics}  Tab:focus  Esc:back"),
+        3 => format!(
+            "↑↓:session  ←→:section  Enter:focus{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+        ),
         _ => format!(
-            "←→:section  Enter:launch{direct_action_hints}{local_mnemonics}  Tab:focus  Esc:back"
+            "←→:section  Enter:launch{direct_action_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
     }
 }
@@ -5418,7 +5405,7 @@ mod tests {
 
         let rendered = render_model_text(&model, 220, 24);
 
-        assert!(rendered.contains("Tab:focus"));
+        assert!(rendered.contains("C-g Tab:focus"));
         assert!(rendered.contains("^C×2"));
     }
 
@@ -5438,7 +5425,7 @@ mod tests {
         let rendered = render_model_text(&model, 80, 24);
 
         assert!(rendered.contains("Ctrl+G:b/i/s g c []/1-9 z ?"));
-        assert!(rendered.contains("Tab:focus"));
+        assert!(rendered.contains("C-g Tab:focus"));
         assert!(rendered.contains("^C×2"));
     }
 
@@ -5476,7 +5463,7 @@ mod tests {
 
         assert!(rendered.contains("←→ sec  ↵ act  S↵ sh"));
         assert!(rendered.contains("mvf?"));
-        assert!(rendered.contains("Tab↔P  Esc←"));
+        assert!(rendered.contains("C-g↔P  Esc←"));
     }
 
     #[test]
@@ -5489,7 +5476,7 @@ mod tests {
         let rendered = render_model_text(&model, 80, 24);
 
         assert!(rendered.contains("↑↓ sel  ↵ dtl  / srch  r rfsh"));
-        assert!(rendered.contains("Tab pane"));
+        assert!(rendered.contains("C-g Tab"));
         assert!(rendered.contains("Esc term"));
     }
 
@@ -7754,6 +7741,12 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn key_event_to_bytes_maps_backtab_to_escape_sequence() {
+        let bytes = key_event_to_bytes(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(bytes, Some(b"\x1b[Z".to_vec()));
+    }
+
+    #[test]
     fn update_voice_transcription_result_queues_pty_bytes() {
         let mut model = test_model();
         handle_voice_message(
@@ -9252,119 +9245,92 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn update_key_input_tab_on_non_branches_management_skips_branch_detail_focus() {
+    fn update_focus_next_on_non_branches_management_skips_branch_detail_focus() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Issues;
         model.active_focus = FocusPane::TabContent;
 
-        update(
-            &mut model,
-            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::NONE)),
-        );
+        update(&mut model, Message::FocusNext);
 
         assert_eq!(model.active_focus, FocusPane::Terminal);
     }
 
     #[test]
-    fn update_cycle_focus_forward_from_main_reveals_management_and_targets_next_pane() {
+    fn update_focus_prev_on_non_branches_management_skips_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Logs;
+        model.active_focus = FocusPane::Terminal;
+
+        update(&mut model, Message::FocusPrev);
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_focus_next_from_main_reveals_management_and_targets_next_pane() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.management_tab = ManagementTab::Issues;
         model.active_focus = FocusPane::Terminal;
 
-        update(&mut model, Message::CycleFocusForward);
+        update(&mut model, Message::FocusNext);
 
         assert_eq!(model.active_layer, ActiveLayer::Management);
         assert_eq!(model.active_focus, FocusPane::TabContent);
     }
 
     #[test]
-    fn update_cycle_focus_backward_from_main_on_branches_targets_branch_detail() {
+    fn update_focus_prev_from_main_on_branches_targets_branch_detail() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.management_tab = ManagementTab::Branches;
         model.active_focus = FocusPane::Terminal;
 
-        update(&mut model, Message::CycleFocusBackward);
+        update(&mut model, Message::FocusPrev);
 
         assert_eq!(model.active_layer, ActiveLayer::Management);
         assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 
     #[test]
-    fn update_key_input_backtab_on_non_branches_management_skips_branch_detail_focus() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Management;
-        model.management_tab = ManagementTab::Logs;
-        model.active_focus = FocusPane::Terminal;
-
-        update(
-            &mut model,
-            Message::KeyInput(key(KeyCode::BackTab, KeyModifiers::SHIFT)),
-        );
-
-        assert_eq!(model.active_focus, FocusPane::TabContent);
-    }
-
-    #[test]
-    fn update_key_input_shift_tab_modifier_on_non_branches_management_skips_branch_detail_focus() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Management;
-        model.management_tab = ManagementTab::Logs;
-        model.active_focus = FocusPane::Terminal;
-
-        update(
-            &mut model,
-            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::SHIFT)),
-        );
-
-        assert_eq!(model.active_focus, FocusPane::TabContent);
-    }
-
-    #[test]
-    fn update_key_input_shift_tab_modifier_on_branches_cycles_backward_into_branch_detail_focus() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Management;
-        model.management_tab = ManagementTab::Branches;
-        model.active_focus = FocusPane::Terminal;
-
-        update(
-            &mut model,
-            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::SHIFT)),
-        );
-
-        assert_eq!(model.active_focus, FocusPane::BranchDetail);
-    }
-
-    #[test]
-    fn update_key_input_tab_on_branches_still_cycles_into_branch_detail_focus() {
+    fn update_focus_next_on_branches_still_cycles_into_branch_detail_focus() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Branches;
         model.active_focus = FocusPane::TabContent;
 
-        update(
-            &mut model,
-            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::NONE)),
-        );
+        update(&mut model, Message::FocusNext);
 
         assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 
     #[test]
-    fn update_key_input_tab_on_non_branches_management_normalizes_stale_branch_detail_focus() {
+    fn update_focus_next_on_non_branches_management_normalizes_stale_branch_detail_focus() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Issues;
         model.active_focus = FocusPane::BranchDetail;
 
+        update(&mut model, Message::FocusNext);
+
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn update_key_input_tab_no_longer_cycles_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Issues;
+        model.active_focus = FocusPane::TabContent;
+
         update(
             &mut model,
             Message::KeyInput(key(KeyCode::Tab, KeyModifiers::NONE)),
         );
 
-        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
     }
 
     #[test]

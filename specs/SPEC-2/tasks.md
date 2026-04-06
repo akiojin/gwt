@@ -85,9 +85,9 @@
 
 - [x] T053 Add FocusPane enum to model.rs: TabContent, BranchDetail, Terminal (3 panes, no TabHeader)
 - [x] T054 Add active_focus: FocusPane field to Model
-- [x] T055 Write RED test: Tab cycles through 3 focus panes in order
-- [x] T056 Write RED test: Shift+Tab cycles in reverse
-- [x] T057 Implement Tab/Shift+Tab focus cycling in app.rs update()
+- [x] T055 Write RED test: Ctrl+G, Tab cycles through 3 focus panes in order
+- [x] T056 Write RED test: Ctrl+G, Shift+Tab cycles in reverse
+- [x] T057 Implement Ctrl+G, Tab/Shift+Tab focus cycling in app.rs update()
 - [x] T058 Implement focus-aware border colors: Cyan (focused) / Gray (unfocused)
 - [x] T059 Write render test: focused pane has Cyan border
 
@@ -105,7 +105,7 @@
 - [x] T066 TabHeader focus: Left/Right switch tabs, Enter moves focus to TabContent
 - [x] T067 TabContent focus: ↑↓ navigate list, Enter select, / search, r refresh
 - [x] T068 BranchDetail focus: ←→ switch sections, ↑↓ navigate actions, Enter execute
-- [x] T069 Terminal focus: forward all keys to PTY (except Tab and Ctrl+G prefix)
+- [x] T069 Terminal focus: forward all keys to PTY (except Ctrl+G prefix; Ctrl+G, Tab/Shift+Tab reserved for focus cycling)
 - [x] T070 Write 10+ tests for focus-aware key routing
 
 ### 5.4: Update Overlay Key Routing
@@ -315,10 +315,10 @@ banner in favor of pane-title chrome.
 - [x] T203 Refresh `SPEC-2` artifacts to describe hint parity with the supplemental escape contract.
 - [x] T204 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
 
-## Phase 28: Tab-Aware Management Focus Cycle
+## Phase 28: Ctrl+G Management Focus Cycle
 
-- [x] T205 [P] Write RED test: `Tab` on a non-Branches management tab skips `BranchDetail` and returns focus to `Terminal`.
-- [x] T206 [P] Write RED test: `BackTab` on a non-Branches management tab skips `BranchDetail` and returns focus to `TabContent`.
+- [x] T205 [P] Write RED test: `Ctrl+G, Tab` on a non-Branches management tab skips `BranchDetail` and returns focus to `Terminal`.
+- [x] T206 [P] Write RED test: `Ctrl+G, Shift+Tab` on a non-Branches management tab skips `BranchDetail` and returns focus to `TabContent`.
 - [x] T207 [P] Write RED test: `Branches` still retains the old three-surface focus cycle and can enter `BranchDetail`.
 - [x] T208 Update `app.rs` management focus cycling so non-Branches tabs use a two-state `Terminal <-> TabContent` loop while Branches keeps the three-state loop.
 - [x] T209 Verify focused tests, workspace checks, and refresh SPEC-2 artifacts.
@@ -350,7 +350,7 @@ banner in favor of pane-title chrome.
 ## Phase 32: Make Terminal Footer Hints Survive Standard Width
 
 - [x] T225 [P] Write RED test: the compact grouped terminal footer hint remains visible at `80x24`.
-- [x] T226 [P] Write RED test: `Tab:focus` and `^C×2` remain visible in the terminal footer at `80x24`.
+- [x] T226 [P] Write RED test: `C-g Tab:focus` and `^C×2` remain visible in the terminal footer at `80x24`.
 - [x] T227 Update `status_bar.rs` and `app.rs` so narrow terminal footers compact context and use grouped shortcut notation.
 - [x] T228 Refresh `SPEC-2` artifacts to describe the standard-width compact-footer contract precisely.
 - [x] T229 Verify focused tests, snapshot refresh, workspace checks, and SPEC-2 artifact sync.

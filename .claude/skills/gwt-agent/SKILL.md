@@ -1,6 +1,6 @@
 ---
 name: gwt-agent
-description: "Unified agent pane management. Auto-detects mode from arguments: no args lists panes, pane ID reads output, pane ID with message sends input, 'stop'/'close' with pane ID stops a pane. Use when user says 'list panes', 'show active agents', 'check pane output', 'read agent output', 'what is the agent doing?', 'send to pane', 'dispatch to agent', 'broadcast instructions', 'stop the agent', 'close pane', 'escalation needed', 'エージェント一覧', 'ペインを確認', 'エージェントの状態', 'ペインの出力を見て', 'エージェントに送って', 'ペインに指示', 'エージェントを止めて', 'ペインを閉じて'."
+description: "Use proactively when monitoring or interacting with running agent panes. Auto-detects mode: no args lists panes, pane ID reads output, pane ID + message sends input, stop/close stops a pane. Triggers: 'list panes', 'check agent', 'send to pane', 'stop agent', 'エージェント一覧'."
 allowed-tools: Bash, Read
 argument-hint: "[list | <pane-id> [message] | stop <pane-id> | broadcast <message>]"
 ---

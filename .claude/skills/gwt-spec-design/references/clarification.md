@@ -1,6 +1,6 @@
 # Clarification Reference
 
-Detailed logic for Phase 4 of gwt-design.
+Detailed logic for Phase 4 of gwt-spec-design.
 
 ## Purpose
 
@@ -90,7 +90,7 @@ python3 ".claude/scripts/spec_artifact.py" \
 
 - If a real product or scope decision remains: stop with a blocker summary.
 - If remaining gaps are implementation-local: resolve them here.
-- If planning-ready: proceed to chain suggestion (gwt-plan).
+- If planning-ready: proceed to chain suggestion (gwt-spec-plan).
 
 ## Standard question checklist
 
@@ -141,5 +141,5 @@ All of the following must be true:
 Resolved: <N> markers
 Remaining blockers: <M>
 Planning-ready: YES | NO (reason)
-Next: gwt-plan | ask follow-up clarification
+Next: gwt-spec-plan | ask follow-up clarification
 ```

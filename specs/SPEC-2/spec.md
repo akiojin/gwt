@@ -143,14 +143,14 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-013a**: The bottom status line keeps the old-TUI always-on context model: session summary and branch/agent context stay visible even while focus changes.
 - **FR-013b**: Context-sensitive keybind hints remain visible in the status bar instead of replacing the status context entirely.
-- **FR-013c**: At terminal widths `<= 80` and while no notification is occupying the footer, Terminal-focused status-bar hints use a compact grouped notation (`Ctrl+G:b/i/s g c []/1-9 z ?`) and keep `Tab:focus` / `^C×2` visible without truncating the footer.
+- **FR-013c**: At terminal widths `<= 80` and while no notification is occupying the footer, Terminal-focused status-bar hints use a compact grouped notation (`Ctrl+G:b/i/s g c []/1-9 z ?`) and keep `C-g Tab:focus` / `^C×2` visible without truncating the footer.
 - **FR-013d**: At terminal widths `<= 80` and while no notification is occupying the footer, management and Branch Detail footers also switch to compact hint notation so the pane-local affordances remain visible instead of truncating behind the status context.
 - **FR-013e**: Non-Branches management footer hints are mode-aware instead of generic: tabs without sub-tabs omit `Ctrl+←→:sub-tab`, detail drill-downs advertise `Esc:back`, and form/edit modes advertise `Esc:cancel`.
 - **FR-013f**: Non-Branches management footer hints are also action-aware: each tab advertises only its real primary action surface instead of a generic `Enter:action`, such as `Issues` list showing `/:search` and `Enter:detail`, `Git View` showing `Enter:expand`, `Versions` showing refresh-only, and `PR Dashboard` detail showing `Enter:close`.
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion. The current default split is responsive: wide terminals (`>=120 cols`) use `40% management / 60% session`, while standard or narrower terminals fall back to `50% / 50%` so management chrome remains legible.
 - **FR-014a**: Session PTY geometry is initialized from the actual visible session-pane size at startup. The default shell must not stay on the stale `80x24` model default until a later terminal resize event arrives.
-- **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Tab`/`Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border. Reverse focus cycling must work whether the terminal reports `Shift+Tab` as `BackTab` or as `Tab` with the Shift modifier.
-- **FR-015a**: Session panes expose an explicit focus-escape path behind the global prefix as well: `Ctrl+G,Tab` cycles focus forward and `Ctrl+G,Shift+Tab` cycles focus backward even when the active PTY would otherwise consume `Tab`. When the management panel is hidden, these shortcuts first reveal it and then land on the next logical focus target.
+- **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border. Reverse focus cycling must work whether the terminal reports `Shift+Tab` as `BackTab` or as `Tab` with the Shift modifier.
+- **FR-015a**: The prefixed focus shortcuts remain available even when a session PTY owns `Tab`. When the management panel is hidden, `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab` first reveal it and then land on the next logical focus target.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 
@@ -174,13 +174,13 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 Branches uses a 3-surface cycle:
 
 ```
-Tab →  Tab Content (list) → Branch Detail → Terminal → ...
+Ctrl+G, Tab →  Tab Content (list) → Branch Detail → Terminal → ...
 ```
 
 All other management tabs use a 2-surface cycle:
 
 ```
-Tab →  Tab Content (list) → Terminal → ...
+Ctrl+G, Tab →  Tab Content (list) → Terminal → ...
 ```
 
 - Focused pane: **blue** border (`Color::Cyan`)
@@ -195,8 +195,8 @@ Tab →  Tab Content (list) → Terminal → ...
 
 | Keybinding | Action |
 |------------|--------|
-| `Tab` | Move focus to next pane |
-| `Shift+Tab` | Move focus to previous pane |
+| `Ctrl+G, Tab` | Move focus to next pane |
+| `Ctrl+G, Shift+Tab` | Move focus to previous pane |
 | `Ctrl+G, g` | Toggle management panel visibility |
 | `Ctrl+G, c` | New shell session |
 | `Ctrl+G, q` | Quit |
@@ -252,7 +252,7 @@ Management tabs are displayed in the Block title of the management panel area. T
 
 | Keybinding | Action |
 |------------|--------|
-| All keys | Forwarded to PTY (except Ctrl+G prefix and Tab) |
+| All keys | Forwarded to PTY (except Ctrl+G prefix; `Ctrl+G, Tab/Shift+Tab` reserved for focus cycling) |
 
 ### Overlay: Wizard (captures all input)
 

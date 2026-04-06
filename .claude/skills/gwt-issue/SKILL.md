@@ -1,6 +1,6 @@
 ---
 name: gwt-issue
-description: "Unified GitHub Issue lifecycle manager. Auto-detects mode: no Issue number means register mode (search first, then create Issue or SPEC); Issue number/URL means resolve mode (analyze, decide direct fix vs SPEC path, continue toward resolution). Use when user says 'register an issue', 'create issue', 'file a bug', 'resolve issue', 'fix issue #N', or 'progress this issue'."
+description: "Use proactively when user references a GitHub Issue or reports a bug. Auto-detects register mode (no Issue number) or resolve mode (Issue number/URL provided). Searches existing Issues before creating duplicates. Triggers: 'register issue', 'file a bug', 'fix issue #N', 'resolve issue'."
 ---
 
 # gwt Issue

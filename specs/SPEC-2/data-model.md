@@ -13,7 +13,7 @@
 
 - Role: Identifies which pane currently owns keyboard focus.
 - Variants: `TabContent`, `BranchDetail`, `Terminal` (3 panes).
-- Invariant: Only one pane can own focus at a time. Tab/Shift+Tab cycles through all 3 in order.
+- Invariant: Only one pane can own focus at a time. Ctrl+G, Tab/Shift+Tab cycles through all 3 in order.
 
 ### PrefixKeyState
 

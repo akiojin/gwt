@@ -11,25 +11,25 @@ Implement code using test-first TDD methodology. Works in two modes: SPEC mode (
 ## Usage
 
 ```text
-/gwt:gwt-build [SPEC-ID or task description]
+/gwt:gwt-spec-build [SPEC-ID or task description]
 ```
 
 ## Steps
 
-1. Load `.claude/skills/gwt-build/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-spec-build/SKILL.md` and follow the workflow.
 2. In SPEC mode, read tasks.md and execute tasks in order with progress tracking.
 3. In standalone mode, implement the user-provided task with TDD.
 
 ## Examples
 
 ```text
-/gwt:gwt-build SPEC-5
+/gwt:gwt-spec-build SPEC-5
 ```
 
 ```text
-/gwt:gwt-build
+/gwt:gwt-spec-build
 ```
 
 ```text
-/gwt:gwt-build add clipboard support to the editor widget
+/gwt:gwt-spec-build add clipboard support to the editor widget
 ```

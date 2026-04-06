@@ -1,6 +1,6 @@
 # Quality Gate
 
-Reference for Phase 4 of `gwt-plan`. Defines the pre-implementation readiness checks,
+Reference for Phase 4 of `gwt-spec-plan`. Defines the pre-implementation readiness checks,
 three-way verdict, and auto-fix behavior.
 
 ## Purpose
@@ -10,7 +10,7 @@ the artifact set (spec.md, plan.md, tasks.md, and supporting artifacts) is compl
 consistent, and actionable.
 
 This gate does NOT certify that implementation is complete. Post-implementation
-reconciliation happens in `gwt-build`.
+reconciliation happens in `gwt-spec-build`.
 
 ## Five Mandatory Checks
 
@@ -75,7 +75,7 @@ After running all five checks, issue exactly one verdict:
 
 All checks pass. The artifact set is ready for implementation.
 
-**Next action:** suggest proceeding to `gwt-build`.
+**Next action:** suggest proceeding to `gwt-spec-build`.
 
 ### AUTO-FIXABLE
 

@@ -1,6 +1,6 @@
 # Task Decomposition Rules
 
-Reference for Phase 3 of `gwt-plan`. Defines how to generate `tasks.md` from the
+Reference for Phase 3 of `gwt-spec-plan`. Defines how to generate `tasks.md` from the
 architecture design and plan artifacts.
 
 ## Canonical Phase Order

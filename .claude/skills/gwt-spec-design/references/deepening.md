@@ -1,6 +1,6 @@
 # Deepening Reference
 
-Detailed logic for Phase 5 of gwt-design.
+Detailed logic for Phase 5 of gwt-spec-design.
 
 ## Purpose
 
@@ -9,7 +9,7 @@ break down coarse tasks through a two-phase interactive workshop.
 
 ## When to use
 
-- Invoke with `gwt-design --deepen SPEC-N`.
+- Invoke with `gwt-spec-design --deepen SPEC-N`.
 - Or when the user requests deeper exploration after clarification.
 - Goes beyond clarify: it questions premises, not just fills gaps.
 
@@ -138,7 +138,7 @@ Repeat steps 1-5 for each selected deepening point.
 - **Spec-level changes**: update spec.md (user stories, FRs, edge cases, NFRs).
 - **Task-level changes**: update tasks.md (split tasks, add test entries, mark dependencies).
 - **Plan-level changes**: if deep-dive reveals a plan-level change, note it for
-  gwt-plan follow-up rather than modifying plan.md directly.
+  gwt-spec-plan follow-up rather than modifying plan.md directly.
 - **Preserve structure**: make surgical edits, do not rewrite entire sections.
 
 ## Exit criteria
@@ -153,10 +153,10 @@ Repeat steps 1-5 for each selected deepening point.
 Points addressed: <N> / <total selected>
 spec.md changes: <list of sections updated>
 tasks.md changes: <list of tasks split/added>
-Plan-level notes: <any items for gwt-plan follow-up>
+Plan-level notes: <any items for gwt-spec-plan follow-up>
 
 Remaining points for future deepening: <list or "none">
 ```
 
 - If further deepening is needed, suggest re-running with remaining points.
-- If the SPEC is now planning-ready, suggest `gwt-plan`.
+- If the SPEC is now planning-ready, suggest `gwt-spec-plan`.
