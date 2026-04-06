@@ -27,6 +27,7 @@ As a developer, I want to create, switch between, and close terminal sessions so
 3. Given multiple sessions exist, when I press Ctrl+G,[, then the previous session becomes active.
 4. Given multiple sessions exist, when I press Ctrl+G,3, then session 3 becomes active directly.
 5. Given a session is active, when I press Ctrl+G,x, then the session is closed (with unsaved changes warning if applicable).
+6. Given an agent or shell PTY exits on its own, when the exit is detected, then its tab is removed automatically and focus moves to a remaining session without leaving a dead tab behind.
 
 ### US-3: Toggle Management Panel Visibility (P0) -- IMPLEMENTED
 
@@ -87,6 +88,8 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - Management panel toggle during an active text selection in the terminal.
 - Rapid Ctrl+G prefix followed by key press (within a few milliseconds).
 - Split mode with more than 9 sessions (grid layout scaling).
+- Active session exits while the management panel is visible and terminal focus is still selected.
+- Multiple PTY sessions exit in the same tick.
 
 ## Functional Requirements
 
@@ -99,6 +102,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
+- **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.
 - **FR-006**: 8 management tabs: Branches, Issues, PRs, Profiles, Git View, Versions, Settings, Logs. (SPECs tab removed — SPECs are shown in Branch Detail view.)
 - **FR-006e**: Global management-tab shortcuts (`Ctrl+G,b/i/s/...`) also behave like supplemental surfaces when invoked from Terminal: they open the requested tab without stealing terminal focus, while management-local tab switches still land on `TabContent`.
 - **FR-006f**: When the user has explicitly focused a management list/pane, `Esc` still behaves like a supplemental-surface escape hatch: if no search/detail/edit flow claims it and no warn notification is pending, focus returns to `Terminal`; warn dismissal keeps priority when a warn toast is present.
@@ -130,7 +134,9 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006n**: Branch-detail preload results are applied incrementally. A single UI tick must not drain an unbounded number of preload events, so large branch sets cannot monopolize one frame and stall Branches list input.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
+- **FR-008a**: PTY exit detection removes the corresponding session tab automatically, clamps the active session index to the nearest surviving tab, and drops the stale PTY handle in the same tick.
 - **FR-009**: Session navigation: Ctrl+G,] (next), Ctrl+G,[ (prev), Ctrl+G,1-9 (direct).
+- **FR-009a**: The event loop drains PTY output before blocking on the next crossterm poll so terminal echo/render updates are not delayed by the 100ms tick interval.
 - **FR-010**: Help overlay via Ctrl+G,? auto-collects keybindings from code definitions.
 - **FR-011**: Session metadata persisted to `~/.gwt/sessions/` in TOML format.
 - **FR-012**: Restore session layout on gwt restart (best-effort: working directories, display mode, active tab).
@@ -144,6 +150,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-014**: Management panel width is adjustable or uses a sensible default proportion. The current default split is responsive: wide terminals (`>=120 cols`) use `40% management / 60% session`, while standard or narrower terminals fall back to `50% / 50%` so management chrome remains legible.
 - **FR-014a**: Session PTY geometry is initialized from the actual visible session-pane size at startup. The default shell must not stay on the stale `80x24` model default until a later terminal resize event arrives.
 - **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border. Reverse focus cycling must work whether the terminal reports `Shift+Tab` as `BackTab` or as `Tab` with the Shift modifier.
+- **FR-015a**: The prefixed focus shortcuts remain available even when a session PTY owns `Tab`. When the management panel is hidden, `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab` first reveal it and then land on the next logical focus target.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 
@@ -158,6 +165,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **NFR-007**: Startup PTY geometry matches the visible session pane without requiring a manual terminal resize.
 - **NFR-008**: Branch-detail preload refresh cost scales with the number of branches for branch-local Git/filesystem reads only; Docker container discovery remains `O(1)` per refresh, not `O(branches)`.
 - **NFR-009**: Applying branch-detail preload results is frame-budgeted: each tick handles a bounded batch so Branches list navigation remains responsive while preload data continues to stream in.
+- **NFR-010**: Terminal keypress echo and PTY output rendering must not wait for the next 100ms tick; normal typing should feel immediate.
 
 ## Implementation Details
 
@@ -308,3 +316,5 @@ agent_id = "claude"  # only for agent type
 - **SC-006**: Status bar updates within one frame of session or branch change.
 - **SC-007**: `Shift+Tab` moves focus backward on both Branches and non-Branches management tabs even when the terminal emits `Tab` with the Shift modifier instead of `BackTab`.
 - **SC-008**: On startup, the default shell PTY sees the same row/column geometry as the visible session pane before any manual terminal resize occurs.
+- **SC-009**: Toggling the management panel resizes the visible PTY viewport in the same update cycle, without waiting for a later terminal resize event.
+- **SC-010**: Exited PTY sessions are automatically removed from the session strip and never leave a dead tab behind.

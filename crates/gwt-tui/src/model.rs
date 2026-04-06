@@ -372,11 +372,28 @@ pub enum DockerProgressResult {
     Failed { message: String, detail: String },
 }
 
+/// A terminal cell position within the currently visible viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalCell {
+    pub row: u16,
+    pub col: u16,
+}
+
+/// A drag-selection range across visible terminal cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSelection {
+    pub anchor: TerminalCell,
+    pub focus: TerminalCell,
+}
+
 /// Minimal vt100 screen state wrapper.
 pub struct VtState {
     parser: vt100::Parser,
     rows: u16,
     cols: u16,
+    max_scrollback: usize,
+    follow_live: bool,
+    selection: Option<TerminalSelection>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -384,6 +401,8 @@ impl std::fmt::Debug for VtState {
         f.debug_struct("VtState")
             .field("rows", &self.rows)
             .field("cols", &self.cols)
+            .field("max_scrollback", &self.max_scrollback)
+            .field("follow_live", &self.follow_live)
             .finish()
     }
 }
@@ -393,21 +412,30 @@ impl Clone for VtState {
         let mut parser = vt100::Parser::new(self.rows, self.cols, 10_000);
         let state = self.parser.screen().state_formatted();
         parser.process(&state);
+        parser.set_scrollback(self.scrollback());
         Self {
             parser,
             rows: self.rows,
             cols: self.cols,
+            max_scrollback: self.max_scrollback,
+            follow_live: self.follow_live,
+            selection: self.selection,
         }
     }
 }
 
 impl VtState {
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self {
+        let mut state = Self {
             parser: vt100::Parser::new(rows, cols, 10_000),
             rows,
             cols,
-        }
+            max_scrollback: 0,
+            follow_live: true,
+            selection: None,
+        };
+        state.refresh_scrollback_metrics();
+        state
     }
 
     pub fn rows(&self) -> u16 {
@@ -419,17 +447,87 @@ impl VtState {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let current_scrollback = self.scrollback();
         self.rows = rows;
         self.cols = cols;
         self.parser.set_size(rows, cols);
+        self.refresh_scrollback_metrics();
+        self.parser
+            .set_scrollback(current_scrollback.min(self.max_scrollback));
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
+        let previous_scrollback = self.scrollback();
+        let previous_max_scrollback = self.max_scrollback;
         self.parser.process(bytes);
+        self.refresh_scrollback_metrics();
+        if self.follow_live {
+            self.parser.set_scrollback(0);
+        } else {
+            let added_scrollback = self.max_scrollback.saturating_sub(previous_max_scrollback);
+            self.parser.set_scrollback(
+                previous_scrollback
+                    .saturating_add(added_scrollback)
+                    .min(self.max_scrollback),
+            );
+        }
     }
 
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
+    }
+
+    pub fn scrollback(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    pub fn max_scrollback(&self) -> usize {
+        self.max_scrollback
+    }
+
+    pub fn set_scrollback(&mut self, rows: usize) {
+        self.parser.set_scrollback(rows.min(self.max_scrollback));
+    }
+
+    pub fn follow_live(&self) -> bool {
+        self.follow_live
+    }
+
+    pub fn set_follow_live(&mut self, follow_live: bool) {
+        self.follow_live = follow_live;
+        if follow_live {
+            self.parser.set_scrollback(0);
+        }
+    }
+
+    pub fn selection(&self) -> Option<TerminalSelection> {
+        self.selection
+    }
+
+    pub fn begin_selection(&mut self, cell: TerminalCell) {
+        self.selection = Some(TerminalSelection {
+            anchor: cell,
+            focus: cell,
+        });
+    }
+
+    pub fn update_selection(&mut self, cell: TerminalCell) {
+        if let Some(mut selection) = self.selection {
+            selection.focus = cell;
+            self.selection = Some(selection);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    fn refresh_scrollback_metrics(&mut self) {
+        let current_scrollback = self.parser.screen().scrollback();
+        self.parser.set_scrollback(usize::MAX);
+        self.max_scrollback = self.parser.screen().scrollback();
+        self.parser
+            .set_scrollback(current_scrollback.min(self.max_scrollback));
     }
 }
 

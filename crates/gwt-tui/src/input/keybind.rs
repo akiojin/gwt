@@ -438,6 +438,26 @@ mod tests {
     }
 
     #[test]
+    fn prefix_tab_cycles_focus_forward_even_when_terminal_is_focused() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key_with_focus(key(KeyCode::Char('g'), KeyModifiers::CONTROL), true);
+        let result = reg.process_key_with_focus(key(KeyCode::Tab, KeyModifiers::NONE), true);
+        assert!(matches!(result, Some(Message::FocusNext)));
+    }
+
+    #[test]
+    fn prefix_shift_tab_cycles_focus_backward() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert!(matches!(result, Some(Message::FocusPrev)));
+
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(matches!(result, Some(Message::FocusPrev)));
+    }
+
+    #[test]
     fn prefix_a_opens_session_conversion() {
         let mut reg = KeybindRegistry::new();
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
