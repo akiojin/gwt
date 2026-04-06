@@ -145,9 +145,9 @@
 - `cargo test -p gwt-tui from_selected_branch -- --nocapture`
 - `cargo test -p gwt-git sibling_worktree_path_preserves_branch_hierarchy -- --nocapture`
 - `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`
-- `cargo test -p gwt-git bare_common_dir -- --nocapture`
-- `cargo test -p gwt-tui linked_worktree_uses_main_repo_branch_layout -- --nocapture`
-- `cargo test -p gwt-tui bare_workspace_linked_worktree_uses_branch_hierarchy_layout -- --nocapture`
+- `cargo test -p gwt-git main_worktree_root_uses_bare_common_dir_for_linked_workspace_layout -- --nocapture`
+- `cargo test -p gwt-tui materialize_pending_launch_with_linked_worktree_uses_main_repo_branch_layout -- --nocapture`
+- `cargo test -p gwt-tui materialize_pending_launch_with_bare_workspace_linked_worktree_uses_branch_hierarchy_layout -- --nocapture`
 - `cargo test -p gwt-tui existing_branch_worktree_reuses_previous_path -- --nocapture`
 - `cargo test -p gwt-tui session_conversion`
 

@@ -6139,7 +6139,16 @@ mod tests {
         );
     }
 
-    fn git_checkout_new_branch(path: &std::path::Path, name: &str) {
+    fn git_checkout_branch_or_create(path: &std::path::Path, name: &str) {
+        let checkout = std::process::Command::new("git")
+            .args(["checkout", name])
+            .current_dir(path)
+            .output()
+            .expect("checkout git branch");
+        if checkout.status.success() {
+            return;
+        }
+
         let output = std::process::Command::new("git")
             .args(["checkout", "-b", name])
             .current_dir(path)
@@ -6147,7 +6156,8 @@ mod tests {
             .expect("checkout new git branch");
         assert!(
             output.status.success(),
-            "git checkout -b failed: {}",
+            "git checkout/create failed: checkout stderr: {}; checkout -b stderr: {}",
+            String::from_utf8_lossy(&checkout.stderr),
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -7681,7 +7691,7 @@ CUSTOM_ENV = "enabled"
         std::fs::create_dir_all(&repo_path).expect("create repo dir");
         init_git_repo(&repo_path);
         git_commit_allow_empty(&repo_path, "initial commit");
-        git_checkout_new_branch(&repo_path, "develop");
+        git_checkout_branch_or_create(&repo_path, "develop");
 
         let mut model = Model::new(repo_path.clone());
         model.pending_launch_config = Some(LaunchConfig {
@@ -7690,7 +7700,7 @@ CUSTOM_ENV = "enabled"
             args: vec!["agent-test".to_string()],
             env_vars: HashMap::new(),
             working_dir: None,
-            branch: Some("feature/materialized-launch".to_string()),
+            branch: Some("feature/alpha/beta".to_string()),
             base_branch: None,
             display_name: "My Agent".to_string(),
             color: AgentId::Custom("my-agent".to_string()).default_color(),
@@ -7709,7 +7719,8 @@ CUSTOM_ENV = "enabled"
         let expected_worktree = workspace_dir
             .path()
             .join("feature")
-            .join("materialized-launch");
+            .join("alpha")
+            .join("beta");
         assert!(expected_worktree.exists(), "new worktree should exist");
         let expected_worktree =
             std::fs::canonicalize(&expected_worktree).expect("canonicalize expected worktree");
@@ -7726,7 +7737,7 @@ CUSTOM_ENV = "enabled"
         );
         assert_eq!(
             String::from_utf8_lossy(&branch_output.stdout).trim(),
-            "feature/materialized-launch"
+            "feature/alpha/beta"
         );
 
         let session_entry = fs::read_dir(sessions_dir.path())
@@ -7736,7 +7747,7 @@ CUSTOM_ENV = "enabled"
             .expect("dir entry")
             .path();
         let persisted = AgentSession::load(&session_entry).expect("load persisted session");
-        assert_eq!(persisted.branch, "feature/materialized-launch");
+        assert_eq!(persisted.branch, "feature/alpha/beta");
         assert_eq!(persisted.worktree_path, expected_worktree);
     }
 
@@ -7748,7 +7759,7 @@ CUSTOM_ENV = "enabled"
         std::fs::create_dir_all(&repo_path).expect("create repo dir");
         init_git_repo(&repo_path);
         git_commit_allow_empty(&repo_path, "initial commit");
-        git_checkout_new_branch(&repo_path, "develop");
+        git_checkout_branch_or_create(&repo_path, "develop");
 
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -7900,7 +7911,7 @@ CUSTOM_ENV = "enabled"
             .output()
             .expect("set git name");
         assert!(name.status.success(), "git config user.name failed");
-        git_checkout_new_branch(&bootstrap_path, "develop");
+        git_checkout_branch_or_create(&bootstrap_path, "develop");
         git_commit_allow_empty(&bootstrap_path, "initial commit");
         git_push_branch(&bootstrap_path, "develop");
 
