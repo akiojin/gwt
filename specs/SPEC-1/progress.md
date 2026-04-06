@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `25/25` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T05:14:42Z`
+- Task progress: `26/26` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T08:39:47Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -14,6 +14,7 @@
 - Wrapped URLs are now detected across soft-wrapped terminal rows and remain underlined/clickable across every visible segment.
 - Terminal sessions now keep viewport-local scrollback state, expose overflow-only scrollbar chrome, and restore the cursor against the text area even when the gutter is present.
 - Mouse-wheel scrolling now freezes live follow against vt100 scrollback, and drag selection copies from the visible scrollback viewport through `contents_between()`.
+- Session-pane mouse interactions now re-focus the terminal before scrollback routing, so wheel scrolling works from the default management-focus state instead of dropping the first event.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next
