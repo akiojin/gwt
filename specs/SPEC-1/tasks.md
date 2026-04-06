@@ -55,3 +55,5 @@
 - [x] T042 Adjust the full-screen cache model in `model.rs` / `app.rs` so overwrite-or-clear redraws mutate the latest cached viewport instead of leaking stale cleared lines into scrollback.
 - [x] T043 [P] Write RED tests: blank-only overlap between consecutive full-screen frames is not treated as viewport-shift history and does not create a phantom empty top frame.
 - [x] T044 Tighten snapshot viewport-shift detection in `model.rs` so history extension requires non-blank overlap and verify the oldest-scrollback frame never goes empty for bottom-aligned first draws.
+- [x] T045 [P] Write RED test: leading blank snapshots are pruned once newer non-blank frames exist so topmost scrollback never lands on an empty phantom frame.
+- [x] T046 Prune leading blank snapshot prefixes in `model.rs` and preserve snapshot cursor clamping while keeping non-blank history intact.

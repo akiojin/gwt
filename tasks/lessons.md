@@ -1,5 +1,23 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot 先頭の blank prefix は自動で間引く
+
+### 事象
+
+blank-only overlap 判定を締めても、履歴先頭に残った古い blank frame に
+スクロールが当たると、最上端で空表示になるケースが残った。
+
+### 原因
+
+- snapshot 履歴追加条件は改善済みでも、過去に取り込まれた blank frame の先頭残留は別問題だった。
+- top scroll は `snapshot_cursor == 0` に到達するため、先頭が blank のままだと空画面を描いてしまう。
+
+### 再発防止策
+
+1. non-blank frame が存在する場合、leading blank snapshot prefix を自動で削除する。
+2. prefix 削除時は `snapshot_cursor` を `saturating_sub` で同期してカーソル破綻を防ぐ。
+3. snapshot 系不具合は「append 条件」と「履歴正規化（prefix pruning）」を分けて検証する。
+
 ## 2026-04-07 — fix: blank-only overlap を viewport shift と誤判定しない
 
 ### 事象

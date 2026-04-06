@@ -409,6 +409,10 @@ impl ScreenSnapshot {
     pub fn state(&self) -> &[u8] {
         &self.state
     }
+
+    fn is_blank(&self) -> bool {
+        !slice_contains_non_blank_content(&self.visible_lines)
+    }
 }
 
 fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
@@ -693,12 +697,25 @@ impl VtState {
         if let Some(existing) = self.snapshots.back_mut() {
             if !snapshots_capture_viewport_shift(existing, &snapshot) {
                 *existing = snapshot;
+                self.prune_leading_blank_snapshots();
                 return;
             }
         }
 
         self.snapshots.push_back(snapshot);
         if self.snapshots.len() > SNAPSHOT_HISTORY_CAPACITY {
+            self.snapshots.pop_front();
+            if let Some(cursor) = self.snapshot_cursor {
+                self.snapshot_cursor = Some(cursor.saturating_sub(1));
+            }
+        }
+        self.prune_leading_blank_snapshots();
+    }
+
+    fn prune_leading_blank_snapshots(&mut self) {
+        while self.snapshots.len() > 1
+            && self.snapshots.front().is_some_and(ScreenSnapshot::is_blank)
+        {
             self.snapshots.pop_front();
             if let Some(cursor) = self.snapshot_cursor {
                 self.snapshot_cursor = Some(cursor.saturating_sub(1));
@@ -1256,6 +1273,57 @@ mod tests {
         assert!(
             snapshots_capture_viewport_shift(&previous, &current),
             "non-blank overlapping rows should still be treated as a viewport shift"
+        );
+    }
+
+    #[test]
+    fn prune_leading_blank_snapshots_discards_only_blank_prefix() {
+        let mut vt = VtState::new(5, 20);
+        vt.snapshots = VecDeque::from(vec![
+            ScreenSnapshot {
+                rows: 5,
+                cols: 20,
+                state: Vec::new(),
+                visible_lines: vec!["".to_string(); 5],
+            },
+            ScreenSnapshot {
+                rows: 5,
+                cols: 20,
+                state: Vec::new(),
+                visible_lines: vec![
+                    "line-1".to_string(),
+                    "line-2".to_string(),
+                    "line-3".to_string(),
+                    "line-4".to_string(),
+                    "line-5".to_string(),
+                ],
+            },
+            ScreenSnapshot {
+                rows: 5,
+                cols: 20,
+                state: Vec::new(),
+                visible_lines: vec![
+                    "line-2".to_string(),
+                    "line-3".to_string(),
+                    "line-4".to_string(),
+                    "line-5".to_string(),
+                    "line-6".to_string(),
+                ],
+            },
+        ]);
+        vt.snapshot_cursor = Some(0);
+
+        vt.prune_leading_blank_snapshots();
+
+        assert_eq!(vt.snapshots.len(), 2);
+        assert!(
+            !vt.snapshots.front().expect("front snapshot").is_blank(),
+            "the oldest remaining snapshot should carry visible content"
+        );
+        assert_eq!(
+            vt.snapshot_cursor,
+            Some(0),
+            "cursor should stay clamped to the oldest remaining meaningful frame"
         );
     }
 
