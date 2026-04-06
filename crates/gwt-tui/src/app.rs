@@ -47,6 +47,7 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// Cap branch-detail preload event application per tick so one refresh burst
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
+const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -2382,6 +2383,9 @@ fn build_launch_config_from_wizard_with_custom_agents(
     if !wizard.branch_name.is_empty() {
         builder = builder.branch(&wizard.branch_name);
     }
+    if let Some(base_branch) = wizard_launch_base_branch(wizard) {
+        builder = builder.base_branch(base_branch);
+    }
 
     if is_explicit_model_selection(&wizard.model) {
         builder = builder.model(&wizard.model);
@@ -2470,6 +2474,7 @@ fn build_custom_launch_config_from_wizard(
         env_vars,
         working_dir: wizard.worktree_path.clone(),
         branch: (!wizard.branch_name.is_empty()).then(|| wizard.branch_name.clone()),
+        base_branch: wizard_launch_base_branch(wizard),
         display_name: custom_agent.display_name.clone(),
         model: None,
         tool_version: None,
@@ -2483,6 +2488,19 @@ fn build_custom_launch_config_from_wizard(
 
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
+}
+
+fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<String> {
+    if wizard.worktree_path.is_some() || !wizard.is_new_branch {
+        None
+    } else {
+        Some(
+            wizard
+                .base_branch_name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
+        )
+    }
 }
 
 fn materialize_pending_launch(model: &mut Model) {
@@ -2503,9 +2521,11 @@ fn materialize_pending_launch_with(
     model: &mut Model,
     sessions_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let Some(config) = model.pending_launch_config.take() else {
+    let Some(mut config) = model.pending_launch_config.take() else {
         return Ok(());
     };
+
+    resolve_launch_worktree(&model.repo_path, &mut config)?;
 
     let worktree = config
         .working_dir
@@ -2591,6 +2611,88 @@ fn materialize_pending_launch_with(
     );
 
     Ok(())
+}
+
+fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Result<(), String> {
+    let Some(branch_name) = config.branch.clone() else {
+        return Ok(());
+    };
+    if config.working_dir.is_some() {
+        return Ok(());
+    }
+
+    let current_branch = match current_git_branch(repo_path) {
+        Ok(branch) => branch,
+        Err(_) if config.base_branch.is_none() => return Ok(()),
+        Err(_) => config
+            .base_branch
+            .clone()
+            .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
+    };
+    if current_branch == branch_name {
+        config.working_dir = Some(repo_path.to_path_buf());
+        config.env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            repo_path.display().to_string(),
+        );
+        return Ok(());
+    }
+
+    let worktree_path = gwt_git::worktree::sibling_worktree_path(repo_path, &branch_name);
+    let manager = gwt_git::WorktreeManager::new(repo_path);
+    if local_branch_exists(repo_path, &branch_name)? {
+        manager
+            .create(&branch_name, &worktree_path)
+            .map_err(|err| err.to_string())?;
+    } else {
+        let base_branch = config.base_branch.clone().unwrap_or(current_branch);
+        manager
+            .create_from_base(&base_branch, &branch_name, &worktree_path)
+            .map_err(|err| err.to_string())?;
+    }
+
+    config.working_dir = Some(worktree_path.clone());
+    config.env_vars.insert(
+        "GWT_PROJECT_ROOT".to_string(),
+        worktree_path.display().to_string(),
+    );
+    Ok(())
+}
+
+fn current_git_branch(repo_path: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("git branch --show-current: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git branch --show-current: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        Err("git branch --show-current returned an empty branch name".to_string())
+    } else {
+        Ok(branch)
+    }
+}
+
+fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("git show-ref --verify refs/heads/{branch_name}: {err}"))?;
+
+    Ok(output.status.success())
 }
 
 fn configure_existing_branch_wizard_with_sessions(
@@ -5630,6 +5732,19 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    fn git_checkout_new_branch(path: &std::path::Path, name: &str) {
+        let output = std::process::Command::new("git")
+            .args(["checkout", "-b", name])
+            .current_dir(path)
+            .output()
+            .expect("checkout new git branch");
+        assert!(
+            output.status.success(),
+            "git checkout -b failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     #[test]
     fn update_quit_sets_flag() {
         let mut model = test_model();
@@ -6919,6 +7034,41 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_carries_selected_base_branch_for_new_branch_flow() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("feature/source".to_string()),
+            branch_name: "feature/child".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.branch.as_deref(), Some("feature/child"));
+        assert_eq!(config.base_branch.as_deref(), Some("feature/source"));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_defaults_spec_prefill_base_branch_to_develop() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            branch_name: "feature/spec-42-my-feature".to_string(),
+            spec_context: Some(screens::wizard::SpecContext::new(
+                "SPEC-42",
+                "My Feature",
+                "",
+            )),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_keeps_selected_version() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -7096,6 +7246,75 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path() {
+        let repo_dir = tempfile::tempdir().expect("temp repo dir");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        init_git_repo(repo_dir.path());
+        git_commit_allow_empty(repo_dir.path(), "initial commit");
+        git_checkout_new_branch(repo_dir.path(), "develop");
+
+        let mut model = Model::new(repo_dir.path().to_path_buf());
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Custom("my-agent".to_string()),
+            command: "/bin/echo".to_string(),
+            args: vec!["agent-test".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/materialized-launch".to_string()),
+            base_branch: None,
+            display_name: "My Agent".to_string(),
+            color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let repo_name = repo_dir
+            .path()
+            .file_name()
+            .expect("repo dir name")
+            .to_string_lossy();
+        let expected_worktree = repo_dir
+            .path()
+            .parent()
+            .expect("repo dir parent")
+            .join(format!("{repo_name}-feature-materialized-launch"));
+        assert!(expected_worktree.exists(), "new worktree should exist");
+
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&expected_worktree)
+            .output()
+            .expect("read worktree branch");
+        assert!(
+            branch_output.status.success(),
+            "git branch --show-current failed: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/materialized-launch"
+        );
+
+        let session_entry = fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .next()
+            .expect("session entry")
+            .expect("dir entry")
+            .path();
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "feature/materialized-launch");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
     fn materialize_pending_launch_with_spawn_failure_mentions_command() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut model = test_model();
@@ -7107,6 +7326,7 @@ CUSTOM_ENV = "enabled"
             env_vars: HashMap::new(),
             working_dir: None,
             branch: Some("feature/custom-agent".to_string()),
+            base_branch: None,
             display_name: "My Agent".to_string(),
             color: AgentId::Custom("my-agent".to_string()).default_color(),
             model: None,

@@ -330,3 +330,10 @@
 - [x] T169 Write RED test: Codex model options and old-TUI model-step rendering match the current Codex CLI snapshot.
 - [x] T170 Update `wizard.rs` so the Launch Agent Codex model list and descriptions match the current CLI snapshot while keeping `Default (Auto)` as the non-explicit override.
 - [x] T171 Verify focused wizard tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 47: New-Branch Launch Worktree Materialization
+
+- [x] T172 Write RED test: materializing a pending new-branch launch creates a sibling worktree and persists the actual launched path.
+- [x] T173 Extend launch configuration so new-branch wizard flows preserve the selected base branch, with `develop` as the SPEC/Issue fallback.
+- [x] T174 Implement launch-time worktree materialization and actual-path persistence before PTY spawn.
+- [x] T175 Verify focused worktree/materialization tests, broad workspace checks, and refresh SPEC-3 artifacts.

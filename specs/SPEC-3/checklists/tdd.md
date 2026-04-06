@@ -11,6 +11,8 @@
 - [x] The latest implementation slice has spec-focused verification evidence attached to it.
 - [x] The Codex model snapshot sync slice was driven by failing wizard tests
   before the Launch Agent model list was updated.
+- [x] The new-branch worktree materialization slice was driven by a failing
+  pending-launch test before launch-time worktree creation was implemented.
 - [x] The reviewer flow in `quickstart.md` has been captured as repeatable
   completion evidence, including launch-config and launch-materialization
   commands.
