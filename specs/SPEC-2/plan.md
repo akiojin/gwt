@@ -729,6 +729,18 @@ collapse into a single `run Claude Code` style label, hiding Codex behind the fi
 53.3: Verification and artifact sync (1 task)
 - Add focused RED coverage for multi-session extraction, spinner-only rendering, per-agent colors, and narrow-width truncation, then rerun focused and broad verification and refresh SPEC-2 artifacts.
 
+### Phase 54: Branch Spinner Palette Parity (4 tasks)
+Align the restored spinner strip with the old-TUI built-in agent palette so the indicators are
+recognizable at a glance without adding labels back into the row.
+
+54.1: Palette contract (2 tasks)
+- Fix the Branches spinner strip palette for built-in agents to `Claude Code=Yellow`, `Codex=Cyan`, and `Gemini=Magenta`.
+- Keep the change local to the Branches spinner surface; other TUI surfaces continue using their current agent colors unless separately specified.
+
+54.2: Verification and artifact sync (2 tasks)
+- Add RED coverage for the Claude/Codex/Gemini spinner palette mapping.
+- Re-run focused and broad verification, then refresh SPEC-2 artifacts and execution tracking.
+
 ## Verification
 
 1. `cargo test -p gwt-tui` — all pass

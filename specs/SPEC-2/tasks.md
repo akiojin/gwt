@@ -530,3 +530,10 @@ banner in favor of pane-title chrome.
 - [x] T340 [P] Write RED test: branch spinner indicators use the originating agent colors so Claude Code and Codex stay visually distinct.
 - [x] T341 Implement multi-indicator branch aggregation and spinner-strip rendering in `app.rs` / `branches.rs`.
 - [x] T342 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for multi-agent spinner-strip Branches rendering.
+
+## Phase 54: Branch Spinner Palette Parity
+
+- [x] T343 [P] Write RED test: Claude and Codex branch spinners use `Yellow` and `Cyan` instead of the session-tab palette.
+- [x] T344 [P] Write RED test: Gemini branch spinner uses `Magenta` in the Branches strip.
+- [x] T345 Implement branch-only built-in agent palette mapping in `app.rs` / `branches.rs` with fallback for custom agents.
+- [x] T346 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for the Branches spinner palette mapping.

@@ -1609,7 +1609,7 @@ fn branch_live_session_summaries_with(
         HashMap::new();
 
     for session in &model.sessions {
-        let SessionTabType::Agent { color, .. } = &session.tab_type else {
+        let SessionTabType::Agent { agent_id, color } = &session.tab_type else {
             continue;
         };
 
@@ -1627,7 +1627,7 @@ fn branch_live_session_summaries_with(
 
         let candidate = screens::branches::BranchLiveSessionIndicator {
             status,
-            color: *color,
+            color: branch_spinner_palette_color(agent_id, *color),
         };
         summaries
             .entry(persisted.branch.clone())
@@ -1662,6 +1662,18 @@ fn branch_live_session_priority(status: gwt_agent::AgentStatus) -> u8 {
         gwt_agent::AgentStatus::Running => 2,
         gwt_agent::AgentStatus::WaitingInput => 1,
         gwt_agent::AgentStatus::Unknown | gwt_agent::AgentStatus::Stopped => 0,
+    }
+}
+
+fn branch_spinner_palette_color(
+    agent_id: &str,
+    fallback: crate::model::AgentColor,
+) -> crate::model::AgentColor {
+    match agent_id {
+        "claude" => crate::model::AgentColor::Yellow,
+        "codex" => crate::model::AgentColor::Cyan,
+        "gemini" => crate::model::AgentColor::Magenta,
+        _ => fallback,
     }
 }
 
@@ -6983,12 +6995,15 @@ mod tests {
             summary.indicators[0].status,
             gwt_agent::AgentStatus::Running
         );
-        assert_eq!(summary.indicators[0].color, crate::model::AgentColor::Blue);
+        assert_eq!(summary.indicators[0].color, crate::model::AgentColor::Cyan);
         assert_eq!(
             summary.indicators[1].status,
             gwt_agent::AgentStatus::WaitingInput
         );
-        assert_eq!(summary.indicators[1].color, crate::model::AgentColor::Green);
+        assert_eq!(
+            summary.indicators[1].color,
+            crate::model::AgentColor::Yellow
+        );
         model.branches.live_session_summaries = summaries;
         model.branches.session_animation_tick = 0;
 
@@ -7092,8 +7107,70 @@ mod tests {
 
         assert_eq!(
             spinner_colors,
-            vec![Color::Blue, Color::Green],
+            vec![Color::Cyan, Color::Yellow],
             "spinner indicators should keep per-agent colors so multiple agents remain distinguishable"
+        );
+    }
+
+    #[test]
+    fn branch_live_session_rendering_uses_magenta_for_gemini_spinner() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+        }];
+
+        let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Gemini);
+        running.save(dir.path()).expect("persist running session");
+        SessionRuntimeState::from_hook_event("PostToolUse")
+            .expect("running runtime")
+            .save(&runtime_state_path(dir.path(), &running.id))
+            .expect("persist running runtime");
+
+        model.sessions = vec![crate::model::SessionTab {
+            id: running.id.clone(),
+            name: "Gemini CLI".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "gemini".to_string(),
+                color: crate::model::AgentColor::Cyan,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+        model.branches.session_animation_tick = 0;
+
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                crate::screens::branches::render_list(&model.branches, frame, frame.area());
+            })
+            .expect("draw branches");
+
+        let spinner_colors: Vec<Color> = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .map(|cell| cell.fg)
+            .collect();
+
+        assert_eq!(
+            spinner_colors,
+            vec![Color::Magenta],
+            "Gemini branch spinners should use the old-TUI magenta palette"
         );
     }
 
