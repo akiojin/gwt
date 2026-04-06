@@ -22,6 +22,23 @@ sandbox 環境では home 配下への書き込みが拒否され、期待した
 
 ## 2026-04-06 — fix: startup 時の agent detection は main thread で同期実行しない
 
+### 事象
+
+`load_initial_data_prefetches_branch_detail_async` が GitHub Actions で約 5 秒ブロックし、
+branch detail preload 自体は非同期でも startup 全体が重く見えていた。
+
+### 原因
+
+- `schedule_startup_version_cache_refresh()` が `AgentDetector::detect_all()` を呼び、
+  `gh copilot --version` などの version probe を main thread 上で同期実行していた。
+- branch detail preload の非同期性とは無関係な agent detection が、同じ startup path に混ざっていた。
+
+### 再発防止策
+
+1. startup で補助的な cache refresh や probe を走らせる場合は、dispatch から background thread に逃がして UI/initial load を塞がない。
+2. 非同期 preload の test は、対象 worker だけでなく同じ code path 上の別 I/O が同期で混ざっていないか確認する。
+3. global in-flight flag を使う scheduler test は並列実行で干渉するため、test 側で lock を入れて検証を直列化する。
+
 ## 2026-04-07 — fix: sibling worktree path は linked worktree 名ではなく main repo 名を基準にする
 
 ### 事象
@@ -40,23 +57,6 @@ worktree path が `.../develop-feature-test` になり、SPEC-10 の sibling lay
 1. sibling layout を導出する前に、`git rev-parse --git-common-dir` 等で main worktree root を解決する。
 2. worktree path のテストは main repo 直下だけでなく、linked worktree を起点にした Launch Agent 経路でも固定する。
 3. `git worktree` 系の path 期待値は macOS の `/var` → `/private/var` 正規化を考慮して canonical path で比較する。
-
-### 事象
-
-`load_initial_data_prefetches_branch_detail_async` が GitHub Actions で約 5 秒ブロックし、
-branch detail preload 自体は非同期でも startup 全体が重く見えていた。
-
-### 原因
-
-- `schedule_startup_version_cache_refresh()` が `AgentDetector::detect_all()` を呼び、
-  `gh copilot --version` などの version probe を main thread 上で同期実行していた。
-- branch detail preload の非同期性とは無関係な agent detection が、同じ startup path に混ざっていた。
-
-### 再発防止策
-
-1. startup で補助的な cache refresh や probe を走らせる場合は、dispatch から background thread に逃がして UI/initial load を塞がない。
-2. 非同期 preload の test は、対象 worker だけでなく同じ code path 上の別 I/O が同期で混ざっていないか確認する。
-3. global in-flight flag を使う scheduler test は並列実行で干渉するため、test 側で lock を入れて検証を直列化する。
 
 ## 2026-04-06 — fix: process-wide fake docker env は並列 app テストの観測値を汚す
 
