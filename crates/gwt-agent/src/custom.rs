@@ -40,6 +40,8 @@ pub struct CustomCodingAgent {
     #[serde(default)]
     pub mode_args: Option<ModeArgs>,
     #[serde(default)]
+    pub skip_permissions_args: Vec<String>,
+    #[serde(default)]
     pub env: HashMap<String, String>,
 }
 
@@ -83,6 +85,7 @@ mod tests {
                 continue_mode: vec!["--continue".to_string()],
                 resume: vec!["--resume".to_string()],
             }),
+            skip_permissions_args: vec!["--yolo".to_string()],
             env: HashMap::from([("KEY".to_string(), "VALUE".to_string())]),
         }
     }
@@ -156,6 +159,7 @@ mod tests {
         let parsed: CustomCodingAgent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, agent.id);
         assert_eq!(parsed.agent_type, agent.agent_type);
+        assert_eq!(parsed.skip_permissions_args, agent.skip_permissions_args);
     }
 
     #[test]

@@ -116,6 +116,7 @@ pub struct AgentLaunchBuilder {
     model: Option<String>,
     version: Option<String>,
     fast_mode: bool,
+    skip_permissions: bool,
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
@@ -133,6 +134,7 @@ impl AgentLaunchBuilder {
             model: None,
             version: None,
             fast_mode: false,
+            skip_permissions: false,
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
@@ -165,6 +167,11 @@ impl AgentLaunchBuilder {
 
     pub fn fast_mode(mut self, enabled: bool) -> Self {
         self.fast_mode = enabled;
+        self
+    }
+
+    pub fn skip_permissions(mut self, enabled: bool) -> Self {
+        self.skip_permissions = enabled;
         self
     }
 
@@ -255,10 +262,11 @@ impl AgentLaunchBuilder {
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
-        let skip_permissions = matches!(
-            self.permission_mode,
-            Some(PermissionMode::Auto | PermissionMode::BypassPermissions)
-        );
+        let skip_permissions = self.skip_permissions
+            || matches!(
+                self.permission_mode,
+                Some(PermissionMode::Auto | PermissionMode::BypassPermissions)
+            );
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
         LaunchConfig {
@@ -311,6 +319,10 @@ impl AgentLaunchBuilder {
             );
         }
 
+        if self.skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+
         // Session mode
         match self.session_mode {
             SessionMode::Continue => args.push("--continue".to_string()),
@@ -360,6 +372,10 @@ impl AgentLaunchBuilder {
             args.push("service_tier=fast".to_string());
         }
 
+        if self.skip_permissions {
+            args.push("--yolo".to_string());
+        }
+
         // Web search args
         if let Some(ref ver) = parsed_version {
             if *ver >= semver::Version::new(0, 90, 0) {
@@ -389,6 +405,10 @@ impl AgentLaunchBuilder {
             args.push("--model".to_string());
             args.push(model.clone());
         }
+
+        if self.skip_permissions {
+            args.push("--yolo".to_string());
+        }
     }
 
     fn build_opencode_args(&self, _args: &mut Vec<String>) {
@@ -398,6 +418,9 @@ impl AgentLaunchBuilder {
     fn build_copilot_args(&self, args: &mut Vec<String>) {
         // gh copilot is invoked as `gh copilot`
         args.insert(0, "copilot".to_string());
+        if self.skip_permissions {
+            args.push("--yolo".to_string());
+        }
     }
 }
 
@@ -470,6 +493,18 @@ mod tests {
     }
 
     #[test]
+    fn build_claude_skip_permissions_adds_dangerous_flag() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .skip_permissions(true)
+            .build();
+
+        assert!(config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(config.skip_permissions);
+    }
+
+    #[test]
     fn build_codex_fast_mode() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .fast_mode(true)
@@ -483,6 +518,36 @@ mod tests {
         assert!(!config.args.contains(&"--full-auto".to_string()));
         assert!(config.codex_fast_mode);
         assert!(!config.skip_permissions);
+    }
+
+    #[test]
+    fn build_codex_skip_permissions_adds_yolo() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .skip_permissions(true)
+            .build();
+
+        assert!(config.args.contains(&"--yolo".to_string()));
+        assert!(config.skip_permissions);
+    }
+
+    #[test]
+    fn build_gemini_skip_permissions_adds_yolo() {
+        let config = AgentLaunchBuilder::new(AgentId::Gemini)
+            .skip_permissions(true)
+            .build();
+
+        assert!(config.args.contains(&"--yolo".to_string()));
+        assert!(config.skip_permissions);
+    }
+
+    #[test]
+    fn build_copilot_skip_permissions_adds_yolo() {
+        let config = AgentLaunchBuilder::new(AgentId::Copilot)
+            .skip_permissions(true)
+            .build();
+
+        assert!(config.args.contains(&"--yolo".to_string()));
+        assert!(config.skip_permissions);
     }
 
     #[test]

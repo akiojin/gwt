@@ -44,6 +44,13 @@ struct CustomAgentToml {
     default_args: Vec<String>,
     #[serde(
         default,
+        rename = "skipPermissionsArgs",
+        alias = "skip_permissions_args",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    skip_permissions_args: Vec<String>,
+    #[serde(
+        default,
         rename = "modeArgs",
         alias = "mode_args",
         skip_serializing_if = "Option::is_none"
@@ -65,6 +72,7 @@ impl CustomAgentToml {
             agent_type: self.agent_type,
             command: self.command,
             default_args: self.default_args,
+            skip_permissions_args: self.skip_permissions_args,
             mode_args: self.mode_args,
             env: self.env,
         };
@@ -81,6 +89,7 @@ impl From<&CustomCodingAgent> for CustomAgentToml {
             agent_type: agent.agent_type,
             command: agent.command.clone(),
             default_args: agent.default_args.clone(),
+            skip_permissions_args: agent.skip_permissions_args.clone(),
             mode_args: agent.mode_args.clone(),
             env: agent.env.clone(),
         }
@@ -216,6 +225,8 @@ fn normalized_custom_agent_table(entry: &StoredCustomAgent) -> Result<Table, Str
         "command",
         "defaultArgs",
         "default_args",
+        "skipPermissionsArgs",
+        "skip_permissions_args",
         "modeArgs",
         "mode_args",
         "env",
@@ -307,6 +318,7 @@ displayName = "My Agent"
 agentType = "command"
 command = "my-agent-cli"
 defaultArgs = ["--flag"]
+skipPermissionsArgs = ["--yolo"]
 
 [tools.customCodingAgents.my-agent.modeArgs]
 normal = ["--normal"]
@@ -328,6 +340,7 @@ CUSTOM_ENV = "enabled"
         assert_eq!(agent.agent_type, CustomAgentType::Command);
         assert_eq!(agent.command, "my-agent-cli");
         assert_eq!(agent.default_args, vec!["--flag"]);
+        assert_eq!(agent.skip_permissions_args, vec!["--yolo"]);
         assert_eq!(
             agent
                 .mode_args
