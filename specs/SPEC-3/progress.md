@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `174/174` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T12:22:37Z`
+- Task progress: `178/178` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T09:16:20Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -37,6 +37,9 @@
   (`reasoning_level`, `skip_permissions`, resume session ID) so future
   launches can replay the previous configuration instead of showing a static
   placeholder.
+- SkipPermissions now restores legacy flags per agent (Claude:
+  `--dangerously-skip-permissions`; Codex/Gemini/Copilot: `--yolo`) and custom
+  agents can supply `skipPermissionsArgs` for opt-in behavior.
 - Recent verification exists for SPEC-3 slices: `cargo fmt --all`, `cargo test -p gwt-tui`, `cargo test -p gwt-core -p gwt-tui`, `cargo clippy -p gwt-tui --all-targets --all-features -- -D warnings`, `cargo clippy --all-targets --all-features -- -D warnings`, `bunx markdownlint-cli specs/SPEC-3/tasks.md`, and `bunx commitlint --from HEAD~1 --to HEAD`.
 - Repeatable reviewer evidence is now captured in `quickstart.md` with detect,
   version-cache, wizard, launch-materialization, and session-conversion test
