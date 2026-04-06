@@ -2738,6 +2738,14 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
 
     let main_repo_path =
         gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = existing_worktree_for_branch(&main_repo_path, &branch_name)? {
+        config.working_dir = Some(existing_worktree.clone());
+        config.env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            existing_worktree.display().to_string(),
+        );
+        return Ok(());
+    }
     let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
     if local_branch_exists(&main_repo_path, &branch_name)? {
@@ -2757,6 +2765,22 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         worktree_path.display().to_string(),
     );
     Ok(())
+}
+
+fn existing_worktree_for_branch(
+    repo_path: &Path,
+    branch_name: &str,
+) -> Result<Option<PathBuf>, String> {
+    let manager = gwt_git::WorktreeManager::new(repo_path);
+    manager
+        .list()
+        .map_err(|err| err.to_string())
+        .map(|worktrees| {
+            worktrees
+                .into_iter()
+                .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
+                .map(|worktree| worktree.path)
+        })
 }
 
 fn current_git_branch(repo_path: &Path) -> Result<String, String> {
@@ -7822,6 +7846,85 @@ CUSTOM_ENV = "enabled"
             .path();
         let persisted = AgentSession::load(&session_entry).expect("load persisted session");
         assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_existing_branch_worktree_reuses_previous_path() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let develop_worktree = workspace_dir.path().join("develop");
+        let develop_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "develop",
+                develop_worktree.to_str().expect("develop worktree path"),
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add -b develop");
+        assert!(
+            develop_output.status.success(),
+            "git worktree add -b develop failed: {}",
+            String::from_utf8_lossy(&develop_output.stderr)
+        );
+
+        let stale_worktree = workspace_dir.path().join("develop-feature-test");
+        let stale_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/test",
+                stale_worktree.to_str().expect("stale worktree path"),
+                "develop",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add -b feature/test");
+        assert!(
+            stale_output.status.success(),
+            "git worktree add -b feature/test failed: {}",
+            String::from_utf8_lossy(&stale_output.stderr)
+        );
+        let stale_worktree =
+            std::fs::canonicalize(&stale_worktree).expect("canonicalize stale worktree");
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/test".to_string(),
+            worktree_path: Some(develop_worktree.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(develop_worktree);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        assert!(
+            !workspace_dir.path().join("gwt-feature-test").exists(),
+            "launch should reuse the existing branch worktree instead of trying to create a new sibling path"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .next()
+            .expect("session entry")
+            .expect("dir entry")
+            .path();
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "feature/test");
+        assert_eq!(persisted.worktree_path, stale_worktree);
     }
 
     #[test]

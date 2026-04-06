@@ -112,6 +112,9 @@
 42. Repeat the new-branch launch from SPEC or Issue context and verify the
     created worktree uses the new branch while the session metadata records
     that actual launched path.
+43. If a stale worktree for the same branch already exists from a previous
+    failed launch attempt, retry Launch Agent and verify it reuses that
+    existing branch worktree instead of failing to start.
 
 ## Repeatable Evidence
 - `cargo test -p gwt-agent detect -- --nocapture`
@@ -137,6 +140,7 @@
 - `cargo test -p gwt-tui from_selected_branch -- --nocapture`
 - `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`
 - `cargo test -p gwt-tui linked_worktree_uses_main_repo_sibling_layout -- --nocapture`
+- `cargo test -p gwt-tui existing_branch_worktree_reuses_previous_path -- --nocapture`
 - `cargo test -p gwt-tui session_conversion`
 
 ## Expected Result
