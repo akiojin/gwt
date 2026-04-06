@@ -529,11 +529,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 }
             }
         }
-        Message::PasteFiles => {
-            if let Some(bytes) = read_clipboard_input_bytes() {
-                push_input_to_active_session(model, bytes);
-            }
-        }
+        Message::PasteInput(text) => route_paste_input(model, text),
         Message::OpenSessionConversion => {
             open_session_conversion(model);
         }
@@ -555,6 +551,14 @@ pub fn update(model: &mut Model, msg: Message) {
 /// Populates branches, version tags, and worktree mappings.  Each section is
 /// best-effort: failures are silently ignored so the TUI still starts.
 pub fn load_initial_data(model: &mut Model) {
+    load_initial_data_with(model, fetch_current_pr_link, gwt_git::fetch_pr_list);
+}
+
+fn load_initial_data_with<P, F>(model: &mut Model, load_pr_link: P, load_prs: F)
+where
+    P: FnOnce(&std::path::Path) -> gwt_core::Result<Option<String>>,
+    F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
+{
     schedule_startup_version_cache_refresh();
     let has_git_remote = repo_has_git_remote(&model.repo_path);
 
@@ -634,7 +638,7 @@ pub fn load_initial_data(model: &mut Model) {
         gwt_git::branch::list_branches,
         |repo_path| {
             if has_git_remote {
-                fetch_current_pr_link(repo_path)
+                load_pr_link(repo_path)
             } else {
                 Ok(None)
             }
@@ -642,7 +646,7 @@ pub fn load_initial_data(model: &mut Model) {
     );
 
     if has_git_remote {
-        load_pr_dashboard(model);
+        load_pr_dashboard_with(model, load_prs);
     }
 }
 
@@ -806,10 +810,6 @@ fn switch_management_tab_with<F, D>(
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
     }
-}
-
-fn load_pr_dashboard(model: &mut Model) {
-    load_pr_dashboard_with(model, gwt_git::fetch_pr_list);
 }
 
 fn refresh_pr_dashboard_with<F, D>(model: &mut Model, fetch_prs: F, fetch_detail: D)
@@ -2142,6 +2142,100 @@ fn handle_voice_message(model: &mut Model, msg: VoiceInputMessage, voice_enabled
     }
 }
 
+fn route_paste_input(model: &mut Model, text: String) {
+    if model.help_visible
+        || !model.error_queue.is_empty()
+        || model.service_select.is_some()
+        || model.confirm.visible
+        || model
+            .docker_progress
+            .as_ref()
+            .is_some_and(|progress| progress.visible)
+    {
+        return;
+    }
+
+    if route_non_terminal_paste(model, &text) {
+        return;
+    }
+
+    match model.active_layer {
+        ActiveLayer::Initialization => {}
+        ActiveLayer::Management => {
+            if matches!(model.active_focus, FocusPane::Terminal) {
+                handle_paste_input(model, text);
+            }
+        }
+        _ => handle_paste_input(model, text),
+    }
+}
+
+fn route_non_terminal_paste(model: &mut Model, text: &str) -> bool {
+    if let Some(wizard) = model.wizard.as_mut() {
+        paste_text_input_chars(text, |ch| {
+            screens::wizard::update(wizard, screens::wizard::WizardMessage::InputChar(ch));
+        });
+        return true;
+    }
+
+    match model.active_layer {
+        ActiveLayer::Initialization => {
+            if let Some(state) = model.initialization.as_mut() {
+                paste_text_input_chars(text, |ch| {
+                    screens::initialization::update(
+                        state,
+                        screens::initialization::InitializationMessage::InputChar(ch),
+                    );
+                });
+                return true;
+            }
+            false
+        }
+        ActiveLayer::Management if !matches!(model.active_focus, FocusPane::Terminal) => {
+            match model.management_tab {
+                ManagementTab::Branches if model.branches.search_active => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::branches::update(
+                            &mut model.branches,
+                            screens::branches::BranchesMessage::SearchInput(ch),
+                        );
+                    });
+                    true
+                }
+                ManagementTab::Issues if model.issues.search_active => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::issues::update(
+                            &mut model.issues,
+                            screens::issues::IssuesMessage::SearchInput(ch),
+                        );
+                    });
+                    true
+                }
+                ManagementTab::Settings if model.settings.editing => {
+                    paste_text_input_chars(text, |ch| {
+                        screens::settings::update(
+                            &mut model.settings,
+                            screens::settings::SettingsMessage::InputChar(ch),
+                        );
+                    });
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn paste_text_input_chars(text: &str, mut push_char: impl FnMut(char)) {
+    for ch in text.chars() {
+        if matches!(ch, '\r' | '\n') {
+            continue;
+        }
+        push_char(ch);
+    }
+}
+
 trait VoiceRuntime {
     fn configure(&mut self, config: &VoiceConfig);
     fn start_recording(&mut self) -> Result<(), String>;
@@ -3128,15 +3222,38 @@ fn run_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<Ag
     }
 }
 
-fn read_clipboard_input_bytes() -> Option<Vec<u8>> {
-    if let Ok(paths) = gwt_clipboard::ClipboardFilePaste::extract_file_paths() {
-        if let Some(bytes) = clipboard_payload_to_bytes(&paths, "") {
-            return Some(bytes);
-        }
+fn handle_paste_input(model: &mut Model, text: String) {
+    let bracketed_paste_enabled = model
+        .active_session_tab()
+        .map(|session| vt_requests_bracketed_paste(&session.vt))
+        .unwrap_or(false);
+
+    if let Some(bytes) = build_paste_input_bytes(&text, bracketed_paste_enabled) {
+        push_input_to_active_session(model, bytes);
+    }
+}
+
+fn vt_requests_bracketed_paste(vt: &crate::model::VtState) -> bool {
+    vt.screen()
+        .input_mode_formatted()
+        .windows(b"\x1b[?2004h".len())
+        .any(|window| window == b"\x1b[?2004h")
+}
+
+fn build_paste_input_bytes(text: &str, bracketed_paste_enabled: bool) -> Option<Vec<u8>> {
+    if text.is_empty() {
+        return None;
     }
 
-    let text = gwt_clipboard::ClipboardText::get_text().ok()?;
-    clipboard_payload_to_bytes(&[], &text)
+    if bracketed_paste_enabled {
+        let mut bytes = Vec::with_capacity(text.len() + 12);
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        Some(bytes)
+    } else {
+        Some(text.as_bytes().to_vec())
+    }
 }
 
 fn apply_pending_session_conversion_with(
@@ -3197,24 +3314,6 @@ fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
         crate::model::AgentColor::Yellow => Color::Yellow,
         crate::model::AgentColor::Magenta => Color::Magenta,
         crate::model::AgentColor::Gray => Color::Gray,
-    }
-}
-
-fn clipboard_payload_to_bytes(paths: &[PathBuf], fallback_text: &str) -> Option<Vec<u8>> {
-    if !paths.is_empty() {
-        let payload = paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Some(payload.into_bytes());
-    }
-
-    let text = fallback_text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -6023,7 +6122,11 @@ mod tests {
             let mut model = Model::new(dir.path().to_path_buf());
 
             let start = std::time::Instant::now();
-            load_initial_data(&mut model);
+            load_initial_data_with(
+                &mut model,
+                |_repo_path| Ok(None),
+                |_repo_path| Ok(Vec::new()),
+            );
             let elapsed = start.elapsed();
             let gh_calls = fs::read_to_string(&gh_count)
                 .unwrap_or_else(|_| "0".to_string())
@@ -7388,7 +7491,6 @@ CUSTOM_ENV = "enabled"
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        // Claude stale, Codex fresh, Gemini missing → Claude + Gemini need refresh
         assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(!targets.contains(&AgentId::Codex));
         assert!(targets.contains(&AgentId::Gemini));
@@ -7427,7 +7529,6 @@ CUSTOM_ENV = "enabled"
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
-        // All npm agents (Claude, Codex, Gemini) need refresh from empty cache
         assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(targets.contains(&AgentId::Codex));
         assert!(targets.contains(&AgentId::Gemini));
@@ -7440,14 +7541,15 @@ CUSTOM_ENV = "enabled"
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
 
+        let cache_path = PathBuf::from("/tmp/agent-versions.json");
         let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
         let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let detected_flag = detected.clone();
-        let scheduled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let scheduled_flag = scheduled.clone();
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None::<(PathBuf, Vec<AgentId>)>));
+        let scheduled_capture = scheduled.clone();
 
         schedule_startup_version_cache_refresh_with(
-            PathBuf::from("/tmp/agent-versions.json"),
+            cache_path.clone(),
             move || {
                 detected_flag.store(true, Ordering::Release);
                 vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
@@ -7455,13 +7557,13 @@ CUSTOM_ENV = "enabled"
             |task| {
                 *spawned.borrow_mut() = Some(task);
             },
-            move |_, _| {
-                scheduled_flag.store(true, Ordering::Release);
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
         );
 
         assert!(!detected.load(Ordering::Acquire));
-        assert!(!scheduled.load(Ordering::Acquire));
+        assert!(scheduled.lock().unwrap().is_none());
         assert!(spawned.borrow().is_some());
         assert!(STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
 
@@ -7469,7 +7571,9 @@ CUSTOM_ENV = "enabled"
         task();
 
         assert!(detected.load(Ordering::Acquire));
-        assert!(scheduled.load(Ordering::Acquire));
+        let (scheduled_path, targets) = scheduled.lock().unwrap().clone().unwrap();
+        assert_eq!(scheduled_path, cache_path);
+        assert!(targets.contains(&AgentId::ClaudeCode));
         assert!(!STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
     }
 
@@ -7970,28 +8074,142 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_prefers_paths() {
-        let bytes = clipboard_payload_to_bytes(
-            &[
-                std::path::PathBuf::from("/tmp/one.txt"),
-                std::path::PathBuf::from("/tmp/two.txt"),
-            ],
-            "",
-        )
-        .unwrap();
-
-        assert_eq!(bytes, b"/tmp/one.txt\n/tmp/two.txt".to_vec());
+    fn build_paste_input_bytes_wraps_payload_when_bracketed_paste_is_enabled() {
+        let bytes = build_paste_input_bytes("git status\npwd", true).unwrap();
+        assert_eq!(bytes, b"\x1b[200~git status\npwd\x1b[201~".to_vec());
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_falls_back_to_text() {
-        let bytes = clipboard_payload_to_bytes(&[], "echo hello").unwrap();
+    fn build_paste_input_bytes_keeps_plain_text_when_bracketed_paste_is_disabled() {
+        let bytes = build_paste_input_bytes("echo hello", false).unwrap();
         assert_eq!(bytes, b"echo hello".to_vec());
     }
 
     #[test]
-    fn clipboard_payload_to_bytes_ignores_empty_payload() {
-        assert!(clipboard_payload_to_bytes(&[], "   ").is_none());
+    fn build_paste_input_bytes_ignores_empty_payload() {
+        assert!(build_paste_input_bytes("", false).is_none());
+    }
+
+    #[test]
+    fn build_paste_input_bytes_preserves_whitespace_payload() {
+        let bytes = build_paste_input_bytes("   \n", false).unwrap();
+        assert_eq!(bytes, b"   \n".to_vec());
+    }
+
+    #[test]
+    fn vt_state_reports_bracketed_paste_when_requested_by_session() {
+        let mut vt = crate::model::VtState::new(24, 80);
+        assert!(!vt_requests_bracketed_paste(&vt));
+
+        vt.process(b"\x1b[?2004h");
+        assert!(vt_requests_bracketed_paste(&vt));
+
+        vt.process(b"\x1b[?2004l");
+        assert!(!vt_requests_bracketed_paste(&vt));
+    }
+
+    #[test]
+    fn handle_paste_input_queues_bracketed_payload_for_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model
+            .active_session_tab_mut()
+            .expect("active session")
+            .vt
+            .process(b"\x1b[?2004h");
+
+        handle_paste_input(&mut model, "git status\npwd".into());
+
+        let forwarded = model.pending_pty_inputs().back().unwrap();
+        assert_eq!(forwarded.session_id, "shell-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[200~git status\npwd\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn handle_paste_input_ignores_empty_text() {
+        let mut model = test_model();
+
+        handle_paste_input(&mut model, "".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_ignores_management_paste_when_terminal_is_not_focused() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        route_paste_input(&mut model, "git status".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_ignores_paste_when_wizard_is_open() {
+        let mut model = test_model();
+        model.wizard = Some(screens::wizard::WizardState::default());
+
+        route_paste_input(&mut model, "git status".into());
+
+        assert!(model.pending_pty_inputs().is_empty());
+    }
+
+    #[test]
+    fn route_paste_input_initialization_appends_url_input() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Initialization;
+        model.initialization = Some(crate::screens::initialization::InitializationState::default());
+
+        route_paste_input(&mut model, "https://example.com/repo.git".into());
+
+        assert_eq!(
+            model.initialization.as_ref().unwrap().url_input,
+            "https://example.com/repo.git"
+        );
+    }
+
+    #[test]
+    fn route_paste_input_wizard_branch_name_appends_text() {
+        let mut model = test_model();
+        let mut wizard = screens::wizard::WizardState::default();
+        wizard.step = screens::wizard::WizardStep::BranchNameInput;
+        model.wizard = Some(wizard);
+
+        route_paste_input(&mut model, "feature/paste".into());
+
+        assert_eq!(model.wizard.as_ref().unwrap().branch_name, "feature/paste");
+    }
+
+    #[test]
+    fn route_paste_input_branches_search_appends_query() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.search_active = true;
+
+        route_paste_input(&mut model, "feat".into());
+
+        assert_eq!(model.branches.search_query, "feat");
+    }
+
+    #[test]
+    fn route_paste_input_settings_edit_appends_buffer() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Settings;
+        model.settings.load_category_fields();
+        model.settings.editing = true;
+        model.settings.edit_buffer.clear();
+
+        route_paste_input(&mut model, "dark".into());
+
+        assert_eq!(model.settings.edit_buffer, "dark");
     }
 
     #[test]

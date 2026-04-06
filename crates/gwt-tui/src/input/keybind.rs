@@ -139,11 +139,6 @@ impl KeybindRegistry {
                 category: KeybindingCategory::Sessions,
             },
             Keybinding {
-                keys: "Ctrl+G, p".into(),
-                description: "Paste file paths".into(),
-                category: KeybindingCategory::Input,
-            },
-            Keybinding {
                 keys: "Ctrl+G, ?".into(),
                 description: "Show help".into(),
                 category: KeybindingCategory::Global,
@@ -262,7 +257,6 @@ impl KeybindRegistry {
                         Some(Message::SwitchManagementTab(ManagementTab::Settings))
                     }
                     KeyCode::Char('i') => Some(Message::SwitchManagementTab(ManagementTab::Issues)),
-                    KeyCode::Char('p') => Some(Message::PasteFiles),
                     KeyCode::Char('?') => Some(Message::ToggleHelp),
                     KeyCode::Esc => Some(Message::Tick), // Cancel prefix
                     _ => None,                           // Unknown, discard
@@ -430,11 +424,21 @@ mod tests {
     }
 
     #[test]
-    fn prefix_p_paste_files() {
+    fn prefix_p_is_unbound() {
         let mut reg = KeybindRegistry::new();
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Char('p'), KeyModifiers::NONE));
-        assert!(matches!(result, Some(Message::PasteFiles)));
+        assert!(result.is_none());
+        assert!(matches!(reg.prefix_state, PrefixState::Idle));
+    }
+
+    #[test]
+    fn keybinding_list_does_not_include_removed_paste_shortcut() {
+        let reg = KeybindRegistry::new();
+        assert!(!reg
+            .all_bindings()
+            .iter()
+            .any(|binding| binding.keys == "Ctrl+G, p"));
     }
 
     #[test]

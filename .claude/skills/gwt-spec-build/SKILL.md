@@ -101,7 +101,7 @@ In SPEC mode, also verify:
 
 - Implementation matches `spec.md` acceptance scenarios
 - No scope creep beyond `tasks.md`
-- If a failure indicates a spec gap (not a code bug), route back to `gwt-spec-ops`
+- If a failure indicates a spec gap (not a code bug), route back to `gwt-spec-design`
 
 ## Phase 4: PR Flow
 
@@ -125,7 +125,7 @@ Required checks:
 - `checklists/acceptance.md` reflects actual accepted behavior
 - `checklists/tdd.md` reflects actual verification evidence
 - `progress.md` entries do not claim completion unsupported by code
-- If artifacts disagree, return to `gwt-spec-ops` — do not proceed to PR
+- If artifacts disagree, return to `gwt-spec-design` — do not proceed to PR
 
 Update execution tracking:
 
@@ -166,6 +166,6 @@ Verification:
 Next:
 - `gwt-pr` (create/update PR)
 - `gwt-arch-review` (code review)
-- return to `gwt-spec-ops` (artifact repair)
+- return to `gwt-spec-design` (artifact repair)
 - ask user for decision
 ```

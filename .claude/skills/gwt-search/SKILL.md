@@ -144,9 +144,8 @@ $PYTHON $RUNNER \
 
 This skill is a **mandatory preflight step** before:
 
-- `gwt-spec-design` (spec brainstorm, register, clarify, ops)
-- `gwt-spec-register` / `gwt-spec-ops`
-- `gwt-issue-register` / `gwt-issue-resolve`
+- `gwt-spec-design`
+- `gwt-issue`
 
 Run at least 2-3 semantic queries derived from the request before creating any new SPEC or Issue.
 
