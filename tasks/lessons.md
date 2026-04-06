@@ -78,6 +78,27 @@ agent PTY が起動しなかった。
 2. linked worktree path 修正の回帰テストだけで終わらせず、「旧 path が残っている再 launch」まで RED/GREEN で固定する。
 3. launch failure の切り分けでは `~/.gwt/sessions/*.toml` の増加有無と `git worktree list` を合わせて確認する。
 
+## 2026-04-07 — fix: bare workspace の `gwt.git` を linked worktree 名で代用しない
+
+### 事象
+
+`/Users/.../gwt/gwt.git` を common-dir に持つ legacy bare workspace で Launch Agent から
+`feature/test2` を作成すると、worktree path が `gwt-feature-test2` ではなく
+`develop-feature-test2` になっていた。
+
+### 原因
+
+- `main_worktree_root()` は `--git-common-dir` が `.git` で終わる normal clone しか想定しておらず、
+  bare common-dir の `gwt.git` を見たときに linked worktree 自身 (`develop/`) を返していた。
+- さらに sibling path 生成側も repo 名の `.git` suffix を落としていなかったため、
+  bare repo path をそのまま渡しても期待どおりの `gwt-*` 名にならない設計だった。
+
+### 再発防止策
+
+1. linked worktree から layout root を引く helper は、normal clone の `.git` と bare repo の `*.git` を分けて扱う。
+2. bare workspace を使う実運用が残っている間は、tempdir 上の `gwt.git + develop/` fixture を app 層の RED テストに含める。
+3. `git-common-dir` を使う path 変換では、`repo name` と `git control dir` を同一視しない。
+
 ## 2026-04-06 — fix: process-wide fake docker env は並列 app テストの観測値を汚す
 
 ### 事象
