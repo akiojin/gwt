@@ -2359,7 +2359,7 @@ fn build_launch_config_from_wizard_with_custom_agents(
     }
 
     if wizard.skip_perms {
-        builder = builder.permission_mode(gwt_agent::launch::PermissionMode::Auto);
+        builder = builder.skip_permissions(true);
     }
     let session_mode = match wizard.mode.as_str() {
         "continue" => SessionMode::Continue,
@@ -2397,6 +2397,9 @@ fn build_custom_launch_config_from_wizard(
             SessionMode::Continue => args.extend(mode_args.continue_mode.clone()),
             SessionMode::Resume => args.extend(mode_args.resume.clone()),
         }
+    }
+    if wizard.skip_perms {
+        args.extend(custom_agent.skip_permissions_args.clone());
     }
 
     let command = match custom_agent.agent_type {
@@ -4372,6 +4375,7 @@ mod tests {
                 continue_mode: vec!["--continue".to_string()],
                 resume: vec!["--resume".to_string()],
             }),
+            skip_permissions_args: vec!["--yolo".to_string()],
             env: HashMap::from([("CUSTOM_ENV".to_string(), "enabled".to_string())]),
         }
     }
@@ -6851,7 +6855,24 @@ CUSTOM_ENV = "enabled"
 
         assert!(config.skip_permissions);
         assert!(!config.codex_fast_mode);
+        assert!(config.args.contains(&"--yolo".to_string()));
         assert!(!config.args.contains(&"service_tier=fast".to_string()));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_skip_permissions_uses_dangerous_flag() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            skip_perms: true,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.skip_permissions);
+        assert!(config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     #[test]
