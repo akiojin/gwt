@@ -1,8 +1,9 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 427
 expression: output
 ---
-┌ Branches │ Specs │ Issues │...───────┐┌ › Shell ─────────────────────────────┐
+┌ Branches │ Issues │ PRs │...─────────┐┌ › Shell ─────────────────────────────┐
 │ View: Local │ Sort: Default          ││Session: Shell (80x24)                │
 │No branches loaded                    ││                                      │
 │                                      ││                                      │

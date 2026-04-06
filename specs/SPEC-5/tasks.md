@@ -1,5 +1,7 @@
 # SPEC-5: Tasks
 
+> Superseded on 2026-04-06 by the `SPEC-2` Branch Detail-only contract. Historical record only.
+
 ## Phase 0: Live Shell Reintegration
 
 ### 0.1 Management Shell Reachability
