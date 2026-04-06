@@ -11,6 +11,13 @@ use crate::types::{AgentId, AgentStatus};
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
 
+/// Environment variable injected into agent PTYs so hooks can identify the
+/// backing gwt session.
+pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
+/// Environment variable injected into agent PTYs so hooks can write the
+/// matching runtime sidecar without discovering gwt paths on their own.
+pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -32,6 +39,16 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub display_name: String,
+}
+
+/// Lightweight runtime state updated by hook events while the PTY is alive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionRuntimeState {
+    pub status: AgentStatus,
+    pub updated_at: DateTime<Utc>,
+    pub last_activity_at: DateTime<Utc>,
+    #[serde(default)]
+    pub source_event: Option<String>,
 }
 
 impl Session {
@@ -98,6 +115,76 @@ impl Session {
         let content = std::fs::read_to_string(path)?;
         toml::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    }
+}
+
+impl SessionRuntimeState {
+    /// Create a new runtime state snapshot for the given status.
+    pub fn new(status: AgentStatus) -> Self {
+        let now = Utc::now();
+        Self {
+            status,
+            updated_at: now,
+            last_activity_at: now,
+            source_event: None,
+        }
+    }
+
+    /// Create a runtime state snapshot from a supported hook event.
+    pub fn from_hook_event(event: &str) -> Option<Self> {
+        let status = hook_event_status(event)?;
+        Some(Self {
+            source_event: Some(event.to_string()),
+            ..Self::new(status)
+        })
+    }
+
+    /// Save the runtime state to a JSON sidecar file.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        std::fs::write(path, content)
+    }
+
+    /// Load the runtime state from a JSON sidecar file.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    }
+}
+
+/// Return the JSON sidecar path for a session runtime state record.
+pub fn runtime_state_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir
+        .join("runtime")
+        .join(format!("{session_id}.json"))
+}
+
+/// Persist a final session status into both the TOML metadata and the runtime
+/// sidecar so future renders do not keep stale active states around.
+pub fn persist_session_status(
+    sessions_dir: &Path,
+    session_id: &str,
+    status: AgentStatus,
+) -> std::io::Result<()> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = Session::load(&session_path)?;
+    session.update_status(status);
+    session.save(sessions_dir)?;
+    SessionRuntimeState::new(status).save(&runtime_state_path(sessions_dir, session_id))
+}
+
+fn hook_event_status(event: &str) -> Option<AgentStatus> {
+    match event {
+        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
+            Some(AgentStatus::Running)
+        }
+        "Stop" => Some(AgentStatus::WaitingInput),
+        _ => None,
     }
 }
 
@@ -202,5 +289,25 @@ mod tests {
         std::fs::write(&path, "not valid toml {{{{").unwrap();
         let result = Session::load(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn hook_runtime_state_maps_running_and_waiting_events() {
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+        ] {
+            let runtime = SessionRuntimeState::from_hook_event(event).expect("running event");
+            assert_eq!(runtime.status, AgentStatus::Running, "{event}");
+            assert_eq!(runtime.source_event.as_deref(), Some(event));
+        }
+
+        let waiting = SessionRuntimeState::from_hook_event("Stop").expect("waiting event");
+        assert_eq!(waiting.status, AgentStatus::WaitingInput);
+        assert_eq!(waiting.source_event.as_deref(), Some("Stop"));
+
+        assert!(SessionRuntimeState::from_hook_event("Notification").is_none());
     }
 }

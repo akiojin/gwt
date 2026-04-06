@@ -14,6 +14,9 @@ pub mod version_cache;
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use launch::{resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner};
-pub use session::Session;
+pub use session::{
+    persist_session_status, runtime_state_path, Session, SessionRuntimeState, GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
+};
 pub use types::{AgentColor, AgentId, AgentInfo, AgentStatus, SessionMode};
 pub use version_cache::{build_version_options, VersionCache, VersionOption};

@@ -1,6 +1,6 @@
 //! Distribute bundled skill assets to a target worktree.
 
-use crate::assets::{CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_SKILLS};
+use crate::assets::{CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_SKILLS, CODEX_HOOKS};
 use include_dir::Dir;
 use std::fs;
 use std::io;
@@ -22,6 +22,7 @@ pub struct DistributeReport {
 /// - `.claude/commands/gwt-*.md`
 /// - `.claude/hooks/scripts/gwt-*.mjs`
 /// - `.codex/skills/gwt-*/`  (same skill content)
+/// - `.codex/hooks/scripts/gwt-*.mjs`
 pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
 
@@ -44,6 +45,11 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
 
     // Codex targets (skills only)
     write_dir_assets(&CLAUDE_SKILLS, &worktree.join(".codex/skills"), &mut report)?;
+    write_dir_assets(
+        &CODEX_HOOKS,
+        &worktree.join(".codex/hooks/scripts"),
+        &mut report,
+    )?;
 
     Ok(report)
 }
@@ -92,6 +98,14 @@ mod tests {
         distribute_to_worktree(dir.path()).unwrap();
         let skill_md = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
         assert!(skill_md.exists(), "expected {}", skill_md.display());
+    }
+
+    #[test]
+    fn distribute_creates_codex_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        distribute_to_worktree(dir.path()).unwrap();
+        let hook = dir.path().join(".codex/hooks/scripts/gwt-forward-hook.mjs");
+        assert!(hook.exists(), "expected {}", hook.display());
     }
 
     #[test]

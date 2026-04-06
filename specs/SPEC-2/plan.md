@@ -689,6 +689,26 @@ Close the remaining workspace-shell usability gap where session PTYs rightfully 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
 - SPEC-4 (GitHub): Git status and PR data for detail sections
 - SPEC-10 (Workspace): Worktree management for delete action
+- SPEC-9 (Infrastructure): Embedded Claude/Codex hook assets and hooks merge remain the distribution owner for hook-managed worktree assets
+
+### Phase 50: Restore Hook-Derived Branch Session Discovery (10 tasks)
+Bring back the old-TUI scanability contract by letting Branches show live agent activity directly in the list, using hook-derived runtime state instead of requiring a jump into Branch Detail.
+
+50.1: Hook runtime state ingestion (4 tasks)
+- Inject stable gwt session runtime environment into launched agent PTYs so embedded hook scripts can identify the correct session runtime record.
+- Store hook-derived runtime state in a lightweight sidecar next to the persisted session TOML and read it back without blocking or failing the list render.
+- Map `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` to `Running`, and `Stop` to `WaitingInput`.
+- When a PTY exits or the user closes a session tab, persist `Stopped` so stale waiting/running state cannot linger.
+
+50.2: Branches list rendering (4 tasks)
+- Derive one highest-priority live agent-session summary per branch from the existing session tabs plus the hook runtime sidecar.
+- Render that summary right-aligned in the Branches list while preserving the old-TUI left-side branch line contract.
+- Reuse the existing tick cadence for a running spinner and keep waiting state visually distinct.
+- Make the row width-aware so the right side shortens or disappears before the branch name becomes unreadable.
+
+50.3: Verification and artifact sync (2 tasks)
+- Add focused RED coverage for hook-state mapping, launch env injection, session cleanup, and Branches-row rendering at wide and narrow widths.
+- Re-run focused and broad workspace verification, then refresh SPEC-2 progress evidence and metadata.
 
 ## Verification
 

@@ -14,6 +14,7 @@ const GWT_EXCLUDE_PATTERNS: &[&str] = &[
     ".claude/hooks/scripts/gwt-*",
     ".claude/settings.local.json",
     ".codex/skills/gwt-*",
+    ".codex/hooks/scripts/gwt-*",
 ];
 
 /// Update `.git/info/exclude` to include gwt-managed asset exclusions.
@@ -93,6 +94,7 @@ mod tests {
         assert!(result.contains(END_MARKER));
         assert!(result.contains(".claude/skills/gwt-*"));
         assert!(result.contains(".codex/skills/gwt-*"));
+        assert!(result.contains(".codex/hooks/scripts/gwt-*"));
         assert!(!result.contains(".agents/skills/gwt-*"));
     }
 

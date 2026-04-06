@@ -4,6 +4,8 @@
 
 gwt-tui's workspace shell manages terminal sessions (shell and agent) with two display modes: tab view (one session visible at a time) and split window (equal grid showing multiple sessions simultaneously). A management panel containing Branches, Issues, PRs, Profiles, Git View, Versions, Settings, and Logs tabs can be toggled on/off. All navigation uses a Ctrl+G prefix key system with a 2-second timeout. Session state is persisted for restore on restart. The application follows an Elm Architecture pattern (Model/Message/Update/View).
 
+The Branches surface also inherits the old-TUI branch-first discovery contract: developers should be able to scan the branch list and immediately see whether a branch currently has an active coding session and whether that session is still running tools or is waiting for user input. For Claude Code and Codex, that live state is derived from hook events distributed into each launched worktree.
+
 ## User Stories
 
 ### US-1: Switch Between Tab and Split Window Modes (P0) -- PARTIALLY IMPLEMENTED
@@ -79,6 +81,18 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 2. Given I press Ctrl+G, when I press an unbound key, then no action is taken and the prefix is consumed.
 3. Given a terminal app is running inside a session, when I type Ctrl+G followed by a bound key, then gwt intercepts it (not the terminal app).
 
+### US-8: Discover Running And Waiting Agent Sessions From Branches (P1) -- PLANNED
+
+As a developer, I want the Branches list to show hook-derived live session state so that I can tell at a glance which branches are actively running tools and which branches are waiting for my input.
+
+**Acceptance Scenarios**
+
+1. Given a Codex or Claude Code agent session on branch `feature/x` emits `SessionStart`, `UserPromptSubmit`, `PreToolUse`, or `PostToolUse`, when the Branches list renders, then the `feature/x` row shows a right-aligned running indicator without opening Branch Detail.
+2. Given the same session later emits `Stop` and the PTY is still alive, when the Branches list renders, then the row switches to a distinct waiting-for-input indicator instead of disappearing.
+3. Given the session PTY exits or the user closes the session tab, when the next cleanup tick runs, then the branch row no longer shows an active or waiting indicator for that session.
+4. Given multiple active agent sessions belong to the same branch, when the Branches list renders, then exactly one right-aligned summary is shown and `Running` wins over `WaitingInput`.
+5. Given the management pane is narrow, when the Branches list cannot fit both the branch label and the full session summary, then the branch name and core branch icons stay visible and the session summary shortens or disappears before the left side becomes unreadable.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -90,6 +104,10 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - Split mode with more than 9 sessions (grid layout scaling).
 - Active session exits while the management panel is visible and terminal focus is still selected.
 - Multiple PTY sessions exit in the same tick.
+- Hook scripts run without `GWT_SESSION_RUNTIME_PATH` in the environment (must fail open without breaking the agent turn).
+- Hook runtime sidecar file is missing or malformed while the Branches list is rendering.
+- A session has emitted `Stop` (waiting for input) but the user closes the PTY before another hook event arrives.
+- Branch rows at narrow widths must keep the branch label and `◆` / `◇` / `▸` legible even when the live session indicator cannot fit.
 
 ## Functional Requirements
 
@@ -132,6 +150,14 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006l**: Branch-detail preload keeps at most one active refresh worker. When startup, `r`, or a Docker action schedules a newer preload, any superseded worker is canceled and must not continue walking later branches in the background.
 - **FR-006m**: Docker container state used by Branch Detail preload is captured once per refresh and shared across every branch payload in that refresh; the preload path must not call `docker ps -a` once per branch.
 - **FR-006n**: Branch-detail preload results are applied incrementally. A single UI tick must not drain an unbounded number of preload events, so large branch sets cannot monopolize one frame and stall Branches list input.
+- **FR-006o**: Branch list rows may render one right-aligned live agent-session summary derived from hook-managed runtime state. The left side remains `name + worktree icon + HEAD indicator`, and the right side is reserved for the highest-priority active agent session on that branch.
+- **FR-006p**: Hook-derived branch-session state distinguishes at least `Running` and `WaitingInput`. `Running` takes precedence over `WaitingInput` when multiple live agent sessions map to the same branch.
+- **FR-006q**: The running indicator is animated from the existing TUI tick cadence, while the waiting indicator remains visually distinct but stable enough to read in the list.
+- **FR-006r**: Branch-row live session state is derived from Claude Code / Codex hook events distributed into launched worktrees. `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` mark the session `Running`; `Stop` marks it `WaitingInput`.
+- **FR-006s**: Agent launches inject stable gwt session runtime environment into the spawned PTY so embedded hook scripts can update the correct session runtime record without user configuration.
+- **FR-006t**: Hook scripts persist lightweight runtime state in a per-session sidecar that is safe to overwrite on every event and safe for the Branches list to ignore when the file is absent or corrupted.
+- **FR-006u**: Session cleanup is authoritative for terminal-backed reality. When an agent PTY exits or the user closes its tab, gwt marks the persisted session `Stopped` and removes that branch's live-session indicator from the list on the next render.
+- **FR-006v**: Branch-row live session summaries are width-aware. When space is limited, the right-aligned summary shortens before the branch label or branch icons are truncated, and extremely narrow layouts may omit the right side entirely.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-008a**: PTY exit detection removes the corresponding session tab automatically, clamps the active session index to the nearest surviving tab, and drops the stale PTY handle in the same tick.
@@ -139,6 +165,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-009a**: The event loop drains PTY output before blocking on the next crossterm poll so terminal echo/render updates are not delayed by the 100ms tick interval.
 - **FR-010**: Help overlay via Ctrl+G,? auto-collects keybindings from code definitions.
 - **FR-011**: Session metadata persisted to `~/.gwt/sessions/` in TOML format.
+- **FR-011a**: Hook-derived runtime session state is persisted alongside session metadata as a lightweight per-session sidecar so the Branches list can read live `Running` / `WaitingInput` state without reparsing PTY scrollback.
 - **FR-012**: Restore session layout on gwt restart (best-effort: working directories, display mode, active tab).
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-013a**: The bottom status line keeps the old-TUI always-on context model: session summary and branch/agent context stay visible even while focus changes.
@@ -318,3 +345,5 @@ agent_id = "claude"  # only for agent type
 - **SC-008**: On startup, the default shell PTY sees the same row/column geometry as the visible session pane before any manual terminal resize occurs.
 - **SC-009**: Toggling the management panel resizes the visible PTY viewport in the same update cycle, without waiting for a later terminal resize event.
 - **SC-010**: Exited PTY sessions are automatically removed from the session strip and never leave a dead tab behind.
+- **SC-011**: The Branches list shows hook-derived `Running` / `WaitingInput` state for live agent sessions without requiring the user to open Branch Detail.
+- **SC-012**: Closing or exiting an agent session clears its branch-row live indicator and persists a `Stopped` session status.

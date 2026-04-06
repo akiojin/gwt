@@ -9,8 +9,10 @@ use std::thread;
 use std::time::Duration;
 
 use gwt_agent::{
-    custom::CustomAgentType, AgentDetector, AgentId, AgentLaunchBuilder, CustomCodingAgent,
-    DetectedAgent, LaunchConfig, Session as AgentSession, SessionMode, VersionCache,
+    custom::CustomAgentType, persist_session_status, runtime_state_path, AgentDetector, AgentId,
+    AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig, Session as AgentSession,
+    SessionMode, SessionRuntimeState, VersionCache, GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings, VoiceConfig};
@@ -142,6 +144,10 @@ fn drain_pending_pty_inputs(model: &mut Model) {
 
 /// Poll live PTY handles for process exit and notify the user.
 fn check_pty_exits(model: &mut Model) {
+    check_pty_exits_with(model, &gwt_sessions_dir());
+}
+
+fn check_pty_exits_with(model: &mut Model, sessions_dir: &Path) {
     let exited: Vec<String> = model
         .pty_handles
         .iter()
@@ -154,6 +160,9 @@ fn check_pty_exits(model: &mut Model) {
     for id in exited {
         model.pty_handles.remove(&id);
         if let Some(index) = model.sessions.iter().position(|session| session.id == id) {
+            if matches!(model.sessions[index].tab_type, SessionTabType::Agent { .. }) {
+                persist_agent_session_stopped(sessions_dir, &id);
+            }
             model.sessions.remove(index);
             if model.sessions.is_empty() {
                 model.active_session = 0;
@@ -172,6 +181,38 @@ fn check_pty_exits(model: &mut Model) {
             ),
         );
     }
+
+    refresh_branch_live_session_summaries_with(model, sessions_dir);
+}
+
+fn persist_agent_session_stopped(sessions_dir: &Path, session_id: &str) {
+    if let Err(err) =
+        persist_session_status(sessions_dir, session_id, gwt_agent::AgentStatus::Stopped)
+    {
+        tracing::warn!(session_id, error = %err, "failed to persist stopped agent session");
+    }
+}
+
+fn inject_agent_hook_runtime_env(
+    env: &mut HashMap<String, String>,
+    sessions_dir: &Path,
+    session_id: &str,
+) {
+    env.insert(GWT_SESSION_ID_ENV.to_string(), session_id.to_string());
+    env.insert(
+        GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+        runtime_state_path(sessions_dir, session_id)
+            .to_string_lossy()
+            .into_owned(),
+    );
+}
+
+fn refresh_branch_live_session_summaries(model: &mut Model) {
+    refresh_branch_live_session_summaries_with(model, &gwt_sessions_dir());
+}
+
+fn refresh_branch_live_session_summaries_with(model: &mut Model, sessions_dir: &Path) {
+    model.branches.live_session_summaries = branch_live_session_summaries_with(model, sessions_dir);
 }
 
 /// Process a message and update the model (Elm: update).
@@ -271,16 +312,7 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::CloseSession => {
-            if model.sessions.len() > 1 {
-                let id = model.sessions[model.active_session].id.clone();
-                if let Some(pty) = model.pty_handles.remove(&id) {
-                    let _ = pty.kill();
-                }
-                model.sessions.remove(model.active_session);
-                if model.active_session >= model.sessions.len() {
-                    model.active_session = model.sessions.len() - 1;
-                }
-            }
+            close_active_session_with(model, &gwt_sessions_dir());
         }
         Message::Resize(w, h) => {
             model.terminal_size = (w, h);
@@ -335,6 +367,9 @@ pub fn update(model: &mut Model, msg: Message) {
             drain_branch_detail_events(model);
             tick_notification(model);
             check_pty_exits(model);
+            model.branches.session_animation_tick =
+                model.branches.session_animation_tick.wrapping_add(1);
+            refresh_branch_live_session_summaries(model);
             // Forward tick to wizard (AI suggest spinner) when active
             if let Some(ref mut wizard) = model.wizard {
                 if wizard.ai_suggest.loading {
@@ -1711,6 +1746,69 @@ fn branch_session_summaries(model: &Model) -> Vec<screens::branches::DetailSessi
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+fn branch_live_session_summaries_with(
+    model: &Model,
+    sessions_dir: &Path,
+) -> HashMap<String, screens::branches::BranchLiveSessionSummary> {
+    let mut summaries: HashMap<String, screens::branches::BranchLiveSessionSummary> =
+        HashMap::new();
+
+    for session in &model.sessions {
+        let SessionTabType::Agent { .. } = &session.tab_type else {
+            continue;
+        };
+
+        let path = sessions_dir.join(format!("{}.toml", session.id));
+        let Ok(persisted) = AgentSession::load(&path) else {
+            continue;
+        };
+        let status = agent_session_runtime_status(sessions_dir, &session.id, &persisted);
+        if !matches!(
+            status,
+            gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
+        ) {
+            continue;
+        }
+
+        let candidate = screens::branches::BranchLiveSessionSummary {
+            status,
+            name: session.name.clone(),
+        };
+
+        let replace = summaries
+            .get(&persisted.branch)
+            .map(|current| {
+                branch_live_session_priority(candidate.status)
+                    > branch_live_session_priority(current.status)
+            })
+            .unwrap_or(true);
+        if replace {
+            summaries.insert(persisted.branch.clone(), candidate);
+        }
+    }
+
+    summaries
+}
+
+fn agent_session_runtime_status(
+    sessions_dir: &Path,
+    session_id: &str,
+    persisted: &AgentSession,
+) -> gwt_agent::AgentStatus {
+    SessionRuntimeState::load(&runtime_state_path(sessions_dir, session_id))
+        .map(|runtime| runtime.status)
+        .unwrap_or(persisted.status)
+}
+
+fn branch_live_session_priority(status: gwt_agent::AgentStatus) -> u8 {
+    match status {
+        gwt_agent::AgentStatus::Running => 2,
+        gwt_agent::AgentStatus::WaitingInput => 1,
+        gwt_agent::AgentStatus::Unknown | gwt_agent::AgentStatus::Stopped => 0,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn branch_session_summaries_with(
     model: &Model,
     sessions_dir: &Path,
@@ -2676,12 +2774,14 @@ fn materialize_pending_launch_with(
     }
 
     // Spawn PTY process for the agent session.
+    let mut pty_env = config.env_vars.clone();
+    inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
     let pty_config = gwt_terminal::pty::SpawnConfig {
         command: config.command.clone(),
         args: config.args.clone(),
         cols,
         rows,
-        env: config.env_vars.clone(),
+        env: pty_env,
         cwd: config.working_dir.clone(),
     };
     if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
@@ -2717,6 +2817,29 @@ fn materialize_pending_launch_with(
     );
 
     Ok(())
+}
+
+fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
+    if model.sessions.len() <= 1 {
+        return;
+    }
+
+    let id = model.sessions[model.active_session].id.clone();
+    let is_agent = matches!(
+        model.sessions[model.active_session].tab_type,
+        SessionTabType::Agent { .. }
+    );
+    if is_agent {
+        persist_agent_session_stopped(sessions_dir, &id);
+    }
+    if let Some(pty) = model.pty_handles.remove(&id) {
+        let _ = pty.kill();
+    }
+    model.sessions.remove(model.active_session);
+    if model.active_session >= model.sessions.len() {
+        model.active_session = model.sessions.len() - 1;
+    }
+    refresh_branch_live_session_summaries_with(model, sessions_dir);
 }
 
 fn configure_existing_branch_wizard_with_sessions(
@@ -7071,6 +7194,65 @@ mod tests {
     }
 
     #[test]
+    fn branch_live_session_summaries_with_prefers_running_over_waiting_for_same_branch() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+        }];
+
+        let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
+        running.save(dir.path()).expect("persist running session");
+        SessionRuntimeState::from_hook_event("PostToolUse")
+            .expect("running runtime")
+            .save(&runtime_state_path(dir.path(), &running.id))
+            .expect("persist running runtime");
+
+        let waiting = AgentSession::new(&selected_worktree, "feature/test", AgentId::ClaudeCode);
+        waiting.save(dir.path()).expect("persist waiting session");
+        SessionRuntimeState::from_hook_event("Stop")
+            .expect("waiting runtime")
+            .save(&runtime_state_path(dir.path(), &waiting.id))
+            .expect("persist waiting runtime");
+
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: waiting.id.clone(),
+                name: "Claude Code".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "claude".to_string(),
+                    color: crate::model::AgentColor::Green,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+            crate::model::SessionTab {
+                id: running.id.clone(),
+                name: "Codex".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "codex".to_string(),
+                    color: crate::model::AgentColor::Blue,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+        ];
+
+        let summaries = branch_live_session_summaries_with(&model, dir.path());
+        let summary = summaries.get("feature/test").expect("branch live summary");
+        assert_eq!(summary.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(summary.name, "Codex");
+    }
+
+    #[test]
     fn load_custom_agents_from_path_parses_spec_schema() {
         let dir = tempfile::tempdir().expect("temp config dir");
         let config_path = dir.path().join("config.toml");
@@ -7321,6 +7503,122 @@ CUSTOM_ENV = "enabled"
         assert_eq!(persisted.model.as_deref(), Some("sonnet"));
         assert_eq!(persisted.tool_version.as_deref(), Some("latest"));
         assert_eq!(persisted.display_name, "Claude Code");
+    }
+
+    #[test]
+    fn inject_agent_hook_runtime_env_sets_session_identifiers() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut env = HashMap::from([(String::from("EXISTING"), String::from("1"))]);
+
+        inject_agent_hook_runtime_env(&mut env, dir.path(), "session-123");
+
+        assert_eq!(env.get("EXISTING").map(String::as_str), Some("1"));
+        assert_eq!(
+            env.get(gwt_agent::GWT_SESSION_ID_ENV).map(String::as_str),
+            Some("session-123")
+        );
+        assert_eq!(
+            env.get(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+                .map(String::as_str),
+            Some(
+                runtime_state_path(dir.path(), "session-123")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[test]
+    fn close_active_session_with_marks_agent_session_stopped() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+        SessionRuntimeState::from_hook_event("SessionStart")
+            .expect("running runtime")
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("persist running runtime");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.active_session = 1;
+
+        close_active_session_with(&mut model, dir.path());
+
+        assert_eq!(model.session_count(), 1);
+        let persisted = AgentSession::load(&dir.path().join(format!("{}.toml", persisted.id)))
+            .expect("load stopped agent session");
+        assert_eq!(persisted.status, gwt_agent::AgentStatus::Stopped);
+        let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("load stopped runtime");
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn check_pty_exits_with_marks_agent_session_stopped() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.active_session = 1;
+
+        spawn_pty_for_session(
+            &mut model,
+            &persisted.id,
+            gwt_terminal::pty::SpawnConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-lc".to_string(), "exit 0".to_string()],
+                cols: 80,
+                rows: 24,
+                env: HashMap::new(),
+                cwd: Some(worktree.clone()),
+            },
+        )
+        .expect("spawn short-lived PTY");
+
+        for _ in 0..50 {
+            let exited = model
+                .pty_handles
+                .get(&persisted.id)
+                .and_then(|pty| pty.try_wait().ok().flatten())
+                .is_some();
+            if exited {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        check_pty_exits_with(&mut model, dir.path());
+
+        assert_eq!(model.session_count(), 1);
+        let persisted = AgentSession::load(&dir.path().join(format!("{}.toml", persisted.id)))
+            .expect("load stopped agent session");
+        assert_eq!(persisted.status, gwt_agent::AgentStatus::Stopped);
     }
 
     #[test]

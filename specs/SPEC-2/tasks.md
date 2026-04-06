@@ -491,3 +491,16 @@ banner in favor of pane-title chrome.
 - [x] T313 [P] Write RED test: applying the forward focus-cycle message from `ActiveLayer::Main` reveals management and lands on the next logical pane instead of forwarding `Tab` into the PTY.
 - [x] T314 Update the keybind registry and app update path so prefixed focus-cycle commands work consistently from Shell and Agent panes.
 - [x] T315 Refresh `SPEC-2` artifacts and focused verification evidence for the prefixed focus-escape contract.
+
+## Phase 50: Restore Hook-Derived Branch Session Discovery
+
+- [x] T316 [P] Write RED test: hook runtime sidecar maps `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
+- [x] T317 [P] Write RED test: Branches session-summary extraction prefers `Running` over `WaitingInput` when multiple live agent sessions belong to the same branch.
+- [x] T318 [P] Write RED test: launched agent PTYs receive stable gwt hook-runtime environment pointing at the correct session runtime record.
+- [x] T319 [P] Write RED test: PTY exit and explicit session close persist `Stopped` for agent sessions.
+- [x] T320 [P] Write RED test: wide Branches rows render a right-aligned running summary without regressing the left-side branch line.
+- [x] T321 [P] Write RED test: waiting rows render a distinct waiting summary.
+- [x] T322 [P] Write RED test: narrow Branches rows shorten or omit the live summary before the branch label and core icons disappear.
+- [x] T323 Implement hook runtime sidecar persistence, launch env injection, and `Stopped` cleanup updates in `gwt-agent` / `app.rs`.
+- [x] T324 Implement branch-scoped live session summary extraction and right-aligned Branches row rendering in `app.rs` / `branches.rs`.
+- [x] T325 Refresh `SPEC-2` artifacts and run focused plus broad verification for hook-derived Branches session visibility.

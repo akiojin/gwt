@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `288/288` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T05:38:09Z`
+- Task progress: `325/325` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T10:22:50Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -61,6 +61,11 @@
 - `Ctrl+G,g` pane toggles now resize live PTYs and vt100 parsers immediately to the new visible session geometry, keeping placeholder chrome and actual terminal width aligned.
 - Exited PTY-backed sessions now remove their tabs automatically, clamp the active session safely, and notify with the auto-close result instead of leaving dead tabs behind.
 - Session PTYs now also expose an explicit prefixed focus-escape path: `Ctrl+G,Tab` and `Ctrl+G,Shift+Tab` cycle focus without stealing the raw plain-`Tab` key from Shell or Agent processes.
+- Agent PTYs now receive stable gwt hook-runtime environment (`GWT_SESSION_ID`, `GWT_SESSION_RUNTIME_PATH`), so Codex / Claude hook scripts can update the correct session runtime record without shell-specific discovery logic.
+- Hook-managed runtime state is now persisted in a lightweight JSON sidecar next to the session TOML, mapping `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
+- Branches rows now show a right-aligned live agent summary again: running sessions animate with a spinner, waiting sessions render a distinct `wait` indicator, and narrow panes keep the branch label readable by shortening or omitting the right side first.
+- Explicit agent-session close and detected PTY exit now persist `Stopped`, so stale running/waiting indicators do not survive after the session is gone.
+- Embedded asset distribution now also writes `.codex/hooks/scripts/gwt-*.mjs`, so launched worktrees get the updated Codex hook script alongside the already-distributed Claude hook assets.
 
 ## Next
-- Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.
+- Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.
