@@ -45,6 +45,7 @@ use crate::{
 use crate::custom_agents::{load_custom_agents_from_path, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV};
 
 static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// Cap branch-detail preload event application per tick so one refresh burst
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
@@ -589,6 +590,7 @@ pub fn update(model: &mut Model, msg: Message) {
 /// best-effort: failures are silently ignored so the TUI still starts.
 pub fn load_initial_data(model: &mut Model) {
     schedule_startup_version_cache_refresh();
+    let has_git_remote = repo_has_git_remote(&model.repo_path);
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -658,19 +660,37 @@ pub fn load_initial_data(model: &mut Model) {
 
     schedule_branch_detail_prefetch(model);
 
-    // -- Specs --
-    load_specs(model);
-
     // -- Git View --
     load_git_view_with(
         model,
         gwt_git::diff::get_status,
         |repo_path| gwt_git::commit::recent_commits(repo_path, 10),
         gwt_git::branch::list_branches,
-        fetch_current_pr_link,
+        |repo_path| {
+            if has_git_remote {
+                fetch_current_pr_link(repo_path)
+            } else {
+                Ok(None)
+            }
+        },
     );
 
-    load_pr_dashboard(model);
+    if has_git_remote {
+        load_pr_dashboard(model);
+    }
+}
+
+fn repo_has_git_remote(repo_path: &std::path::Path) -> bool {
+    let output = match Command::new("git")
+        .args(["remote"])
+        .current_dir(repo_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
 }
 
 fn load_git_view_with<S, C, B, P>(
@@ -785,76 +805,6 @@ fn parse_current_pr_link_json(json: &str) -> gwt_core::Result<Option<String>> {
         .get("url")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned))
-}
-
-fn load_specs(model: &mut Model) {
-    model.specs.spec_root = Some(model.repo_path.clone());
-
-    let mut items = Vec::new();
-    let specs_dir = model.repo_path.join("specs");
-    if let Ok(entries) = std::fs::read_dir(specs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !dir_name.starts_with("SPEC-") {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(path.join("metadata.json")) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-                continue;
-            };
-
-            items.push(screens::specs::SpecItem {
-                id: value
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(dir_name)
-                    .to_string(),
-                title: value
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                phase: value
-                    .get("phase")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                status: value
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            });
-        }
-    }
-
-    items.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
-    screens::specs::update(
-        &mut model.specs,
-        screens::specs::SpecsMessage::SetSpecs(items),
-    );
-}
-
-fn read_spec_body(repo_path: &Path, spec_id: &str) -> String {
-    std::fs::read_to_string(repo_path.join("specs").join(spec_id).join("spec.md"))
-        .unwrap_or_default()
-}
-
-fn spec_sort_key(spec_id: &str) -> (u32, &str) {
-    let numeric = spec_id
-        .strip_prefix("SPEC-")
-        .unwrap_or(spec_id)
-        .parse::<u32>()
-        .unwrap_or(u32::MAX);
-    (numeric, spec_id)
 }
 
 fn switch_management_tab(model: &mut Model, tab: ManagementTab) {
@@ -1275,16 +1225,9 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::settings::SettingsMessage;
     use screens::versions::VersionsMessage;
 
-    let specs_detail_handles_horizontal_navigation =
-        model.management_tab == ManagementTab::Specs && model.specs.detail_view;
-
     // Left/Right switches tabs when not in text input mode.
-    // Ctrl+Left/Right is reserved for sub-tab switching within individual tabs,
-    // and Specs detail owns plain Left/Right for artifact section navigation.
-    if !is_in_text_input_mode(model)
-        && !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !specs_detail_handles_horizontal_navigation
-    {
+    // Ctrl+Left/Right is reserved for sub-tab switching within individual tabs.
+    if !is_in_text_input_mode(model) && !key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Right => {
                 model.management_tab = model.management_tab.next();
@@ -1352,96 +1295,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             };
             if let Some(m) = msg {
                 screens::branches::update(&mut model.branches, m);
-            } else if key.code == KeyCode::Esc {
-                fallback_management_escape(model);
-            }
-        }
-        ManagementTab::Specs => {
-            use screens::specs::SpecsMessage;
-
-            if model.specs.detail_editing {
-                let msg = match key.code {
-                    KeyCode::Enter => Some(SpecsMessage::SaveSectionEdit),
-                    KeyCode::Esc => Some(SpecsMessage::CancelSectionEdit),
-                    KeyCode::Backspace => Some(SpecsMessage::SectionEditBackspace),
-                    KeyCode::Char(ch) => Some(SpecsMessage::SectionEditInput(ch)),
-                    _ => None,
-                };
-                if let Some(m) = msg {
-                    screens::specs::update(&mut model.specs, m);
-                }
-                return;
-            }
-
-            if model.specs.editing {
-                let msg = match key.code {
-                    KeyCode::Enter => Some(SpecsMessage::SaveEdit),
-                    KeyCode::Esc => Some(SpecsMessage::CancelEdit),
-                    KeyCode::Up => Some(SpecsMessage::MoveUp),
-                    KeyCode::Down => Some(SpecsMessage::MoveDown),
-                    _ => None,
-                };
-                if let Some(m) = msg {
-                    screens::specs::update(&mut model.specs, m);
-                }
-                return;
-            }
-
-            if model.specs.search_active && !model.specs.detail_view {
-                let msg = match key.code {
-                    KeyCode::Esc => Some(SpecsMessage::SearchClear),
-                    KeyCode::Backspace => Some(SpecsMessage::SearchBackspace),
-                    _ => search_input_char(&key).map(SpecsMessage::SearchInput),
-                };
-                if let Some(m) = msg {
-                    screens::specs::update(&mut model.specs, m);
-                    return;
-                }
-            }
-
-            let msg = match key.code {
-                KeyCode::Down => Some(SpecsMessage::MoveDown),
-                KeyCode::Up => Some(SpecsMessage::MoveUp),
-                KeyCode::Enter
-                    if !key.modifiers.contains(KeyModifiers::SHIFT) && !model.specs.detail_view =>
-                {
-                    Some(SpecsMessage::ToggleDetail)
-                }
-                KeyCode::Char('e')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && model.specs.detail_view =>
-                {
-                    Some(SpecsMessage::StartSectionEdit)
-                }
-                KeyCode::Char('E') if model.specs.detail_view => Some(SpecsMessage::StartFileEdit),
-                KeyCode::Char('e') if model.specs.detail_view => Some(SpecsMessage::StartEdit),
-                KeyCode::Char('s') if model.specs.detail_view => {
-                    Some(SpecsMessage::StartStatusEdit)
-                }
-                KeyCode::Esc if model.specs.detail_view => Some(SpecsMessage::ToggleDetail),
-                KeyCode::Left if model.specs.detail_view => Some(SpecsMessage::PrevSection),
-                KeyCode::Right if model.specs.detail_view => Some(SpecsMessage::NextSection),
-                KeyCode::Char('/') => Some(SpecsMessage::SearchStart),
-                KeyCode::Char('r') => {
-                    load_specs(model);
-                    return;
-                }
-                _ => None,
-            };
-
-            if let Some(m) = msg {
-                screens::specs::update(&mut model.specs, m);
-            } else if key.code == KeyCode::Enter
-                && key.modifiers.contains(KeyModifiers::SHIFT)
-                && model.specs.detail_view
-            {
-                if let Some(spec) = model.specs.selected_spec() {
-                    let spec_context = screens::wizard::SpecContext::new(
-                        spec.id.clone(),
-                        spec.title.clone(),
-                        read_spec_body(&model.repo_path, &spec.id),
-                    );
-                    update(model, Message::OpenWizardWithSpec(spec_context));
-                }
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -2180,7 +2033,13 @@ fn schedule_branch_detail_prefetch(model: &mut Model) {
     let (generation, branches) = model.branches.begin_detail_refresh();
     let events = Arc::new(Mutex::new(VecDeque::new()));
     let cancel = Arc::new(AtomicBool::new(false));
-    let handle = spawn_branch_detail_worker(events.clone(), cancel.clone(), generation, branches);
+    let handle = spawn_branch_detail_worker(
+        events.clone(),
+        cancel.clone(),
+        generation,
+        branches,
+        branch_detail_docker_snapshotter(model),
+    );
 
     if let Some(worker) = model.branch_detail_worker.as_mut() {
         worker.replace(events, cancel, handle);
@@ -2196,12 +2055,13 @@ fn spawn_branch_detail_worker(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
+    docker_snapshotter: Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         if cancel.load(Ordering::SeqCst) {
             return;
         }
-        let docker_containers = gwt_docker::list_containers().unwrap_or_default();
+        let docker_containers = docker_snapshotter();
         if cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -2214,6 +2074,17 @@ fn spawn_branch_detail_worker(
             screens::branches::load_branch_detail,
         );
     })
+}
+
+fn branch_detail_docker_snapshotter(
+    _model: &Model,
+) -> Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync> {
+    #[cfg(test)]
+    if let Some(snapshotter) = _model.branch_detail_docker_snapshotter.as_ref() {
+        return snapshotter.clone();
+    }
+
+    Arc::new(|| gwt_docker::list_containers().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -2627,7 +2498,7 @@ fn build_launch_config_from_wizard_with_custom_agents(
     }
 
     if wizard.skip_perms {
-        builder = builder.permission_mode(gwt_agent::launch::PermissionMode::Auto);
+        builder = builder.skip_permissions(true);
     }
     let session_mode = match wizard.mode.as_str() {
         "continue" => SessionMode::Continue,
@@ -2665,6 +2536,9 @@ fn build_custom_launch_config_from_wizard(
             SessionMode::Continue => args.extend(mode_args.continue_mode.clone()),
             SessionMode::Resume => args.extend(mode_args.resume.clone()),
         }
+    }
+    if wizard.skip_perms {
+        args.extend(custom_agent.skip_permissions_args.clone());
     }
 
     let command = match custom_agent.agent_type {
@@ -3047,21 +2921,39 @@ fn schedule_startup_version_cache_refresh() {
     schedule_startup_version_cache_refresh_with(
         wizard_version_cache_path(),
         AgentDetector::detect_all,
+        |task| {
+            let _ = thread::spawn(task);
+        },
         schedule_wizard_version_cache_refresh,
     );
 }
 
-fn schedule_startup_version_cache_refresh_with<Detect, Schedule>(
+fn schedule_startup_version_cache_refresh_with<Detect, Spawn, Schedule>(
     cache_path: PathBuf,
     detect_agents: Detect,
+    spawn_task: Spawn,
     schedule_refresh: Schedule,
 ) where
-    Detect: FnOnce() -> Vec<DetectedAgent>,
-    Schedule: FnOnce(PathBuf, Vec<AgentId>),
+    Detect: FnOnce() -> Vec<DetectedAgent> + Send + 'static,
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>),
+    Schedule: FnOnce(PathBuf, Vec<AgentId>) + Send + 'static,
 {
-    let cache = VersionCache::load(&cache_path);
-    let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
-    schedule_refresh(cache_path, refresh_targets);
+    if STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    spawn_task(Box::new(move || {
+        let cache = VersionCache::load(&cache_path);
+        let (_, refresh_targets) = build_wizard_agent_options(detect_agents(), &cache);
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+        if refresh_targets.is_empty() {
+            return;
+        }
+        schedule_refresh(cache_path, refresh_targets);
+    }));
 }
 
 fn prepare_wizard_startup(
@@ -3412,9 +3304,6 @@ fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
-        ManagementTab::Specs => {
-            model.specs.search_active || model.specs.editing || model.specs.detail_editing
-        }
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -4079,7 +3968,6 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
         ManagementTab::Branches => {
             // Handled by render_management_panes directly
         }
-        ManagementTab::Specs => screens::specs::render(&model.specs, frame, area),
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -4223,15 +4111,6 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
         ManagementTab::Logs => logs_hint_text(model, compact),
         ManagementTab::PrDashboard => pr_dashboard_hint_text(model, compact),
         ManagementTab::Profiles => profiles_hint_text(model, compact),
-        ManagementTab::Specs => {
-            if model.specs.detail_editing {
-                generic_management_hint_text(compact, false, "cancel")
-            } else if model.specs.detail_view {
-                generic_management_hint_text(compact, false, "back")
-            } else {
-                generic_management_hint_text(compact, false, "term")
-            }
-        }
         ManagementTab::GitView => git_view_hint_text(compact),
         ManagementTab::Versions => versions_hint_text(compact),
     }
@@ -4530,6 +4409,8 @@ mod tests {
     use std::sync::Once;
     use tempfile::TempDir;
 
+    static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
@@ -4679,6 +4560,7 @@ mod tests {
                 continue_mode: vec!["--continue".to_string()],
                 resume: vec!["--resume".to_string()],
             }),
+            skip_permissions_args: vec!["--yolo".to_string()],
             env: HashMap::from([("CUSTOM_ENV".to_string(), "enabled".to_string())]),
         }
     }
@@ -4755,6 +4637,46 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
             None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        result
+    }
+
+    #[cfg(unix)]
+    fn write_fake_gh(script_body: &str) -> TempDir {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let script_path = dir.path().join("gh");
+        let mut file = fs::File::create(&script_path).expect("create fake gh");
+        file.write_all(script_body.as_bytes())
+            .expect("write fake gh");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = file.metadata().expect("stat fake gh").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod fake gh");
+
+        dir
+    }
+
+    #[cfg(unix)]
+    fn with_fake_gh<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::GH_PATH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = write_fake_gh(script_body);
+        let previous = std::env::var_os("PATH");
+        let mut entries = vec![dir.path().to_path_buf()];
+        if let Some(value) = previous.as_ref() {
+            entries.extend(std::env::split_paths(value));
+        }
+        let new_path = std::env::join_paths(entries).expect("join fake gh PATH");
+        std::env::set_var("PATH", &new_path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
 
         result
@@ -5356,15 +5278,15 @@ mod tests {
 
         assert!(first_line.contains("Branches"));
         assert!(
-            first_line.contains("Specs"),
+            first_line.contains("Issues"),
             "standard-width Branches title should keep the next nearby tab visible"
         );
         assert!(
-            first_line.contains("Issues"),
+            first_line.contains("PRs"),
             "standard-width Branches title should keep multiple nearby tabs visible"
         );
         assert!(
-            !first_line.contains("Settings"),
+            !first_line.contains("Profiles"),
             "standard-width Branches title should not try to render the full strip"
         );
     }
@@ -5379,23 +5301,23 @@ mod tests {
         let rendered = render_model_text(&model, 80, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
-        assert!(first_line.contains("Specs"));
+        assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
         assert!(
             first_line.contains("PRs"),
             "standard-width non-Branches title should keep the next nearby tab visible"
         );
         assert!(
-            !first_line.contains("Versions"),
+            !first_line.contains("Profiles"),
             "standard-width non-Branches title should not try to render distant tabs"
         );
     }
 
     #[test]
     fn compact_tab_window_start_keeps_active_tab_visible_for_single_slot_window() {
-        assert_eq!(compact_tab_window_start(9, 0, 1), 0);
-        assert_eq!(compact_tab_window_start(9, 3, 1), 3);
-        assert_eq!(compact_tab_window_start(9, 8, 1), 8);
+        assert_eq!(compact_tab_window_start(8, 0, 1), 0);
+        assert_eq!(compact_tab_window_start(8, 3, 1), 3);
+        assert_eq!(compact_tab_window_start(8, 7, 1), 7);
     }
 
     #[test]
@@ -5408,14 +5330,14 @@ mod tests {
         let rendered = render_model_text(&model, 120, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
-        assert!(first_line.contains("Specs"));
+        assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
         assert!(
             first_line.contains("PRs"),
             "when the full tab strip does not fit, medium-width panes should still keep nearby tabs visible"
         );
         assert!(
-            !first_line.contains("Logs"),
+            !first_line.contains("Profiles"),
             "medium-width panes should still omit distant tabs until the full strip fits"
         );
     }
@@ -5431,8 +5353,8 @@ mod tests {
         let first_line = rendered.lines().next().unwrap_or_default();
 
         assert!(first_line.contains("Branches"));
-        assert!(first_line.contains("Specs"));
         assert!(first_line.contains("Issues"));
+        assert!(!first_line.contains("Specs"));
     }
 
     fn shell_tab(id: &str, name: &str) -> crate::model::SessionTab {
@@ -5832,31 +5754,6 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-
-    fn write_spec_fixture(
-        repo_path: &std::path::Path,
-        spec_dir_name: &str,
-        id: &str,
-        title: &str,
-        phase: &str,
-        status: &str,
-    ) {
-        let spec_dir = repo_path.join("specs").join(spec_dir_name);
-        fs::create_dir_all(&spec_dir).expect("create spec dir");
-        fs::write(
-            spec_dir.join("metadata.json"),
-            serde_json::to_string_pretty(&serde_json::json!({
-                "id": id,
-                "title": title,
-                "phase": phase,
-                "status": status,
-            }))
-            .expect("serialize metadata"),
-        )
-        .expect("write metadata");
-        fs::write(spec_dir.join("spec.md"), format!("# {title}\n\nbody\n")).expect("write spec");
-    }
-
     #[test]
     fn update_quit_sets_flag() {
         let mut model = test_model();
@@ -6077,67 +5974,83 @@ mod tests {
     }
 
     #[test]
-    fn load_initial_data_populates_specs_from_metadata() {
-        let dir = tempfile::tempdir().expect("temp repo");
-        init_git_repo(dir.path());
-        write_spec_fixture(
-            dir.path(),
-            "SPEC-9",
-            "SPEC-9",
-            "Later spec",
-            "implementation",
-            "in-progress",
-        );
-        write_spec_fixture(
-            dir.path(),
-            "SPEC-2",
-            "SPEC-2",
-            "Earlier spec",
-            "done",
-            "done",
-        );
-
-        let mut model = Model::new(dir.path().to_path_buf());
-        load_initial_data(&mut model);
-
-        assert_eq!(model.specs.spec_root.as_deref(), Some(dir.path()));
-        assert_eq!(model.specs.specs.len(), 2);
-        assert_eq!(model.specs.specs[0].id, "SPEC-2");
-        assert_eq!(model.specs.specs[1].id, "SPEC-9");
-        assert_eq!(model.specs.specs[0].title, "Earlier spec");
-    }
-
-    #[test]
     fn load_initial_data_prefetches_branch_detail_async() {
         let dir = tempfile::tempdir().expect("temp repo");
         init_git_repo(dir.path());
         git_commit_allow_empty(dir.path(), "initial commit");
 
-        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.set_branch_detail_docker_snapshotter(|| {
+            thread::sleep(std::time::Duration::from_millis(250));
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
+        });
 
-        with_fake_docker(script, || {
+        let start = std::time::Instant::now();
+        load_initial_data(&mut model);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(3000),
+            "initial data load should not block on branch detail preload: {elapsed:?}"
+        );
+        assert!(
+            model.branches.docker_containers.is_empty(),
+            "branch detail docker data should arrive asynchronously"
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| !model.branches.docker_containers.is_empty(),
+            "branch detail preload",
+        );
+
+        assert_eq!(model.branches.docker_containers[0].name, "web");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_initial_data_skips_github_cli_when_repo_has_no_remote() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+        assert!(
+            !repo_has_git_remote(dir.path()),
+            "test repo should not have any git remotes"
+        );
+
+        let gh_count = dir.path().join("gh-count.txt");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$2\" = \"--version\" ]; then\n  printf 'gh version test\\n'\n  exit 0\nfi\ncount_file=\"{}\"\ncount=0\nif [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\necho $((count + 1)) > \"$count_file\"\nsleep 5\nprintf '{{\"url\":\"https://example.com/pr/1\"}}'\n",
+            gh_count.display()
+        );
+
+        with_fake_gh(&script, || {
             let mut model = Model::new(dir.path().to_path_buf());
 
             let start = std::time::Instant::now();
             load_initial_data(&mut model);
             let elapsed = start.elapsed();
+            let gh_calls = fs::read_to_string(&gh_count)
+                .unwrap_or_else(|_| "0".to_string())
+                .trim()
+                .to_string();
 
             assert!(
-                elapsed < std::time::Duration::from_millis(3000),
-                "initial data load should not block on branch detail preload: {elapsed:?}"
+                elapsed < std::time::Duration::from_millis(1500),
+                "load_initial_data should skip gh lookups when the repo has no remote: {elapsed:?} (gh calls: {gh_calls})"
             );
             assert!(
-                model.branches.docker_containers.is_empty(),
-                "branch detail docker data should arrive asynchronously"
+                !gh_count.exists(),
+                "gh should not be invoked for repos without remotes"
             );
-
-            drive_ticks_until(
-                &mut model,
-                |model| !model.branches.docker_containers.is_empty(),
-                "branch detail preload",
+            assert!(
+                model.pr_dashboard.prs.is_empty(),
+                "repos without remotes should not try to populate PR dashboard data"
             );
-
-            assert_eq!(model.branches.docker_containers[0].name, "web");
         });
     }
 
@@ -6149,33 +6062,30 @@ mod tests {
         git_create_branch(dir.path(), "feature/one");
         git_create_branch(dir.path(), "feature/two");
 
-        let counter_path = dir.path().join("docker-count.txt");
-        fs::write(&counter_path, "0\n").expect("write docker counter");
-        let script = format!(
-            "#!/bin/sh\ncount_file=\"{}\"\ncount=$(cat \"$count_file\")\necho $((count + 1)) > \"$count_file\"\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n",
-            counter_path.display()
+        let docker_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let docker_calls_for_worker = docker_calls.clone();
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.set_branch_detail_docker_snapshotter(move || {
+            docker_calls_for_worker.fetch_add(1, Ordering::SeqCst);
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
+        });
+        load_initial_data(&mut model);
+
+        drive_ticks_until(
+            &mut model,
+            |model| !model.branches.docker_containers.is_empty(),
+            "branch detail preload docker snapshot",
         );
 
-        with_fake_docker(&script, || {
-            let mut model = Model::new(dir.path().to_path_buf());
-            load_initial_data(&mut model);
-
-            drive_ticks_until(
-                &mut model,
-                |model| !model.branches.docker_containers.is_empty(),
-                "branch detail preload docker snapshot",
-            );
-
-            let docker_calls = fs::read_to_string(&counter_path)
-                .expect("read docker counter")
-                .trim()
-                .parse::<usize>()
-                .expect("parse docker counter");
-            assert!(
-                (1..=2).contains(&docker_calls),
-                "branch detail preload should snapshot docker state at most once per worker refresh cycle (actual: {docker_calls})"
-            );
-        });
+        let docker_calls = docker_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            docker_calls, 1,
+            "branch detail preload should snapshot docker state exactly once per refresh cycle"
+        );
     }
 
     #[test]
@@ -6547,203 +6457,15 @@ mod tests {
     }
 
     #[test]
-    fn route_key_to_management_specs_enter_opens_detail_and_escape_returns_list() {
+    fn route_key_to_management_right_from_branches_switches_directly_to_issues() {
         let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(model.specs.detail_view);
-
-        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!model.specs.detail_view);
-    }
-
-    #[test]
-    fn route_key_to_management_specs_left_right_cycle_sections_without_switching_tabs() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
+        model.management_tab = ManagementTab::Branches;
 
         route_key_to_management(&mut model, key(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(model.management_tab, ManagementTab::Specs);
-        assert_eq!(model.specs.detail_section, 1);
+        assert_eq!(model.management_tab, ManagementTab::Issues);
 
         route_key_to_management(&mut model, key(KeyCode::Left, KeyModifiers::NONE));
-        assert_eq!(model.management_tab, ManagementTab::Specs);
-        assert_eq!(model.specs.detail_section, 0);
-    }
-
-    #[test]
-    fn route_key_to_management_specs_shift_enter_opens_prefilled_wizard() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.spec_root = Some(model.repo_path.clone());
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5")).expect("create spec dir");
-        std::fs::write(
-            model.repo_path.join("specs/SPEC-5/spec.md"),
-            "# SPEC-5\n\nLocal SPEC detail body\n",
-        )
-        .expect("write spec body");
-
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
-
-        let wizard = model
-            .wizard
-            .as_ref()
-            .expect("wizard opened from spec detail");
-        let context = wizard.spec_context.as_ref().expect("spec context captured");
-        assert_eq!(context.spec_id, "SPEC-5");
-        assert_eq!(context.title, "Local SPEC Management");
-        assert_eq!(context.spec_body, "# SPEC-5\n\nLocal SPEC detail body\n");
-        assert_eq!(wizard.branch_name, "feature/spec-5-local-spec-management");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_e_starts_phase_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
-
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.edit_field, "implementation");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_ctrl_e_starts_section_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.spec_root = Some(model.repo_path.clone());
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5002".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5002")).expect("create spec dir");
-        std::fs::write(
-            model.repo_path.join("specs/SPEC-5002/spec.md"),
-            "# SPEC-5002\n\nSection edit body\n",
-        )
-        .expect("write spec body");
-
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::CONTROL));
-
-        assert!(model.specs.detail_editing);
-        assert!(model.specs.detail_edit_buffer.contains("Section edit body"));
-    }
-
-    #[test]
-    fn route_key_to_management_specs_shift_e_starts_raw_file_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.spec_root = Some(model.repo_path.clone());
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5003".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-        std::fs::create_dir_all(model.repo_path.join("specs/SPEC-5003")).expect("create spec dir");
-        std::fs::write(
-            model.repo_path.join("specs/SPEC-5003/spec.md"),
-            "# SPEC-5003\n\n## Background\n\nfull file body\n",
-        )
-        .expect("write spec body");
-
-        route_key_to_management(&mut model, key(KeyCode::Char('E'), KeyModifiers::SHIFT));
-
-        assert!(model.specs.detail_editing);
-        assert!(model.specs.detail_edit_buffer.contains("# SPEC-5003"));
-        assert!(model.specs.detail_edit_buffer.contains("## Background"));
-    }
-
-    #[test]
-    fn route_key_to_management_specs_s_starts_status_edit_from_detail() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-
-        route_key_to_management(&mut model, key(KeyCode::Char('s'), KeyModifiers::NONE));
-
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.edit_field, "in-progress");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_search_to_detail_then_e_starts_phase_edit() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.search_active = true;
-        model.specs.search_query = "spec".into();
-
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
-
-        assert!(model.specs.detail_view);
-        assert!(!model.specs.search_active);
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.edit_field, "implementation");
-    }
-
-    #[test]
-    fn route_key_to_management_specs_down_cycles_phase_selection_menu() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Specs;
-        model.specs.specs = vec![screens::specs::SpecItem {
-            id: "SPEC-5".into(),
-            title: "Local SPEC Management".into(),
-            phase: "implementation".into(),
-            status: "in-progress".into(),
-        }];
-        model.specs.detail_view = true;
-
-        route_key_to_management(&mut model, key(KeyCode::Char('e'), KeyModifiers::NONE));
-        route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
-
-        assert!(model.specs.editing);
-        assert_eq!(model.specs.selected, 0);
-        assert_eq!(model.specs.edit_field, "done");
+        assert_eq!(model.management_tab, ManagementTab::Branches);
     }
 
     #[test]
@@ -7461,7 +7183,24 @@ CUSTOM_ENV = "enabled"
 
         assert!(config.skip_permissions);
         assert!(!config.codex_fast_mode);
+        assert!(config.args.contains(&"--yolo".to_string()));
         assert!(!config.args.contains(&"service_tier=fast".to_string()));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_skip_permissions_uses_dangerous_flag() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            skip_perms: true,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.skip_permissions);
+        assert!(config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     #[test]
@@ -7775,6 +7514,11 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn schedule_startup_version_cache_refresh_with_schedules_stale_refreshable_agents() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
         let mut cache = VersionCache::new();
@@ -7787,7 +7531,9 @@ CUSTOM_ENV = "enabled"
             .insert("codex".into(), version_entry(&["0.5.0"], 60));
         cache.save(&cache_path).unwrap();
 
-        let scheduled = std::cell::RefCell::new(None);
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let scheduled_capture = scheduled.clone();
         schedule_startup_version_cache_refresh_with(
             cache_path.clone(),
             || {
@@ -7797,12 +7543,17 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.2.0")),
                 ]
             },
-            |path, targets| {
-                *scheduled.borrow_mut() = Some((path, targets));
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
         );
 
-        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
         // Claude stale, Codex fresh, Gemini missing → Claude + Gemini need refresh
         assert!(targets.contains(&AgentId::ClaudeCode));
@@ -7812,9 +7563,16 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn schedule_startup_version_cache_refresh_with_schedules_missing_cache_entries() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
-        let scheduled = std::cell::RefCell::new(None);
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let scheduled_capture = scheduled.clone();
 
         schedule_startup_version_cache_refresh_with(
             cache_path.clone(),
@@ -7824,12 +7582,17 @@ CUSTOM_ENV = "enabled"
                     detected_agent(AgentId::OpenCode, Some("0.4.0")),
                 ]
             },
-            |path, targets| {
-                *scheduled.borrow_mut() = Some((path, targets));
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+            move |path, targets| {
+                *scheduled_capture.lock().unwrap() = Some((path, targets));
             },
         );
 
-        let (scheduled_path, targets) = scheduled.into_inner().unwrap();
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+        let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
         // All npm agents (Claude, Codex, Gemini) need refresh from empty cache
         assert!(targets.contains(&AgentId::ClaudeCode));
@@ -7838,7 +7601,50 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn schedule_startup_version_cache_refresh_with_defers_detection_until_spawned_task_runs() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+
+        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
+        let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let detected_flag = detected.clone();
+        let scheduled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let scheduled_flag = scheduled.clone();
+
+        schedule_startup_version_cache_refresh_with(
+            PathBuf::from("/tmp/agent-versions.json"),
+            move || {
+                detected_flag.store(true, Ordering::Release);
+                vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
+            },
+            |task| {
+                *spawned.borrow_mut() = Some(task);
+            },
+            move |_, _| {
+                scheduled_flag.store(true, Ordering::Release);
+            },
+        );
+
+        assert!(!detected.load(Ordering::Acquire));
+        assert!(!scheduled.load(Ordering::Acquire));
+        assert!(spawned.borrow().is_some());
+        assert!(STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
+
+        let task = spawned.borrow_mut().take().unwrap();
+        task();
+
+        assert!(detected.load(Ordering::Acquire));
+        assert!(scheduled.load(Ordering::Acquire));
+        assert!(!STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn schedule_wizard_version_cache_refresh_with_defers_refresh_until_spawned_task_runs() {
+        let _guard = VERSION_CACHE_SCHEDULER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
 
         let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
@@ -8795,33 +8601,37 @@ CUSTOM_ENV = "enabled"
         init_git_repo(dir.path());
         git_commit_allow_empty(dir.path(), "initial commit");
 
-        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
-
-        with_fake_docker(script, || {
-            let mut model = Model::new(dir.path().to_path_buf());
-            model.management_tab = ManagementTab::Branches;
-
-            let start = std::time::Instant::now();
-            route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
-            let elapsed = start.elapsed();
-
-            assert!(
-                elapsed < std::time::Duration::from_millis(150),
-                "Branches refresh should not block on branch detail reload: {elapsed:?}"
-            );
-            assert!(
-                model.branches.docker_containers.is_empty(),
-                "detail refresh should update docker data asynchronously"
-            );
-
-            drive_ticks_until(
-                &mut model,
-                |model| !model.branches.docker_containers.is_empty(),
-                "branch detail refresh",
-            );
-
-            assert_eq!(model.branches.docker_containers[0].name, "web");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.management_tab = ManagementTab::Branches;
+        model.set_branch_detail_docker_snapshotter(|| {
+            thread::sleep(std::time::Duration::from_millis(250));
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
         });
+
+        let start = std::time::Instant::now();
+        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(150),
+            "Branches refresh should not block on branch detail reload: {elapsed:?}"
+        );
+        assert!(
+            model.branches.docker_containers.is_empty(),
+            "detail refresh should update docker data asynchronously"
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| !model.branches.docker_containers.is_empty(),
+            "branch detail refresh",
+        );
+
+        assert_eq!(model.branches.docker_containers[0].name, "web");
     }
 
     #[test]
@@ -8980,39 +8790,43 @@ CUSTOM_ENV = "enabled"
     fn route_key_to_management_branches_down_does_not_block_on_detail_reload() {
         let wt_a = tempfile::tempdir().expect("worktree a");
         let wt_b = tempfile::tempdir().expect("worktree b");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
-
-        with_fake_docker(script, || {
-            let mut model = test_model();
-            model.management_tab = ManagementTab::Branches;
-            model.active_focus = FocusPane::TabContent;
-            model.branches.branches = vec![
-                screens::branches::BranchItem {
-                    name: "feature/a".to_string(),
-                    is_head: false,
-                    is_local: true,
-                    category: screens::branches::BranchCategory::Feature,
-                    worktree_path: Some(wt_a.path().to_path_buf()),
-                },
-                screens::branches::BranchItem {
-                    name: "feature/b".to_string(),
-                    is_head: false,
-                    is_local: true,
-                    category: screens::branches::BranchCategory::Feature,
-                    worktree_path: Some(wt_b.path().to_path_buf()),
-                },
-            ];
-
-            let start = std::time::Instant::now();
-            route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
-            let elapsed = start.elapsed();
-
-            assert!(
-                elapsed < std::time::Duration::from_millis(150),
-                "Branches cursor movement should not block on detail reload: {elapsed:?}"
-            );
-            assert_eq!(model.branches.selected, 1);
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.set_branch_detail_docker_snapshotter(|| {
+            thread::sleep(std::time::Duration::from_millis(250));
+            vec![docker_container(
+                "abc123",
+                "web",
+                gwt_docker::ContainerStatus::Running,
+            )]
         });
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/a".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(wt_a.path().to_path_buf()),
+            },
+            screens::branches::BranchItem {
+                name: "feature/b".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(wt_b.path().to_path_buf()),
+            },
+        ];
+
+        let start = std::time::Instant::now();
+        route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(150),
+            "Branches cursor movement should not block on detail reload: {elapsed:?}"
+        );
+        assert_eq!(model.branches.selected, 1);
     }
 
     #[test]

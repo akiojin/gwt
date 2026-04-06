@@ -10,6 +10,7 @@
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
 - Current documentation now treats removed or orphaned routes as implementation drift, not as accepted behavior.
 - Execution tracking stays tied to the real `tasks.md` progress instead of legacy planning assumptions.
+- The accidental live `Specs` tab reintroduction has been removed again, so the management shell is back to the 8-tab `SPEC-2` contract and legacy persisted `Specs` state now reopens on `Branches`.
 - Ctrl+G,? now opens a grouped help overlay sourced from the keybinding registry, and Esc closes it without leaking input to underlying panes.
 - Git View now loads repository status and recent commits through `load_initial_data()`, and `r` refresh reloads that data from the current repo.
 - Session layout now persists `display_mode`, `panel_visible`, and `active_management_tab`, restores on startup, and auto-creates the state directory on save.

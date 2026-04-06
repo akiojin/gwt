@@ -67,6 +67,9 @@
 - [P] [x] **T-039**: Write test: `distribute_to_worktree()` creates `.claude/hooks/scripts/gwt-forward-hook.mjs` in target path.
 - [x] **T-040**: Implement `distribute_to_worktree()` in `crates/gwt-skills/src/distribute.rs`.
 - [x] **T-041**: Verify T-035 through T-039 pass (GREEN).
+- [x] **T-097**: Write test: tracked `.claude/*` gwt asset files are preserved during distribution while untracked targets are still written.
+- [x] **T-098**: Update `distribute_to_worktree()` to skip tracked gwt asset paths in Git worktrees.
+- [x] **T-099**: Verify focused `gwt-skills` distribution tests pass after tracked-file preservation change.
 
 ### 2b.2 Git Exclude Management
 

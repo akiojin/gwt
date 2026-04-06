@@ -1,12 +1,13 @@
 # Progress: SPEC-5 - Local SPEC Management
 
 ## Progress
-- Status: `in-progress`
-- Phase: `Implementation`
+- Status: `closed`
+- Phase: `Done`
 - Task progress: `50/50` checked in `tasks.md`
-- Artifact refresh: `2026-04-04T04:59:40Z`
+- Artifact refresh: `2026-04-06T08:31:21Z`
 
 ## Done
+- This standalone `Specs`-tab reintegration was superseded on 2026-04-06; the canonical SPEC surface is Branch Detail in `SPEC-2`, and the live shell no longer exposes a separate `Specs` tab.
 - The management shell now exposes a live Specs tab again.
 - Startup loading now reads local `specs/SPEC-*/metadata.json` into `model.specs` in sorted SPEC order.
 - The live Specs tab now supports `Enter` to open detail, `Esc` to return to the list, and `Shift+Enter` to open the wizard with SPEC id/title/spec.md prefill and a title-derived branch seed.
@@ -22,5 +23,4 @@
   code-side implementation gap tracked in `spec.md`.
 
 ## Next
-- Run the reviewer flow on the current branch and capture completion-gate
-  evidence before any `Done` transition.
+- None. Keep this SPEC as a historical record of the superseded tab-based approach.

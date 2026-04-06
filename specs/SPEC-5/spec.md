@@ -1,5 +1,7 @@
 # SPEC-5: Local SPEC Management — List, Detail, Search, Edit, Agent Launch
 
+> Status note (2026-04-06): This standalone `Specs`-tab design is superseded. Branch Detail in `SPEC-2` is the canonical SPEC surface.
+
 ## Background
 
 gwt manages local SPEC artifacts (`specs/SPEC-{id}/`) including `spec.md`, `plan.md`, `tasks.md`, supporting docs, and a persisted `analysis.md`. The management shell now exposes a live Specs tab again, and the shell can load local `metadata.json` entries, open detail, launch the wizard with SPEC id/title/spec.md context plus a title-derived branch seed, expose constrained metadata editing from detail, support section-scoped `spec.md` editing, route read-only artifact detail through the shared markdown renderer, and rank free-text search results across metadata plus local artifact bodies without any external search service.
