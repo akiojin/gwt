@@ -37,7 +37,7 @@
 - Management focus cycling now matches the pane topology again: `Branches` still cycles through `BranchDetail`, while every other management tab stays on the two real surfaces (`Terminal` and `TabContent`).
 - The management/session split now responds to terminal width again: wide terminals keep the 40/60 old-TUI balance, while standard widths fall back to 50/50 so management chrome remains readable.
 - The redundant standalone management banner is gone; pane titles now carry the management context so the left-side list/detail surfaces reclaim one full row of content.
-- Terminal-focused footer hints now use compact grouped notation so `Ctrl+G:b/i/s g c []/1-9 z ?`, `Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
+- Terminal-focused footer hints now use compact grouped notation so `Ctrl+G:b/i/s g c []/1-9 z ?`, `C-g Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
 - Management and Branch Detail footers now compact both context and hint text at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of truncating at the right edge.
 - Narrow management pane titles now collapse to the active tab label whenever the full tab strip would truncate, so standard-width terminals keep the current management surface legible instead of showing a cut-off strip.
 - Narrow session pane titles now collapse to the active session label whenever the full session strip would truncate, so standard-width multi-session workspaces keep the current workstream legible instead of showing a cut-off strip.

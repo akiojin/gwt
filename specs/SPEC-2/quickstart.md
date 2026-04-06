@@ -16,7 +16,7 @@
 13. Verify the bottom status bar now changes its Branch Detail hints by section: `Overview` advertises direct branch actions and Docker controls, while `Sessions` advertises `↑/↓` row selection plus `Enter:focus`.
 14. Confirm the Branch Detail pane title keeps the selected branch name visible next to the section tabs, and that clearing the branch selection falls back to `No branch selected`.
 15. With focus still in Branch Detail, press `Esc` and confirm focus returns to the Branches list while the selected branch, detail section, and session-row selection are unchanged.
-16. Cycle focus across Tab Content, Branch Detail, and Terminal, and confirm the focused pane border is Cyan while the unfocused pane borders are Gray.
+16. Cycle focus across Tab Content, Branch Detail, and Terminal with `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab`, and confirm the focused pane border is Cyan while the unfocused pane borders are Gray.
 17. Move Branch Detail to a branch without a worktree and confirm the footer no longer advertises `Shift+Enter:shell` or `Ctrl+C:delete`, and that pressing those keys does not open a shell or delete confirmation.
 18. Toggle the management panel on a wide terminal and confirm the left pane is visibly narrower than the session pane, with the default layout matching a `40/60` split instead of `50/50`.
 19. While focus stays in Branch Detail, press `m` to change Branches view mode, `v` to jump to Git View, and `f` to return to the list with search active; confirm `?` or `h` still opens the help overlay from the detail pane.
@@ -28,9 +28,9 @@
 25. Move focus into a management list/pane without an open detail or active search, press `Esc`, and confirm focus returns to the terminal pane while the visible tab and current row stay intact.
 26. Switch to `Profiles` in plain list mode, press `Esc`, and confirm focus returns to the terminal; then enter create mode and confirm `Esc` still cancels the form instead of changing focus.
 27. While focused on Branches list and on another management list such as Git View, confirm the footer/status bar now advertises `Esc:term` so the restored return-to-terminal behavior is visible in the UI.
-28. On a non-Branches management tab such as `Issues` or `Logs`, use `Tab` / `BackTab` and confirm focus only cycles between the list pane and the terminal; it must never land on a nonexistent `BranchDetail` surface.
+28. On a non-Branches management tab such as `Issues` or `Logs`, use `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab` and confirm focus only cycles between the list pane and the terminal; it must never land on a nonexistent `BranchDetail` surface.
 29. Compare a wide terminal (`120x40`) and a standard terminal (`100x24`) and confirm the management pane uses `40/60` on the wider layout but falls back to `50/50` on the standard layout so the left-side chrome stays readable.
-30. In an `80x24` terminal with Terminal focus active and no notification occupying the footer, confirm the footer/status bar keeps the compact grouped hint fully visible: `Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2`.
+30. In an `80x24` terminal with Terminal focus active and no notification occupying the footer, confirm the footer/status bar keeps the compact grouped hint fully visible: `Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2`.
 31. In an `80x24` terminal with no notification occupying the footer, move through Branches list, Branch Detail, and a generic management tab such as `Issues`, then confirm the footer/status bar keeps their compact pane-local hints visible instead of truncating them at the right edge.
 32. In an `80x24` terminal with the management pane visible, confirm the top-left pane title shows only the active management tab label instead of a truncated multi-tab strip; then widen to an extra-wide terminal such as `220x40` and confirm the full tab strip returns.
 33. In a multi-session workspace at `80x24`, confirm the session pane title collapses to the active session while still showing the active `n/N` position (for example `2/4`); then widen to an extra-wide terminal such as `220x40` and confirm the full session strip returns and the compact `n/N` badge disappears.
@@ -64,7 +64,7 @@
 - The status-bar hints now tell the truth about that contract, advertising `Esc:term` on Branches list and generic management lists instead of implying that only `Tab` can exit those panes.
 - Management focus cycling now matches the visible pane topology: Branches keeps the old three-surface loop, while other management tabs stay on `Terminal` and `TabContent` only.
 - The management/session width balance is now responsive instead of hard-coded: wide terminals keep the 40/60 emphasis on the session pane, while standard widths fall back to 50/50 to preserve management readability.
-- Terminal-focused footer hints now use a compact grouped form so the main workspace mnemonics, `Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
+- Terminal-focused footer hints now use a compact grouped form so the main workspace mnemonics, `C-g Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
 - Management and Branch Detail footers now use compact wording at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of dropping the trailing affordances.
 - Management pane titles now compact whenever the full tab strip would truncate, showing only the active tab label until the pane is wide enough to restore the full strip.
 - Session pane titles now compact by the same fit-based rule, showing the active session plus its `n/N` position until the pane is wide enough to restore the full strip.

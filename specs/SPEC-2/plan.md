@@ -249,8 +249,8 @@ standalone banner entirely in favor of pane-title chrome.
 20.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
 
-### Phase 28: Tab-Aware Management Focus Cycle (5 tasks)
-Close the remaining supplemental-surface focus gap by making `Tab` / `BackTab` respect which
+### Phase 28: Ctrl+G Focus Cycle for Management (5 tasks)
+Close the remaining supplemental-surface focus gap by making `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab` respect which
 management tabs actually have a second pane.
 
 28.1: Focus-cycle contract (2 tasks)
@@ -258,8 +258,8 @@ management tabs actually have a second pane.
 - Restrict every other management tab to a two-surface cycle: `Terminal <-> TabContent`.
 
 28.2: Focused routing coverage (2 tasks)
-- Add focused coverage for `Tab` on a non-Branches management tab so it skips `BranchDetail`.
-- Add focused coverage for `BackTab` on a non-Branches management tab so it also skips `BranchDetail`.
+- Add focused coverage for `Ctrl+G, Tab` on a non-Branches management tab so it skips `BranchDetail`.
+- Add focused coverage for `Ctrl+G, Shift+Tab` on a non-Branches management tab so it also skips `BranchDetail`.
 
 28.3: Verification (1 task)
 - Re-run focused and broad workspace verification and refresh SPEC-2 artifacts.
@@ -315,11 +315,11 @@ notation that remains visible on standard-width terminals.
 
 32.1: Compact-footer contract (2 tasks)
 - Standard-width terminal footers use grouped shortcut notation (`Ctrl+G:b/i/s g c []/1-9 z ?`) instead of repeating the `Ctrl+G` prefix on every token.
-- Standard-width terminal footers keep `Tab:focus` and `^C×2` visible without requiring the user to open the management pane first.
+- Standard-width terminal footers keep `C-g Tab:focus` and `^C×2` visible without requiring the user to open the management pane first.
 
 32.2: Focused render coverage (2 tasks)
 - Add RED coverage that the grouped terminal footer shortcuts remain visible at standard width.
-- Add RED coverage that `Tab:focus` and `^C×2` remain visible at standard width.
+- Add RED coverage that `C-g Tab:focus` and `^C×2` remain visible at standard width.
 
 32.3: Verification (1 task)
 - Re-run focused tests, snapshot refresh, broad workspace verification, and SPEC-2 artifact sync.
