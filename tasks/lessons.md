@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: full-screen cache history は viewport shift のときだけ伸ばす
+
+### 事象
+
+full-screen pane で同じ行の上書きや clear + redraw が起きると、
+scrollback review に「消えたはずの行」まで残って見えてしまった。
+
+### 原因
+
+- pane-local cache が append-only な screen snapshot history として動いていた。
+- そのため、同じ visible viewport を描き直しただけの in-place redraw でも、
+  以前の visible rows が独立した history 項目として残っていた。
+- これは viewport history と redraw mutation を区別していない cache モデルの問題だった。
+
+### 再発防止策
+
+1. full-screen pane の scrollback cache は「全 redraw の履歴」ではなく、「visible viewport が進んだ履歴」として扱う。
+2. 同位置 redraw と viewport shift を分ける focused test を追加し、overwrite/clear redraw が latest cache を置き換えることを固定する。
+3. scrollback 不具合で stale line が見えるときは、PTY chunk 境界だけでなく snapshot append 条件そのものを点検する。
+
 ## 2026-04-07 — fix: snapshot scrollback は PTY reader chunk ではなく drain 単位で切る
 
 ### 事象

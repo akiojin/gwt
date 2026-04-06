@@ -51,3 +51,5 @@
 - [x] T038 Adjust snapshot scrollbar metrics in `app.rs` so thumb length tracks the pane viewport while row scrollback behavior stays unchanged.
 - [x] T039 [P] Write RED test: PTY output chunks drained in one event-loop pass are coalesced per session so snapshot-backed scrollback does not expose intermediate chunk states.
 - [x] T040 Coalesce per-session PTY output in `main.rs` before dispatching `Message::PtyOutput`, keeping snapshot capture aligned with rendered frame boundaries.
+- [x] T041 [P] Write RED tests: in-place full-screen redraws replace the latest cached viewport, while vertical viewport shifts still extend snapshot-backed history.
+- [x] T042 Adjust the full-screen cache model in `model.rs` / `app.rs` so overwrite-or-clear redraws mutate the latest cached viewport instead of leaking stale cleared lines into scrollback.

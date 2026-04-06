@@ -385,9 +385,19 @@ pub struct ScreenSnapshot {
     rows: u16,
     cols: u16,
     state: Vec<u8>,
+    visible_lines: Vec<String>,
 }
 
 impl ScreenSnapshot {
+    fn from_screen(rows: u16, cols: u16, screen: &vt100::Screen) -> Self {
+        Self {
+            rows,
+            cols,
+            state: screen.state_formatted(),
+            visible_lines: screen_visible_lines(screen),
+        }
+    }
+
     pub fn rows(&self) -> u16 {
         self.rows
     }
@@ -399,6 +409,38 @@ impl ScreenSnapshot {
     pub fn state(&self) -> &[u8] {
         &self.state
     }
+}
+
+fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
+    let (rows, cols) = screen.size();
+    (0..rows)
+        .map(|row| screen.contents_between(row, 0, row, cols))
+        .collect()
+}
+
+fn snapshots_capture_viewport_shift(previous: &ScreenSnapshot, current: &ScreenSnapshot) -> bool {
+    if previous.rows != current.rows
+        || previous.cols != current.cols
+        || previous.visible_lines.len() != current.visible_lines.len()
+    {
+        return false;
+    }
+
+    let line_count = previous.visible_lines.len();
+    if line_count < 2 {
+        return false;
+    }
+
+    for shift in 1..line_count {
+        if previous.visible_lines[shift..] == current.visible_lines[..line_count - shift] {
+            return true;
+        }
+        if previous.visible_lines[..line_count - shift] == current.visible_lines[shift..] {
+            return true;
+        }
+    }
+
+    false
 }
 
 const SNAPSHOT_HISTORY_CAPACITY: usize = 256;
@@ -629,11 +671,7 @@ impl VtState {
             return;
         }
 
-        let snapshot = ScreenSnapshot {
-            rows: self.rows,
-            cols: self.cols,
-            state: self.parser.screen().state_formatted(),
-        };
+        let snapshot = ScreenSnapshot::from_screen(self.rows, self.cols, self.parser.screen());
 
         if self
             .snapshots
@@ -641,6 +679,13 @@ impl VtState {
             .is_some_and(|existing| *existing == snapshot)
         {
             return;
+        }
+
+        if let Some(existing) = self.snapshots.back_mut() {
+            if !snapshots_capture_viewport_shift(existing, &snapshot) {
+                *existing = snapshot;
+                return;
+            }
         }
 
         self.snapshots.push_back(snapshot);

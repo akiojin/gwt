@@ -4655,6 +4655,10 @@ mod tests {
         );
     }
 
+    fn join_terminal_lines(lines: &[&str]) -> String {
+        lines.join("\r\n")
+    }
+
     fn enter_alt_screen_with_text(model: &mut Model, session_id: &str, text: &str) {
         update(
             model,
@@ -4665,6 +4669,10 @@ mod tests {
         );
     }
 
+    fn enter_alt_screen_with_lines(model: &mut Model, session_id: &str, lines: &[&str]) {
+        enter_alt_screen_with_text(model, session_id, &join_terminal_lines(lines));
+    }
+
     fn replace_alt_screen_text(model: &mut Model, session_id: &str, text: &str) {
         update(
             model,
@@ -4673,6 +4681,10 @@ mod tests {
                 format!("\x1b[2J\x1b[H{text}").into_bytes(),
             ),
         );
+    }
+
+    fn replace_alt_screen_lines(model: &mut Model, session_id: &str, lines: &[&str]) {
+        replace_alt_screen_text(model, session_id, &join_terminal_lines(lines));
     }
 
     fn detected_agent(agent_id: AgentId, version: Option<&str>) -> DetectedAgent {
@@ -5203,13 +5215,49 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_scrollback_reveals_previous_full_screen_when_row_scrollback_is_unavailable() {
+    fn in_place_full_screen_redraw_replaces_latest_snapshot_cache() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
         update(&mut model, Message::Resize(24, 8));
         enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
         replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        let session = model.active_session_tab().expect("active session");
+        assert_eq!(session.vt.snapshot_count(), 1);
+        assert!(!session.vt.has_snapshot_scrollback());
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        let after = render_model_text(&model, 24, 8);
+        assert!(after.contains("frame-2"));
+        assert!(!after.contains("frame-1"));
+    }
+
+    #[test]
+    fn snapshot_scrollback_reveals_previous_full_screen_viewport_after_line_shift() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
 
         assert_eq!(
             model
@@ -5222,8 +5270,8 @@ mod tests {
         );
 
         let before = render_model_text(&model, 24, 8);
-        assert!(before.contains("frame-2"));
-        assert!(!before.contains("frame-1"));
+        assert!(before.contains("line-6"));
+        assert!(!before.contains("line-1"));
 
         let area = active_session_text_area(&model).expect("active session text area");
         update(
@@ -5238,10 +5286,10 @@ mod tests {
 
         let after = render_model_text(&model, 24, 8);
         assert!(
-            after.contains("frame-1"),
-            "snapshot scrollback should reveal the previous full-screen frame"
+            after.contains("line-1"),
+            "snapshot scrollback should reveal the previous full-screen viewport when the content advanced vertically"
         );
-        assert!(!after.contains("frame-2"));
+        assert!(!after.contains("line-6"));
     }
 
     #[test]
@@ -5250,8 +5298,16 @@ mod tests {
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
         update(&mut model, Message::Resize(24, 8));
-        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
-        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
 
         let area = active_session_content_area(&model).expect("active session area");
         let buffer = render_model_buffer(&model, 24, 8);
@@ -5270,8 +5326,16 @@ mod tests {
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
         update(&mut model, Message::Resize(24, 8));
-        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
-        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
 
         let session = model.active_session_tab().expect("active session");
         let viewport_height = active_session_text_area(&model)
@@ -5297,8 +5361,16 @@ mod tests {
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
         update(&mut model, Message::Resize(24, 8));
-        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
-        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
 
         let area = active_session_text_area(&model).expect("active session text area");
         update(
@@ -5354,7 +5426,7 @@ mod tests {
 
         assert_eq!(
             copied.as_deref(),
-            Some("frame-1"),
+            Some("line-1"),
             "selection copy should read from the visible snapshot surface instead of the live frame"
         );
     }
@@ -5365,8 +5437,16 @@ mod tests {
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
         update(&mut model, Message::Resize(24, 8));
-        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
-        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
 
         let area = active_session_text_area(&model).expect("active session text area");
         update(
@@ -5378,11 +5458,15 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }),
         );
-        replace_alt_screen_text(&mut model, "shell-0", "frame-3");
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-3", "line-4", "line-5", "line-6", "line-7"],
+        );
 
         let frozen = render_model_text(&model, 24, 8);
-        assert!(frozen.contains("frame-1"));
-        assert!(!frozen.contains("frame-3"));
+        assert!(frozen.contains("line-1"));
+        assert!(!frozen.contains("line-7"));
 
         update(
             &mut model,
@@ -5394,8 +5478,11 @@ mod tests {
             }),
         );
         let previous = render_model_text(&model, 24, 8);
-        assert!(previous.contains("frame-2"));
-        assert!(!previous.contains("frame-3"));
+        assert!(!previous.contains("line-1"));
+        assert!(
+            previous.contains("line-6") || previous.contains("line-7"),
+            "scrolling down from the oldest cached viewport should leave the frozen history view and move toward the newest available content"
+        );
 
         update(
             &mut model,
@@ -5407,7 +5494,7 @@ mod tests {
             }),
         );
         let live = render_model_text(&model, 24, 8);
-        assert!(live.contains("frame-3"));
+        assert!(live.contains("line-7"));
         assert!(
             model
                 .active_session_tab()
