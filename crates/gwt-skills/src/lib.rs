@@ -15,7 +15,7 @@ pub use hooks::{
     restore_from_backup, Hook, HooksConfig, HooksError,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
-pub use settings_local::generate_settings_local;
+pub use settings_local::{generate_codex_hooks, generate_settings_local};
 
 #[cfg(test)]
 mod tests {
@@ -555,7 +555,9 @@ mod tests {
         assert!(exclude.contains("gwt-managed-begin"));
 
         generate_settings_local(wt).unwrap();
+        generate_codex_hooks(wt).unwrap();
         assert!(wt.join(".claude/settings.local.json").exists());
+        assert!(wt.join(".codex/hooks.json").exists());
 
         // Verify all distribution targets exist
         assert!(wt.join(".claude/skills/gwt-pr/SKILL.md").exists());

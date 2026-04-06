@@ -159,9 +159,33 @@ impl SessionRuntimeState {
 
 /// Return the JSON sidecar path for a session runtime state record.
 pub fn runtime_state_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
-    sessions_dir
-        .join("runtime")
-        .join(format!("{session_id}.json"))
+    runtime_state_path_for_pid(sessions_dir, std::process::id(), session_id)
+}
+
+/// Return the runtime namespace directory for a specific gwt process id.
+pub fn runtime_state_dir_for_pid(sessions_dir: &Path, pid: u32) -> PathBuf {
+    sessions_dir.join("runtime").join(pid.to_string())
+}
+
+/// Return the JSON sidecar path for a session runtime state record scoped to a
+/// specific gwt process id.
+pub fn runtime_state_path_for_pid(sessions_dir: &Path, pid: u32, session_id: &str) -> PathBuf {
+    runtime_state_dir_for_pid(sessions_dir, pid).join(format!("{session_id}.json"))
+}
+
+/// Reset the runtime namespace for the current gwt process.
+pub fn reset_runtime_state_dir(sessions_dir: &Path) -> std::io::Result<()> {
+    reset_runtime_state_dir_for_pid(sessions_dir, std::process::id())
+}
+
+/// Reset the runtime namespace for the provided gwt process id without
+/// touching sibling PID namespaces.
+pub fn reset_runtime_state_dir_for_pid(sessions_dir: &Path, pid: u32) -> std::io::Result<()> {
+    let runtime_dir = runtime_state_dir_for_pid(sessions_dir, pid);
+    if runtime_dir.exists() {
+        std::fs::remove_dir_all(&runtime_dir)?;
+    }
+    std::fs::create_dir_all(&runtime_dir)
 }
 
 /// Persist a final session status into both the TOML metadata and the runtime
@@ -309,5 +333,39 @@ mod tests {
         assert_eq!(waiting.source_event.as_deref(), Some("Stop"));
 
         assert!(SessionRuntimeState::from_hook_event("Notification").is_none());
+    }
+
+    #[test]
+    fn runtime_state_path_scopes_sidecars_to_current_process_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = runtime_state_path(dir.path(), "session-123");
+
+        assert_eq!(
+            path,
+            dir.path()
+                .join("runtime")
+                .join(std::process::id().to_string())
+                .join("session-123.json")
+        );
+    }
+
+    #[test]
+    fn reset_runtime_state_dir_for_pid_clears_only_target_pid_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_pid = 4242_u32;
+        let other_pid = 4343_u32;
+        let current_dir = dir.path().join("runtime").join(current_pid.to_string());
+        let other_dir = dir.path().join("runtime").join(other_pid.to_string());
+
+        std::fs::create_dir_all(&current_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(current_dir.join("session-a.json"), "{}").unwrap();
+        std::fs::write(other_dir.join("session-b.json"), "{}").unwrap();
+
+        reset_runtime_state_dir_for_pid(dir.path(), current_pid).unwrap();
+
+        assert!(current_dir.is_dir());
+        assert_eq!(std::fs::read_dir(&current_dir).unwrap().count(), 0);
+        assert!(other_dir.join("session-b.json").exists());
     }
 }

@@ -511,3 +511,14 @@ banner in favor of pane-title chrome.
 - [x] T327 [P] Write RED test: Claude settings regeneration preserves non-gwt user hooks while replacing stale gwt-managed commands.
 - [x] T328 Update `gwt-skills` / `app.rs` launch materialization to generate Claude hook settings through a typed Claude-schema merge instead of the internal hooks-merge schema.
 - [x] T329 [P] Write RED test and fix: managed hook assets/settings are written before agent PTY spawn so the first launch turn can emit runtime state.
+
+## Phase 52: PID-Scoped Runtime State And No-Node Hook Commands
+
+- [x] T330 [P] Write RED test: runtime sidecar paths are scoped under the current gwt PID namespace.
+- [x] T331 [P] Write RED test: startup/runtime reset clears only the current PID namespace and preserves sibling gwt runtime directories.
+- [x] T332 [P] Write RED test: generated Claude and Codex runtime hooks contain no Node-based live-state forward command, include `SessionStart`, and skip `Notification`.
+- [x] T333 [P] Write RED test: generated `.codex/hooks.json` preserves user hooks for untracked files and skips tracked `.codex/hooks.json`.
+- [x] T334 [P] Write RED test: POSIX runtime hook command writes a runtime sidecar via `GWT_SESSION_RUNTIME_PATH`.
+- [x] T335 Implement PID-scoped runtime path/reset helpers in `gwt-agent` and call startup reset from `gwt-tui/src/main.rs`.
+- [x] T336 Implement shared Claude/Codex runtime hook generation, `.codex/hooks.json` materialization, and launch-time wiring in `gwt-skills` / `app.rs`.
+- [x] T337 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for PID-scoped no-Node hook live-state updates.

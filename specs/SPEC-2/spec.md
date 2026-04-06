@@ -93,7 +93,9 @@ As a developer, I want the Branches list to show hook-derived live session state
 4. Given multiple active agent sessions belong to the same branch, when the Branches list renders, then exactly one right-aligned summary is shown and `Running` wins over `WaitingInput`.
 5. Given the management pane is narrow, when the Branches list cannot fit both the branch label and the full session summary, then the branch name and core branch icons stay visible and the session summary shortens or disappears before the left side becomes unreadable.
 6. Given gwt materializes a launched worktree for Claude Code, when it writes `.claude/settings.local.json`, then the file uses Claude's native `hooks` schema, preserves non-gwt hook entries and unrelated settings, and replaces stale gwt-managed hook entries instead of emitting an internal `managed_hooks` / `user_hooks` schema.
-7. Given gwt launches a Claude Code or Codex agent in a worktree that needs managed hook assets, when the PTY process starts, then the required hook scripts and settings have already been written so the first agent turn can emit runtime state immediately.
+7. Given gwt launches a Claude Code or Codex agent in a worktree that needs managed hook assets, when the PTY process starts, then the required hook scripts plus `.claude/settings.local.json` / `.codex/hooks.json` have already been written so the first agent turn can emit runtime state immediately.
+8. Given gwt restarts after a previous run left runtime sidecars behind, when startup completes, then only the current gwt process PID namespace is visible to the Branches list and stale indicators from older runs do not reappear.
+9. Given two gwt processes are running at the same time, when their agents emit hook events, then each TUI reads only its own PID-scoped runtime sidecars and their branch indicators do not overwrite each other.
 
 ## Edge Cases
 
@@ -158,11 +160,13 @@ As a developer, I want the Branches list to show hook-derived live session state
 - **FR-006q**: The running indicator is animated from the existing TUI tick cadence, while the waiting indicator remains visually distinct but stable enough to read in the list.
 - **FR-006r**: Branch-row live session state is derived from Claude Code / Codex hook events distributed into launched worktrees. `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` mark the session `Running`; `Stop` marks it `WaitingInput`.
 - **FR-006s**: Agent launches inject stable gwt session runtime environment into the spawned PTY so embedded hook scripts can update the correct session runtime record without user configuration.
-- **FR-006t**: Hook scripts persist lightweight runtime state in a per-session sidecar that is safe to overwrite on every event and safe for the Branches list to ignore when the file is absent or corrupted.
+- **FR-006t**: Hook scripts persist lightweight runtime state in a per-session sidecar under `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`. The current gwt process reads only its own PID namespace, and Branches rendering safely ignores absent or malformed files.
 - **FR-006u**: Session cleanup is authoritative for terminal-backed reality. When an agent PTY exits or the user closes its tab, gwt marks the persisted session `Stopped` and removes that branch's live-session indicator from the list on the next render.
 - **FR-006v**: Branch-row live session summaries are width-aware. When space is limited, the right-aligned summary shortens before the branch label or branch icons are truncated, and extremely narrow layouts may omit the right side entirely.
 - **FR-006w**: Launch-time Claude hook distribution writes `.claude/settings.local.json` in Claude's native `hooks` schema. Existing non-gwt hooks and unrelated Claude settings are preserved, while legacy gwt-managed entries and the obsolete `managed_hooks` / `user_hooks` schema are replaced during regeneration.
-- **FR-006x**: Managed hook assets are prepared before the agent PTY is spawned. A newly launched Claude Code or Codex process must see the hook scripts and settings on its very first turn, not only on subsequent launches.
+- **FR-006x**: Managed hook assets are prepared before the agent PTY is spawned. A newly launched Claude Code or Codex process must see the hook scripts and `.claude/settings.local.json` / `.codex/hooks.json` on its very first turn, not only on subsequent launches.
+- **FR-006y**: The live-state runtime hooks generated for Claude Code and Codex write directly to `GWT_SESSION_RUNTIME_PATH` and do not invoke Node-based forwarders or `gwt hook` subprocesses for Branches live-state updates.
+- **FR-006z**: gwt startup resets only its own runtime PID namespace before restoring UI state, so stale live-state from older gwt processes is dropped without touching other running gwt instances.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-008a**: PTY exit detection removes the corresponding session tab automatically, clamps the active session index to the nearest surviving tab, and drops the stale PTY handle in the same tick.
@@ -170,7 +174,7 @@ As a developer, I want the Branches list to show hook-derived live session state
 - **FR-009a**: The event loop drains PTY output before blocking on the next crossterm poll so terminal echo/render updates are not delayed by the 100ms tick interval.
 - **FR-010**: Help overlay via Ctrl+G,? auto-collects keybindings from code definitions.
 - **FR-011**: Session metadata persisted to `~/.gwt/sessions/` in TOML format.
-- **FR-011a**: Hook-derived runtime session state is persisted alongside session metadata as a lightweight per-session sidecar so the Branches list can read live `Running` / `WaitingInput` state without reparsing PTY scrollback.
+- **FR-011a**: Hook-derived runtime session state is persisted alongside session metadata as a lightweight per-session sidecar and treated as a live cache for the current gwt process only. It is safe to rebuild from fresh hook events after startup reset without reparsing PTY scrollback.
 - **FR-012**: Restore session layout on gwt restart (best-effort: working directories, display mode, active tab).
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-013a**: The bottom status line keeps the old-TUI always-on context model: session summary and branch/agent context stay visible even while focus changes.

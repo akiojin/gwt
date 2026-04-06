@@ -18,7 +18,9 @@ use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
-use gwt_skills::{distribute_to_worktree, generate_settings_local, update_git_exclude};
+use gwt_skills::{
+    distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -2658,6 +2660,9 @@ fn materialize_pending_launch_with(
     }
     if let Err(e) = generate_settings_local(worktree) {
         tracing::warn!("settings.local.json generation failed: {e}");
+    }
+    if let Err(e) = generate_codex_hooks(worktree) {
+        tracing::warn!("hooks.json generation failed: {e}");
     }
 
     // Spawn PTY process for the agent session.
@@ -7276,16 +7281,53 @@ CUSTOM_ENV = "enabled"
         let content = fs::read_to_string(&settings_path).expect("read settings.local");
         let value: serde_json::Value = serde_json::from_str(&content).expect("parse settings");
 
-        assert_eq!(
-            value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
-            serde_json::Value::String(
-                "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()
-            )
-        );
+        let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("hook command");
+        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
             serde_json::Value::String("Bash".to_string())
         );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_generates_codex_hooks() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-spec-42");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "gwt-missing-custom-agent-command".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/spec-42".to_string()),
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let hooks_path = worktree.join(".codex/hooks.json");
+        let content = fs::read_to_string(&hooks_path).expect("read codex hooks");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse codex hooks");
+        let command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("hook command");
+
+        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(!command.contains("node"));
     }
 
     #[test]
@@ -7310,6 +7352,51 @@ CUSTOM_ENV = "enabled"
             branch: Some("feature/spec-42".to_string()),
             display_name: "My Agent".to_string(),
             color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let mut observed = None;
+        for _ in 0..50 {
+            if let Ok(value) = fs::read_to_string(&marker) {
+                observed = Some(value);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(observed.as_deref(), Some("present"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_prepares_codex_hooks_before_agent_process_starts() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-spec-42");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let marker = dir.path().join("hooks-check.txt");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "if [ -f .codex/hooks.json ]; then printf present > \"$1\"; else printf missing > \"$1\"; fi".to_string(),
+                "sh".to_string(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree),
+            branch: Some("feature/spec-42".to_string()),
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
             model: None,
             tool_version: None,
             reasoning_level: None,

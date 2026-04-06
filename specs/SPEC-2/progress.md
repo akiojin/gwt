@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `329/329` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T10:50:22Z`
+- Task progress: `337/337` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T11:21:20Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -63,12 +63,13 @@
 - Exited PTY-backed sessions now remove their tabs automatically, clamp the active session safely, and notify with the auto-close result instead of leaving dead tabs behind.
 - Session PTYs now also expose an explicit prefixed focus-escape path: `Ctrl+G,Tab` and `Ctrl+G,Shift+Tab` cycle focus without stealing the raw plain-`Tab` key from Shell or Agent processes.
 - Agent PTYs now receive stable gwt hook-runtime environment (`GWT_SESSION_ID`, `GWT_SESSION_RUNTIME_PATH`), so Codex / Claude hook scripts can update the correct session runtime record without shell-specific discovery logic.
-- Hook-managed runtime state is now persisted in a lightweight JSON sidecar next to the session TOML, mapping `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
+- Hook-managed runtime state is now persisted in a lightweight JSON sidecar under `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`, mapping `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
 - Branches rows now show a right-aligned live agent summary again: running sessions animate with a spinner, waiting sessions render a distinct `wait` indicator, and narrow panes keep the branch label readable by shortening or omitting the right side first.
 - Explicit agent-session close and detected PTY exit now persist `Stopped`, so stale running/waiting indicators do not survive after the session is gone.
 - Embedded asset distribution now also writes `.codex/hooks/scripts/gwt-*.mjs`, so launched worktrees get the updated Codex hook script alongside the already-distributed Claude hook assets.
 - Claude launch materialization now regenerates `.claude/settings.local.json` in Claude's native `hooks` schema, preserving user hooks and unrelated settings while replacing the stale internal `managed_hooks` / `user_hooks` layout that prevented Claude hook execution.
-- Managed hook assets are now prepared before agent PTY spawn, so a fresh Claude/Codex launch can emit runtime sidecar state on its first turn instead of only after a relaunch.
+- Codex launch materialization now also generates `.codex/hooks.json` for untracked worktrees, preserves tracked hook files, and uses direct shell commands instead of Node-based live-state forwarders.
+- gwt startup now resets only its own runtime PID namespace before restore, so stale indicators from earlier gwt runs disappear without touching sibling gwt processes.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

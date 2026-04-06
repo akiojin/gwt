@@ -4,25 +4,70 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::io;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const GWT_FORWARD_SCRIPT: &str = "gwt-forward-hook.mjs";
 const GWT_BLOCK_SCRIPT_PREFIX: &str = "gwt-block-";
+const GWT_MANAGED_RUNTIME_MARKER: &str = "GWT_MANAGED_HOOK";
+const GWT_MANAGED_RUNTIME_KIND: &str = "runtime-state";
 const CLAUDE_HOOK_COMMAND_TYPE: &str = "command";
 const MANAGED_EVENT_ORDER: &[&str] = &[
-    "Notification",
-    "PostToolUse",
-    "PreToolUse",
-    "Stop",
+    "SessionStart",
     "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
 ];
+const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookShell {
+    Posix,
+    PowerShell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedHookTarget {
+    Claude,
+    Codex,
+}
+
+impl ManagedHookTarget {
+    fn config_path(self, worktree: &Path) -> PathBuf {
+        match self {
+            Self::Claude => worktree.join(".claude/settings.local.json"),
+            Self::Codex => worktree.join(CODEX_HOOKS_PATH),
+        }
+    }
+
+    fn script_root(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude/hooks/scripts",
+            Self::Codex => ".codex/hooks/scripts",
+        }
+    }
+}
 
 /// Generate `.claude/settings.local.json` in the target worktree.
 ///
 /// Replaces gwt-managed Claude hook entries while preserving user-defined
 /// hook entries and unrelated top-level Claude settings.
 pub fn generate_settings_local(worktree: &Path) -> io::Result<()> {
-    let settings_path = worktree.join(".claude/settings.local.json");
+    generate_hook_config(worktree, ManagedHookTarget::Claude)
+}
+
+/// Generate `.codex/hooks.json` in the target worktree unless that file is
+/// already tracked by Git.
+pub fn generate_codex_hooks(worktree: &Path) -> io::Result<()> {
+    if path_is_git_tracked(worktree, Path::new(CODEX_HOOKS_PATH))? {
+        return Ok(());
+    }
+    generate_hook_config(worktree, ManagedHookTarget::Codex)
+}
+
+fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Result<()> {
+    let settings_path = target.config_path(worktree);
 
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
@@ -35,7 +80,11 @@ pub fn generate_settings_local(worktree: &Path) -> io::Result<()> {
     let user_hooks = existing_user_hooks(root.get("hooks"));
     root.insert(
         "hooks".to_string(),
-        Value::Object(merge_managed_and_user_hooks(user_hooks)),
+        Value::Object(merge_managed_and_user_hooks(
+            user_hooks,
+            target,
+            managed_hook_shell(),
+        )),
     );
 
     write_settings_atomically(&settings_path, &Value::Object(root))
@@ -80,8 +129,12 @@ fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
-fn merge_managed_and_user_hooks(user_hooks: Map<String, Value>) -> Map<String, Value> {
-    let managed_hooks = managed_hooks();
+fn merge_managed_and_user_hooks(
+    user_hooks: Map<String, Value>,
+    target: ManagedHookTarget,
+    shell: HookShell,
+) -> Map<String, Value> {
+    let managed_hooks = managed_hooks(target, shell);
     let mut merged = Map::new();
 
     for event in MANAGED_EVENT_ORDER {
@@ -157,70 +210,133 @@ fn existing_user_hooks(existing: Option<&Value>) -> Map<String, Value> {
 }
 
 fn is_gwt_managed_command(command: &str) -> bool {
-    command.contains(GWT_FORWARD_SCRIPT) || command.contains(GWT_BLOCK_SCRIPT_PREFIX)
+    command.contains(GWT_FORWARD_SCRIPT)
+        || command.contains(GWT_BLOCK_SCRIPT_PREFIX)
+        || command.contains(GWT_MANAGED_RUNTIME_MARKER)
 }
 
-fn managed_hooks() -> Map<String, Value> {
+fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Value> {
     let mut hooks = Map::new();
     hooks.insert(
-        "Notification".to_string(),
-        Value::Array(vec![forward_hook("Notification")]),
+        "SessionStart".to_string(),
+        Value::Array(vec![runtime_hook("SessionStart", shell)]),
     );
     hooks.insert(
-        "PostToolUse".to_string(),
-        Value::Array(vec![forward_hook("PostToolUse")]),
+        "UserPromptSubmit".to_string(),
+        Value::Array(vec![runtime_hook("UserPromptSubmit", shell)]),
     );
     hooks.insert(
         "PreToolUse".to_string(),
-        Value::Array(vec![forward_hook("PreToolUse"), bash_blockers_hook()]),
+        Value::Array(vec![
+            runtime_hook("PreToolUse", shell),
+            bash_blockers_hook(target),
+        ]),
     );
-    hooks.insert("Stop".to_string(), Value::Array(vec![forward_hook("Stop")]));
     hooks.insert(
-        "UserPromptSubmit".to_string(),
-        Value::Array(vec![forward_hook("UserPromptSubmit")]),
+        "PostToolUse".to_string(),
+        Value::Array(vec![runtime_hook("PostToolUse", shell)]),
+    );
+    hooks.insert(
+        "Stop".to_string(),
+        Value::Array(vec![runtime_hook("Stop", shell)]),
     );
     hooks
 }
 
-fn forward_hook(event: &str) -> Value {
+fn runtime_hook(event: &str, shell: HookShell) -> Value {
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": format!("node .claude/hooks/scripts/{GWT_FORWARD_SCRIPT} {event}"),
+                "command": runtime_hook_command(event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
     })
 }
 
-fn bash_blockers_hook() -> Value {
+fn bash_blockers_hook(target: ManagedHookTarget) -> Value {
     json!({
         "matcher": "Bash",
         "hooks": [
             {
-                "command": "node .claude/hooks/scripts/gwt-block-git-branch-ops.mjs",
+                "command": format!("node {}/gwt-block-git-branch-ops.mjs", target.script_root()),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             },
             {
-                "command": "node .claude/hooks/scripts/gwt-block-cd-command.mjs",
+                "command": format!("node {}/gwt-block-cd-command.mjs", target.script_root()),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             },
             {
-                "command": "node .claude/hooks/scripts/gwt-block-file-ops.mjs",
+                "command": format!("node {}/gwt-block-file-ops.mjs", target.script_root()),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             },
             {
-                "command": "node .claude/hooks/scripts/gwt-block-git-dir-override.mjs",
+                "command": format!(
+                    "node {}/gwt-block-git-dir-override.mjs",
+                    target.script_root()
+                ),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
     })
+}
+
+fn managed_hook_shell() -> HookShell {
+    if cfg!(windows) {
+        HookShell::PowerShell
+    } else {
+        HookShell::Posix
+    }
+}
+
+fn runtime_hook_command(event: &str, shell: HookShell) -> String {
+    let status = runtime_status_for_event(event);
+    match shell {
+        HookShell::Posix => posix_runtime_hook_command(event, status),
+        HookShell::PowerShell => powershell_runtime_hook_command(event, status),
+    }
+}
+
+fn runtime_status_for_event(event: &str) -> &'static str {
+    match event {
+        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => "Running",
+        "Stop" => "WaitingInput",
+        other => panic!("unsupported runtime hook event: {other}"),
+    }
+}
+
+fn posix_runtime_hook_command(event: &str, status: &str) -> String {
+    format!(
+        "{GWT_MANAGED_RUNTIME_MARKER}={GWT_MANAGED_RUNTIME_KIND} sh -lc 'runtime_path=\"${{GWT_SESSION_RUNTIME_PATH:-}}\"; [ -n \"$runtime_path\" ] || exit 0; runtime_dir=$(dirname \"$runtime_path\"); mkdir -p \"$runtime_dir\" || exit 0; now=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\"); tmp=\"${{runtime_path}}.tmp.$$\"; printf \"{{\\\"status\\\":\\\"%s\\\",\\\"updated_at\\\":\\\"%s\\\",\\\"last_activity_at\\\":\\\"%s\\\",\\\"source_event\\\":\\\"%s\\\"}}\" \"{status}\" \"$now\" \"$now\" \"{event}\" > \"$tmp\" && mv \"$tmp\" \"$runtime_path\"' || true"
+    )
+}
+
+fn powershell_runtime_hook_command(event: &str, status: &str) -> String {
+    format!(
+        "powershell -NoProfile -Command \"& {{ $env:{GWT_MANAGED_RUNTIME_MARKER} = '{GWT_MANAGED_RUNTIME_KIND}'; if ($env:GWT_SESSION_RUNTIME_PATH) {{ $runtimePath = $env:GWT_SESSION_RUNTIME_PATH; $runtimeDir = Split-Path -Parent $runtimePath; New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null; $now = (Get-Date).ToUniversalTime().ToString('o'); $tmp = \\\"$runtimePath.tmp.$PID\\\"; $payload = @{{ status = '{status}'; updated_at = $now; last_activity_at = $now; source_event = '{event}' }} | ConvertTo-Json -Compress; Set-Content -Path $tmp -Value $payload -NoNewline; Move-Item -Force $tmp $runtimePath }} }}\""
+    )
+}
+
+fn path_is_git_tracked(worktree: &Path, relative_path: &Path) -> io::Result<bool> {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("ls-files")
+        .arg("--error-unmatch")
+        .arg(relative_path)
+        .output()
+    {
+        Ok(output) => Ok(output.status.success()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn creates_settings_local_with_managed_hooks() {
@@ -233,12 +349,13 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
 
-        assert_eq!(
-            value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
-            Value::String(
-                "node .claude/hooks/scripts/gwt-forward-hook.mjs UserPromptSubmit".to_string()
-            )
-        );
+        let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command string");
+        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(!command.contains("node"));
+        assert!(value["hooks"]["SessionStart"].is_array());
+        assert!(value["hooks"].get("Notification").is_none());
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
             Value::String("Bash".to_string())
@@ -259,7 +376,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": "node .claude/hooks/scripts/gwt-forward-hook.mjs PreToolUse",
+                                    "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'echo old-managed'",
                                     "type": "command"
                                 },
                                 {
@@ -303,7 +420,7 @@ mod tests {
         assert_eq!(
             commands
                 .iter()
-                .filter(|command| command.contains("gwt-forward-hook.mjs PreToolUse"))
+                .filter(|command| command.contains("GWT_MANAGED_HOOK"))
                 .count(),
             1
         );
@@ -351,5 +468,154 @@ mod tests {
         generate_settings_local(dir.path()).unwrap();
 
         assert!(path.exists());
+    }
+
+    #[test]
+    fn generate_codex_hooks_creates_hooks_json_without_node_runtime_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let path = dir.path().join(".codex/hooks.json");
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command string");
+
+        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(!command.contains("node"));
+        assert_eq!(
+            value["hooks"]["PreToolUse"][1]["matcher"],
+            Value::String("Bash".to_string())
+        );
+    }
+
+    #[test]
+    fn generate_codex_hooks_preserves_user_hooks_while_replacing_managed_runtime_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'echo old-managed'",
+                                    "type": "command"
+                                },
+                                {
+                                    "command": "my-custom-hook",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let commands: Vec<&str> = value["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect();
+
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.contains("GWT_MANAGED_HOOK"))
+                .count(),
+            1
+        );
+        assert!(commands.contains(&"my-custom-hook"));
+    }
+
+    #[test]
+    fn generate_codex_hooks_skips_tracked_hooks_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "tracked-command",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("tracked-command"));
+        assert!(!content.contains("GWT_MANAGED_HOOK"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn posix_runtime_hook_command_writes_runtime_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_path = dir
+            .path()
+            .join("runtime")
+            .join("999")
+            .join("session-123.json");
+        let command = posix_runtime_hook_command("SessionStart", "Running");
+
+        assert!(Command::new("sh")
+            .arg("-lc")
+            .arg(&command)
+            .env("GWT_SESSION_RUNTIME_PATH", &runtime_path)
+            .status()
+            .unwrap()
+            .success());
+
+        let content = fs::read_to_string(&runtime_path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["status"], Value::String("Running".to_string()));
+        assert_eq!(
+            value["source_event"],
+            Value::String("SessionStart".to_string())
+        );
     }
 }
