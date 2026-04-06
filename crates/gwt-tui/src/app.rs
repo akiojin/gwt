@@ -2470,8 +2470,10 @@ fn build_launch_config_from_wizard_with_custom_agents(
 
     let mut builder = AgentLaunchBuilder::new(agent_id);
 
-    if let Some(ref wt) = wizard.worktree_path {
-        builder = builder.working_dir(wt);
+    if !wizard.is_new_branch {
+        if let Some(ref wt) = wizard.worktree_path {
+            builder = builder.working_dir(wt);
+        }
     }
 
     if !wizard.branch_name.is_empty() {
@@ -2566,7 +2568,9 @@ fn build_custom_launch_config_from_wizard(
         command,
         args,
         env_vars,
-        working_dir: wizard.worktree_path.clone(),
+        working_dir: (!wizard.is_new_branch)
+            .then(|| wizard.worktree_path.clone())
+            .flatten(),
         branch: (!wizard.branch_name.is_empty()).then(|| wizard.branch_name.clone()),
         base_branch: wizard_launch_base_branch(wizard),
         display_name: custom_agent.display_name.clone(),
@@ -2585,7 +2589,7 @@ fn is_explicit_model_selection(model: &str) -> bool {
 }
 
 fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<String> {
-    if wizard.worktree_path.is_some() || !wizard.is_new_branch {
+    if !wizard.is_new_branch {
         None
     } else {
         Some(
@@ -7392,6 +7396,24 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_new_branch_ignores_selected_branch_worktree() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/child".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/wt-develop")),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.branch.as_deref(), Some("feature/child"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+        assert!(config.working_dir.is_none());
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_defaults_spec_prefill_base_branch_to_develop() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -7653,6 +7675,67 @@ CUSTOM_ENV = "enabled"
             .path();
         let persisted = AgentSession::load(&session_entry).expect("load persisted session");
         assert_eq!(persisted.branch, "feature/materialized-launch");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_new_branch_from_selected_branch_creates_new_worktree() {
+        let repo_dir = tempfile::tempdir().expect("temp repo dir");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        init_git_repo(repo_dir.path());
+        git_commit_allow_empty(repo_dir.path(), "initial commit");
+        git_checkout_new_branch(repo_dir.path(), "develop");
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/launch-from-selected".to_string(),
+            worktree_path: Some(repo_dir.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(repo_dir.path().to_path_buf());
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch");
+
+        let repo_name = repo_dir
+            .path()
+            .file_name()
+            .expect("repo dir name")
+            .to_string_lossy();
+        let expected_worktree = repo_dir
+            .path()
+            .parent()
+            .expect("repo dir parent")
+            .join(format!("{repo_name}-feature-launch-from-selected"));
+        assert!(expected_worktree.exists(), "new worktree should exist");
+
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&expected_worktree)
+            .output()
+            .expect("read worktree branch");
+        assert!(
+            branch_output.status.success(),
+            "git branch --show-current failed: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/launch-from-selected"
+        );
+
+        let session_entry = fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .next()
+            .expect("session entry")
+            .expect("dir entry")
+            .path();
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "feature/launch-from-selected");
         assert_eq!(persisted.worktree_path, expected_worktree);
     }
 
