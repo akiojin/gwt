@@ -351,14 +351,13 @@ impl AgentLaunchBuilder {
         let version_str = self.version.as_deref().unwrap_or("");
         let parsed_version = semver::Version::parse(version_str).ok();
 
-        if self.fast_mode {
-            if parsed_version
+        if self.fast_mode
+            && parsed_version
                 .as_ref()
                 .is_some_and(|ver| *ver >= semver::Version::new(0, 110, 0))
-            {
-                args.push("-c".to_string());
-                args.push("service_tier=fast".to_string());
-            }
+        {
+            args.push("-c".to_string());
+            args.push("service_tier=fast".to_string());
         }
 
         // Web search args
