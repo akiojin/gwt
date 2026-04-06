@@ -491,3 +491,11 @@ banner in favor of pane-title chrome.
 - [x] T313 [P] Write RED test: applying the forward focus-cycle message from `ActiveLayer::Main` reveals management and lands on the next logical pane instead of forwarding `Tab` into the PTY.
 - [x] T314 Update the keybind registry and app update path so prefixed focus-cycle commands work consistently from Shell and Agent panes.
 - [x] T315 Refresh `SPEC-2` artifacts and focused verification evidence for the prefixed focus-escape contract.
+
+## Phase 50: Make Agent Session Titles Branch-First And Color-Stable
+
+- [x] T316 [P] Write RED test: full-width agent session titles prefer persisted branch names over agent display names.
+- [x] T317 [P] Write RED test: compact agent session titles keep `n/N` context while showing the active persisted branch name.
+- [x] T318 [P] Write RED test: agent identity colors stay fixed while active-state emphasis comes from modifiers instead of a shared active-yellow foreground.
+- [x] T319 Update `app.rs` and `gwt-agent` color defaults so agent session titles render branch-first and keep Claude/Codex/Gemini as Yellow/Cyan/Magenta.
+- [x] T320 Refresh `SPEC-2` artifacts, launch/conversion expectations, and verification evidence for the branch-first agent-title contract.

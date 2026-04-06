@@ -54,11 +54,11 @@ impl AgentId {
     /// Default UI color for this agent.
     pub fn default_color(&self) -> AgentColor {
         match self {
-            Self::ClaudeCode => AgentColor::Green,
-            Self::Codex => AgentColor::Blue,
-            Self::Gemini => AgentColor::Cyan,
-            Self::OpenCode => AgentColor::Yellow,
-            Self::Copilot => AgentColor::Magenta,
+            Self::ClaudeCode => AgentColor::Yellow,
+            Self::Codex => AgentColor::Cyan,
+            Self::Gemini => AgentColor::Magenta,
+            Self::OpenCode => AgentColor::Green,
+            Self::Copilot => AgentColor::Blue,
             Self::Custom(_) => AgentColor::Gray,
         }
     }
@@ -156,8 +156,9 @@ mod tests {
 
     #[test]
     fn agent_id_default_color() {
-        assert_eq!(AgentId::ClaudeCode.default_color(), AgentColor::Green);
-        assert_eq!(AgentId::Codex.default_color(), AgentColor::Blue);
+        assert_eq!(AgentId::ClaudeCode.default_color(), AgentColor::Yellow);
+        assert_eq!(AgentId::Codex.default_color(), AgentColor::Cyan);
+        assert_eq!(AgentId::Gemini.default_color(), AgentColor::Magenta);
         assert_eq!(
             AgentId::Custom("x".into()).default_color(),
             AgentColor::Gray
@@ -169,7 +170,7 @@ mod tests {
         let info = AgentInfo::from_id(AgentId::ClaudeCode);
         assert_eq!(info.display_name, "Claude Code");
         assert_eq!(info.command, "claude");
-        assert_eq!(info.color, AgentColor::Green);
+        assert_eq!(info.color, AgentColor::Yellow);
         assert_eq!(info.package_name, Some("@anthropic-ai/claude-code".into()));
     }
 
