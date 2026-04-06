@@ -47,3 +47,5 @@
 - [x] T034 Implement terminal-focus input normalization in `event.rs` / `main.rs` so leaked SGR mouse reports are swallowed or converted, and hover-only move events are dropped before redraw.
 - [x] T035 [P] Write RED tests: consecutive wheel messages are drained as one bounded burst and the first following non-scroll message is preserved for the next event-loop iteration.
 - [x] T036 Implement bounded wheel-burst batching in `main.rs` so Terminal.app trackpad floods do not force one redraw per raw scroll event.
+- [x] T037 [P] Write RED test: snapshot-backed scrollbar metrics keep the thumb length proportional to the visible viewport height instead of collapsing to a single-cell frame indicator.
+- [x] T038 Adjust snapshot scrollbar metrics in `app.rs` so thumb length tracks the pane viewport while row scrollback behavior stays unchanged.

@@ -32,6 +32,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 8. Given I am viewing an older in-memory snapshot, when new output arrives, then the viewport stays on that older frame until I scroll back to the newest frame.
 9. Given Terminal.app leaks an SGR mouse report instead of a parsed mouse event, when that sequence reaches gwt, then it is consumed as mouse input and never rendered into the session pane as literal `[<...M` text.
 10. Given the host terminal emits a burst of consecutive wheel events for one trackpad gesture, when the burst arrives over the session pane, then gwt applies the whole burst before the next redraw so scrolling stays responsive and boundary non-scroll input is preserved.
+11. Given a pane is using snapshot-backed scrollback, when the scrollbar renders, then the thumb length reflects the visible terminal viewport height instead of collapsing to a single-cell frame indicator.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -94,6 +95,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
 - **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.
 - **FR-005b**: While the user is viewing an older snapshot-backed frame, new output appends to the history cache without forcing the viewport back to live until the user scrolls down to the newest frame.
+- **FR-005c**: Snapshot-backed scrollbar metrics use the visible viewport height plus the number of extra historical frames so the thumb length stays proportional to the pane instead of shrinking to a single cell.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
 - **FR-006a**: Selection coordinates are tracked in viewport cell space and resolved against the active scrollback offset so copied text matches the currently visible history.
 - **FR-007**: Copy selected text to system clipboard via platform-native clipboard integration.
@@ -127,3 +129,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-008**: Drag selection across single-line and multi-line scrollback copies the expected plain-text payload to the clipboard.
 - **SC-009**: A full-screen pane with `max_scrollback == 0` still exposes recent frames through in-memory snapshot scrollback, and live-follow resumes only after the user returns to the newest frame.
 - **SC-010**: Consecutive wheel events are batched before redraw, preserving the first non-scroll message after the burst so trackpad scrolling remains responsive under Terminal.app event floods.
+- **SC-011**: Snapshot-backed scrollbars keep a viewport-sized thumb baseline, so short frame histories render a legible scrollbar length instead of a one-cell marker.

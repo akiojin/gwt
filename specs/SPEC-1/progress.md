@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `36/36` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T17:14:28Z`
+- Task progress: `38/38` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T17:27:26Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -22,6 +22,7 @@
 - Terminal-focus input is now normalized so leaked SGR wheel reports are converted back into mouse input instead of being echoed into the pane as literal `[<...M` text.
 - Hover-only `Moved` floods are now dropped at the event layer, reducing redraw pressure during Terminal.app trackpad gestures.
 - Consecutive wheel events are now drained as a bounded burst before redraw, so Terminal.app trackpad floods no longer force one full frame render per raw scroll event.
+- Snapshot-backed scrollbar metrics now use the pane viewport height as the thumb baseline, so short frame histories render a legible scrollbar length instead of a single-cell indicator.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

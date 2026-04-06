@@ -3684,10 +3684,15 @@ fn session_scrollbar_metrics(
     }
 
     if session.vt.has_snapshot_scrollback() {
+        let visible_viewport = viewport_height.max(1);
         return Some((
-            session.vt.snapshot_count(),
+            session
+                .vt
+                .snapshot_count()
+                .saturating_sub(1)
+                .saturating_add(visible_viewport),
             session.vt.snapshot_position(),
-            1,
+            visible_viewport,
         ));
     }
 
@@ -5256,6 +5261,33 @@ mod tests {
         assert!(
             has_scrollbar,
             "snapshot history should reserve scrollbar chrome even without vt100 row scrollback"
+        );
+    }
+
+    #[test]
+    fn snapshot_scrollbar_metrics_use_viewport_height_for_thumb_length() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        let session = model.active_session_tab().expect("active session");
+        let viewport_height = active_session_text_area(&model)
+            .expect("active session text area")
+            .height as usize;
+        let metrics =
+            session_scrollbar_metrics(session, viewport_height).expect("snapshot metrics");
+
+        assert_eq!(
+            metrics,
+            (
+                session.vt.snapshot_count().saturating_sub(1) + viewport_height,
+                session.vt.snapshot_position(),
+                viewport_height,
+            ),
+            "snapshot scrollbar thumb should reflect the visible viewport height instead of a single-cell frame indicator"
         );
     }
 

@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot scrollbar の thumb 長は viewport 高さ基準で計算する
+
+### 事象
+
+scroll 自体は機能していても、full-screen pane の snapshot-backed scrollback では
+scrollbar thumb が極端に短く、1 セルに近い表示になっていた。
+
+### 原因
+
+- snapshot scrollbar の metrics が `content_length = snapshot_count` と
+  `viewport_content_length = 1` を返しており、visible pane 高さをまったく使っていなかった。
+- そのため「見えているのは 1 画面分」なのに、thumb は「1 フレーム分」だけとして描かれていた。
+
+### 再発防止策
+
+1. snapshot-backed scrollbar は row scrollback と同じく、「追加履歴量 + visible viewport 高さ」で metrics を組み立てる。
+2. thumb 長の不具合では、render だけでなく `session_scrollbar_metrics()` の戻り値を直接固定する focused test を追加する。
+3. `max_scrollback == 0` 系の調整では、scroll できることだけでなく scrollbar の位置と長さも別テストで検証する。
+
 ## 2026-04-07 — fix: trackpad scroll の重さは wheel flood ごとの redraw 回数を先に疑う
 
 ### 事象
