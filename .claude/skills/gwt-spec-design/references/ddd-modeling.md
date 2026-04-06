@@ -1,6 +1,6 @@
 # DDD Domain Discovery Reference
 
-Detailed logic for Phase 2 of gwt-design.
+Detailed logic for Phase 2 of gwt-spec-design.
 
 ## Purpose
 
@@ -125,38 +125,30 @@ touches multiple BCs, consider:
 - Is the cross-BC work a thin integration layer? (OK to keep as one SPEC)
 - Does each BC require significant new entities or logic? (Split into per-BC SPECs)
 
-**Size gate**: apply these criteria:
+**SPEC vs Issue decision**:
 
 | Signal | SPEC | Issue |
 |---|---|---|
-| Adds new user-facing functionality | Yes | -- |
-| Defines architecture or design | Yes | -- |
-| Fixes a bug in existing functionality | -- | Yes (link to parent SPEC) |
-| One-off task or chore | -- | Yes |
-| Requires 3-15 tasks to complete | Yes | -- |
-| Can be described in a single commit | -- | Yes |
+| New user-facing functionality | Yes | -- |
+| Architecture or design decisions | Yes | -- |
+| Bug fix | -- | Yes (link to parent SPEC) |
+| One-off chore | -- | Yes |
 
-**Well-scoped SPEC indicators**:
+SPEC scope is determined by feature cohesion, not task count.
+Implementation phasing is handled by gwt-spec-plan.
 
-- 3-15 tasks (fewer = merge into parent, more = split)
-- 2-5 user stories (fewer = too narrow, more = too broad)
-- Belongs to exactly one category
-- No overlap with another SPEC's scope
+### When to split a SPEC
 
-### Splitting guidance
+Split only when the SPEC spans **multiple distinct features** (not when task count is high):
 
-If the SPEC is too large:
-
-1. Identify natural BC boundaries as split points.
-2. Each child SPEC should have its own aggregate root.
+1. The SPEC touches multiple BCs with significant independent logic in each.
+2. Each part could be specified and delivered independently.
 3. Define integration contracts between child SPECs.
-4. Register the first slice and note dependencies on future slices.
 
-If the SPEC is too small:
+### When to merge into a parent SPEC
 
-1. Identify the parent SPEC that should own it.
-2. Merge the scope into the parent.
-3. Add the new user stories to the parent's spec.md.
+1. The work is a natural extension of an existing feature SPEC.
+2. Merge the new user stories into the parent's spec.md.
 
 ### Domain model summary output
 

@@ -25,4 +25,4 @@ expression: output
 │    └────────────────────────────┘    ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
-↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  Tab:focus  ?:help
+↑↓:select  ←→:tab  Ctrl+←→:sub-tab  Enter:action  C-g Tab:focus  ?:help

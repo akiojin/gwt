@@ -11,25 +11,25 @@ Scan codebase structure, analyze domain boundaries (DDD), evaluate module depth 
 ## Usage
 
 ```text
-/gwt:gwt-review [path]
+/gwt:gwt-arch-review [path]
 ```
 
 ## Steps
 
-1. Load `.claude/skills/gwt-review/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-arch-review/SKILL.md` and follow the workflow.
 2. Analyze the target path or full codebase for architectural concerns.
 3. Generate a prioritized report with actionable recommendations.
 
 ## Examples
 
 ```text
-/gwt:gwt-review
+/gwt:gwt-arch-review
 ```
 
 ```text
-/gwt:gwt-review src/
+/gwt:gwt-arch-review src/
 ```
 
 ```text
-/gwt:gwt-review crates/gwt-core/
+/gwt:gwt-arch-review crates/gwt-core/
 ```

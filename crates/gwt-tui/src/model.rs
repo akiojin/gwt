@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -11,7 +13,7 @@ use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
 use serde::{Deserialize, Serialize};
 
 use crate::input::voice::VoiceInputState;
-use crate::screens::branches::BranchesState;
+use crate::screens::branches::{BranchDetailLoadResult, BranchesState};
 use crate::screens::confirm::ConfirmState;
 use crate::screens::docker_progress::DockerProgressState;
 use crate::screens::git_view::GitViewState;
@@ -260,6 +262,105 @@ pub struct PendingSessionConversion {
 /// Shared queue of terminal Docker lifecycle results produced in the background.
 pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
 
+/// Shared queue of branch-detail preload results produced in the background.
+pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
+
+/// Tracked branch-detail preload worker state.
+pub(crate) struct BranchDetailWorker {
+    events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
+    active: Option<JoinHandle<()>>,
+    retired: Vec<JoinHandle<()>>,
+}
+
+impl BranchDetailWorker {
+    pub(crate) fn new(
+        events: BranchDetailQueue,
+        cancel: Arc<AtomicBool>,
+        active: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            events,
+            cancel,
+            active: Some(active),
+            retired: Vec::new(),
+        }
+    }
+
+    pub(crate) fn events(&self) -> BranchDetailQueue {
+        self.events.clone()
+    }
+
+    pub(crate) fn replace(
+        &mut self,
+        events: BranchDetailQueue,
+        cancel: Arc<AtomicBool>,
+        active: JoinHandle<()>,
+    ) {
+        self.cancel_active();
+        if let Some(handle) = self.active.take() {
+            self.retired.push(handle);
+        }
+        self.reap_finished();
+        self.events = events;
+        self.cancel = cancel;
+        self.active = Some(active);
+    }
+
+    pub(crate) fn reap_finished(&mut self) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            if let Some(handle) = self.active.take() {
+                let _ = handle.join();
+            }
+        }
+
+        let mut index = 0;
+        while index < self.retired.len() {
+            if self.retired[index].is_finished() {
+                let handle = self.retired.swap_remove(index);
+                let _ = handle.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn cancel_active(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for BranchDetailWorker {
+    fn drop(&mut self) {
+        self.cancel_active();
+        self.reap_finished();
+        if let Some(handle) = self.active.take() {
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                self.retired.push(handle);
+            }
+        }
+        for handle in self.retired.drain(..) {
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for BranchDetailWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BranchDetailWorker")
+            .field("retired", &self.retired.len())
+            .finish()
+    }
+}
+
 /// Result sent from the background Docker lifecycle worker back into the TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockerProgressResult {
@@ -267,11 +368,28 @@ pub enum DockerProgressResult {
     Failed { message: String, detail: String },
 }
 
+/// A terminal cell position within the currently visible viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalCell {
+    pub row: u16,
+    pub col: u16,
+}
+
+/// A drag-selection range across visible terminal cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSelection {
+    pub anchor: TerminalCell,
+    pub focus: TerminalCell,
+}
+
 /// Minimal vt100 screen state wrapper.
 pub struct VtState {
     parser: vt100::Parser,
     rows: u16,
     cols: u16,
+    max_scrollback: usize,
+    follow_live: bool,
+    selection: Option<TerminalSelection>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -279,6 +397,8 @@ impl std::fmt::Debug for VtState {
         f.debug_struct("VtState")
             .field("rows", &self.rows)
             .field("cols", &self.cols)
+            .field("max_scrollback", &self.max_scrollback)
+            .field("follow_live", &self.follow_live)
             .finish()
     }
 }
@@ -288,21 +408,30 @@ impl Clone for VtState {
         let mut parser = vt100::Parser::new(self.rows, self.cols, 10_000);
         let state = self.parser.screen().state_formatted();
         parser.process(&state);
+        parser.set_scrollback(self.scrollback());
         Self {
             parser,
             rows: self.rows,
             cols: self.cols,
+            max_scrollback: self.max_scrollback,
+            follow_live: self.follow_live,
+            selection: self.selection,
         }
     }
 }
 
 impl VtState {
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self {
+        let mut state = Self {
             parser: vt100::Parser::new(rows, cols, 10_000),
             rows,
             cols,
-        }
+            max_scrollback: 0,
+            follow_live: true,
+            selection: None,
+        };
+        state.refresh_scrollback_metrics();
+        state
     }
 
     pub fn rows(&self) -> u16 {
@@ -314,17 +443,87 @@ impl VtState {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let current_scrollback = self.scrollback();
         self.rows = rows;
         self.cols = cols;
         self.parser.set_size(rows, cols);
+        self.refresh_scrollback_metrics();
+        self.parser
+            .set_scrollback(current_scrollback.min(self.max_scrollback));
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
+        let previous_scrollback = self.scrollback();
+        let previous_max_scrollback = self.max_scrollback;
         self.parser.process(bytes);
+        self.refresh_scrollback_metrics();
+        if self.follow_live {
+            self.parser.set_scrollback(0);
+        } else {
+            let added_scrollback = self.max_scrollback.saturating_sub(previous_max_scrollback);
+            self.parser.set_scrollback(
+                previous_scrollback
+                    .saturating_add(added_scrollback)
+                    .min(self.max_scrollback),
+            );
+        }
     }
 
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
+    }
+
+    pub fn scrollback(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    pub fn max_scrollback(&self) -> usize {
+        self.max_scrollback
+    }
+
+    pub fn set_scrollback(&mut self, rows: usize) {
+        self.parser.set_scrollback(rows.min(self.max_scrollback));
+    }
+
+    pub fn follow_live(&self) -> bool {
+        self.follow_live
+    }
+
+    pub fn set_follow_live(&mut self, follow_live: bool) {
+        self.follow_live = follow_live;
+        if follow_live {
+            self.parser.set_scrollback(0);
+        }
+    }
+
+    pub fn selection(&self) -> Option<TerminalSelection> {
+        self.selection
+    }
+
+    pub fn begin_selection(&mut self, cell: TerminalCell) {
+        self.selection = Some(TerminalSelection {
+            anchor: cell,
+            focus: cell,
+        });
+    }
+
+    pub fn update_selection(&mut self, cell: TerminalCell) {
+        if let Some(mut selection) = self.selection {
+            selection.focus = cell;
+            self.selection = Some(selection);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    fn refresh_scrollback_metrics(&mut self) {
+        let current_scrollback = self.parser.screen().scrollback();
+        self.parser.set_scrollback(usize::MAX);
+        self.max_scrollback = self.parser.screen().scrollback();
+        self.parser
+            .set_scrollback(current_scrollback.min(self.max_scrollback));
     }
 }
 
@@ -384,6 +583,8 @@ pub struct Model {
     pub(crate) docker_progress: Option<DockerProgressState>,
     /// Background Docker lifecycle completion queue polled from the tick loop.
     pub(crate) docker_progress_events: Option<DockerProgressQueue>,
+    /// Tracked branch-detail preload worker and completion queue polled from the tick loop.
+    pub(crate) branch_detail_worker: Option<BranchDetailWorker>,
     /// Service selection overlay state.
     pub(crate) service_select: Option<ServiceSelectState>,
     /// Port conflict resolution overlay state.
@@ -463,6 +664,7 @@ impl Model {
             wizard: None,
             docker_progress: None,
             docker_progress_events: None,
+            branch_detail_worker: None,
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),

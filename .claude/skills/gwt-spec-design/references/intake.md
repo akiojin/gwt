@@ -1,6 +1,6 @@
 # Intake Reference
 
-Detailed logic for Phase 1 of gwt-design.
+Detailed logic for Phase 1 of gwt-spec-design.
 
 ## Preflight search protocol
 

@@ -1,8 +1,10 @@
 //! Branches management screen.
 
+use std::collections::{HashMap, HashSet};
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
     Frame,
@@ -42,8 +44,8 @@ impl SortMode {
 /// View mode filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    #[default]
     All,
+    #[default]
     Local,
     Remote,
 }
@@ -146,6 +148,23 @@ pub struct PendingDockerAction {
     pub action: DockerLifecycleAction,
 }
 
+/// Cached detail payload for a branch.
+#[derive(Debug, Clone, Default)]
+pub struct BranchDetailData {
+    pub specs: Vec<DetailSpecItem>,
+    pub files: Vec<String>,
+    pub commits: Vec<String>,
+    pub docker_containers: Vec<gwt_docker::ContainerInfo>,
+}
+
+/// Background detail-load result for a single branch.
+#[derive(Debug, Clone)]
+pub struct BranchDetailLoadResult {
+    pub generation: u64,
+    pub branch_name: String,
+    pub data: BranchDetailData,
+}
+
 /// Number of detail sections in the branch detail view.
 const DETAIL_SECTION_COUNT: usize = 4;
 
@@ -189,6 +208,12 @@ pub struct BranchesState {
     pub(crate) docker_selected: usize,
     /// Pending Docker action intent to be handled by the caller.
     pub(crate) pending_docker_action: Option<PendingDockerAction>,
+    /// Cached branch detail payloads keyed by branch name.
+    pub(crate) detail_cache: HashMap<String, BranchDetailData>,
+    /// Branches currently being loaded in the background.
+    pub(crate) loading_branches: HashSet<String>,
+    /// Monotonic generation used to discard stale async detail results.
+    pub(crate) detail_generation: u64,
 }
 
 impl BranchesState {
@@ -208,9 +233,24 @@ impl BranchesState {
             .collect();
 
         match self.sort_mode {
-            SortMode::Default => {} // insertion order
+            SortMode::Default => {
+                if self.view_mode == ViewMode::All {
+                    let (mut local, remote): (Vec<&BranchItem>, Vec<&BranchItem>) =
+                        result.into_iter().partition(|branch| branch.is_local);
+                    local.extend(remote);
+                    result = local;
+                }
+            }
             // Date has no dedicated field yet; fall back to alphabetical like Name.
-            SortMode::Name | SortMode::Date => result.sort_by(|a, b| a.name.cmp(&b.name)),
+            SortMode::Name | SortMode::Date => result.sort_by(|a, b| {
+                if self.view_mode == ViewMode::All {
+                    b.is_local
+                        .cmp(&a.is_local)
+                        .then_with(|| a.name.cmp(&b.name))
+                } else {
+                    a.name.cmp(&b.name)
+                }
+            }),
         }
 
         result
@@ -242,6 +282,115 @@ impl BranchesState {
     /// Return the currently selected Docker container, if any.
     fn selected_docker_container(&self) -> Option<&gwt_docker::ContainerInfo> {
         self.docker_containers.get(self.docker_selected)
+    }
+
+    fn selected_branch_name(&self) -> Option<String> {
+        self.selected_branch().map(|branch| branch.name.clone())
+    }
+
+    fn apply_detail_data(&mut self, data: &BranchDetailData, reset_docker_selection: bool) {
+        self.detail_specs = data.specs.clone();
+        self.detail_files = data.files.clone();
+        self.detail_commits = data.commits.clone();
+        self.docker_containers = data.docker_containers.clone();
+        if reset_docker_selection {
+            self.docker_selected = 0;
+        }
+        self.clamp_docker_selected();
+        self.pending_docker_action = None;
+    }
+
+    fn clear_visible_detail(&mut self) {
+        self.detail_specs.clear();
+        self.detail_files.clear();
+        self.detail_commits.clear();
+        self.docker_containers.clear();
+        self.docker_selected = 0;
+        self.pending_docker_action = None;
+    }
+
+    fn sync_selected_detail_from_cache(&mut self, reset_docker_selection: bool) {
+        let Some(branch_name) = self.selected_branch_name() else {
+            self.clear_visible_detail();
+            return;
+        };
+
+        let cached = self.detail_cache.get(&branch_name).cloned();
+        if let Some(data) = cached {
+            self.apply_detail_data(&data, reset_docker_selection);
+        } else {
+            self.clear_visible_detail();
+        }
+    }
+
+    fn prune_detail_cache(&mut self) {
+        let branch_names: HashSet<String> = self
+            .branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect();
+        self.detail_cache
+            .retain(|branch_name, _| branch_names.contains(branch_name));
+        self.loading_branches
+            .retain(|branch_name| branch_names.contains(branch_name));
+    }
+
+    fn worktree_sources(&self) -> HashMap<String, Option<std::path::PathBuf>> {
+        self.branches
+            .iter()
+            .map(|branch| (branch.name.clone(), branch.worktree_path.clone()))
+            .collect()
+    }
+
+    fn evict_changed_detail_sources(
+        &mut self,
+        previous_sources: &HashMap<String, Option<std::path::PathBuf>>,
+    ) {
+        for branch in &self.branches {
+            if previous_sources
+                .get(&branch.name)
+                .is_some_and(|previous| previous == &branch.worktree_path)
+            {
+                continue;
+            }
+            self.detail_cache.remove(&branch.name);
+            self.loading_branches.remove(&branch.name);
+        }
+    }
+
+    pub(crate) fn begin_detail_refresh(&mut self) -> (u64, Vec<BranchItem>) {
+        self.detail_generation = self.detail_generation.wrapping_add(1);
+        self.loading_branches = self
+            .branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect();
+        self.sync_selected_detail_from_cache(false);
+        (self.detail_generation, self.branches.clone())
+    }
+
+    pub(crate) fn cache_detail(&mut self, branch_name: String, data: BranchDetailData) {
+        let selected_branch = self.selected_branch_name();
+        let is_selected = selected_branch.as_deref() == Some(branch_name.as_str());
+        self.loading_branches.remove(&branch_name);
+        self.detail_cache.insert(branch_name, data.clone());
+        if is_selected {
+            self.apply_detail_data(&data, false);
+        }
+    }
+
+    pub(crate) fn selected_detail_loading(&self) -> bool {
+        let Some(branch_name) = self.selected_branch_name() else {
+            return false;
+        };
+        self.loading_branches.contains(&branch_name)
+            && !self.detail_cache.contains_key(&branch_name)
+    }
+
+    pub(crate) fn knows_branch(&self, branch_name: &str) -> bool {
+        self.branches
+            .iter()
+            .any(|branch| branch.name == branch_name)
     }
 }
 
@@ -286,13 +435,19 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     match msg {
         BranchesMessage::MoveUp => {
             let len = state.filtered_branches().len();
-            super::move_up(&mut state.selected, len);
+            super::clamp_index(&mut state.selected, len);
+            state.selected = state.selected.saturating_sub(1);
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::MoveDown => {
             let len = state.filtered_branches().len();
-            super::move_down(&mut state.selected, len);
+            super::clamp_index(&mut state.selected, len);
+            if len > 0 && state.selected + 1 < len {
+                state.selected += 1;
+            }
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::Select => {
             if !state.filtered_branches().is_empty() {
@@ -302,11 +457,13 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::ToggleSort => {
             state.sort_mode = state.sort_mode.next();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::ToggleView => {
             state.view_mode = state.view_mode.next();
             state.clamp_selected();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::SearchStart => {
             state.search_active = true;
@@ -316,6 +473,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 state.search_query.push(ch);
                 state.clamp_selected();
                 state.detail_session_selected = 0;
+                state.sync_selected_detail_from_cache(true);
             }
         }
         BranchesMessage::SearchBackspace => {
@@ -323,6 +481,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 state.search_query.pop();
                 state.clamp_selected();
                 state.detail_session_selected = 0;
+                state.sync_selected_detail_from_cache(true);
             }
         }
         BranchesMessage::SearchClear => {
@@ -330,14 +489,19 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
             state.search_active = false;
             state.clamp_selected();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::Refresh => {
             // Signal to reload branches — handled by caller
         }
         BranchesMessage::SetBranches(branches) => {
+            let previous_sources = state.worktree_sources();
             state.branches = branches;
+            state.evict_changed_detail_sources(&previous_sources);
+            state.prune_detail_cache();
             state.clamp_selected();
             state.detail_session_selected = 0;
+            state.sync_selected_detail_from_cache(true);
         }
         BranchesMessage::NextDetailSection => {
             state.detail_section = (state.detail_section + 1) % DETAIL_SECTION_COUNT;
@@ -395,28 +559,20 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     }
 }
 
-/// Load detail data (SPECs, git status, commits) for the selected branch.
+/// Load detail data (SPECs, git status, commits, docker state) for the branch.
 ///
 /// Best-effort: all errors are silently ignored.
-pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Path) {
-    state.detail_specs.clear();
-    state.detail_files.clear();
-    state.detail_commits.clear();
-    state.docker_containers.clear();
-    state.docker_selected = 0;
-    state.pending_docker_action = None;
+pub fn load_branch_detail(
+    branch: &BranchItem,
+    docker_containers: &[gwt_docker::ContainerInfo],
+) -> BranchDetailData {
+    let mut detail = BranchDetailData {
+        docker_containers: docker_containers.to_vec(),
+        ..BranchDetailData::default()
+    };
 
-    if let Ok(containers) = gwt_docker::list_containers() {
-        state.docker_containers = containers;
-        state.clamp_docker_selected();
-    }
-
-    let worktree_path = state
-        .selected_branch()
-        .and_then(|b| b.worktree_path.clone());
-
-    let Some(wt_path) = worktree_path else {
-        return;
+    let Some(wt_path) = branch.worktree_path.clone() else {
+        return detail;
     };
 
     // Load SPECs from worktree specs/ directory
@@ -468,12 +624,12 @@ pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Pat
             });
         }
         specs.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
-        state.detail_specs = specs;
+        detail.specs = specs;
     }
 
     // Load git status
     if let Ok(entries) = gwt_git::diff::get_status(&wt_path) {
-        state.detail_files = entries
+        detail.files = entries
             .iter()
             .map(|e| {
                 let tag = match e.status {
@@ -488,11 +644,13 @@ pub fn load_branch_detail(state: &mut BranchesState, _repo_path: &std::path::Pat
 
     // Load recent commits
     if let Ok(commits) = gwt_git::commit::recent_commits(&wt_path, 5) {
-        state.detail_commits = commits
+        detail.commits = commits
             .iter()
             .map(|c| format!("{} {}", c.hash, c.subject))
             .collect();
     }
+
+    detail
 }
 
 fn spec_sort_key(spec_id: &str) -> (u64, String) {
@@ -667,7 +825,9 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
 
     lines.push(String::new());
     lines.push(" Docker status".to_string());
-    if state.docker_containers.is_empty() {
+    if state.selected_detail_loading() {
+        lines.push(" Loading branch details...".to_string());
+    } else if state.docker_containers.is_empty() {
         lines.push(" No containers found".to_string());
     } else if let Some(container) = state.selected_docker_container() {
         lines.push(format!(" Selected: {}", container.name));
@@ -724,6 +884,12 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
     }
 
     if state.detail_specs.is_empty() {
+        if state.selected_detail_loading() {
+            let paragraph = Paragraph::new(" Loading branch details...")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(paragraph, area);
+            return;
+        }
         let has_worktree = state
             .selected_branch()
             .and_then(|b| b.worktree_path.as_ref())
@@ -762,6 +928,13 @@ fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
 fn render_detail_git_status(state: &BranchesState, frame: &mut Frame, area: Rect) {
     if state.selected_branch().is_none() {
         let paragraph = Paragraph::new(" No branch selected").style(theme::style::muted_text());
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    if state.selected_detail_loading() {
+        let paragraph = Paragraph::new(" Loading branch details...")
+            .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(paragraph, area);
         return;
     }
@@ -881,10 +1054,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use std::fs;
-    use std::io::Write;
     use std::path::PathBuf;
-    use tempfile::TempDir;
 
     fn sample_branches() -> Vec<BranchItem> {
         vec![
@@ -926,6 +1096,39 @@ mod tests {
         ]
     }
 
+    fn sample_branches_with_early_remote() -> Vec<BranchItem> {
+        vec![
+            BranchItem {
+                name: "origin/aaa-remote".to_string(),
+                is_head: false,
+                is_local: false,
+                category: BranchCategory::Feature,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "zeta-local".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Other,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "yellow-local".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Other,
+                worktree_path: None,
+            },
+            BranchItem {
+                name: "origin/zzz-remote".to_string(),
+                is_head: false,
+                is_local: false,
+                category: BranchCategory::Feature,
+                worktree_path: None,
+            },
+        ]
+    }
+
     fn sample_containers() -> Vec<gwt_docker::ContainerInfo> {
         vec![
             gwt_docker::ContainerInfo {
@@ -945,42 +1148,6 @@ mod tests {
         ]
     }
 
-    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let script_path = dir.path().join("docker");
-        let mut file = fs::File::create(&script_path).expect("create fake docker");
-        file.write_all(script_body.as_bytes())
-            .expect("write fake docker");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata().expect("stat fake docker").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
-        }
-
-        (dir, script_path)
-    }
-
-    fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
-        let _guard = crate::DOCKER_ENV_TEST_LOCK
-            .lock()
-            .expect("lock docker tests");
-        let (_dir, script_path) = write_fake_docker(script_body);
-        let previous = std::env::var_os("GWT_DOCKER_BIN");
-        std::env::set_var("GWT_DOCKER_BIN", &script_path);
-
-        let result = f();
-
-        match previous {
-            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
-            None => std::env::remove_var("GWT_DOCKER_BIN"),
-        }
-
-        result
-    }
-
     fn buffer_to_lines(buf: &ratatui::buffer::Buffer) -> Vec<String> {
         (0..buf.area.height)
             .map(|y| {
@@ -997,36 +1164,36 @@ mod tests {
         assert!(state.branches.is_empty());
         assert_eq!(state.selected, 0);
         assert_eq!(state.sort_mode, SortMode::Default);
-        assert_eq!(state.view_mode, ViewMode::All);
+        assert_eq!(state.view_mode, ViewMode::Local);
         assert!(state.search_query.is_empty());
         assert!(!state.search_active);
     }
 
     #[test]
-    fn move_down_wraps() {
+    fn move_down_stops_at_last_row() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         assert_eq!(state.selected, 0);
 
         update(&mut state, BranchesMessage::MoveDown);
         assert_eq!(state.selected, 1);
 
         // Move to last
-        for _ in 0..4 {
+        for _ in 0..10 {
             update(&mut state, BranchesMessage::MoveDown);
         }
-        // Should wrap to 0
-        assert_eq!(state.selected, 0);
+        assert_eq!(state.selected, 4);
     }
 
     #[test]
-    fn move_up_wraps() {
+    fn move_up_stops_at_first_row() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
         assert_eq!(state.selected, 0);
 
         update(&mut state, BranchesMessage::MoveUp);
-        assert_eq!(state.selected, 4); // wraps to last
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
@@ -1065,9 +1232,6 @@ mod tests {
     #[test]
     fn toggle_view_cycles() {
         let mut state = BranchesState::default();
-        assert_eq!(state.view_mode, ViewMode::All);
-
-        update(&mut state, BranchesMessage::ToggleView);
         assert_eq!(state.view_mode, ViewMode::Local);
 
         update(&mut state, BranchesMessage::ToggleView);
@@ -1075,6 +1239,9 @@ mod tests {
 
         update(&mut state, BranchesMessage::ToggleView);
         assert_eq!(state.view_mode, ViewMode::All);
+
+        update(&mut state, BranchesMessage::ToggleView);
+        assert_eq!(state.view_mode, ViewMode::Local);
     }
 
     #[test]
@@ -1117,7 +1284,37 @@ mod tests {
         state.selected = 99;
         update(&mut state, BranchesMessage::SetBranches(sample_branches()));
         assert_eq!(state.branches.len(), 5);
-        assert_eq!(state.selected, 4); // clamped
+        assert_eq!(state.selected, 3); // clamped to last visible local row
+    }
+
+    #[test]
+    fn set_branches_evicts_cached_detail_when_worktree_changes() {
+        let mut state = BranchesState::default();
+        let branch = BranchItem {
+            name: "feature/api".to_string(),
+            is_head: false,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/worktree-a")),
+        };
+        state.branches = vec![branch.clone()];
+        state.detail_cache.insert(
+            branch.name.clone(),
+            BranchDetailData {
+                files: vec!["stale.txt".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let mut updated_branch = branch.clone();
+        updated_branch.worktree_path = Some(PathBuf::from("/tmp/worktree-b"));
+        update(
+            &mut state,
+            BranchesMessage::SetBranches(vec![updated_branch.clone()]),
+        );
+
+        assert!(!state.detail_cache.contains_key(&updated_branch.name));
+        assert!(state.detail_files.is_empty());
     }
 
     #[test]
@@ -1151,6 +1348,7 @@ mod tests {
     fn filtered_branches_respects_search() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         state.search_query = "feature".to_string();
 
         let filtered = state.filtered_branches();
@@ -1204,9 +1402,10 @@ mod tests {
     }
 
     #[test]
-    fn sort_name_returns_alphabetical_order() {
+    fn sort_name_returns_alphabetical_order_within_local_and_remote_groups() {
         let mut state = BranchesState::default();
-        state.branches = sample_branches(); // main, develop, feature/login, origin/feature/api, hotfix/crash
+        state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
         state.sort_mode = SortMode::Name;
 
         let filtered = state.filtered_branches();
@@ -1214,40 +1413,39 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "develop",
-                "feature/login",
-                "hotfix/crash",
-                "main",
-                "origin/feature/api",
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
             ]
         );
     }
 
     #[test]
-    fn sort_date_returns_alphabetical_fallback() {
+    fn sort_name_keeps_local_branches_before_remote_branches() {
         let mut state = BranchesState::default();
-        state.branches = sample_branches();
-        state.sort_mode = SortMode::Date;
+        state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
+        state.sort_mode = SortMode::Name;
 
         let filtered = state.filtered_branches();
         let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
-        // Date falls back to alphabetical since no date field exists
         assert_eq!(
             names,
             vec![
-                "develop",
-                "feature/login",
-                "hotfix/crash",
-                "main",
-                "origin/feature/api",
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
             ]
         );
     }
 
     #[test]
-    fn sort_default_preserves_insertion_order() {
+    fn sort_default_keeps_local_branches_before_remote_branches() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         state.sort_mode = SortMode::Default;
 
         let filtered = state.filtered_branches();
@@ -1258,8 +1456,48 @@ mod tests {
                 "main",
                 "develop",
                 "feature/login",
-                "origin/feature/api",
                 "hotfix/crash",
+                "origin/feature/api",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_date_returns_alphabetical_fallback_within_local_and_remote_groups() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
+        state.sort_mode = SortMode::Date;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_date_keeps_local_branches_before_remote_branches() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches_with_early_remote();
+        state.view_mode = ViewMode::All;
+        state.sort_mode = SortMode::Date;
+
+        let filtered = state.filtered_branches();
+        let names: Vec<&str> = filtered.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "yellow-local",
+                "zeta-local",
+                "origin/aaa-remote",
+                "origin/zzz-remote",
             ]
         );
     }
@@ -1268,6 +1506,7 @@ mod tests {
     fn search_then_navigate_selects_filtered_item() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
 
         // Search for "feature" — matches feature/login and origin/feature/api
         update(&mut state, BranchesMessage::SearchStart);
@@ -1304,6 +1543,7 @@ mod tests {
     fn view_toggle_clamps_selected() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
+        state.view_mode = ViewMode::All;
         state.selected = 4; // last item (Other)
 
         // Switch to Remote — only 1 item
@@ -1525,29 +1765,23 @@ mod tests {
 
     #[test]
     fn load_branch_detail_populates_docker_containers() {
-        with_fake_docker(
-            "#!/bin/sh\nprintf 'abc123\\tweb\\trunning\\tnginx:latest\\t0.0.0.0:8080->80/tcp\\n'\n",
-            || {
-                let tmp = tempfile::tempdir().expect("create temp worktree");
-                let mut state = BranchesState::default();
-                state.branches = vec![BranchItem {
-                    name: "feature/docker".to_string(),
-                    is_head: true,
-                    is_local: true,
-                    category: BranchCategory::Feature,
-                    worktree_path: Some(tmp.path().to_path_buf()),
-                }];
+        let tmp = tempfile::tempdir().expect("create temp worktree");
+        let branch = BranchItem {
+            name: "feature/docker".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(tmp.path().to_path_buf()),
+        };
 
-                load_branch_detail(&mut state, tmp.path());
+        let detail = load_branch_detail(&branch, &sample_containers());
 
-                assert_eq!(state.docker_containers.len(), 1);
-                let container = &state.docker_containers[0];
-                assert_eq!(container.id, "abc123");
-                assert_eq!(container.name, "web");
-                assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
-                assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
-            },
-        );
+        assert_eq!(detail.docker_containers.len(), 2);
+        let container = &detail.docker_containers[0];
+        assert_eq!(container.id, "abc123");
+        assert_eq!(container.name, "web");
+        assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
+        assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
     }
 
     #[test]

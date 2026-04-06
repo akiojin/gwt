@@ -1,11 +1,11 @@
 ---
-name: gwt-design
-description: "Drive SPEC design from intake to planning-ready. Runs preflight search, one-question-at-a-time interview, DDD domain discovery, SPEC registration, and clarification. Use when user says 'design this feature', 'brainstorm', 'create a new spec', 'clarify the spec', 'deepen the spec', 'domain model this', or starts from a rough idea."
+name: gwt-spec-design
+description: "MUST invoke before any feat/refactor implementation. Use proactively when conversation moves toward new functionality or architectural changes. Runs DDD intake, domain discovery, SPEC registration, and clarification. Triggers: 'design', 'brainstorm', 'create a spec', 'clarify spec'."
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 argument-hint: "[rough idea or request | --deepen SPEC-N]"
 ---
 
-# gwt-design
+# gwt-spec-design
 
 Unified design skill that takes a rough idea through domain discovery to a
 planning-ready SPEC. Absorbs brainstorm, register, clarify, and deepen into a
@@ -15,7 +15,7 @@ single five-phase pipeline.
 
 | Invocation | Behavior |
 |---|---|
-| `gwt-design` | Run Phase 1-4 sequentially (intake through clarification) |
+| `gwt-spec-design` | Run Phase 1-4 sequentially (intake through clarification) |
 | `gwt-design <rough idea>` | Same, seeded with the given idea |
 | `gwt-design --deepen SPEC-N` | Run Phase 5 only on an existing SPEC |
 
@@ -155,18 +155,17 @@ Use the DDD model to validate SPEC granularity:
 - If the feature spans multiple BCs, consider splitting into per-BC SPECs.
 - Cross-BC interactions should be documented as integration points, not merged scope.
 
-Also apply the size gate:
+Also apply the SPEC vs Issue decision:
 
 | Criteria | SPEC | Issue |
 |---|---|---|
-| Adds new user-facing functionality | Yes | -- |
-| Defines architecture or design | Yes | -- |
-| Fixes a bug | -- | Yes (link to parent SPEC) |
-| One-off task or chore | -- | Yes |
-| 3-15 tasks to complete | Yes | -- |
-| Describable in a single commit | -- | Yes |
+| New user-facing functionality | Yes | -- |
+| Architecture or design decisions | Yes | -- |
+| Bug fix | -- | Yes (link to parent SPEC) |
+| One-off chore | -- | Yes |
 
-A well-scoped SPEC: 3-15 tasks, 2-5 user stories, one category, no overlap.
+SPEC scope is determined by feature cohesion, not task count.
+Implementation phasing is handled by gwt-spec-plan.
 
 ### DDD output
 
@@ -373,7 +372,7 @@ for the user.
 On completion of Phase 4 (or Phase 5), suggest:
 
 ```text
-SPEC-<id> is planning-ready. Run `gwt-plan` to generate plan.md and
+SPEC-<id> is planning-ready. Run `gwt-spec-plan` to generate plan.md and
 supporting artifacts.
 ```
 

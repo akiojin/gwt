@@ -1,10 +1,10 @@
 # Progress: SPEC-2 - Workspace Shell
 
 ## Progress
-- Status: `in-progress`
-- Phase: `Implementation`
-- Task progress: `253/253` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T08:31:21Z`
+- Status: `done`
+- Phase: `Done`
+- Task progress: `288/288` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T09:33:36Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -38,9 +38,11 @@
 - Management focus cycling now matches the pane topology again: `Branches` still cycles through `BranchDetail`, while every other management tab stays on the two real surfaces (`Terminal` and `TabContent`).
 - The management/session split now responds to terminal width again: wide terminals keep the 40/60 old-TUI balance, while standard widths fall back to 50/50 so management chrome remains readable.
 - The redundant standalone management banner is gone; pane titles now carry the management context so the left-side list/detail surfaces reclaim one full row of content.
-- Terminal-focused footer hints now use compact grouped notation so `Ctrl+G:b/i/s g c []/1-9 z ?`, `Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
+- Terminal-focused footer hints now use compact grouped notation so `Ctrl+G:b/i/s g c []/1-9 z ?`, `C-g Tab:focus`, and `^C×2` stay visible at terminal widths `<= 80` when no notification is occupying the footer.
 - Management and Branch Detail footers now compact both context and hint text at terminal widths `<= 80` when no notification is occupying the footer, so pane-local guidance remains visible instead of truncating at the right edge.
-- Narrow management pane titles now collapse to the active tab label whenever the full tab strip would truncate, so standard-width terminals keep the current management surface legible instead of showing a cut-off strip.
+- Branches list navigation now stops at the first and last visible rows instead of wrapping, so daily branch scanning no longer overshoots at the edges.
+- `Branches` `All` view now keeps local branches ahead of remotes while still honoring the active sort mode inside each group, so worktree-focused branches stay at the top of the list.
+- Narrow management pane titles now keep the active tab plus nearby tabs visible with ellipsis whenever the full tab strip would truncate, so standard-width terminals preserve tab context instead of collapsing to a single label.
 - Narrow session pane titles now collapse to the active session label whenever the full session strip would truncate, so standard-width multi-session workspaces keep the current workstream legible instead of showing a cut-off strip.
 - Non-Branches management footer hints now mirror the actual routing contract: detail views advertise `Esc:back`, form/edit modes advertise `Esc:cancel`, and only Settings/Logs keep `Ctrl+←→:sub-tab`.
 - Branch Detail `Esc:back` is now consumed before warn-dismiss fallback runs, so a visible warn toast no longer hijacks the detail back action.
@@ -48,6 +50,18 @@
 - Branch Detail content now stays chrome-light: the pane border owns the active section and branch context, while inner Overview / SPECs / Git / Sessions renderers no longer repeat nested titles inside the body.
 - Compact session titles now keep the active `n/N` position visible alongside the active session label, so standard-width workspaces preserve multi-session context even after the full strip collapses.
 - Split/grid pane titles now keep old-TUI session identity cues as well: each pane shows its stable `n:` position plus the session-type icon before the session label.
+- Branch Detail now prefetches detail data asynchronously and caches it per branch, so startup/refresh can repopulate details without putting Docker/git/spec filesystem reads on the cursor-move input path.
+- Management focus cycling now also accepts both real-world reverse-tab encodings: `BackTab` and `Tab` with the Shift modifier both move focus backward as documented.
+- Startup now synchronizes the live terminal frame size into the model before the default shell PTY is spawned, so the right-side session pane starts with the correct geometry instead of stale `80x24` dimensions.
+- The default `Branches` filter now opens in `Local`, and the `m` view-mode cycle continues through `Remote` and `All`, so the first management view is immediately scoped to worktree-focused branches.
+- Reviewer guidance and snapshots now show `View: Local` on the initial Branches surface, keeping the documented startup state aligned with the shipped UI.
+- Branch-detail preload workers are now tracked and cancelable, so a newer startup/refresh/docker-triggered preload no longer leaves detached stale workers shelling out against later branches.
+- Branch-detail preload now snapshots Docker container state once per refresh and fans that shared snapshot into each branch payload, removing the previous `docker ps -a` per-branch amplification.
+- Branch-detail preload backfill now applies in bounded per-tick batches, so large queued preload bursts no longer monopolize one frame and Branches list navigation stays responsive while detail cache updates stream in.
+- The main event loop now drains queued PTY output before blocking on terminal input and rechecks it in short slices, so shell/agent echo is no longer gated by the next 100 ms tick.
+- `Ctrl+G,g` pane toggles now resize live PTYs and vt100 parsers immediately to the new visible session geometry, keeping placeholder chrome and actual terminal width aligned.
+- Exited PTY-backed sessions now remove their tabs automatically, clamp the active session safely, and notify with the auto-close result instead of leaving dead tabs behind.
+- Session PTYs now also expose an explicit prefixed focus-escape path: `Ctrl+G,Tab` and `Ctrl+G,Shift+Tab` cycle focus without stealing the raw plain-`Tab` key from Shell or Agent processes.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

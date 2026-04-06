@@ -11,12 +11,20 @@ const TICK_RATE: Duration = Duration::from_millis(100);
 
 /// Poll for the next message. Returns `None` on timeout with no events.
 pub fn poll_event(deadline: Instant) -> Option<Message> {
+    poll_event_slice(deadline, deadline.saturating_duration_since(Instant::now()))
+}
+
+/// Poll for the next message while capping the blocking wait to `max_wait`.
+///
+/// Returns `None` when the slice times out before the next tick deadline.
+pub fn poll_event_slice(deadline: Instant, max_wait: Duration) -> Option<Message> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Some(Message::Tick);
     }
 
-    if event::poll(remaining).unwrap_or(false) {
+    let wait = remaining.min(max_wait);
+    if event::poll(wait).unwrap_or(false) {
         match event::read() {
             Ok(Event::Key(key)) if key.kind == event::KeyEventKind::Press => {
                 Some(Message::KeyInput(key))
@@ -25,8 +33,10 @@ pub fn poll_event(deadline: Instant) -> Option<Message> {
             Ok(Event::Resize(w, h)) => Some(Message::Resize(w, h)),
             _ => None,
         }
-    } else {
+    } else if Instant::now() >= deadline {
         Some(Message::Tick)
+    } else {
+        None
     }
 }
 
@@ -59,5 +69,12 @@ mod tests {
         let past = Instant::now() - Duration::from_secs(1);
         let msg = poll_event(past);
         assert!(matches!(msg, Some(Message::Tick)));
+    }
+
+    #[test]
+    fn poll_event_slice_returns_none_before_deadline_timeout() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let msg = poll_event_slice(deadline, Duration::ZERO);
+        assert!(msg.is_none());
     }
 }

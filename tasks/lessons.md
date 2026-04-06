@@ -1,5 +1,59 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: session pane mouse interaction は keyboard focus 前提で捨てない
+
+### 事象
+
+terminal pane の scrollback 実装自体は存在していたが、管理ビューの初期状態から session 上でホイールしても
+スクロールせず、最初のマウス操作が無視されていた。
+
+### 原因
+
+- `handle_mouse_input_with_tools()` が `active_focus == FocusPane::Terminal` を満たさない限り
+  session 領域上の `ScrollUp` / `ScrollDown` / click / drag をまとめて `Ok(false)` で捨てていた。
+- モデルの初期 focus は `TabContent` のため、session 上の最初のマウス操作だけでは terminal focus に遷移できなかった。
+
+### 再発防止策
+
+1. session pane の mouse UX を追加・変更するときは、「keyboard focus が terminal でない状態」からの 1 発目の操作を RED テストで固定する。
+2. session 領域上の wheel / click / drag は、必要なら先に terminal focus へ遷移させてから個別処理へ流す。
+3. opener 呼び出しの有無だけを見るテストと、イベントが session interaction として handled されるかを見るテストを分けて評価する。
+
+## 2026-04-06 — fix: Branch detail preload は Tick ごとに処理上限を設ける
+
+### 事象
+
+`Branches` の入力パスを async preload 化した後でも、preload 完了イベントを 1 Tick で全件 drain していたため、
+ブランチ数が多い環境で 1 フレーム内の同期処理量が増え、一覧操作が重く感じる再発が起きた。
+
+### 原因
+
+- `drain_branch_detail_events()` がキューを空になるまで `loop` で処理していた。
+- preload 自体はバックグラウンド化できていても、結果適用が無制限だと UI スレッドを占有しうる設計だった。
+
+### 再発防止策
+
+1. preload/バックグラウンド処理の「結果適用側」でも 1 Tick あたりの上限（frame budget）を明示的に持つ。
+2. 「1 Tick で全件 drain しない」ことを固定する RED テストを追加し、回帰で即検知できるようにする。
+3. `Branches` 系のレスポンス不具合では、I/O の非同期化だけでなく「メインスレッド適用量」の上限有無まで確認する。
+
+## 2026-04-06 — fix: Launch Agent の AI branch suggestion が復活しないことをテストで固定する
+
+### 事象
+
+`origin/develop` をマージした直後、`prepare_wizard_startup()` が `ai_enabled = true` を再導入してしまい、
+Branch Name 入力後に AI suggestion step が復活してブランチ作成が阻害された。
+
+### 原因
+
+- `prepare_wizard_startup()` が `WizardState::default()` の `ai_enabled = false` を上書きしていた。
+- 標準 new-branch フローで AI を無効にする前提が、テストで固定されていなかった。
+
+### 再発防止策
+
+1. `prepare_wizard_startup()` が `ai_enabled = false` を保持することを RED テストで固定する。
+2. `origin/develop` のマージ後は、Launch Agent の新規ブランチ導線で AI step が出ないことを最小テストで検証する。
+
 ## 2026-04-04 — fix: Docker 系 broad verification は Cargo を並列実行しない
 
 ### 事象
