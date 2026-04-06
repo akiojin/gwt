@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `185/185` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T11:59:47Z`
+- Artifact refresh: `2026-04-07T00:20:00Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -147,6 +147,10 @@
 - Branch-origin launches now preserve the selected base branch for
   worktree creation, while SPEC/Issue-prefilled launches default that base
   branch to `develop`.
+- Selected-branch new-branch launches no longer leak the selected branch's
+  existing worktree into `LaunchConfig`, so launch-time materialization now
+  still creates the requested sibling worktree instead of silently reusing
+  `develop`.
 - The actual launched worktree path is now persisted into session metadata
   and exported through `GWT_PROJECT_ROOT`, so Quick Start / resume operate on
   the materialized launch target instead of a repo-root alias.
@@ -159,7 +163,8 @@
   `cargo test -p gwt-git sibling_worktree_path_uses_repo_name_and_slugged_branch -- --nocapture`,
   `cargo test -p gwt-git create_from_base_creates_new_branch_worktree -- --nocapture`,
   `cargo test -p gwt-tui base_branch -- --nocapture`, and
-  `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`.
+  `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`,
+  plus `cargo test -p gwt-tui from_selected_branch -- --nocapture`.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

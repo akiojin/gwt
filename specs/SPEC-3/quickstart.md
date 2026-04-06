@@ -107,7 +107,8 @@
    of inventing a `default` model placeholder.
 41. From Branches, choose `Create new from selected`, finish the wizard, and
     verify Launch Agent creates a sibling worktree for the requested branch
-    before the PTY starts.
+    before the PTY starts, even when the selected base branch already has its
+    own worktree.
 42. Repeat the new-branch launch from SPEC or Issue context and verify the
     created worktree uses the new branch while the session metadata records
     that actual launched path.
@@ -133,6 +134,7 @@
 - `cargo test -p gwt-tui custom_agents_add_edit_delete_persist_immediately -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with -- --nocapture`
 - `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`
+- `cargo test -p gwt-tui from_selected_branch -- --nocapture`
 - `cargo test -p gwt-tui session_conversion`
 
 ## Expected Result
