@@ -35,7 +35,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 11. Given a pane is using snapshot-backed scrollback, when the scrollbar renders, then the thumb length reflects the visible terminal viewport height instead of collapsing to a single-cell frame indicator.
 12. Given a full-screen pane redraw arrives as multiple PTY reader chunks inside one event-loop drain, when gwt records snapshot-backed scrollback, then it keeps only the final drained frame for that pass instead of exposing partially painted intermediate states during scrollback review.
 13. Given a full-screen pane redraw overwrites or clears the same visible rows without advancing the viewport, when gwt updates its in-memory cache, then the latest cached viewport is replaced in place and stale cleared lines are not exposed by scrollback review.
-14. Given the previous full-screen frame is visually blank and the next frame only introduces content near the bottom rows, when gwt evaluates viewport-shift history, then blank-only overlap is not treated as historical advancement and scrolling to the oldest frame never shows an empty phantom screen.
+14. Given the previous full-screen frame is visually blank and the next frame only introduces content near the bottom rows, when gwt evaluates viewport-shift history, then frame progression remains available and any leading blank history is pruned so scrolling to the oldest frame never shows an empty phantom screen.
 15. Given historical snapshots already include an old blank frame and newer frames contain visible text, when gwt updates the snapshot history, then it prunes the leading blank frame so scrolling to the oldest position still shows meaningful content.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
@@ -102,7 +102,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005c**: Snapshot-backed scrollbar metrics use the visible viewport height plus the number of extra historical frames so the thumb length stays proportional to the pane instead of shrinking to a single cell.
 - **FR-005d**: PTY output chunks drained in the same event-loop pass are coalesced per session before they enter the app update path so snapshot-backed scrollback tracks rendered frames rather than PTY reader chunk boundaries.
 - **FR-005e**: Full-screen redraws that overwrite or clear the same visible viewport replace the latest cached viewport in place; only vertical viewport advances extend the in-memory history.
-- **FR-005f**: Viewport-shift detection for snapshot-backed history must require non-blank overlapping rows; blank-only overlap is treated as redraw replacement so transient empty frames do not become scrollback history.
+- **FR-005f**: Viewport-shift detection for snapshot-backed history remains overlap-based so full-screen frame history can progress even when updates are sparse across mostly blank rows.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
 - **FR-006a**: Selection coordinates are tracked in viewport cell space and resolved against the active scrollback offset so copied text matches the currently visible history.

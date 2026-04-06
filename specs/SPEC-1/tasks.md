@@ -53,7 +53,7 @@
 - [x] T040 Coalesce per-session PTY output in `main.rs` before dispatching `Message::PtyOutput`, keeping snapshot capture aligned with rendered frame boundaries.
 - [x] T041 [P] Write RED tests: in-place full-screen redraws replace the latest cached viewport, while vertical viewport shifts still extend snapshot-backed history.
 - [x] T042 Adjust the full-screen cache model in `model.rs` / `app.rs` so overwrite-or-clear redraws mutate the latest cached viewport instead of leaking stale cleared lines into scrollback.
-- [x] T043 [P] Write RED tests: blank-only overlap between consecutive full-screen frames is not treated as viewport-shift history and does not create a phantom empty top frame.
-- [x] T044 Tighten snapshot viewport-shift detection in `model.rs` so history extension requires non-blank overlap and verify the oldest-scrollback frame never goes empty for bottom-aligned first draws.
+- [x] T043 [P] Write RED tests: blank-to-bottom-aligned frame transitions keep snapshot history usable while topmost scrollback never lands on a phantom empty frame.
+- [x] T044 Keep overlap-based snapshot viewport-shift progression in `model.rs` and pair it with blank-prefix pruning so sparse full-screen redraws remain scrollable without empty-top regressions.
 - [x] T045 [P] Write RED test: leading blank snapshots are pruned once newer non-blank frames exist so topmost scrollback never lands on an empty phantom frame.
 - [x] T046 Prune leading blank snapshot prefixes in `model.rs` and preserve snapshot cursor clamping while keeping non-blank history intact.

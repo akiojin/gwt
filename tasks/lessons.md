@@ -18,25 +18,24 @@ blank-only overlap 判定を締めても、履歴先頭に残った古い blank 
 2. prefix 削除時は `snapshot_cursor` を `saturating_sub` で同期してカーソル破綻を防ぐ。
 3. snapshot 系不具合は「append 条件」と「履歴正規化（prefix pruning）」を分けて検証する。
 
-## 2026-04-07 — fix: blank-only overlap を viewport shift と誤判定しない
+## 2026-04-07 — fix: viewport shift 判定を厳しくしすぎると scroll が消える
 
 ### 事象
 
-full-screen pane で 2 画面程度の履歴を上までスクロールすると、
-最古フレームが空画面になって何も表示されないことがあった。
+blank-only overlap を除外するために viewport shift 判定を厳しくしたところ、
+full-screen pane の snapshot history が伸びず、実質的にスクロール不能になるケースが出た。
 
 ### 原因
 
-- snapshot history 追加条件が「行配列の shift 一致」だけだった。
-- 直前フレームがほぼ空白で次フレームが下端にだけ文字を描くケースで、
-  空白部分の一致を viewport shift と誤判定していた。
-- その結果、過渡的な空フレームが history に残り、最上端で空表示になった。
+- viewport shift 判定を「非空白 overlap 必須」にしたことで、
+  sparse な full-screen redraw（ほぼ空白 + 一部更新）の多くが history 追加対象から外れた。
+- 結果として `snapshot_count` が増えず、ユーザー視点では scrollback が効かなくなった。
 
 ### 再発防止策
 
-1. viewport shift 判定は「重なり行が非空白を含む」ことを必須条件にする。
-2. blank frame -> bottom-aligned first draw の回帰テストを追加し、`snapshot_count == 1` を固定する。
-3. 「最上端スクロールで空表示」は render だけでなく snapshot append 条件の誤検知を疑う。
+1. overlap-based の viewport shift 判定は維持し、history 進行を止めない。
+2. 空表示対策は判定厳格化ではなく、leading blank prefix pruning で分離して解く。
+3. 「scroll 不能」と「最上端空表示」を別の故障モードとして切り分けてテストする。
 
 ## 2026-04-07 — fix: full-screen cache history は viewport shift のときだけ伸ばす
 

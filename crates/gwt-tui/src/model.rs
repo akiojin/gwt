@@ -442,13 +442,13 @@ fn snapshots_capture_viewport_shift(previous: &ScreenSnapshot, current: &ScreenS
     for shift in 1..line_count {
         let previous_suffix = &previous.visible_lines[shift..];
         let current_prefix = &current.visible_lines[..line_count - shift];
-        if previous_suffix == current_prefix && slice_contains_non_blank_content(previous_suffix) {
+        if previous_suffix == current_prefix {
             return true;
         }
 
         let previous_prefix = &previous.visible_lines[..line_count - shift];
         let current_suffix = &current.visible_lines[shift..];
-        if previous_prefix == current_suffix && slice_contains_non_blank_content(previous_prefix) {
+        if previous_prefix == current_suffix {
             return true;
         }
     }
@@ -1217,7 +1217,7 @@ mod tests {
     }
 
     #[test]
-    fn viewport_shift_detection_ignores_blank_only_overlap() {
+    fn viewport_shift_detection_allows_blank_only_overlap() {
         let previous = ScreenSnapshot {
             rows: 5,
             cols: 20,
@@ -1238,8 +1238,8 @@ mod tests {
         };
 
         assert!(
-            !snapshots_capture_viewport_shift(&previous, &current),
-            "blank overlap should not be treated as a viewport shift because it keeps a transient empty frame in history"
+            snapshots_capture_viewport_shift(&previous, &current),
+            "blank overlap should still count as viewport shift so full-screen frame history can progress"
         );
     }
 
