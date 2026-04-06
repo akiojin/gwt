@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `278/278` checked in `tasks.md`
-- Artifact refresh: `2026-04-05T13:57:31Z`
+- Task progress: `281/281` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T02:39:36Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -56,6 +56,7 @@
 - Reviewer guidance and snapshots now show `View: Local` on the initial Branches surface, keeping the documented startup state aligned with the shipped UI.
 - Branch-detail preload workers are now tracked and cancelable, so a newer startup/refresh/docker-triggered preload no longer leaves detached stale workers shelling out against later branches.
 - Branch-detail preload now snapshots Docker container state once per refresh and fans that shared snapshot into each branch payload, removing the previous `docker ps -a` per-branch amplification.
+- Branch-detail preload backfill now applies in bounded per-tick batches, so large queued preload bursts no longer monopolize one frame and Branches list navigation stays responsive while detail cache updates stream in.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

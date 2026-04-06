@@ -643,6 +643,18 @@ and so Docker state is captured once per refresh instead of once per branch.
 46.3: Verification (1 task)
 - Add focused coverage for canceling superseded workers and for single-snapshot Docker loading, then rerun broad verification and refresh SPEC-2 artifacts.
 
+### Phase 47: Keep Branches List Responsive During Detail Backfill (3 tasks)
+Fix the recurrence where Branch Detail backfill can still make Branches navigation feel sticky under larger branch sets.
+
+47.1: Tick budget for preload event application (1 task)
+- Bound branch-detail event draining per tick so one frame cannot consume the entire queue when preload has accumulated many branch payloads.
+
+47.2: Regression coverage (1 task)
+- Add a RED test proving one tick leaves remaining branch-detail preload events queued, then verify subsequent ticks continue draining incrementally.
+
+47.3: Verification and artifact sync (1 task)
+- Re-run focused preload/responsiveness tests and update SPEC-2 artifacts with the incremental drain contract.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
@@ -656,3 +668,4 @@ and so Docker state is captured once per refresh instead of once per branch.
 3. `cargo clippy -p gwt-tui --all-targets -- -D warnings` — clean
 4. Manual: launch gwt-tui, navigate branches, verify cached detail switches immediately on cursor move and `r` refresh repopulates details asynchronously
 5. Manual: verify `Shift+Tab` moves focus backward and the initial right-side session pane starts at the expected size without requiring a window resize
+6. Manual: in a repository with many branches, open Branches during preload and verify `Up`/`Down` remains responsive while detail rows continue to backfill.

@@ -127,6 +127,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006k**: The default `Branches` view filter is `Local`, so the initial management view opens on local branches without requiring an extra toggle from `All`.
 - **FR-006l**: Branch-detail preload keeps at most one active refresh worker. When startup, `r`, or a Docker action schedules a newer preload, any superseded worker is canceled and must not continue walking later branches in the background.
 - **FR-006m**: Docker container state used by Branch Detail preload is captured once per refresh and shared across every branch payload in that refresh; the preload path must not call `docker ps -a` once per branch.
+- **FR-006n**: Branch-detail preload results are applied incrementally. A single UI tick must not drain an unbounded number of preload events, so large branch sets cannot monopolize one frame and stall Branches list input.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-009**: Session navigation: Ctrl+G,] (next), Ctrl+G,[ (prev), Ctrl+G,1-9 (direct).
@@ -156,6 +157,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **NFR-006**: Branch list selection changes complete without synchronous `git` / Docker / filesystem detail reloads on the input path.
 - **NFR-007**: Startup PTY geometry matches the visible session pane without requiring a manual terminal resize.
 - **NFR-008**: Branch-detail preload refresh cost scales with the number of branches for branch-local Git/filesystem reads only; Docker container discovery remains `O(1)` per refresh, not `O(branches)`.
+- **NFR-009**: Applying branch-detail preload results is frame-budgeted: each tick handles a bounded batch so Branches list navigation remains responsive while preload data continues to stream in.
 
 ## Implementation Details
 

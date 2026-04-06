@@ -466,3 +466,9 @@ banner in favor of pane-title chrome.
 - [x] T297 Update `app.rs` to track and cancel/reap branch-detail preload workers instead of replacing the completion queue and detaching stale workers.
 - [x] T298 Update `branches.rs` so branch-detail loading consumes a per-refresh Docker snapshot instead of calling Docker per branch.
 - [x] T299 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the stabilized Branch Detail preload path.
+
+## Phase 47: Keep Branches List Responsive During Detail Backfill
+
+- [x] T300 [P] Write RED test: one `Tick` does not fully drain a large branch-detail preload queue, so preload work cannot monopolize a frame.
+- [x] T301 Update `app.rs` branch-detail event draining to apply a bounded per-tick batch budget while preserving generation/branch validation.
+- [x] T302 Refresh `SPEC-2` artifacts and focused verification evidence for the incremental preload-drain contract.

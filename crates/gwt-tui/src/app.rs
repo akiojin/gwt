@@ -42,6 +42,9 @@ use crate::{
 use crate::custom_agents::{load_custom_agents_from_path, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV};
 
 static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Cap branch-detail preload event application per tick so one refresh burst
+/// cannot monopolize the UI thread.
+const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -2143,7 +2146,7 @@ fn drain_branch_detail_events(model: &mut Model) {
     worker.reap_finished();
     let events = worker.events();
 
-    loop {
+    for _ in 0..BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET {
         let event = events.lock().ok().and_then(|mut queue| queue.pop_front());
         let Some(event) = event else {
             return;
@@ -7640,6 +7643,55 @@ CUSTOM_ENV = "enabled"
         assert_eq!(model.logs.entries[0].message, "Queued");
         assert!(model.current_notification.is_some());
         assert!(model.drain_notifications().is_empty());
+    }
+
+    #[test]
+    fn update_tick_drains_branch_detail_events_in_small_batches() {
+        let mut model = test_model();
+        let total_events = 12usize;
+        let generation = model.branches.detail_generation.wrapping_add(1);
+        model.branches.detail_generation = generation;
+        model.branches.branches = (0..total_events)
+            .map(|index| screens::branches::BranchItem {
+                name: format!("feature/{index}"),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            })
+            .collect();
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        {
+            let mut queue = events.lock().expect("lock branch detail queue");
+            for index in 0..total_events {
+                queue.push_back(screens::branches::BranchDetailLoadResult {
+                    generation,
+                    branch_name: format!("feature/{index}"),
+                    data: screens::branches::BranchDetailData::default(),
+                });
+            }
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = thread::spawn(|| {});
+        model.branch_detail_worker = Some(crate::model::BranchDetailWorker::new(
+            events.clone(),
+            cancel,
+            handle,
+        ));
+
+        update(&mut model, Message::Tick);
+
+        let remaining = events
+            .lock()
+            .expect("lock branch detail queue after tick")
+            .len();
+        assert_eq!(
+            remaining, 4,
+            "tick should leave work queued so branch detail preload cannot monopolize one frame"
+        );
+        assert_eq!(model.branches.detail_cache.len(), 8);
     }
 
     #[test]

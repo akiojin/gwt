@@ -1,5 +1,23 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: Branch detail preload は Tick ごとに処理上限を設ける
+
+### 事象
+
+`Branches` の入力パスを async preload 化した後でも、preload 完了イベントを 1 Tick で全件 drain していたため、
+ブランチ数が多い環境で 1 フレーム内の同期処理量が増え、一覧操作が重く感じる再発が起きた。
+
+### 原因
+
+- `drain_branch_detail_events()` がキューを空になるまで `loop` で処理していた。
+- preload 自体はバックグラウンド化できていても、結果適用が無制限だと UI スレッドを占有しうる設計だった。
+
+### 再発防止策
+
+1. preload/バックグラウンド処理の「結果適用側」でも 1 Tick あたりの上限（frame budget）を明示的に持つ。
+2. 「1 Tick で全件 drain しない」ことを固定する RED テストを追加し、回帰で即検知できるようにする。
+3. `Branches` 系のレスポンス不具合では、I/O の非同期化だけでなく「メインスレッド適用量」の上限有無まで確認する。
+
 ## 2026-04-04 — fix: Docker 系 broad verification は Cargo を並列実行しない
 
 ### 事象
