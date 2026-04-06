@@ -472,3 +472,14 @@ banner in favor of pane-title chrome.
 - [x] T300 [P] Write RED test: one `Tick` does not fully drain a large branch-detail preload queue, so preload work cannot monopolize a frame.
 - [x] T301 Update `app.rs` branch-detail event draining to apply a bounded per-tick batch budget while preserving generation/branch validation.
 - [x] T302 Refresh `SPEC-2` artifacts and focused verification evidence for the incremental preload-drain contract.
+
+## Phase 48: Keep Terminal Sessions Immediate And Self-Cleaning
+
+- [x] T303 [P] Write RED test: pre-poll PTY draining renders queued PTY output without waiting for a `Tick`.
+- [x] T304 [P] Write RED test: `ToggleLayer` immediately resizes PTYs and vt100 parsers to the new visible session content area.
+- [x] T305 [P] Write RED test: detected PTY exits automatically remove the dead session tab and clamp the active session index.
+- [x] T306 Update the event loop in `main.rs` so PTY output is drained before crossterm polling blocks.
+- [x] T307 Update `app.rs` `ToggleLayer` handling to recompute session-pane geometry and resize live PTYs immediately.
+- [x] T308 Update `app.rs` PTY exit cleanup to remove exited sessions, preserve a valid active session, and notify with the auto-close result.
+- [x] T309 Refresh `SPEC-2` artifacts to describe the new terminal responsiveness and session auto-cleanup contract.
+- [x] T310 Run focused workspace-shell verification for event loop, resize sync, and PTY exit cleanup.

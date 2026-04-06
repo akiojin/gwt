@@ -1,10 +1,10 @@
 # Progress: SPEC-2 - Workspace Shell
 
 ## Progress
-- Status: `in-progress`
-- Phase: `Implementation`
-- Task progress: `281/281` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T02:39:36Z`
+- Status: `done`
+- Phase: `Done`
+- Task progress: `283/283` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T05:14:42Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -57,6 +57,9 @@
 - Branch-detail preload workers are now tracked and cancelable, so a newer startup/refresh/docker-triggered preload no longer leaves detached stale workers shelling out against later branches.
 - Branch-detail preload now snapshots Docker container state once per refresh and fans that shared snapshot into each branch payload, removing the previous `docker ps -a` per-branch amplification.
 - Branch-detail preload backfill now applies in bounded per-tick batches, so large queued preload bursts no longer monopolize one frame and Branches list navigation stays responsive while detail cache updates stream in.
+- The main event loop now drains queued PTY output before blocking on terminal input and rechecks it in short slices, so shell/agent echo is no longer gated by the next 100 ms tick.
+- `Ctrl+G,g` pane toggles now resize live PTYs and vt100 parsers immediately to the new visible session geometry, keeping placeholder chrome and actual terminal width aligned.
+- Exited PTY-backed sessions now remove their tabs automatically, clamp the active session safely, and notify with the auto-close result instead of leaving dead tabs behind.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

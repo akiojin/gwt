@@ -6,6 +6,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
 };
 
+use crate::model::{TerminalCell, TerminalSelection};
+
 /// Map a vt100 color to a ratatui color.
 pub fn map_vt_color(color: vt100::Color) -> Color {
     match color {
@@ -225,6 +227,16 @@ pub fn collect_url_regions(screen: &vt100::Screen, area: Rect) -> Vec<UrlRegion>
 /// Returns detected URL regions with their screen coordinates so that
 /// callers can implement click-to-open or hover highlighting.
 pub fn render_vt_screen(screen: &vt100::Screen, buf: &mut Buffer, area: Rect) -> Vec<UrlRegion> {
+    render_vt_screen_with_selection(screen, buf, area, None)
+}
+
+/// Render a vt100 screen into a ratatui Buffer with an optional selection overlay.
+pub fn render_vt_screen_with_selection(
+    screen: &vt100::Screen,
+    buf: &mut Buffer,
+    area: Rect,
+    selection: Option<TerminalSelection>,
+) -> Vec<UrlRegion> {
     let rows = area.height.min(screen.size().0);
     let cols = area.width.min(screen.size().1);
     let url_regions = collect_url_regions(screen, area);
@@ -248,6 +260,9 @@ pub fn render_vt_screen(screen: &vt100::Screen, buf: &mut Buffer, area: Rect) ->
                     buf_cell.set_char(cell.contents().chars().next().unwrap_or(' '));
 
                     let is_url = url_cells.contains(&(row, col));
+                    let is_selected = selection
+                        .map(|selection| selection_contains(selection, row, col))
+                        .unwrap_or(false);
                     let fg = if is_url {
                         Some(Color::Cyan)
                     } else {
@@ -261,6 +276,9 @@ pub fn render_vt_screen(screen: &vt100::Screen, buf: &mut Buffer, area: Rect) ->
                     );
                     if is_url {
                         mods |= Modifier::UNDERLINED;
+                    }
+                    if is_selected {
+                        mods |= Modifier::REVERSED;
                     }
 
                     buf_cell.set_style(Style {
@@ -276,6 +294,33 @@ pub fn render_vt_screen(screen: &vt100::Screen, buf: &mut Buffer, area: Rect) ->
     }
 
     url_regions
+}
+
+fn selection_contains(selection: TerminalSelection, row: u16, col: u16) -> bool {
+    let (start, end) = normalize_selection(selection);
+    if row < start.row || row > end.row {
+        return false;
+    }
+    if start.row == end.row {
+        return row == start.row && col >= start.col && col <= end.col;
+    }
+    if row == start.row {
+        return col >= start.col;
+    }
+    if row == end.row {
+        return col <= end.col;
+    }
+    true
+}
+
+fn normalize_selection(selection: TerminalSelection) -> (TerminalCell, TerminalCell) {
+    let anchor = selection.anchor;
+    let focus = selection.focus;
+    if (anchor.row, anchor.col) <= (focus.row, focus.col) {
+        (anchor, focus)
+    } else {
+        (focus, anchor)
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +582,28 @@ mod tests {
         assert!(regions[1].end_col > 0);
         assert_eq!(buf[(0, 1)].fg, Color::Cyan);
         assert!(buf[(0, 1)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn render_vt_screen_with_selection_reverses_selected_cells() {
+        let mut parser = vt100::Parser::new(1, 12, 0);
+        parser.process(b"alpha beta");
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_vt_screen_with_selection(
+            parser.screen(),
+            &mut buf,
+            area,
+            Some(TerminalSelection {
+                anchor: TerminalCell { row: 0, col: 0 },
+                focus: TerminalCell { row: 0, col: 4 },
+            }),
+        );
+
+        assert!(buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(4, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(6, 0)].modifier.contains(Modifier::REVERSED));
     }
 
     // ---- Alt-screen buffer tests (T011, T012) ----

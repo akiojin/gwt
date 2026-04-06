@@ -2,7 +2,7 @@
 
 ## Background
 
-`renderer.rs` and related tests cover low-level vt100 cell rendering, URL underline detection, and alt-screen verification, but the current `gwt-tui` session pane still lacks an end-to-end vt100-backed surface. This SPEC therefore covers both the renderer-level work already in place and the still-missing session-surface foundation needed for URL opening, scrollback interaction, and selection.
+`renderer.rs` and related tests cover low-level vt100 cell rendering, URL underline detection, and alt-screen verification, but the current `gwt-tui` session pane still lacks the remaining interaction layer needed for smooth scrollback review, range selection, and scrollbar visibility. This SPEC therefore covers both the renderer-level work already in place and the still-missing session-surface behavior needed for URL opening, scrollback interaction, selection, and scrollbar rendering.
 
 ## User Stories
 
@@ -25,6 +25,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 1. Given a session with more than one screen of output, when I scroll up with mouse wheel, then earlier output becomes visible.
 2. Given a scrollback buffer at maximum capacity (10,000 lines), when new output arrives, then the oldest lines are evicted first.
 3. Given I have scrolled up, when new output arrives, then the viewport stays at my scroll position (no auto-jump).
+4. Given the session has more history than fits on screen, when the terminal pane renders, then a vertical scrollbar appears on the right edge and its thumb tracks the visible scroll position.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -66,6 +67,8 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - URL containing special characters (parentheses, query strings, fragments).
 - URL at the very end of scrollback buffer about to be evicted.
 - Mouse selection across a region containing wide (CJK) characters.
+- Scrollbar gutter on narrow terminals should not corrupt wrapped text layout or cursor placement.
+- Selection starting in visible history and ending after additional scroll movement should still copy the intended region.
 - Alt-screen app sends output after gwt session is backgrounded.
 
 ## Functional Requirements
@@ -74,8 +77,11 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-002**: `renderer.rs` converts vt100 cells to ratatui `Buffer` with color mapping: Named to Named, Indexed to Indexed, RGB to Rgb.
 - **FR-003**: Scrollback buffer stores up to 10,000 lines per pane, configurable via settings.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
+- **FR-004a**: A vertical scrollbar is rendered on the right edge only when scrollback exceeds the visible terminal height.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
+- **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
+- **FR-006a**: Selection coordinates are tracked in viewport cell space and resolved against the active scrollback offset so copied text matches the currently visible history.
 - **FR-007**: Copy selected text to system clipboard via platform-native clipboard integration.
 - **FR-008**: URL detection in terminal output using regex pattern matching (http/https schemes).
 - **FR-009**: Ctrl+click or Enter on a detected URL opens the default browser via `open` (macOS) / `xdg-open` (Linux).
@@ -100,3 +106,5 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-004**: Alt-screen buffer activation/deactivation preserves main scrollback integrity.
 - **SC-005**: Color mapping tests cover Named, Indexed, and RGB color spaces.
 - **SC-006**: Scrollback eviction at 10,000-line boundary works without data corruption.
+- **SC-007**: Scrollbar chrome appears only for overflowing history and the thumb position changes when the user scrolls.
+- **SC-008**: Drag selection across single-line and multi-line scrollback copies the expected plain-text payload to the clipboard.

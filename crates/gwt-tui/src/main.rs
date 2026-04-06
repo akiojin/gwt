@@ -5,6 +5,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use crossterm::{
@@ -22,6 +23,17 @@ use gwt_tui::{
     message::Message,
     model::{ActiveLayer, Model},
 };
+
+const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
+
+fn drain_pty_output_into_model(model: &mut Model) -> bool {
+    let mut drained = false;
+    for (session_id, data) in model.drain_pty_output() {
+        app::update(model, Message::PtyOutput(session_id, data));
+        drained = true;
+    }
+    drained
+}
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
@@ -133,6 +145,8 @@ fn run_app(
     let mut keybinds = KeybindRegistry::new();
 
     loop {
+        drain_pty_output_into_model(&mut model);
+
         // View: render
         terminal.draw(|frame| {
             app::view(&model, frame);
@@ -145,7 +159,15 @@ fn run_app(
 
         // Event: poll
         let deadline = event::next_tick_deadline();
-        if let Some(msg) = event::poll_event(deadline) {
+        loop {
+            if drain_pty_output_into_model(&mut model) {
+                break;
+            }
+
+            let Some(msg) = event::poll_event_slice(deadline, PTY_OUTPUT_POLL_SLICE) else {
+                continue;
+            };
+
             // Route key events through keybind registry
             // (skip keybind processing when in Initialization layer)
             let msg = match msg {
@@ -161,11 +183,7 @@ fn run_app(
 
             // Update: process message
             app::update(&mut model, msg);
-        }
-
-        // Drain PTY output from background reader threads
-        for (session_id, data) in model.drain_pty_output() {
-            app::update(&mut model, Message::PtyOutput(session_id, data));
+            break;
         }
     }
 
@@ -257,5 +275,52 @@ mod tests {
         let active = model.active_session_tab().expect("active session");
         assert_eq!(active.vt.cols(), cols);
         assert_eq!(active.vt.rows(), rows);
+    }
+
+    #[test]
+    fn drain_pty_output_into_model_applies_output_without_tick() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        assert!(!model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .screen()
+            .contents()
+            .contains("ready"));
+
+        app::spawn_pty_for_session(
+            &mut model,
+            "shell-0",
+            gwt_terminal::pty::SpawnConfig {
+                command: "/bin/echo".to_string(),
+                args: vec!["ready".to_string()],
+                cols: 80,
+                rows: 24,
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+        )
+        .expect("spawn echo pty");
+
+        let mut drained = false;
+        for _ in 0..20 {
+            if drain_pty_output_into_model(&mut model) {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            drained,
+            "queued pty output should drain without requiring Tick"
+        );
+        assert!(model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .screen()
+            .contents()
+            .contains("ready"));
     }
 }

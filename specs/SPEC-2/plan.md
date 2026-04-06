@@ -655,6 +655,23 @@ Fix the recurrence where Branch Detail backfill can still make Branches navigati
 47.3: Verification and artifact sync (1 task)
 - Re-run focused preload/responsiveness tests and update SPEC-2 artifacts with the incremental drain contract.
 
+### Phase 48: Keep Terminal Sessions Immediate And Self-Cleaning (8 tasks)
+Close the remaining workspace-shell regressions where PTY output feels one tick late, management toggles leave session geometry stale, and exited sessions stay behind as dead tabs.
+
+48.1: PTY latency and geometry contract (3 tasks)
+- Drain PTY output before the event loop blocks on the next crossterm poll so interactive typing does not wait for the tick cadence.
+- On `Ctrl+G,g`, recompute the visible session content area immediately and resize every live PTY and vt100 parser in the same update.
+- Keep this geometry contract aligned with the terminal scrollbar gutter so the PTY width matches the actual text viewport.
+
+48.2: Session exit cleanup contract (2 tasks)
+- Treat PTY exit detection as session cleanup: remove exited tabs automatically instead of only posting a notification.
+- Clamp the active session index and terminal focus after automatic cleanup so the workspace shell never points at a dead session.
+
+48.3: Verification (3 tasks)
+- Add RED coverage for pre-poll PTY draining, immediate management-toggle resize, and automatic PTY-exit tab removal.
+- Re-run focused session/event-loop tests after the implementation turns green.
+- Refresh SPEC-2 artifacts and progress evidence with the new terminal responsiveness and auto-cleanup contract.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

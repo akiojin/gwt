@@ -1,9 +1,10 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 400
 expression: output
 ---
 ┌ › Shell ─────────────────────────────────────────────────────────────────────┐
-│Session: Shell (80x24)                                                        │
+│Session: Shell (78x21)                                                        │
 │                                                                              │
 │                                                                              │
 │                                                                              │

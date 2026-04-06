@@ -21,7 +21,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
@@ -34,6 +34,7 @@ use crate::{
     model::{
         ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
         ManagementTab, Model, PendingSessionConversion, SessionLayout, SessionTabType,
+        TerminalCell, TerminalSelection,
     },
     screens, theme,
 };
@@ -107,6 +108,27 @@ pub fn session_content_size(model: &Model) -> (u16, u16) {
         .unwrap_or(model.terminal_size)
 }
 
+fn sync_session_viewports(model: &mut Model) {
+    let Some(content) = active_session_content_area(model) else {
+        return;
+    };
+    let render_width = model
+        .active_session_tab()
+        .map(|session| session_text_area(session, content).width)
+        .unwrap_or(content.width);
+
+    for pty in model.pty_handles.values() {
+        let _ = pty.resize(render_width, content.height);
+    }
+    for session in &mut model.sessions {
+        let current_scrollback = session.vt.scrollback();
+        session.vt.resize(content.height, render_width);
+        session
+            .vt
+            .set_scrollback(current_scrollback.min(session.vt.max_scrollback()));
+    }
+}
+
 /// Drain buffered PTY input and write it to the corresponding PTY handles.
 fn drain_pending_pty_inputs(model: &mut Model) {
     while let Some(input) = model.pending_pty_inputs.pop_front() {
@@ -131,9 +153,23 @@ fn check_pty_exits(model: &mut Model) {
 
     for id in exited {
         model.pty_handles.remove(&id);
+        if let Some(index) = model.sessions.iter().position(|session| session.id == id) {
+            model.sessions.remove(index);
+            if model.sessions.is_empty() {
+                model.active_session = 0;
+            } else if model.active_session >= model.sessions.len() {
+                model.active_session = model.sessions.len() - 1;
+            } else if index < model.active_session {
+                model.active_session = model.active_session.saturating_sub(1);
+            }
+        }
         apply_notification(
             model,
-            Notification::new(Severity::Info, "session", format!("Session {id} exited")),
+            Notification::new(
+                Severity::Info,
+                "session",
+                format!("Session {id} exited and closed"),
+            ),
         );
     }
 }
@@ -150,10 +186,12 @@ pub fn update(model: &mut Model, msg: Message) {
                 ActiveLayer::Main => {
                     model.active_layer = ActiveLayer::Management;
                     model.active_focus = FocusPane::Terminal;
+                    sync_session_viewports(model);
                 }
                 ActiveLayer::Management => {
                     model.active_layer = ActiveLayer::Main;
                     model.active_focus = FocusPane::Terminal;
+                    sync_session_viewports(model);
                 }
             }
         }
@@ -236,21 +274,17 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Resize(w, h) => {
             model.terminal_size = (w, h);
-            // Propagate resize to all PTY processes and VtState parsers
-            // using the actual session pane content area, not the full
-            // terminal size.
-            if let Some(content) = active_session_content_area(model) {
-                for pty in model.pty_handles.values() {
-                    let _ = pty.resize(content.width, content.height);
-                }
-                for session in &mut model.sessions {
-                    session.vt.resize(content.height, content.width);
-                }
-            }
+            sync_session_viewports(model);
         }
         Message::PtyOutput(pane_id, data) => {
             if let Some(session) = model.session_tab_mut(&pane_id) {
                 session.vt.process(&data);
+            }
+            if model
+                .active_session_tab()
+                .is_some_and(|session| session.id == pane_id)
+            {
+                sync_session_viewports(model);
             }
         }
         Message::PushError(err) => {
@@ -3260,13 +3294,17 @@ fn is_in_text_input_mode(model: &Model) -> bool {
 }
 
 fn handle_mouse_input(model: &mut Model, mouse: MouseEvent) {
-    if let Err(err) = handle_mouse_input_with(model, mouse, open_url) {
+    if let Err(err) = handle_mouse_input_with_tools(model, mouse, open_url, |text| {
+        gwt_clipboard::ClipboardText::set_text(text).map_err(|err| err.to_string())
+    }) {
         model.error_queue.push_back(
-            Notification::new(Severity::Error, "terminal", "Failed to open URL").with_detail(err),
+            Notification::new(Severity::Error, "terminal", "Mouse interaction failed")
+                .with_detail(err),
         );
     }
 }
 
+#[cfg(test)]
 fn handle_mouse_input_with<F>(
     model: &mut Model,
     mouse: MouseEvent,
@@ -3275,23 +3313,100 @@ fn handle_mouse_input_with<F>(
 where
     F: FnMut(&str) -> Result<(), String>,
 {
-    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-        return Ok(false);
+    handle_mouse_input_with_tools(model, mouse, |url| opener(url), |_| Ok(()))
+}
+
+fn handle_mouse_input_with_tools<F, G>(
+    model: &mut Model,
+    mouse: MouseEvent,
+    mut opener: F,
+    mut clipboard_writer: G,
+) -> Result<bool, String>
+where
+    F: FnMut(&str) -> Result<(), String>,
+    G: FnMut(&str) -> Result<(), String>,
+{
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && mouse.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        let Some(url) = url_at_mouse_position(model, mouse) else {
+            return Ok(false);
+        };
+        opener(&url)?;
+        return Ok(true);
     }
-    if !mouse.modifiers.contains(KeyModifiers::CONTROL) {
+
+    if model.active_focus != FocusPane::Terminal || !mouse_hits_active_session(model, mouse) {
         return Ok(false);
     }
 
-    let Some(url) = url_at_mouse_position(model, mouse) else {
-        return Ok(false);
-    };
-
-    opener(&url)?;
-    Ok(true)
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            if let Some(session) = model.active_session_tab_mut() {
+                session.vt.clear_selection();
+                let next = session
+                    .vt
+                    .scrollback()
+                    .saturating_add(1)
+                    .min(session.vt.max_scrollback());
+                session.vt.set_follow_live(false);
+                session.vt.set_scrollback(next);
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        MouseEventKind::ScrollDown => {
+            if let Some(session) = model.active_session_tab_mut() {
+                session.vt.clear_selection();
+                let next = session.vt.scrollback().saturating_sub(1);
+                session.vt.set_scrollback(next);
+                session.vt.set_follow_live(next == 0);
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(cell) = mouse_terminal_cell(model, mouse) else {
+                return Ok(false);
+            };
+            if let Some(session) = model.active_session_tab_mut() {
+                session.vt.begin_selection(cell);
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(cell) = mouse_terminal_cell(model, mouse) else {
+                return Ok(false);
+            };
+            if let Some(session) = model.active_session_tab_mut() {
+                session.vt.update_selection(cell);
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(cell) = mouse_terminal_cell(model, mouse) else {
+                return Ok(false);
+            };
+            let selection_text = if let Some(session) = model.active_session_tab_mut() {
+                session.vt.update_selection(cell);
+                selected_text(session)
+            } else {
+                None
+            };
+            if let Some(text) = selection_text.filter(|text| !text.is_empty()) {
+                clipboard_writer(&text)?;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
-    let area = active_session_content_area(model)?;
+    let area = active_session_text_area(model)?;
     if mouse.column < area.x
         || mouse.column >= area.right()
         || mouse.row < area.y
@@ -3313,6 +3428,51 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
         mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
     })
     .map(|region| region.url)
+}
+
+fn mouse_hits_active_session(model: &Model, mouse: MouseEvent) -> bool {
+    let Some(area) = active_session_content_area(model) else {
+        return false;
+    };
+    mouse.column >= area.x
+        && mouse.column < area.right()
+        && mouse.row >= area.y
+        && mouse.row < area.bottom()
+}
+
+fn mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell> {
+    let area = active_session_text_area(model)?;
+    if mouse.column < area.x
+        || mouse.column >= area.right()
+        || mouse.row < area.y
+        || mouse.row >= area.bottom()
+    {
+        return None;
+    }
+    Some(TerminalCell {
+        row: mouse.row.saturating_sub(area.y),
+        col: mouse.column.saturating_sub(area.x),
+    })
+}
+
+fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
+    let selection = session.vt.selection()?;
+    let (start, end) = normalize_selection(selection);
+    let end_col = end.col.saturating_add(1).min(session.vt.cols());
+    Some(
+        session
+            .vt
+            .screen()
+            .contents_between(start.row, start.col, end.row, end_col),
+    )
+}
+
+fn normalize_selection(selection: TerminalSelection) -> (TerminalCell, TerminalCell) {
+    if (selection.anchor.row, selection.anchor.col) <= (selection.focus.row, selection.focus.col) {
+        (selection.anchor, selection.focus)
+    } else {
+        (selection.focus, selection.anchor)
+    }
 }
 
 fn active_session_content_area(model: &Model) -> Option<Rect> {
@@ -3337,6 +3497,33 @@ fn active_session_content_area(model: &Model) -> Option<Rect> {
     };
 
     session_content_area(model, session_area)
+}
+
+fn active_session_text_area(model: &Model) -> Option<Rect> {
+    let area = active_session_content_area(model)?;
+    let session = model.active_session_tab()?;
+    Some(session_text_area(session, area))
+}
+
+fn session_text_area(session: &crate::model::SessionTab, area: Rect) -> Rect {
+    if session.vt.max_scrollback() > 0 && area.width > 1 {
+        Rect::new(area.x, area.y, area.width - 1, area.height)
+    } else {
+        area
+    }
+}
+
+fn session_scrollbar_area(session: &crate::model::SessionTab, area: Rect) -> Option<Rect> {
+    if session.vt.max_scrollback() > 0 && area.width > 1 {
+        Some(Rect::new(
+            area.right().saturating_sub(1),
+            area.y,
+            1,
+            area.height,
+        ))
+    } else {
+        None
+    }
 }
 
 fn management_split(area: Rect) -> [Rect; 2] {
@@ -3443,6 +3630,7 @@ fn render_session_surface(
     area: Rect,
     show_cursor: bool,
 ) {
+    let text_area = session_text_area(session, area);
     if session.vt.screen().contents().trim().is_empty() {
         match &session.tab_type {
             crate::model::SessionTabType::Agent { agent_id, color } => {
@@ -3484,7 +3672,7 @@ fn render_session_surface(
                     Style::default().fg(theme::color::TEXT_DISABLED),
                 )));
                 let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-                frame.render_widget(paragraph, area);
+                frame.render_widget(paragraph, text_area);
             }
             _ => {
                 let placeholder = Paragraph::new(format!(
@@ -3494,22 +3682,44 @@ fn render_session_surface(
                     session.vt.rows()
                 ))
                 .style(Style::default().fg(theme::color::TEXT_DISABLED));
-                frame.render_widget(placeholder, area);
+                frame.render_widget(placeholder, text_area);
             }
         }
     } else {
-        frame.render_widget(
-            crate::widgets::terminal_view::TerminalView::new(session.vt.screen()),
-            area,
+        let _ = crate::renderer::render_vt_screen_with_selection(
+            session.vt.screen(),
+            frame.buffer_mut(),
+            text_area,
+            session.vt.selection(),
         );
+        if let Some(scrollbar_area) = session_scrollbar_area(session, area) {
+            let content_length = session
+                .vt
+                .max_scrollback()
+                .saturating_add(text_area.height as usize);
+            let position = session
+                .vt
+                .max_scrollback()
+                .saturating_sub(session.vt.scrollback());
+            let mut scrollbar_state = ScrollbarState::new(content_length)
+                .position(position)
+                .viewport_content_length(text_area.height as usize);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None),
+                scrollbar_area,
+                &mut scrollbar_state,
+            );
+        }
     }
 
     // Show the vt100 cursor when this session has terminal focus.
     if show_cursor && !session.vt.screen().hide_cursor() {
         let (cursor_row, cursor_col) = session.vt.screen().cursor_position();
-        let x = area.x + cursor_col;
-        let y = area.y + cursor_row;
-        if x < area.right() && y < area.bottom() {
+        let x = text_area.x + cursor_col;
+        let y = text_area.y + cursor_row;
+        if x < text_area.right() && y < text_area.bottom() {
             frame.set_cursor_position((x, y));
         }
     }
@@ -4263,6 +4473,22 @@ mod tests {
         buffer_text(terminal.backend().buffer())
     }
 
+    fn render_model_buffer(model: &Model, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| view(model, frame))
+            .expect("draw model");
+        terminal.backend().buffer().clone()
+    }
+
+    fn append_session_line(model: &mut Model, session_id: &str, line: &str) {
+        update(
+            model,
+            Message::PtyOutput(session_id.to_string(), format!("{line}\r\n").into_bytes()),
+        );
+    }
+
     fn detected_agent(agent_id: AgentId, version: Option<&str>) -> DetectedAgent {
         disable_global_custom_agents_for_tests();
         DetectedAgent {
@@ -4476,6 +4702,253 @@ mod tests {
 
         let rendered = render_model_text(&model, 80, 24);
         assert!(rendered.contains("https://example.com"));
+    }
+
+    #[test]
+    fn mouse_scroll_up_moves_terminal_into_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut model, "shell-0", &format!("line-{i}"));
+        }
+
+        let before = render_model_text(&model, 18, 8);
+        assert!(before.contains("line-11"));
+        assert!(!before.contains("line-6"));
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let after = render_model_text(&model, 18, 8);
+        assert!(
+            after.contains("line-7"),
+            "scrolling up should reveal an earlier line from scrollback"
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .scrollback()
+                > 0,
+            "scrolling up should move the viewport away from live follow mode"
+        );
+    }
+
+    #[test]
+    fn render_model_text_terminal_overflow_draws_scrollbar_only_when_needed() {
+        let mut overflow_model = test_model();
+        overflow_model.active_layer = ActiveLayer::Main;
+        overflow_model.active_focus = FocusPane::Terminal;
+        update(&mut overflow_model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut overflow_model, "shell-0", &format!("L{i}"));
+        }
+        let overflow_area =
+            active_session_content_area(&overflow_model).expect("overflow session area");
+        let overflow_buf = render_model_buffer(&overflow_model, 18, 8);
+        let overflow_has_scrollbar = (overflow_area.y..overflow_area.bottom()).any(|y| {
+            !overflow_buf[(overflow_area.right() - 1, y)]
+                .symbol()
+                .trim()
+                .is_empty()
+        });
+        assert!(
+            overflow_has_scrollbar,
+            "overflowing history should render scrollbar chrome on the right edge"
+        );
+
+        let mut non_overflow_model = test_model();
+        non_overflow_model.active_layer = ActiveLayer::Main;
+        non_overflow_model.active_focus = FocusPane::Terminal;
+        update(&mut non_overflow_model, Message::Resize(18, 8));
+        append_session_line(&mut non_overflow_model, "shell-0", "short");
+        let non_overflow_area =
+            active_session_content_area(&non_overflow_model).expect("non-overflow session area");
+        let non_overflow_buf = render_model_buffer(&non_overflow_model, 18, 8);
+        let non_overflow_has_scrollbar =
+            (non_overflow_area.y..non_overflow_area.bottom()).any(|y| {
+                !non_overflow_buf[(non_overflow_area.right() - 1, y)]
+                    .symbol()
+                    .trim()
+                    .is_empty()
+            });
+        assert!(
+            !non_overflow_has_scrollbar,
+            "non-overflowing history should not reserve scrollbar chrome"
+        );
+    }
+
+    #[test]
+    fn drag_selection_reverses_selected_terminal_cells() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        append_session_line(&mut model, "shell-0", "alpha beta");
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x + 4,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let buf = render_model_buffer(&model, 24, 8);
+        assert!(
+            buf[(area.x, area.y)].modifier.contains(Modifier::REVERSED),
+            "drag selection should reverse the selected terminal cells"
+        );
+    }
+
+    #[test]
+    fn selection_copy_uses_scrollback_viewport_coordinates() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut model, "shell-0", &format!("line-{i}"));
+        }
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let mut copied = None;
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("selection down succeeds");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x + 5,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("selection drag succeeds");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x + 5,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("selection up succeeds");
+
+        assert_eq!(copied.as_deref(), Some("line-7"));
+    }
+
+    #[test]
+    fn toggle_layer_resizes_active_terminal_viewport_immediately() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        update(&mut model, Message::Resize(100, 24));
+        let before = model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .clone();
+        assert_eq!(before.cols(), 98);
+        assert_eq!(before.rows(), 21);
+
+        update(&mut model, Message::ToggleLayer);
+
+        let after = &model.active_session_tab().expect("active session").vt;
+        assert_eq!(after.cols(), 48);
+        assert_eq!(after.rows(), 21);
+    }
+
+    #[test]
+    fn exited_pty_sessions_are_removed_automatically() {
+        let mut model = test_model();
+        let session_id = "shell-exit".to_string();
+        model.sessions.push(crate::model::SessionTab {
+            id: session_id.clone(),
+            name: "Ephemeral".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.active_session = 1;
+
+        spawn_pty_for_session(
+            &mut model,
+            &session_id,
+            gwt_terminal::pty::SpawnConfig {
+                command: "/bin/echo".to_string(),
+                args: vec!["done".to_string()],
+                cols: 80,
+                rows: 24,
+                env: HashMap::new(),
+                cwd: None,
+            },
+        )
+        .expect("spawn exiting pty");
+
+        drive_ticks_until(
+            &mut model,
+            |m| !m.pty_handles.contains_key(&session_id),
+            "pty exit detection",
+        );
+
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.active_session, 0);
     }
 
     #[test]
