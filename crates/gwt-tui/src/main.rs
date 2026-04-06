@@ -9,10 +9,13 @@ use std::{
 };
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+
+#[cfg(test)]
+use crossterm::Command;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use gwt_git::RepoType;
@@ -35,6 +38,54 @@ fn drain_pty_output_into_model(model: &mut Model) -> bool {
     drained
 }
 
+fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+    )
+}
+
+fn leave_terminal(writer: &mut impl io::Write) -> io::Result<()> {
+    execute!(
+        writer,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+    )
+}
+
+#[cfg(test)]
+fn terminal_enter_commands_ansi() -> String {
+    let mut ansi = String::new();
+    EnterAlternateScreen
+        .write_ansi(&mut ansi)
+        .expect("enter alternate screen ansi");
+    EnableMouseCapture
+        .write_ansi(&mut ansi)
+        .expect("enable mouse capture ansi");
+    EnableBracketedPaste
+        .write_ansi(&mut ansi)
+        .expect("enable bracketed paste ansi");
+    ansi
+}
+
+#[cfg(test)]
+fn terminal_leave_commands_ansi() -> String {
+    let mut ansi = String::new();
+    LeaveAlternateScreen
+        .write_ansi(&mut ansi)
+        .expect("leave alternate screen ansi");
+    DisableMouseCapture
+        .write_ansi(&mut ansi)
+        .expect("disable mouse capture ansi");
+    DisableBracketedPaste
+        .write_ansi(&mut ansi)
+        .expect("disable bracketed paste ansi");
+    ansi
+}
+
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
     // Install a panic hook that restores the terminal before printing the
@@ -43,7 +94,7 @@ fn main() -> io::Result<()> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture,);
+        let _ = leave_terminal(&mut io::stdout());
         default_hook(info);
     }));
 
@@ -56,7 +107,7 @@ fn main() -> io::Result<()> {
     // Initialize terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    enter_terminal(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -65,11 +116,7 @@ fn main() -> io::Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-    )?;
+    leave_terminal(terminal.backend_mut())?;
     terminal.show_cursor()?;
 
     if let Err(e) = result {
@@ -322,5 +369,17 @@ mod tests {
             .screen()
             .contents()
             .contains("ready"));
+    }
+
+    #[test]
+    fn terminal_enter_commands_enable_bracketed_paste() {
+        let ansi = terminal_enter_commands_ansi();
+        assert!(ansi.contains("\u{1b}[?2004h"));
+    }
+
+    #[test]
+    fn terminal_leave_commands_disable_bracketed_paste() {
+        let ansi = terminal_leave_commands_ansi();
+        assert!(ansi.contains("\u{1b}[?2004l"));
     }
 }

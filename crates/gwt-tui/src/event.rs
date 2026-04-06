@@ -25,18 +25,21 @@ pub fn poll_event_slice(deadline: Instant, max_wait: Duration) -> Option<Message
 
     let wait = remaining.min(max_wait);
     if event::poll(wait).unwrap_or(false) {
-        match event::read() {
-            Ok(Event::Key(key)) if key.kind == event::KeyEventKind::Press => {
-                Some(Message::KeyInput(key))
-            }
-            Ok(Event::Mouse(mouse)) => Some(Message::MouseInput(mouse)),
-            Ok(Event::Resize(w, h)) => Some(Message::Resize(w, h)),
-            _ => None,
-        }
+        event::read().ok().and_then(translate_event)
     } else if Instant::now() >= deadline {
         Some(Message::Tick)
     } else {
         None
+    }
+}
+
+fn translate_event(event: Event) -> Option<Message> {
+    match event {
+        Event::Key(key) if key.kind == event::KeyEventKind::Press => Some(Message::KeyInput(key)),
+        Event::Paste(text) => Some(Message::PasteInput(text)),
+        Event::Mouse(mouse) => Some(Message::MouseInput(mouse)),
+        Event::Resize(w, h) => Some(Message::Resize(w, h)),
+        _ => None,
     }
 }
 
@@ -55,6 +58,7 @@ pub fn classify_key(key: KeyEvent) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::Event;
 
     #[test]
     fn next_tick_deadline_is_in_the_future() {
@@ -76,5 +80,14 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let msg = poll_event_slice(deadline, Duration::ZERO);
         assert!(msg.is_none());
+    }
+
+    #[test]
+    fn translate_event_maps_paste_to_message() {
+        let msg = translate_event(Event::Paste("git status\npwd".into()));
+        assert!(matches!(
+            msg,
+            Some(Message::PasteInput(text)) if text == "git status\npwd"
+        ));
     }
 }

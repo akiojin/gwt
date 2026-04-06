@@ -47,6 +47,8 @@ pub enum Message {
     CloseSession,
     /// Raw key input forwarded to the active pane.
     KeyInput(KeyEvent),
+    /// Bracketed paste payload from the outer terminal.
+    PasteInput(String),
     /// Mouse input.
     MouseInput(MouseEvent),
     /// Terminal resize.
@@ -101,8 +103,6 @@ pub enum Message {
     OpenSessionConversion,
     /// Toggle the keybinding help overlay.
     ToggleHelp,
-    /// Paste file paths from clipboard.
-    PasteFiles,
     /// Open the wizard overlay with SPEC context for prefilling.
     OpenWizardWithSpec(SpecContext),
     /// Close the wizard overlay.
@@ -148,6 +148,7 @@ mod tests {
         let _ = Message::DismissError;
         let _ = Message::Resize(80, 24);
         let _ = Message::PtyOutput("id".into(), vec![0x41]);
+        let _ = Message::PasteInput("git status".into());
         let _ = Message::Branches(BranchesMessage::MoveUp);
         let _ = Message::Profiles(ProfilesMessage::MoveUp);
         let _ = Message::Issues(IssuesMessage::MoveUp);
@@ -164,7 +165,6 @@ mod tests {
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
         let _ = Message::Initialization(InitializationMessage::Exit);
         let _ = Message::OpenSessionConversion;
-        let _ = Message::PasteFiles;
         let _ = Message::OpenWizardWithSpec(SpecContext::new("SPEC-1", "Title", ""));
         let _ = Message::CloseWizard;
     }
