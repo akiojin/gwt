@@ -27,22 +27,24 @@ use ratatui::{
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::theme;
 use crate::{
     custom_agents::load_custom_agents,
     input::voice::VoiceInputMessage,
     message::Message,
     model::{
-        ActiveLayer, DockerProgressQueue, DockerProgressResult, FocusPane, ManagementTab, Model,
-        PendingSessionConversion, SessionLayout, SessionTabType,
+        ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
+        ManagementTab, Model, PendingSessionConversion, SessionLayout, SessionTabType,
     },
-    screens,
+    screens, theme,
 };
 
 #[cfg(test)]
 use crate::custom_agents::{load_custom_agents_from_path, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV};
 
 static WIZARD_VERSION_CACHE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Cap branch-detail preload event application per tick so one refresh burst
+/// cannot monopolize the UI thread.
+const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -286,6 +288,7 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Tick => {
             drain_notification_bus(model);
             drain_docker_progress_events(model);
+            drain_branch_detail_events(model);
             tick_notification(model);
             check_pty_exits(model);
             // Forward tick to wizard (AI suggest spinner) when active
@@ -309,16 +312,13 @@ pub fn update(model: &mut Model, msg: Message) {
             } else if model.active_layer == ActiveLayer::Management {
                 // Focus cycling with Tab/BackTab (before pane-specific dispatch)
                 if !is_in_text_input_mode(model) {
-                    match key.code {
-                        KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            model.active_focus = next_management_focus(model, false);
-                            return;
-                        }
-                        KeyCode::BackTab => {
-                            model.active_focus = next_management_focus(model, true);
-                            return;
-                        }
-                        _ => {}
+                    if is_forward_focus_cycle_key(&key) {
+                        model.active_focus = next_management_focus(model, false);
+                        return;
+                    }
+                    if is_reverse_focus_cycle_key(&key) {
+                        model.active_focus = next_management_focus(model, true);
+                        return;
                     }
                 }
 
@@ -589,9 +589,7 @@ pub fn load_initial_data(model: &mut Model) {
         }
     }
 
-    // Load detail for initially selected branch
-    let repo_path = model.repo_path.clone();
-    screens::branches::load_branch_detail(&mut model.branches, &repo_path);
+    schedule_branch_detail_prefetch(model);
 
     // -- Specs --
     load_specs(model);
@@ -781,14 +779,6 @@ fn load_specs(model: &mut Model) {
 fn read_spec_body(repo_path: &Path, spec_id: &str) -> String {
     std::fs::read_to_string(repo_path.join("specs").join(spec_id).join("spec.md"))
         .unwrap_or_default()
-}
-
-fn issue_wizard_context(issue: &screens::issues::IssueItem) -> screens::wizard::SpecContext {
-    screens::wizard::SpecContext::new(
-        format!("Issue-{}", issue.number),
-        issue.title.clone(),
-        issue.body.clone(),
-    )
 }
 
 fn spec_sort_key(spec_id: &str) -> (u32, &str) {
@@ -1173,8 +1163,6 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Char('m') => {
             screens::branches::update(&mut model.branches, BranchesMessage::ToggleView);
-            let repo_path = model.repo_path.clone();
-            screens::branches::load_branch_detail(&mut model.branches, &repo_path);
             None
         }
         KeyCode::Char('v') => {
@@ -1258,7 +1246,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 }
             }
 
-            let is_cursor_move = matches!(key.code, KeyCode::Down | KeyCode::Up);
             let msg = match key.code {
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                     Some(BranchesMessage::OpenShell)
@@ -1291,17 +1278,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     return;
                 }
                 KeyCode::Char('r') => {
-                    load_initial_data(model);
+                    refresh_branches(model);
                     return;
                 }
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::branches::update(&mut model.branches, m);
-                if is_cursor_move {
-                    let repo_path = model.repo_path.clone();
-                    screens::branches::load_branch_detail(&mut model.branches, &repo_path);
-                }
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -1412,28 +1395,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             let msg = match key.code {
                 KeyCode::Down => Some(IssuesMessage::MoveDown),
                 KeyCode::Up => Some(IssuesMessage::MoveUp),
-                KeyCode::Enter
-                    if !key.modifiers.contains(KeyModifiers::SHIFT)
-                        || !model.issues.detail_view =>
-                {
-                    Some(IssuesMessage::ToggleDetail)
-                }
+                KeyCode::Enter => Some(IssuesMessage::ToggleDetail),
                 KeyCode::Char('/') => Some(IssuesMessage::SearchStart),
                 KeyCode::Char('r') => Some(IssuesMessage::Refresh),
                 _ => None,
             };
             if let Some(m) = msg {
                 screens::issues::update(&mut model.issues, m);
-            } else if key.code == KeyCode::Enter
-                && key.modifiers.contains(KeyModifiers::SHIFT)
-                && model.issues.detail_view
-            {
-                if let Some(issue) = model.issues.selected_issue().cloned() {
-                    open_wizard(model, Some(issue_wizard_context(&issue)));
-                    if let Some(wizard) = model.wizard.as_mut() {
-                        wizard.issue_id = issue.number.to_string();
-                    }
-                }
             } else if key.code == KeyCode::Esc && model.issues.detail_view {
                 screens::issues::update(&mut model.issues, IssuesMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
@@ -1799,6 +1767,15 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
     }
 }
 
+fn is_forward_focus_cycle_key(key: &crossterm::event::KeyEvent) -> bool {
+    key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+fn is_reverse_focus_cycle_key(key: &crossterm::event::KeyEvent) -> bool {
+    key.code == KeyCode::BackTab
+        || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
     let Some(bytes) = key_event_to_bytes(key) else {
         return;
@@ -2000,8 +1977,7 @@ fn drain_docker_progress_events(model: &mut Model) {
                 screens::docker_progress::DockerStage::Ready,
                 message.clone(),
             );
-            let repo_path = model.repo_path.clone();
-            screens::branches::load_branch_detail(&mut model.branches, &repo_path);
+            schedule_branch_detail_prefetch(model);
             update(
                 model,
                 Message::Notify(Notification::new(Severity::Info, "docker", message)),
@@ -2021,6 +1997,171 @@ fn drain_docker_progress_events(model: &mut Model) {
                 ),
             );
         }
+    }
+}
+
+fn refresh_branches(model: &mut Model) {
+    if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
+        let items: Vec<screens::branches::BranchItem> = branches
+            .iter()
+            .map(|branch| screens::branches::BranchItem {
+                name: branch.name.clone(),
+                is_head: branch.is_head,
+                is_local: branch.is_local,
+                category: screens::branches::categorize_branch(&branch.name),
+                worktree_path: None,
+            })
+            .collect();
+        screens::branches::update(
+            &mut model.branches,
+            screens::branches::BranchesMessage::SetBranches(items),
+        );
+    }
+
+    if let Ok(worktrees) = gwt_git::WorktreeManager::new(&model.repo_path).list() {
+        for wt in &worktrees {
+            if let Some(ref branch_name) = wt.branch {
+                if let Some(item) = model
+                    .branches
+                    .branches
+                    .iter_mut()
+                    .find(|branch| &branch.name == branch_name)
+                {
+                    item.worktree_path = Some(wt.path.clone());
+                }
+            }
+        }
+    }
+
+    let synced_branches = model.branches.branches.clone();
+    screens::branches::update(
+        &mut model.branches,
+        screens::branches::BranchesMessage::SetBranches(synced_branches),
+    );
+    schedule_branch_detail_prefetch(model);
+}
+
+fn schedule_branch_detail_prefetch(model: &mut Model) {
+    let (generation, branches) = model.branches.begin_detail_refresh();
+    let events = Arc::new(Mutex::new(VecDeque::new()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = spawn_branch_detail_worker(events.clone(), cancel.clone(), generation, branches);
+
+    if let Some(worker) = model.branch_detail_worker.as_mut() {
+        worker.replace(events, cancel, handle);
+    } else {
+        model.branch_detail_worker = Some(crate::model::BranchDetailWorker::new(
+            events, cancel, handle,
+        ));
+    }
+}
+
+fn spawn_branch_detail_worker(
+    events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
+    generation: u64,
+    branches: Vec<screens::branches::BranchItem>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let docker_containers = gwt_docker::list_containers().unwrap_or_default();
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        run_branch_detail_worker(
+            events,
+            cancel,
+            generation,
+            branches,
+            docker_containers,
+            screens::branches::load_branch_detail,
+        );
+    })
+}
+
+#[cfg(test)]
+fn spawn_branch_detail_worker_with_loader<F>(
+    events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
+    generation: u64,
+    branches: Vec<screens::branches::BranchItem>,
+    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    loader: F,
+) -> thread::JoinHandle<()>
+where
+    F: Fn(
+            &screens::branches::BranchItem,
+            &[gwt_docker::ContainerInfo],
+        ) -> screens::branches::BranchDetailData
+        + Send
+        + 'static,
+{
+    thread::spawn(move || {
+        run_branch_detail_worker(
+            events,
+            cancel,
+            generation,
+            branches,
+            docker_containers,
+            loader,
+        );
+    })
+}
+
+fn run_branch_detail_worker<F>(
+    events: BranchDetailQueue,
+    cancel: Arc<AtomicBool>,
+    generation: u64,
+    branches: Vec<screens::branches::BranchItem>,
+    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    loader: F,
+) where
+    F: Fn(
+        &screens::branches::BranchItem,
+        &[gwt_docker::ContainerInfo],
+    ) -> screens::branches::BranchDetailData,
+{
+    for branch in branches {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let data = loader(&branch, &docker_containers);
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut queue) = events.lock() {
+            queue.push_back(screens::branches::BranchDetailLoadResult {
+                generation,
+                branch_name: branch.name.clone(),
+                data,
+            });
+        }
+    }
+}
+
+fn drain_branch_detail_events(model: &mut Model) {
+    let Some(worker) = model.branch_detail_worker.as_mut() else {
+        return;
+    };
+    worker.reap_finished();
+    let events = worker.events();
+
+    for _ in 0..BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET {
+        let event = events.lock().ok().and_then(|mut queue| queue.pop_front());
+        let Some(event) = event else {
+            return;
+        };
+
+        if event.generation != model.branches.detail_generation {
+            continue;
+        }
+        if !model.branches.knows_branch(&event.branch_name) {
+            continue;
+        }
+
+        model.branches.cache_detail(event.branch_name, event.data);
     }
 }
 
@@ -2346,6 +2487,10 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.reasoning_level(&wizard.reasoning);
     }
 
+    if wizard.agent_id == "codex" && wizard.codex_fast_mode {
+        builder = builder.fast_mode(true);
+    }
+
     if wizard.skip_perms {
         builder = builder.permission_mode(gwt_agent::launch::PermissionMode::Auto);
     }
@@ -2421,6 +2566,7 @@ fn build_custom_launch_config_from_wizard(
         session_mode,
         resume_session_id: wizard.resume_session_id.clone(),
         skip_permissions: wizard.skip_perms,
+        codex_fast_mode: false,
     }
 }
 
@@ -2467,6 +2613,7 @@ fn materialize_pending_launch_with(
     session.tool_version = config.tool_version.clone();
     session.agent_session_id = config.resume_session_id.clone();
     session.skip_permissions = config.skip_permissions;
+    session.codex_fast_mode = config.codex_fast_mode;
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
 
@@ -2607,6 +2754,7 @@ fn load_quick_start_entries(
             version: session.tool_version.clone(),
             resume_session_id: session.agent_session_id.clone(),
             skip_permissions: session.skip_permissions,
+            codex_fast_mode: session.codex_fast_mode,
         })
         .collect()
 }
@@ -2774,7 +2922,7 @@ fn prepare_wizard_startup(
         },
         is_new_branch: starts_new_branch,
         gh_cli_available: gwt_core::process::command_exists("gh"),
-        ai_enabled: false,
+        ai_enabled: true,
         branch_name,
         spec_context,
         ..Default::default()
@@ -3250,7 +3398,6 @@ fn active_grid_session_content_area(model: &Model, area: Rect) -> Option<Rect> {
     Some(
         Block::default()
             .borders(Borders::ALL)
-            .border_type(theme::border::default())
             .title(session.name.as_str())
             .inner(col_chunks[target_col]),
     )
@@ -3412,28 +3559,23 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
 /// Build a bordered block with focus-aware border color (Cyan when focused, Gray otherwise).
 fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
-    let (border_style, border_type) = theme::pane_border(is_focused);
+    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
     Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
-        .border_type(border_type)
+        .border_style(Style::default().fg(border_color))
         .title(title)
 }
 
 /// Build the management tab title line for embedding in a pane border.
 fn management_tab_title(model: &Model, width: u16) -> Line<'static> {
-    if should_compact_management_tab_title(width) {
-        return Line::from(vec![Span::styled(
-            format!(" {} ", model.management_tab.label()),
-            theme::style::tab_active(),
-        )]);
-    }
-
     let labels: Vec<&str> = ManagementTab::ALL.iter().map(|t| t.label()).collect();
     let active_idx = ManagementTab::ALL
         .iter()
         .position(|t| *t == model.management_tab)
         .unwrap_or(0);
+    if should_compact_management_tab_title(width) {
+        return compact_management_tab_title(&labels, active_idx, width);
+    }
     screens::build_tab_title(&labels, active_idx)
 }
 
@@ -3445,6 +3587,83 @@ fn should_compact_management_tab_title(width: u16) -> bool {
         .sum::<usize>()
         + ManagementTab::ALL.len().saturating_sub(1);
     full_strip_width > available_title_width
+}
+
+fn compact_management_tab_title(labels: &[&str], active_idx: usize, width: u16) -> Line<'static> {
+    let available_title_width = width.saturating_sub(2) as usize;
+
+    for window_len in (1..=labels.len().min(3)).rev() {
+        let start = compact_tab_window_start(labels.len(), active_idx, window_len);
+        let candidate =
+            compact_management_tab_title_window(labels, active_idx, start, start + window_len);
+        if title_line_width(&candidate) <= available_title_width {
+            return candidate;
+        }
+    }
+
+    compact_management_tab_title_window(labels, active_idx, active_idx, active_idx + 1)
+}
+
+fn compact_tab_window_start(total_tabs: usize, active_idx: usize, window_len: usize) -> usize {
+    if total_tabs <= window_len {
+        return 0;
+    }
+    let half_window = window_len / 2;
+    let mut start = active_idx.saturating_sub(half_window);
+    let max_start = total_tabs - window_len;
+    if start > max_start {
+        start = max_start;
+    }
+    start
+}
+
+fn compact_management_tab_title_window(
+    labels: &[&str],
+    active_idx: usize,
+    start: usize,
+    end: usize,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    if start > 0 {
+        spans.push(Span::styled("...", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::raw("│"));
+    }
+
+    for (idx, label) in labels[start..end].iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw("│"));
+        }
+        let tab_idx = start + idx;
+        if tab_idx == active_idx {
+            spans.push(Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!(" {} ", label),
+                Style::default().fg(Color::Gray),
+            ));
+        }
+    }
+
+    if end < labels.len() {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled("...", Style::default().fg(Color::DarkGray)));
+    }
+
+    Line::from(spans)
+}
+
+fn title_line_width(title: &Line<'_>) -> usize {
+    title
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
 }
 
 /// Render the management panes (left side — 2 stacked for Branches, 1 for others).
@@ -3488,18 +3707,20 @@ fn render_management_panes(model: &Model, frame: &mut Frame, area: Rect) {
 fn branch_detail_title(model: &Model) -> Line<'static> {
     let detail_labels: Vec<&str> = screens::branches::detail_section_labels().to_vec();
     let mut title = screens::build_tab_title(&detail_labels, model.branches.detail_section);
-    title.spans.push(Span::styled(
-        " · ",
-        Style::default().fg(theme::color::SURFACE),
-    ));
+    title
+        .spans
+        .push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
     let branch_label = model
         .branches
         .selected_branch()
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "No branch selected".to_string());
-    title
-        .spans
-        .push(Span::styled(branch_label, theme::style::header()));
+    title.spans.push(Span::styled(
+        branch_label,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
     title
 }
 
@@ -3552,7 +3773,12 @@ fn build_session_title(model: &Model, width: u16) -> Line<'static> {
                 active.tab_type.icon(),
                 active.name
             );
-            return Line::from(vec![Span::styled(label, theme::style::tab_active())]);
+            return Line::from(vec![Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]);
         }
     }
 
@@ -3563,9 +3789,14 @@ fn build_session_title(model: &Model, width: u16) -> Line<'static> {
         }
         let label = format!(" {} {} ", s.tab_type.icon(), s.name);
         if i == model.active_session {
-            spans.push(Span::styled(label, theme::style::tab_active()));
+            spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
         } else {
-            spans.push(Span::styled(label, theme::style::tab_inactive()));
+            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
         }
     }
     Line::from(spans)
@@ -3896,14 +4127,13 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
             let session_idx = start + col_idx;
             if let Some(session) = model.sessions.get(session_idx) {
                 let is_active = session_idx == model.active_session;
-                let is_focused = is_active && model.active_focus == FocusPane::Terminal;
-                let (mut border_style, border_type) = theme::pane_border(is_focused);
-                if is_active && !is_focused {
-                    border_style = Style::default().fg(theme::color::ACTIVE);
-                }
+                let border_style = if is_active {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .border_type(border_type)
                     .border_style(border_style)
                     .title(grid_session_title(session_idx, session));
                 frame.render_widget(block, *col_area);
@@ -4097,6 +4327,7 @@ mod tests {
         tool_version: Option<&str>,
         resume_session_id: Option<&str>,
         skip_permissions: bool,
+        codex_fast_mode: bool,
     ) {
         let mut session = AgentSession::new(repo_path, branch, agent_id);
         session.model = model.map(str::to_string);
@@ -4104,6 +4335,7 @@ mod tests {
         session.tool_version = tool_version.map(str::to_string);
         session.agent_session_id = resume_session_id.map(str::to_string);
         session.skip_permissions = skip_permissions;
+        session.codex_fast_mode = codex_fast_mode;
         session.updated_at = updated_at;
         session.created_at = updated_at;
         session.last_activity_at = updated_at;
@@ -4145,7 +4377,7 @@ mod tests {
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce() -> R) -> R {
         let _guard = crate::DOCKER_ENV_TEST_LOCK
             .lock()
-            .expect("lock docker tests");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_dir, script_path) = write_fake_docker(script_body);
         let previous = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", &script_path);
@@ -4170,6 +4402,18 @@ mod tests {
         }
 
         panic!("timed out waiting for docker worker: {context}");
+    }
+
+    fn drive_ticks_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
+        for _ in 0..80 {
+            update(model, Message::Tick);
+            if done(model) {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        panic!("timed out waiting for ticks: {context}");
     }
 
     #[test]
@@ -4449,7 +4693,7 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_standard_width_branches_title_collapses_to_active_tab() {
+    fn render_model_text_standard_width_branches_title_keeps_nearby_tabs_visible() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Branches;
@@ -4460,13 +4704,21 @@ mod tests {
 
         assert!(first_line.contains("Branches"));
         assert!(
-            !first_line.contains("Specs"),
-            "standard-width management title should collapse to the active tab instead of a truncated tab strip"
+            first_line.contains("Specs"),
+            "standard-width Branches title should keep the next nearby tab visible"
+        );
+        assert!(
+            first_line.contains("Issues"),
+            "standard-width Branches title should keep multiple nearby tabs visible"
+        );
+        assert!(
+            !first_line.contains("Settings"),
+            "standard-width Branches title should not try to render the full strip"
         );
     }
 
     #[test]
-    fn render_model_text_standard_width_non_branches_title_collapses_to_active_tab() {
+    fn render_model_text_standard_width_non_branches_title_keeps_nearby_tabs_visible() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Issues;
@@ -4475,15 +4727,27 @@ mod tests {
         let rendered = render_model_text(&model, 80, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
+        assert!(first_line.contains("Specs"));
         assert!(first_line.contains("Issues"));
         assert!(
-            !first_line.contains("Branches"),
-            "standard-width non-Branches title should also collapse to the active tab"
+            first_line.contains("PRs"),
+            "standard-width non-Branches title should keep the next nearby tab visible"
+        );
+        assert!(
+            !first_line.contains("Versions"),
+            "standard-width non-Branches title should not try to render distant tabs"
         );
     }
 
     #[test]
-    fn render_model_text_medium_width_management_title_still_collapses_to_active_tab() {
+    fn compact_tab_window_start_keeps_active_tab_visible_for_single_slot_window() {
+        assert_eq!(compact_tab_window_start(9, 0, 1), 0);
+        assert_eq!(compact_tab_window_start(9, 3, 1), 3);
+        assert_eq!(compact_tab_window_start(9, 8, 1), 8);
+    }
+
+    #[test]
+    fn render_model_text_medium_width_management_title_still_prefers_nearby_tabs() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Issues;
@@ -4492,10 +4756,15 @@ mod tests {
         let rendered = render_model_text(&model, 120, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
+        assert!(first_line.contains("Specs"));
         assert!(first_line.contains("Issues"));
         assert!(
-            !first_line.contains("Branches"),
-            "when the full tab strip does not fit, medium-width panes should still collapse to the active tab"
+            first_line.contains("PRs"),
+            "when the full tab strip does not fit, medium-width panes should still keep nearby tabs visible"
+        );
+        assert!(
+            !first_line.contains("Logs"),
+            "medium-width panes should still omit distant tabs until the full strip fits"
         );
     }
 
@@ -4897,6 +5166,19 @@ mod tests {
         );
     }
 
+    fn git_create_branch(path: &std::path::Path, name: &str) {
+        let output = std::process::Command::new("git")
+            .args(["branch", name])
+            .current_dir(path)
+            .output()
+            .expect("create git branch");
+        assert!(
+            output.status.success(),
+            "git branch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn write_spec_fixture(
         repo_path: &std::path::Path,
         spec_dir_name: &str,
@@ -5169,6 +5451,77 @@ mod tests {
         assert_eq!(model.specs.specs[0].id, "SPEC-2");
         assert_eq!(model.specs.specs[1].id, "SPEC-9");
         assert_eq!(model.specs.specs[0].title, "Earlier spec");
+    }
+
+    #[test]
+    fn load_initial_data_prefetches_branch_detail_async() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+
+            let start = std::time::Instant::now();
+            load_initial_data(&mut model);
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(3000),
+                "initial data load should not block on branch detail preload: {elapsed:?}"
+            );
+            assert!(
+                model.branches.docker_containers.is_empty(),
+                "branch detail docker data should arrive asynchronously"
+            );
+
+            drive_ticks_until(
+                &mut model,
+                |model| !model.branches.docker_containers.is_empty(),
+                "branch detail preload",
+            );
+
+            assert_eq!(model.branches.docker_containers[0].name, "web");
+        });
+    }
+
+    #[test]
+    fn load_initial_data_prefetches_docker_once_per_refresh() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+        git_create_branch(dir.path(), "feature/one");
+        git_create_branch(dir.path(), "feature/two");
+
+        let counter_path = dir.path().join("docker-count.txt");
+        fs::write(&counter_path, "0\n").expect("write docker counter");
+        let script = format!(
+            "#!/bin/sh\ncount_file=\"{}\"\ncount=$(cat \"$count_file\")\necho $((count + 1)) > \"$count_file\"\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n",
+            counter_path.display()
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+            load_initial_data(&mut model);
+
+            drive_ticks_until(
+                &mut model,
+                |model| !model.branches.docker_containers.is_empty(),
+                "branch detail preload docker snapshot",
+            );
+
+            let docker_calls = fs::read_to_string(&counter_path)
+                .expect("read docker counter")
+                .trim()
+                .parse::<usize>()
+                .expect("parse docker counter");
+            assert!(
+                (1..=2).contains(&docker_calls),
+                "branch detail preload should snapshot docker state at most once per worker refresh cycle (actual: {docker_calls})"
+            );
+        });
     }
 
     #[test]
@@ -5951,27 +6304,6 @@ mod tests {
     }
 
     #[test]
-    fn prepare_wizard_startup_skips_ai_branch_suggest_in_new_branch_flow() {
-        let cache = VersionCache::new();
-        let (mut wizard, _) = prepare_wizard_startup(
-            Some(screens::wizard::SpecContext::new(
-                "SPEC-42",
-                "My Feature",
-                "",
-            )),
-            vec![],
-            &cache,
-        );
-
-        screens::wizard::update(&mut wizard, screens::wizard::WizardMessage::Select);
-        assert_eq!(wizard.step, screens::wizard::WizardStep::IssueSelect);
-
-        screens::wizard::update(&mut wizard, screens::wizard::WizardMessage::Select);
-        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchNameInput);
-        assert!(!wizard.ai_suggest.loading);
-    }
-
-    #[test]
     fn prepare_wizard_startup_uses_detected_version_when_cache_is_missing() {
         let cache = VersionCache::new();
         let detected = vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))];
@@ -6029,6 +6361,7 @@ mod tests {
             Some("0.5.0"),
             None,
             false,
+            false,
         );
         persist_agent_session(
             dir.path(),
@@ -6040,6 +6373,7 @@ mod tests {
             Some("high"),
             Some("latest"),
             Some("sess-new"),
+            true,
             true,
         );
         persist_agent_session(
@@ -6053,6 +6387,7 @@ mod tests {
             Some("1.0.54"),
             None,
             false,
+            false,
         );
         persist_agent_session(
             dir.path(),
@@ -6064,6 +6399,7 @@ mod tests {
             None,
             Some("latest"),
             Some("sess-other"),
+            false,
             false,
         );
 
@@ -6083,7 +6419,10 @@ mod tests {
             wizard.quick_start_entries[0].resume_session_id.as_deref(),
             Some("sess-new")
         );
+        assert!(wizard.quick_start_entries[0].skip_permissions);
+        assert!(wizard.quick_start_entries[0].codex_fast_mode);
         assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
+        assert!(!wizard.quick_start_entries[1].codex_fast_mode);
     }
 
     #[test]
@@ -6362,6 +6701,40 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_codex_fast_mode_adds_service_tier_flag() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            version: "0.113.0".to_string(),
+            codex_fast_mode: true,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.args.contains(&"-c".to_string()));
+        assert!(config.args.contains(&"service_tier=fast".to_string()));
+        assert!(config.codex_fast_mode);
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_codex_skip_permissions_does_not_imply_fast_mode() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            skip_perms: true,
+            codex_fast_mode: false,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.skip_permissions);
+        assert!(!config.codex_fast_mode);
+        assert!(!config.args.contains(&"service_tier=fast".to_string()));
+    }
+
+    #[test]
     fn materialize_pending_launch_with_creates_agent_session_and_persists_metadata() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut model = test_model();
@@ -6416,6 +6789,7 @@ CUSTOM_ENV = "enabled"
             mode: "resume".to_string(),
             resume_session_id: Some("sess-abc".to_string()),
             skip_perms: true,
+            codex_fast_mode: true,
             ..Default::default()
         };
         model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
@@ -6431,6 +6805,7 @@ CUSTOM_ENV = "enabled"
         let persisted = AgentSession::load(&entry).expect("load persisted session");
         assert_eq!(persisted.reasoning_level.as_deref(), Some("high"));
         assert!(persisted.skip_permissions);
+        assert!(persisted.codex_fast_mode);
         assert_eq!(persisted.agent_session_id.as_deref(), Some("sess-abc"));
     }
 
@@ -6454,6 +6829,7 @@ CUSTOM_ENV = "enabled"
             session_mode: SessionMode::Normal,
             resume_session_id: None,
             skip_permissions: false,
+            codex_fast_mode: false,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -7352,6 +7728,55 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn update_tick_drains_branch_detail_events_in_small_batches() {
+        let mut model = test_model();
+        let total_events = 12usize;
+        let generation = model.branches.detail_generation.wrapping_add(1);
+        model.branches.detail_generation = generation;
+        model.branches.branches = (0..total_events)
+            .map(|index| screens::branches::BranchItem {
+                name: format!("feature/{index}"),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            })
+            .collect();
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        {
+            let mut queue = events.lock().expect("lock branch detail queue");
+            for index in 0..total_events {
+                queue.push_back(screens::branches::BranchDetailLoadResult {
+                    generation,
+                    branch_name: format!("feature/{index}"),
+                    data: screens::branches::BranchDetailData::default(),
+                });
+            }
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = thread::spawn(|| {});
+        model.branch_detail_worker = Some(crate::model::BranchDetailWorker::new(
+            events.clone(),
+            cancel,
+            handle,
+        ));
+
+        update(&mut model, Message::Tick);
+
+        let remaining = events
+            .lock()
+            .expect("lock branch detail queue after tick")
+            .len();
+        assert_eq!(
+            remaining, 4,
+            "tick should leave work queued so branch detail preload cannot monopolize one frame"
+        );
+        assert_eq!(model.branches.detail_cache.len(), 8);
+    }
+
+    #[test]
     fn route_key_to_management_routes_search_input_for_issues() {
         let mut model = test_model();
         model.management_tab = ManagementTab::Issues;
@@ -7398,36 +7823,6 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn route_key_to_management_issues_shift_enter_opens_prefilled_wizard() {
-        let mut model = test_model();
-        model.management_tab = ManagementTab::Issues;
-        model.active_focus = FocusPane::TabContent;
-        model.issues.issues = vec![screens::issues::IssueItem {
-            number: 1776,
-            title: "Fix login freeze".into(),
-            state: "open".into(),
-            labels: vec!["bug".into()],
-            body: "Steps to reproduce...".into(),
-        }];
-        model.issues.detail_view = true;
-
-        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
-
-        let wizard = model.wizard.as_mut().expect("wizard should open");
-        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
-        assert_eq!(wizard.issue_id, "1776");
-        assert_eq!(wizard.branch_name, "feature/issue-1776-fix-login-freeze");
-        assert!(!wizard.ai_enabled);
-
-        screens::wizard::update(wizard, screens::wizard::WizardMessage::Select);
-        assert_eq!(wizard.step, screens::wizard::WizardStep::IssueSelect);
-
-        screens::wizard::update(wizard, screens::wizard::WizardMessage::Select);
-        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchNameInput);
-        assert_eq!(wizard.issue_id, "1776");
-    }
-
-    #[test]
     fn route_key_to_management_git_view_refresh_reloads_repository_data() {
         let dir = tempfile::tempdir().expect("temp repo");
         init_git_repo(dir.path());
@@ -7452,6 +7847,41 @@ CUSTOM_ENV = "enabled"
 
         assert_eq!(model.git_view.files.len(), 1);
         assert_eq!(model.git_view.files[0].path, "tracked.txt");
+    }
+
+    #[test]
+    fn route_key_to_management_branches_refresh_does_not_block_on_detail_reload() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+            model.management_tab = ManagementTab::Branches;
+
+            let start = std::time::Instant::now();
+            route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(150),
+                "Branches refresh should not block on branch detail reload: {elapsed:?}"
+            );
+            assert!(
+                model.branches.docker_containers.is_empty(),
+                "detail refresh should update docker data asynchronously"
+            );
+
+            drive_ticks_until(
+                &mut model,
+                |model| !model.branches.docker_containers.is_empty(),
+                "branch detail refresh",
+            );
+
+            assert_eq!(model.branches.docker_containers[0].name, "web");
+        });
     }
 
     #[test]
@@ -7604,6 +8034,102 @@ CUSTOM_ENV = "enabled"
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(model.branches.docker_selected, 0);
+    }
+
+    #[test]
+    fn route_key_to_management_branches_down_does_not_block_on_detail_reload() {
+        let wt_a = tempfile::tempdir().expect("worktree a");
+        let wt_b = tempfile::tempdir().expect("worktree b");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"ps\" ]; then\n  sleep 0.25\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, || {
+            let mut model = test_model();
+            model.management_tab = ManagementTab::Branches;
+            model.active_focus = FocusPane::TabContent;
+            model.branches.branches = vec![
+                screens::branches::BranchItem {
+                    name: "feature/a".to_string(),
+                    is_head: false,
+                    is_local: true,
+                    category: screens::branches::BranchCategory::Feature,
+                    worktree_path: Some(wt_a.path().to_path_buf()),
+                },
+                screens::branches::BranchItem {
+                    name: "feature/b".to_string(),
+                    is_head: false,
+                    is_local: true,
+                    category: screens::branches::BranchCategory::Feature,
+                    worktree_path: Some(wt_b.path().to_path_buf()),
+                },
+            ];
+
+            let start = std::time::Instant::now();
+            route_key_to_management(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(150),
+                "Branches cursor movement should not block on detail reload: {elapsed:?}"
+            );
+            assert_eq!(model.branches.selected, 1);
+        });
+    }
+
+    #[test]
+    fn spawn_branch_detail_worker_with_loader_stops_after_cancel() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/a".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            },
+            screens::branches::BranchItem {
+                name: "feature/b".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            },
+        ];
+
+        let handle = spawn_branch_detail_worker_with_loader(
+            events,
+            cancel.clone(),
+            7,
+            branches,
+            Vec::new(),
+            move |branch, _docker_containers| {
+                started_tx
+                    .send(branch.name.clone())
+                    .expect("signal branch load start");
+                if branch.name == "feature/a" {
+                    release_rx.recv().expect("release first branch load");
+                }
+                screens::branches::BranchDetailData::default()
+            },
+        );
+
+        let first_branch = started_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .expect("first branch should start loading");
+        assert_eq!(first_branch, "feature/a");
+
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        release_tx.send(()).expect("release canceled worker");
+        handle.join().expect("join worker");
+
+        assert!(
+            started_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "canceled worker should not continue into later branches"
+        );
     }
 
     #[test]
@@ -7922,7 +8448,10 @@ CUSTOM_ENV = "enabled"
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Char('m'), KeyModifiers::NONE));
 
-        assert_eq!(model.branches.view_mode, screens::branches::ViewMode::Local);
+        assert_eq!(
+            model.branches.view_mode,
+            screens::branches::ViewMode::Remote
+        );
         assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 
@@ -8084,6 +8613,20 @@ CUSTOM_ENV = "enabled"
                 "docker stop completion",
             );
 
+            drive_ticks_until(
+                &mut model,
+                |model| {
+                    model
+                        .branches
+                        .docker_containers
+                        .first()
+                        .is_some_and(|container| {
+                            container.status == gwt_docker::ContainerStatus::Exited
+                        })
+                },
+                "branch detail refresh after docker stop",
+            );
+
             assert_eq!(model.branches.docker_containers.len(), 1);
             assert_eq!(
                 model.branches.docker_containers[0].status,
@@ -8243,6 +8786,36 @@ CUSTOM_ENV = "enabled"
         );
 
         assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_key_input_shift_tab_modifier_on_non_branches_management_skips_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Logs;
+        model.active_focus = FocusPane::Terminal;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::SHIFT)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_key_input_shift_tab_modifier_on_branches_cycles_backward_into_branch_detail_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::Terminal;
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Tab, KeyModifiers::SHIFT)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
     }
 
     #[test]

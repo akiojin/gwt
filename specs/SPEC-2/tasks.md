@@ -426,3 +426,49 @@ banner in favor of pane-title chrome.
 - [x] T272 Update `app.rs` grid-session title rendering to include `n:` plus the session-type icon before the session label.
 - [x] T273 Refresh grid-layout snapshots and `SPEC-2` artifacts to describe split-grid title parity.
 - [x] T274 Verify focused tests, snapshot verification, broad workspace verification, and artifact sync.
+
+## Phase 42: Cache Branch Detail Data Off The Input Path
+
+- [x] T275 [P] Write RED test: `Branches` list navigation switches to cached detail immediately without synchronously reloading the newly selected branch.
+- [x] T276 [P] Write RED test: asynchronous branch-detail preload/refresh populates cached detail and updates the selected branch when results arrive.
+- [x] T277 Implement branch-detail cache plus asynchronous preload/refresh wiring in `app.rs` / `model.rs` / `branches.rs`.
+- [x] T278 Refresh `SPEC-2` artifacts and progress tracking to describe cached asynchronous branch-detail loading.
+- [x] T279 Verify focused tests, broad workspace verification, and artifact sync.
+
+## Phase 43: Normalize Reverse Focus Keys And Startup PTY Geometry
+
+- [x] T280 [P] Write RED test: `Shift+Tab` arriving as `KeyCode::Tab` + `KeyModifiers::SHIFT` still moves focus backward on management panes.
+- [x] T281 [P] Write RED test: startup terminal-size synchronization seeds the initial shell geometry from the live terminal frame instead of the stale `80x24` default.
+- [x] T282 Update `app.rs` focus routing to normalize reverse-tab key encodings before pane cycling decisions.
+- [x] T283 Update `main.rs` startup initialization so the model receives the live terminal size before computing the default shell PTY rows/cols.
+- [x] T284 Refresh `SPEC-2` artifacts, progress evidence, and verification results for the reverse-focus and startup-geometry fixes.
+
+## Phase 44: Stop Branch List Wrap, Prefer Local Branches, And Keep Nearby Tabs Visible
+
+- [x] T285 [P] Write RED test: Branches list `Up` on the first row and `Down` on the last row stop at the edge instead of wrapping.
+- [x] T286 [P] Write RED test: `ViewMode::All` keeps local branches ahead of remote branches for default and name/date sort modes.
+- [x] T287 [P] Write RED test: standard-width management pane titles keep the active tab plus nearby tabs visible instead of collapsing to the active label only.
+- [x] T288 Update `branches.rs` and `app.rs` to stop Branches-list wraparound, apply local-first ordering in `All`, and render nearby-tab management titles with ellipsis when tabs are hidden.
+- [x] T289 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the Branches and management-title visibility fixes.
+
+## Phase 45: Default Branches Filter To Local
+
+- [x] T290 [P] Write RED test: Branches default state starts in `ViewMode::Local`.
+- [x] T291 [P] Write RED test: the Branches view-mode cycle now starts at `Local` and still reaches `Remote` and `All`.
+- [x] T292 [P] Refresh reviewer guidance and snapshots so the initial Branches surface shows `View: Local`.
+- [x] T293 Update `branches.rs` so the default `ViewMode` is `Local` without changing the rest of the filter behavior.
+- [x] T294 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the default-local Branches filter.
+
+## Phase 46: Stabilize Branch Detail Prefetch
+
+- [x] T295 [P] Write RED test: canceling a superseded branch-detail preload worker stops it before it starts loading later branches.
+- [x] T296 [P] Write RED test: one branch-detail preload refresh performs exactly one Docker container discovery even when multiple branches are prefetched.
+- [x] T297 Update `app.rs` to track and cancel/reap branch-detail preload workers instead of replacing the completion queue and detaching stale workers.
+- [x] T298 Update `branches.rs` so branch-detail loading consumes a per-refresh Docker snapshot instead of calling Docker per branch.
+- [x] T299 Refresh `SPEC-2` artifacts, verification evidence, and progress tracking for the stabilized Branch Detail preload path.
+
+## Phase 47: Keep Branches List Responsive During Detail Backfill
+
+- [x] T300 [P] Write RED test: one `Tick` does not fully drain a large branch-detail preload queue, so preload work cannot monopolize a frame.
+- [x] T301 Update `app.rs` branch-detail event draining to apply a bounded per-tick batch budget while preserving generation/branch validation.
+- [x] T302 Refresh `SPEC-2` artifacts and focused verification evidence for the incremental preload-drain contract.

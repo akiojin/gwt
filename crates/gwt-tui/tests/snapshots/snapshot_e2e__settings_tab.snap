@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┏ Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭ › Shell ─────────────────────────────╮
-┃ General │ Worktree │ Agent │ Custom A┃│Session: Shell (80x24)                │
-┃No settings in this category          ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┃                                      ┃│                                      │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────────────────────╯
+┌...│ Versions │ Settings │ Logs ──────┐┌ › Shell ─────────────────────────────┐
+│ General │ Worktree │ Agent │ Custom A││Session: Shell (80x24)                │
+│No settings in this category          ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
  ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  Tab pane  E
