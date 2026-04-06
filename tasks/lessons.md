@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: branch detail worker は Drop で detach せず join する
+
+### 事象
+
+`Test (Rust)` の `load_initial_data_prefetches_docker_once_per_refresh` が CI 全体実行でだけ不安定に失敗し、
+docker preload の呼び出し回数が 3 回まで増えることがあった。
+
+### 原因
+
+- `BranchDetailWorker::drop()` が未完了の background thread を `join()` せず detach していた。
+- app テストは `with_fake_docker()` で process-wide な `GWT_DOCKER_BIN` を差し替えるため、
+  前テストから漏れた worker が後続テストの fake docker を踏み、別テストの counter を増やしていた。
+
+### 再発防止策
+
+1. process-wide env var やグローバル fixture に依存する background worker は、Drop 時に cancel だけで終わらせず thread 終了まで `join()` する。
+2. 「単体実行では通るが full suite / CI だけ落ちる」docker 系テストでは、前テストの非同期 worker が detatch されていないかを最初に確認する。
+3. fake external binary を使うテストは、worker の終了保証まで含めて fixture の責務として扱う。
+
 ## 2026-04-06 — fix: session pane mouse interaction は keyboard focus 前提で捨てない
 
 ### 事象
