@@ -1609,7 +1609,7 @@ fn branch_live_session_summaries_with(
         HashMap::new();
 
     for session in &model.sessions {
-        let SessionTabType::Agent { .. } = &session.tab_type else {
+        let SessionTabType::Agent { color, .. } = &session.tab_type else {
             continue;
         };
 
@@ -1625,21 +1625,23 @@ fn branch_live_session_summaries_with(
             continue;
         }
 
-        let candidate = screens::branches::BranchLiveSessionSummary {
+        let candidate = screens::branches::BranchLiveSessionIndicator {
             status,
-            name: session.name.clone(),
+            color: *color,
         };
-
-        let replace = summaries
-            .get(&persisted.branch)
-            .map(|current| {
-                branch_live_session_priority(candidate.status)
-                    > branch_live_session_priority(current.status)
+        summaries
+            .entry(persisted.branch.clone())
+            .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
+                indicators: Vec::new(),
             })
-            .unwrap_or(true);
-        if replace {
-            summaries.insert(persisted.branch.clone(), candidate);
-        }
+            .indicators
+            .push(candidate);
+    }
+
+    for summary in summaries.values_mut() {
+        summary.indicators.sort_by_key(|indicator| {
+            std::cmp::Reverse(branch_live_session_priority(indicator.status))
+        });
     }
 
     summaries
@@ -6922,7 +6924,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_live_session_summaries_with_prefers_running_over_waiting_for_same_branch() {
+    fn branch_live_session_rendering_keeps_multiple_live_agents_for_same_branch() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let repo_path = dir.path().join("repo");
         let selected_worktree = repo_path.join("wt-feature-test");
@@ -6976,8 +6978,123 @@ mod tests {
 
         let summaries = branch_live_session_summaries_with(&model, dir.path());
         let summary = summaries.get("feature/test").expect("branch live summary");
-        assert_eq!(summary.status, gwt_agent::AgentStatus::Running);
-        assert_eq!(summary.name, "Codex");
+        assert_eq!(summary.indicators.len(), 2);
+        assert_eq!(
+            summary.indicators[0].status,
+            gwt_agent::AgentStatus::Running
+        );
+        assert_eq!(summary.indicators[0].color, crate::model::AgentColor::Blue);
+        assert_eq!(
+            summary.indicators[1].status,
+            gwt_agent::AgentStatus::WaitingInput
+        );
+        assert_eq!(summary.indicators[1].color, crate::model::AgentColor::Green);
+        model.branches.live_session_summaries = summaries;
+        model.branches.session_animation_tick = 0;
+
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                crate::screens::branches::render_list(&model.branches, frame, frame.area());
+            })
+            .expect("draw branches");
+
+        let rendered = buffer_text(terminal.backend().buffer());
+        let spinner_count = rendered
+            .chars()
+            .filter(|ch| matches!(ch, '◐' | '◓' | '◑' | '◒'))
+            .count();
+
+        assert_eq!(
+            spinner_count, 2,
+            "one live branch row should keep one spinner per live agent session"
+        );
+        assert!(
+            !rendered.contains("run ") && !rendered.contains("wait "),
+            "branch rows should no longer render textual run/wait labels"
+        );
+    }
+
+    #[test]
+    fn branch_live_session_rendering_uses_agent_colors_for_each_spinner() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+        }];
+
+        let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
+        running.save(dir.path()).expect("persist running session");
+        SessionRuntimeState::from_hook_event("PostToolUse")
+            .expect("running runtime")
+            .save(&runtime_state_path(dir.path(), &running.id))
+            .expect("persist running runtime");
+
+        let waiting = AgentSession::new(&selected_worktree, "feature/test", AgentId::ClaudeCode);
+        waiting.save(dir.path()).expect("persist waiting session");
+        SessionRuntimeState::from_hook_event("Stop")
+            .expect("waiting runtime")
+            .save(&runtime_state_path(dir.path(), &waiting.id))
+            .expect("persist waiting runtime");
+
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: waiting.id.clone(),
+                name: "Claude Code".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "claude".to_string(),
+                    color: crate::model::AgentColor::Green,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+            crate::model::SessionTab {
+                id: running.id.clone(),
+                name: "Codex".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "codex".to_string(),
+                    color: crate::model::AgentColor::Blue,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+        ];
+
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+        model.branches.session_animation_tick = 0;
+
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                crate::screens::branches::render_list(&model.branches, frame, frame.area());
+            })
+            .expect("draw branches");
+
+        let spinner_colors: Vec<Color> = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .map(|cell| cell.fg)
+            .collect();
+
+        assert_eq!(
+            spinner_colors,
+            vec![Color::Blue, Color::Green],
+            "spinner indicators should keep per-agent colors so multiple agents remain distinguishable"
+        );
     }
 
     #[test]

@@ -522,3 +522,11 @@ banner in favor of pane-title chrome.
 - [x] T335 Implement PID-scoped runtime path/reset helpers in `gwt-agent` and call startup reset from `gwt-tui/src/main.rs`.
 - [x] T336 Implement shared Claude/Codex runtime hook generation, `.codex/hooks.json` materialization, and launch-time wiring in `gwt-skills` / `app.rs`.
 - [x] T337 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for PID-scoped no-Node hook live-state updates.
+
+## Phase 53: Multi-Agent Branch Spinner Strips
+
+- [x] T338 [P] Write RED test: branch live-session extraction keeps multiple live agent indicators for the same branch instead of collapsing to one summary.
+- [x] T339 [P] Write RED test: wide Branches rows render spinner-only indicators without `run ...` / `wait ...` labels.
+- [x] T340 [P] Write RED test: branch spinner indicators use the originating agent colors so Claude Code and Codex stay visually distinct.
+- [x] T341 Implement multi-indicator branch aggregation and spinner-strip rendering in `app.rs` / `branches.rs`.
+- [x] T342 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for multi-agent spinner-strip Branches rendering.

@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `337/337` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T11:21:20Z`
+- Task progress: `342/342` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T11:45:43Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -64,7 +64,7 @@
 - Session PTYs now also expose an explicit prefixed focus-escape path: `Ctrl+G,Tab` and `Ctrl+G,Shift+Tab` cycle focus without stealing the raw plain-`Tab` key from Shell or Agent processes.
 - Agent PTYs now receive stable gwt hook-runtime environment (`GWT_SESSION_ID`, `GWT_SESSION_RUNTIME_PATH`), so Codex / Claude hook scripts can update the correct session runtime record without shell-specific discovery logic.
 - Hook-managed runtime state is now persisted in a lightweight JSON sidecar under `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`, mapping `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
-- Branches rows now show a right-aligned live agent summary again: running sessions animate with a spinner, waiting sessions render a distinct `wait` indicator, and narrow panes keep the branch label readable by shortening or omitting the right side first.
+- Branches rows now show one color-coded spinner per live agent session instead of a single `run ...` / `wait ...` text summary, so Claude Code and Codex remain visible at the same time on the same branch row.
 - Explicit agent-session close and detected PTY exit now persist `Stopped`, so stale running/waiting indicators do not survive after the session is gone.
 - Embedded asset distribution now also writes `.codex/hooks/scripts/gwt-*.mjs`, so launched worktrees get the updated Codex hook script alongside the already-distributed Claude hook assets.
 - Claude launch materialization now regenerates `.claude/settings.local.json` in Claude's native `hooks` schema, preserving user hooks and unrelated settings while replacing the stale internal `managed_hooks` / `user_hooks` layout that prevented Claude hook execution.

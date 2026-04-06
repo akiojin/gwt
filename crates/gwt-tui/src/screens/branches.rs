@@ -137,8 +137,14 @@ pub struct DetailSessionSummary {
 /// Lightweight live session summary rendered directly in the branch list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchLiveSessionSummary {
+    pub indicators: Vec<BranchLiveSessionIndicator>,
+}
+
+/// Lightweight live session indicator rendered directly in the branch list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BranchLiveSessionIndicator {
     pub status: AgentStatus,
-    pub name: String,
+    pub color: crate::model::AgentColor,
 }
 
 /// Lifecycle action requested for a Docker container.
@@ -833,7 +839,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
 
     let list = List::new(items)
         .block(Block::default())
-        .highlight_style(theme::style::active_item());
+        .highlight_style(Style::default());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -844,54 +850,25 @@ fn build_branch_live_summary(
     animation_tick: usize,
     available_width: usize,
 ) -> Option<Vec<Span<'static>>> {
-    match summary.status {
-        AgentStatus::Running => {
-            let spinner = running_spinner_frame(animation_tick);
-            if let Some(label) = fit_label(&summary.name, available_width.saturating_sub(6)) {
-                return Some(vec![
-                    Span::styled(
-                        spinner.to_string(),
-                        Style::default().fg(theme::color::AGENT),
-                    ),
-                    Span::raw(" run "),
-                    Span::styled(label, Style::default().fg(theme::color::TEXT_PRIMARY)),
-                ]);
-            }
-            if let Some(label) = fit_label(&summary.name, available_width.saturating_sub(2)) {
-                return Some(vec![
-                    Span::styled(
-                        spinner.to_string(),
-                        Style::default().fg(theme::color::AGENT),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(label, Style::default().fg(theme::color::TEXT_PRIMARY)),
-                ]);
-            }
-            None
-        }
-        AgentStatus::WaitingInput => {
-            if let Some(label) = fit_label(&summary.name, available_width.saturating_sub(7)) {
-                return Some(vec![
-                    Span::styled(
-                        theme::icon::CIRCLE_EMPTY,
-                        Style::default().fg(theme::color::WARNING),
-                    ),
-                    Span::raw(" wait "),
-                    Span::styled(label, Style::default().fg(theme::color::TEXT_PRIMARY)),
-                ]);
-            }
-            if available_width >= 6 {
-                return Some(vec![
-                    Span::styled(
-                        theme::icon::CIRCLE_EMPTY,
-                        Style::default().fg(theme::color::WARNING),
-                    ),
-                    Span::raw(" wait"),
-                ]);
-            }
-            None
-        }
-        AgentStatus::Unknown | AgentStatus::Stopped => None,
+    if available_width == 0 {
+        return None;
+    }
+
+    let spinner = running_spinner_frame(animation_tick);
+    let visible_indicators = summary.indicators.iter().take(available_width);
+    let spans: Vec<Span<'static>> = visible_indicators
+        .map(|indicator| {
+            Span::styled(
+                spinner.to_string(),
+                Style::default().fg(branch_live_indicator_color(indicator.color)),
+            )
+        })
+        .collect();
+
+    if spans.is_empty() {
+        None
+    } else {
+        Some(spans)
     }
 }
 
@@ -900,22 +877,15 @@ fn running_spinner_frame(animation_tick: usize) -> char {
     FRAMES[animation_tick % FRAMES.len()]
 }
 
-fn fit_label(value: &str, max_width: usize) -> Option<String> {
-    if max_width < 4 {
-        return None;
+fn branch_live_indicator_color(color: crate::model::AgentColor) -> Color {
+    match color {
+        crate::model::AgentColor::Green => Color::Green,
+        crate::model::AgentColor::Blue => Color::Blue,
+        crate::model::AgentColor::Cyan => Color::Cyan,
+        crate::model::AgentColor::Yellow => Color::Yellow,
+        crate::model::AgentColor::Magenta => Color::Magenta,
+        crate::model::AgentColor::Gray => Color::Gray,
     }
-
-    let width = value.chars().count();
-    if width <= max_width {
-        return Some(value.to_string());
-    }
-
-    let mut truncated = value
-        .chars()
-        .take(max_width.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    Some(truncated)
 }
 
 fn spans_width(spans: &[Span<'_>]) -> usize {
@@ -2084,8 +2054,10 @@ mod tests {
         state.live_session_summaries.insert(
             "feature/live".to_string(),
             BranchLiveSessionSummary {
-                status: gwt_agent::AgentStatus::Running,
-                name: "Codex".to_string(),
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                }],
             },
         );
         state.session_animation_tick = 0;
@@ -2102,13 +2074,13 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("feature/live") && line.contains("◐ run Codex")),
-            "wide rows should keep the old-TUI left side and add a right-aligned running summary"
+                .any(|line| line.contains("feature/live") && line.contains("◐") && !line.contains("run ")),
+            "wide rows should keep the old-TUI left side and add a right-aligned spinner-only indicator"
         );
     }
 
     #[test]
-    fn render_branch_list_shows_waiting_summary() {
+    fn render_branch_list_keeps_waiting_sessions_visible_with_spinner_indicator() {
         let mut state = BranchesState::default();
         state.branches = vec![BranchItem {
             name: "feature/wait".to_string(),
@@ -2120,10 +2092,13 @@ mod tests {
         state.live_session_summaries.insert(
             "feature/wait".to_string(),
             BranchLiveSessionSummary {
-                status: gwt_agent::AgentStatus::WaitingInput,
-                name: "Claude Code".to_string(),
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Green,
+                }],
             },
         );
+        state.session_animation_tick = 0;
 
         let backend = TestBackend::new(80, 8);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2135,10 +2110,10 @@ mod tests {
 
         let lines = buffer_to_lines(terminal.backend().buffer());
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("feature/wait") && line.contains("○ wait Claude Code")),
-            "waiting rows should render a distinct waiting-for-input summary"
+            lines.iter().any(|line| line.contains("feature/wait"))
+                && lines.iter().any(|line| line.contains("◐"))
+                && !lines.iter().any(|line| line.contains(" wait ")),
+            "waiting rows should keep a spinner-only indicator instead of a textual wait label"
         );
     }
 
@@ -2155,8 +2130,10 @@ mod tests {
         state.live_session_summaries.insert(
             "feature/narrow".to_string(),
             BranchLiveSessionSummary {
-                status: gwt_agent::AgentStatus::Running,
-                name: "Codex".to_string(),
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                }],
             },
         );
 
@@ -2170,10 +2147,8 @@ mod tests {
 
         let lines = buffer_to_lines(terminal.backend().buffer());
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("feature/narrow") && !line.contains("run Codex")),
-            "narrow rows should preserve the branch label even if the live summary must disappear"
+            lines.iter().any(|line| line.contains("feature/narrow")),
+            "narrow rows should preserve the branch label even if the spinner strip must disappear"
         );
     }
 

@@ -714,6 +714,21 @@ Bring back the old-TUI scanability contract by letting Branches show live agent 
 - Add focused RED coverage for hook-state mapping, launch env injection, session cleanup, and Branches-row rendering at wide and narrow widths.
 - Re-run focused and broad workspace verification, then refresh SPEC-2 progress evidence and metadata.
 
+### Phase 53: Replace Text Summaries With Multi-Agent Spinner Strips (5 tasks)
+Correct the remaining Branches visibility gap where multiple live agent sessions on the same branch
+collapse into a single `run Claude Code` style label, hiding Codex behind the first summary.
+
+53.1: Multi-session aggregation contract (2 tasks)
+- Derive an ordered list of live agent indicators per branch from the existing session tabs plus the hook runtime sidecar instead of collapsing to one highest-priority summary.
+- Preserve internal `Running` / `WaitingInput` status for ordering and lifecycle, but expose one visible indicator per live session so Claude Code and Codex can both be scanned from the same branch row.
+
+53.2: Spinner-only rendering contract (2 tasks)
+- Replace the right-aligned `run ...` / `wait ...` text summary with a spinner-only strip that uses the existing tick cadence and the existing per-agent colors.
+- Keep the row width-aware so the spinner strip truncates or disappears before the branch label and branch icons become unreadable.
+
+53.3: Verification and artifact sync (1 task)
+- Add focused RED coverage for multi-session extraction, spinner-only rendering, per-agent colors, and narrow-width truncation, then rerun focused and broad verification and refresh SPEC-2 artifacts.
+
 ## Verification
 
 1. `cargo test -p gwt-tui` — all pass
