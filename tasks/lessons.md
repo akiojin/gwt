@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: process-wide fake docker env は並列 app テストの観測値を汚す
+
+### 事象
+
+`load_initial_data_prefetches_docker_once_per_refresh` が CI の full suite でだけ不安定に失敗し、
+branch detail preload の docker snapshot 回数が期待より多く観測されることがあった。
+
+### 原因
+
+- app テストは `with_fake_docker()` で process-wide な `GWT_DOCKER_BIN` を差し替えていた。
+- 同時に走る別テストが `load_initial_data()` や branch refresh を通じて background preload を起動すると、
+  その worker も同じ fake docker を踏み、カウンタや応答を横取りしていた。
+
+### 再発防止策
+
+1. 並列実行される app テストで external command の観測値を固定したい場合は、process-wide env override ではなく model 単位の dependency injection を使う。
+2. background worker を含むテストでは、「fake binary の差し替えが同一 process 内の他テストから見えるか」を最初に確認する。
+3. call count や遅延を検証するテストは、外部コマンド自体を叩かず closure / function override で deterministic にする。
+
 ## 2026-04-06 — fix: branch detail worker は Drop で detach せず join する
 
 ### 事象
