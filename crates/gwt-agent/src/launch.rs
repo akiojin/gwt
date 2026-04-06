@@ -455,7 +455,7 @@ mod tests {
 
         assert_eq!(config.command, "claude");
         assert_eq!(config.display_name, "Claude Code");
-        assert_eq!(config.color, AgentColor::Green);
+        assert_eq!(config.color, AgentColor::Yellow);
         assert_eq!(
             config.env_vars.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
             Some(&"1".to_string())

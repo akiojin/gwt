@@ -93,9 +93,11 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 
 ## Functional Requirements
 
-- **FR-001**: Tab mode shows single active session with session tabs in the Block title (active session yellow/bold, inactive gray, separated by │).
+- **FR-001**: Tab mode shows single active session with session tabs in the Block title, separated by `│`. Shell tabs keep their session name, while agent tabs show the persisted branch name instead of the agent display name whenever branch metadata is available.
 - **FR-001a**: When the session pane is too narrow to fit the full session tab strip in the pane title, the title collapses to the active session only so the current workstream stays legible; extra-wide panes restore the full strip.
 - **FR-001b**: That compact session title still preserves multi-session context by showing the active session position as `n/N`, so standard-width workspaces do not lose track of how many sessions remain open when the strip collapses.
+- **FR-001c**: Agent tab identity is color-coded instead of name-coded: Claude Code uses Yellow, Codex uses Cyan, and Gemini uses Magenta across session-title chrome.
+- **FR-001d**: Active session emphasis is expressed through title styling modifiers instead of a shared active-only foreground color, so agent identity colors remain stable even when the active tab is Claude Code.
 - **FR-002**: Split mode shows an equal grid of all sessions (e.g., 2x2 for 4 sessions, 2x3 for 5-6).
 - **FR-002a**: Split/grid mode pane titles preserve session identity by showing each pane's stable `n:` shortcut position plus the session-type icon alongside the session name, so the old-TUI numeric muscle memory still applies when multiple panes are visible.
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
@@ -188,7 +190,7 @@ Ctrl+G, Tab →  Tab Content (list) → Terminal → ...
 - Unfocused pane: **white** border (`Color::Gray`)
 - Reverse focus cycling accepts both `BackTab` and `Shift+Tab` key encodings
 - Management tabs are rendered in the Block title of the management panel (Left/Right switches tabs within TabContent focus)
-- Session tabs are rendered in the Block title of the terminal content area (active session highlighted yellow/bold, inactive gray)
+- Session tabs are rendered in the Block title of the terminal content area. Shell tabs keep their session name, agent tabs prefer the persisted branch name, and agent colors stay fixed (`Claude Code = Yellow`, `Codex = Cyan`, `Gemini = Magenta`) while active-state emphasis comes from styling modifiers rather than a shared active foreground color.
 - Ctrl+G,g toggles management panel visibility (same as before)
 - Overlays (Wizard, Confirm, Error) capture all input when visible
 

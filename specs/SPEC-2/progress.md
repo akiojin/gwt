@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `288/288` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T09:33:36Z`
+- Task progress: `320/320` checked in `tasks.md`
+- Artifact refresh: `2026-04-06T12:14:05Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -62,6 +62,8 @@
 - `Ctrl+G,g` pane toggles now resize live PTYs and vt100 parsers immediately to the new visible session geometry, keeping placeholder chrome and actual terminal width aligned.
 - Exited PTY-backed sessions now remove their tabs automatically, clamp the active session safely, and notify with the auto-close result instead of leaving dead tabs behind.
 - Session PTYs now also expose an explicit prefixed focus-escape path: `Ctrl+G,Tab` and `Ctrl+G,Shift+Tab` cycle focus without stealing the raw plain-`Tab` key from Shell or Agent processes.
+- Agent session titles now identify the workstream by persisted branch name instead of the tool label, so the right-side tab strip reads as branch-first workspace context.
+- Claude Code, Codex, and Gemini now keep fixed Yellow/Cyan/Magenta identity colors in session-title chrome, while active emphasis is carried by styling modifiers instead of a shared yellow active color.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.

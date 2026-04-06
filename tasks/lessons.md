@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-06 — feat: session-title tests must not depend on the real home sessions dir
+
+### 事象
+
+agent tab title を branch-first にする RED テストを最初に `gwt_sessions_dir()` 直書きで組んだところ、
+sandbox 環境では home 配下への書き込みが拒否され、期待した振る舞いの失敗ではなく `PermissionDenied`
+でテストが落ちた。
+
+### 原因
+
+- session title の branch 解決が `~/.gwt/sessions` 前提だったため、テストも同じ実ディレクトリを書き換えようとした。
+- render/title 系のテストで「本当に検証したいのは label/style 契約」であるにもかかわらず、
+  ファイル配置の実環境依存を切り離していなかった。
+
+### 再発防止策
+
+1. `~/.gwt/*` のような home 配下の永続ディレクトリに依存する表示ロジックは、テストから注入できる `Path` 引数つき helper を先に用意する。
+2. render/title 系の RED テストでは、まず tempdir で再現できる最小 helper を叩き、環境権限エラーを期待失敗に混ぜない。
+3. sandbox で書き込めるか不明な path を使うテスト helper は作らず、`tempfile` で閉じた fixture に寄せる。
+
 ## 2026-04-06 — fix: startup 時の agent detection は main thread で同期実行しない
 
 ## 2026-04-07 — fix: sibling worktree path は linked worktree 名ではなく main repo 名を基準にする
