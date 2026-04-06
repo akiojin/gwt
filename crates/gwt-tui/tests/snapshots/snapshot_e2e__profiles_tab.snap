@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ tog  n new  e edit  d del  Tab pane  Esc te
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ tog  n new  e edit  d del  C-g Tab  Esc ter

@@ -3970,8 +3970,7 @@ fn profiles_hint_text(model: &Model, compact: bool) -> String {
     } else if compact {
         "↑↓ sel  ↵ tog  n new  e edit  d del  C-g Tab  Esc term".to_string()
     } else {
-        "↑↓:select  Enter:toggle  n:new  e:edit  d:delete  Ctrl+G, Tab:focus  Esc:term"
-            .to_string()
+        "↑↓:select  Enter:toggle  n:new  e:edit  d:delete  Ctrl+G, Tab:focus  Esc:term".to_string()
     }
 }
 

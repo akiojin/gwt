@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  │  ⎇n/a  │  [G]  │  Ctrl+G:b/i/s g c []/1-9 z ?  Tab:focus  ^C×2
+ ▣ Sh  │  ⎇n/a  │  [G]  │  Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2

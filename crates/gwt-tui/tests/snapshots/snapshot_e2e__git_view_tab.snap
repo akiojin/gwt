@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ mv  ↵ exp  r rfsh  Tab pane  Esc term  ?
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ mv  ↵ exp  r rfsh  C-g Tab  Esc term  ?
