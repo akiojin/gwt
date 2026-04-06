@@ -543,3 +543,9 @@ banner in favor of pane-title chrome.
 - [x] T347 [P] Write RED test: Codex launch adds the `GWT_SESSION_RUNTIME_PATH` parent directory as a writable root.
 - [x] T348 Implement Codex runtime namespace writable-root injection in `crates/gwt-agent/src/launch.rs`.
 - [x] T349 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for Codex runtime sidecar writes.
+
+## Phase 56: Materialized Codex Runtime Namespace Wiring
+
+- [x] T350 [P] Write RED test: materialized Codex launches append the runtime namespace writable root after the persisted session id is known.
+- [x] T351 Implement materialized Codex runtime namespace augmentation in `crates/gwt-tui/src/app.rs`.
+- [x] T352 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for the materialized Codex runtime writable-root path.

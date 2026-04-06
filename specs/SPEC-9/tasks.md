@@ -109,6 +109,9 @@
 - [x] **T-141**: Write RED test: Codex launch configs add the `GWT_SESSION_RUNTIME_PATH` parent directory as a writable root.
 - [x] **T-142**: Implement Codex runtime writable-root injection in `crates/gwt-agent/src/launch.rs` so `~/.gwt/sessions/runtime/<pid>` remains writable under `workspace-write`.
 - [x] **T-143**: Refresh `SPEC-9` artifacts and rerun focused plus broad verification for Codex runtime sidecar sandbox access.
+- [x] **T-144**: Write RED test: materialized Codex launches append the runtime namespace writable root after the persisted session id is known.
+- [x] **T-145**: Implement materialized Codex runtime writable-root augmentation in `crates/gwt-tui/src/app.rs`.
+- [x] **T-146**: Refresh `SPEC-9` artifacts and rerun focused plus broad verification for the materialized Codex runtime writable-root path.
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 

@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-06 — fix: Launch args に依存する runtime path は build 後の env 注入だけでは反映されない
+
+### 事象
+
+`gwt-agent` 側で Codex に `--add-dir` を追加しても、実際に起動した Codex セッションの argv にはその引数が現れず、
+Branches の spinner sidecar は依然として生成されなかった。
+
+### 原因
+
+- `LaunchConfig::build()` の時点では session id がまだ未確定だった。
+- 実際の `GWT_SESSION_RUNTIME_PATH` は `materialize_pending_launch_with()` で session record を保存した後に env へ注入していた。
+- そのため build 時に足した writable-root 補完は、本番 launch で使う runtime path と切り離されていた。
+
+### 再発防止策
+
+1. session id や persisted path に依存する launch args は、`LaunchConfig::build()` ではなく materialization 後に補完する。
+2. env と argv が同じ derived path を共有する設計では、「どの時点で path が確定するか」を先に固定する。
+3. Launch bug の検証では builder unit test だけで完了扱いにせず、materialization 後の最終 config までテストで固定する。
+
 ## 2026-04-06 — fix: Codex の hook runtime sidecar は sandbox writable root を明示しないと `~/.gwt` に書けない
 
 ### 事象

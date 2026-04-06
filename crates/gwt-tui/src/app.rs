@@ -210,6 +210,34 @@ fn inject_agent_hook_runtime_env(
     );
 }
 
+fn augment_agent_hook_runtime_launch_config(
+    config: &mut LaunchConfig,
+    sessions_dir: &Path,
+    session_id: &str,
+) {
+    if config.agent_id != AgentId::Codex {
+        return;
+    }
+
+    let Some(runtime_dir) = runtime_state_path(sessions_dir, session_id)
+        .parent()
+        .map(|dir| dir.to_string_lossy().into_owned())
+    else {
+        return;
+    };
+
+    if config
+        .args
+        .windows(2)
+        .any(|pair| pair[0] == "--add-dir" && pair[1] == runtime_dir)
+    {
+        return;
+    }
+
+    config.args.push("--add-dir".to_string());
+    config.args.push(runtime_dir);
+}
+
 fn refresh_branch_live_session_summaries(model: &mut Model) {
     refresh_branch_live_session_summaries_with(model, &gwt_sessions_dir());
 }
@@ -2617,7 +2645,7 @@ fn materialize_pending_launch_with(
     model: &mut Model,
     sessions_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let Some(config) = model.pending_launch_config.take() else {
+    let Some(mut config) = model.pending_launch_config.take() else {
         return Ok(());
     };
 
@@ -2641,6 +2669,7 @@ fn materialize_pending_launch_with(
     session.codex_fast_mode = config.codex_fast_mode;
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
+    augment_agent_hook_runtime_launch_config(&mut config, sessions_dir, &session.id);
 
     let tab = crate::model::SessionTab {
         id: session.id.clone(),
@@ -7635,6 +7664,40 @@ CUSTOM_ENV = "enabled"
                     .as_ref()
             )
         );
+    }
+
+    #[test]
+    fn augment_agent_hook_runtime_launch_config_adds_codex_runtime_namespace_after_session_id() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut config = LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "codex".to_string(),
+            args: vec!["--enable".to_string(), "codex_hooks".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("develop".to_string()),
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: Some("latest".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        };
+
+        augment_agent_hook_runtime_launch_config(&mut config, dir.path(), "session-123");
+
+        let expected = runtime_state_path(dir.path(), "session-123")
+            .parent()
+            .expect("runtime parent")
+            .to_string_lossy()
+            .into_owned();
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == expected));
     }
 
     #[test]
