@@ -772,6 +772,17 @@ impl Model {
         &self.repo_path
     }
 
+    /// Absolute paths of every Worktree currently known to the model.
+    /// Used by the index worker bootstrap to spawn watchers and reconcile
+    /// orphan index directories.
+    pub fn active_worktree_paths(&self) -> Vec<std::path::PathBuf> {
+        self.branches
+            .branches
+            .iter()
+            .filter_map(|b| b.worktree_path.clone())
+            .collect()
+    }
+
     /// Drain queued notifications from the in-process bus.
     pub(crate) fn drain_notifications(&mut self) -> Vec<Notification> {
         self.notification_receiver.drain()

@@ -178,6 +178,13 @@ fn run_app(
         app::load_initial_data(&mut model);
     }
 
+    // Phase 8: bootstrap the index worker (reconcile + Issue refresh + watchers).
+    if model.active_layer != ActiveLayer::Initialization {
+        let repo_root = model.repo_path().to_path_buf();
+        let active_worktrees = model.active_worktree_paths();
+        gwt_tui::index_worker::bootstrap(&repo_root, &active_worktrees);
+    }
+
     // Spawn PTY for the default shell-0 session.
     if model.active_layer != ActiveLayer::Initialization {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
