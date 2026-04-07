@@ -413,35 +413,15 @@ fn read_codex_transcript_lines(path: &Path) -> Option<Vec<String>> {
         let Some(payload) = event.get("payload") else {
             continue;
         };
-        if payload.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        let Some(role) = payload.get("role").and_then(Value::as_str) else {
-            continue;
-        };
-        if !matches!(role, "user" | "assistant") {
-            continue;
-        }
-        let Some(content) = payload.get("content").and_then(Value::as_array) else {
-            continue;
-        };
-        let mut merged = Vec::new();
-        for item in content {
-            let Some(item_type) = item.get("type").and_then(Value::as_str) else {
-                continue;
-            };
-            if !matches!(item_type, "input_text" | "output_text" | "text") {
-                continue;
+        match payload.get("type").and_then(Value::as_str) {
+            Some("message") => append_codex_message_lines(&mut lines, payload),
+            Some("function_call_output") => {
+                if let Some(output) = payload.get("output").and_then(Value::as_str) {
+                    append_transcript_raw_lines(&mut lines, output);
+                }
             }
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                merged.push(text);
-            }
+            _ => {}
         }
-        let text = merged.join("\n").trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        append_transcript_message_lines(&mut lines, role, &text);
     }
     Some(lines)
 }
@@ -460,35 +440,85 @@ fn read_claude_transcript_lines(path: &Path) -> Option<Vec<String>> {
         if !matches!(role, "user" | "assistant") {
             continue;
         }
-        let text = extract_claude_message_text(&event)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if text.is_empty() {
-            continue;
-        }
-        append_transcript_message_lines(&mut lines, role, &text);
+        append_claude_event_lines(&mut lines, role, &event);
     }
     Some(lines)
 }
 
-fn extract_claude_message_text(event: &Value) -> Option<String> {
-    let message = event.get("message")?;
-    let content = message.get("content")?;
-    if let Some(text) = content.as_str() {
-        return Some(text.to_string());
+fn append_codex_message_lines(lines: &mut Vec<String>, payload: &Value) {
+    let Some(role) = payload.get("role").and_then(Value::as_str) else {
+        return;
+    };
+    if !matches!(role, "user" | "assistant") {
+        return;
     }
-    let items = content.as_array()?;
+    let Some(content) = payload.get("content").and_then(Value::as_array) else {
+        return;
+    };
     let mut merged = Vec::new();
-    for item in items {
+    for item in content {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(item_type, "input_text" | "output_text" | "text") {
+            continue;
+        }
         if let Some(text) = item.get("text").and_then(Value::as_str) {
-            merged.push(text.to_string());
+            merged.push(text);
         }
     }
-    if merged.is_empty() {
-        None
-    } else {
-        Some(merged.join("\n"))
+    let text = merged.join("\n").trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    append_transcript_message_lines(lines, role, &text);
+}
+
+fn append_claude_event_lines(lines: &mut Vec<String>, role: &str, event: &Value) {
+    let Some(message) = event.get("message") else {
+        return;
+    };
+    let Some(content) = message.get("content") else {
+        return;
+    };
+    if let Some(text) = content.as_str() {
+        let text = text.trim();
+        if !text.is_empty() {
+            append_transcript_message_lines(lines, role, text);
+        }
+        return;
+    }
+
+    let Some(items) = content.as_array() else {
+        return;
+    };
+    let mut merged = Vec::new();
+    for item in items {
+        match item.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    merged.push(text.to_string());
+                }
+            }
+            Some("tool_result") => {
+                if !merged.is_empty() {
+                    let text = merged.join("\n");
+                    append_transcript_message_lines(lines, role, text.trim());
+                    merged.clear();
+                }
+                if let Some(text) = item.get("content").and_then(Value::as_str) {
+                    append_transcript_raw_lines(lines, text);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !merged.is_empty() {
+        let text = merged.join("\n");
+        let text = text.trim();
+        if !text.is_empty() {
+            append_transcript_message_lines(lines, role, text);
+        }
     }
 }
 
@@ -499,6 +529,12 @@ fn append_transcript_message_lines(lines: &mut Vec<String>, role: &str, text: &s
         } else {
             lines.push(format!("  {raw_line}"));
         }
+    }
+}
+
+fn append_transcript_raw_lines(lines: &mut Vec<String>, text: &str) {
+    for raw_line in text.lines() {
+        lines.push(raw_line.to_string());
     }
 }
 
@@ -5694,6 +5730,77 @@ mod tests {
     }
 
     #[test]
+    fn sync_active_agent_transcript_scrollback_with_preserves_codex_function_output_styles() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let claude_projects_root = temp.path().join("claude/projects");
+        let codex_sessions_root = temp.path().join("codex/sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&claude_projects_root).expect("claude projects dir");
+        fs::create_dir_all(codex_sessions_root.join("2026/04/07")).expect("codex day dir");
+
+        let worktree = temp.path().join("wt-codex-style");
+        fs::create_dir_all(&worktree).expect("worktree");
+
+        let session_id = "agent-codex-style-test";
+        let mut persisted = AgentSession::new(&worktree, "feature/transcript", AgentId::Codex);
+        persisted.id = session_id.to_string();
+        persisted
+            .save(&sessions_dir)
+            .expect("persist codex session");
+
+        let transcript_path = codex_sessions_root
+            .join("2026/04/07")
+            .join("rollout-style-test.jsonl");
+        let transcript_lines = [
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": { "cwd": worktree.to_string_lossy() }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-test",
+                    "output": "\u{1b}[38;5;196mtool-line-1\u{1b}[0m\nplain-line-2\nplain-line-3\nplain-line-4"
+                }
+            })
+            .to_string(),
+        ];
+        fs::write(&transcript_path, transcript_lines.join("\n")).expect("write codex transcript");
+
+        let mut model = Model::new(worktree.clone());
+        model.sessions = vec![crate::model::SessionTab {
+            id: session_id.to_string(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(3, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        sync_active_agent_transcript_scrollback_with(
+            &mut model,
+            &sessions_dir,
+            &claude_projects_root,
+            &codex_sessions_root,
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(session.vt.has_viewport_scrollback());
+        assert!(session.vt.scroll_viewport_lines(100));
+        let parser = session.vt.visible_screen_parser();
+        let text = parser.screen().contents();
+        assert!(text.contains("tool-line-1"));
+        let cell = parser.screen().cell(0, 0).expect("styled cell");
+        assert_eq!(cell.fgcolor(), vt100::Color::Idx(196));
+    }
+
+    #[test]
     fn sync_active_agent_transcript_scrollback_with_loads_claude_jsonl_history() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join("sessions");
@@ -5768,6 +5875,76 @@ mod tests {
         let text = parser.screen().contents();
         assert!(text.contains("user: prompt-1"));
         assert!(text.contains("assistant: answer-1"));
+    }
+
+    #[test]
+    fn sync_active_agent_transcript_scrollback_with_preserves_claude_tool_result_styles() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let claude_projects_root = temp.path().join("claude/projects");
+        let codex_sessions_root = temp.path().join("codex/sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&claude_projects_root).expect("claude projects dir");
+        fs::create_dir_all(&codex_sessions_root).expect("codex root");
+
+        let worktree = temp.path().join("wt-claude-style");
+        fs::create_dir_all(&worktree).expect("worktree");
+
+        let session_id = "agent-claude-style-test";
+        let mut persisted = AgentSession::new(&worktree, "feature/transcript", AgentId::ClaudeCode);
+        persisted.id = session_id.to_string();
+        persisted
+            .save(&sessions_dir)
+            .expect("persist claude session");
+
+        let encoded_worktree = worktree.to_string_lossy().replace('/', "-");
+        let claude_dir = claude_projects_root.join(encoded_worktree);
+        fs::create_dir_all(&claude_dir).expect("claude worktree dir");
+        let transcript_path = claude_dir.join("session.jsonl");
+        let transcript_lines = [
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "tool_use_id": "tool-test",
+                        "type": "tool_result",
+                        "content": "\u{1b}[38;5;46mtool-line-1\u{1b}[0m\nplain-line-2\nplain-line-3\nplain-line-4",
+                        "is_error": false
+                    }]
+                }
+            })
+            .to_string(),
+        ];
+        fs::write(&transcript_path, transcript_lines.join("\n")).expect("write claude transcript");
+
+        let mut model = Model::new(worktree.clone());
+        model.sessions = vec![crate::model::SessionTab {
+            id: session_id.to_string(),
+            name: "Claude".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "claude".to_string(),
+                color: crate::model::AgentColor::Yellow,
+            },
+            vt: crate::model::VtState::new(3, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        sync_active_agent_transcript_scrollback_with(
+            &mut model,
+            &sessions_dir,
+            &claude_projects_root,
+            &codex_sessions_root,
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(session.vt.has_viewport_scrollback());
+        assert!(session.vt.scroll_viewport_lines(100));
+        let parser = session.vt.visible_screen_parser();
+        let text = parser.screen().contents();
+        assert!(text.contains("tool-line-1"));
+        let cell = parser.screen().cell(0, 0).expect("styled cell");
+        assert_eq!(cell.fgcolor(), vt100::Color::Idx(46));
     }
 
     #[test]

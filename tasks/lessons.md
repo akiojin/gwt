@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: transcript hydration must preserve raw tool-output blocks
+
+### 事象
+
+Agent pane の transcript fallback に入ると、session `jsonl` 側に ANSI 付き出力が残っていても
+色や装飾が消え、場合によっては scrollback 自体が空になるケースがあった。
+
+### 原因
+
+- transcript reader が会話メッセージ本文だけを抽出し、Codex `function_call_output.output` と
+  Claude `tool_result.content` を捨てていた。
+- その結果、tool 実行結果由来の scrollback 行が生成されず、ANSI 属性を持つ生データも
+  viewport parser へ届かなかった。
+
+### 再発防止策
+
+1. Claude/Codex transcript hydration では、会話メッセージと tool-output event を別経路で抽出する。
+2. ANSI を含む tool-output は role prefix 付きの plain text へ潰さず、raw line のまま保持する。
+3. Codex `function_call_output` と Claude `tool_result` の styled hydration 回帰テストを固定する。
+
 ## 2026-04-07 — fix: snapshot だけでは agent 会話ログ全量の scrollback を満たせない
 
 ### 事象

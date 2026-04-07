@@ -76,3 +76,5 @@
 - [x] T063 [P] Write RED tests: recent agent-pane row/snapshot cache keeps VT color attributes while transcript history remains available as an older fallback.
 - [x] T064 Adjust `VtState` transcript fallback ordering so recent local cache is exhausted before plain-text transcript mode becomes active, and downward scroll returns to the oldest local cache before live-follow.
 - [x] T065 Re-run focused transcript + scrollback regressions and verify scrollbar metrics / viewport routing stay coherent with the new cache-first ordering.
+- [x] T066 [P] Write RED tests: Codex `function_call_output` and Claude `tool_result` transcript hydration preserve ANSI-styled tool output lines inside agent scrollback.
+- [x] T067 Preserve raw tool-output transcript lines during Claude/Codex `jsonl` hydration in `app.rs` so transcript-backed scrollback does not drop colorized session output.

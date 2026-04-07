@@ -44,6 +44,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 20. Given a pane has existing main-screen row scrollback and then enters alternate screen, when the user scrolls while viewing alternate-screen output, then gwt uses snapshot-backed history for the visible alternate-screen frames instead of stale main-screen row scrollback.
 21. Given scrollback interaction, URL hit-testing, selection copy, and terminal rendering happen in one pane, when the viewport moves, then all of them resolve against the same cached visible surface instead of mixing separate live/snapshot sources.
 22. Given a Claude/Codex agent pane has both recent VT/snapshot cache and hydrated transcript history, when the user scrolls upward through recent history, then gwt keeps the styled recent cache visible first and only falls back to plain-text transcript history after the local cache is exhausted.
+23. Given a Claude/Codex session `jsonl` contains ANSI-styled tool output blocks, when gwt hydrates transcript scrollback from that file, then those raw lines remain scrollable with their color attributes intact instead of being dropped or flattened into plain prefixed text.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -99,6 +100,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-003b**: Agent-pane scrollback cache remains ephemeral in memory and is discarded when the pane closes.
 - **FR-003c**: For Claude/Codex agent panes, gwt may hydrate in-memory transcript scrollback from the corresponding session `jsonl` file so users can review full session history even when vt100 row scrollback and snapshot history are sparse.
 - **FR-003d**: When both local VT/snapshot cache and hydrated transcript history exist for an agent pane, recent scrollback navigation prefers the local cache so ANSI color and text attributes remain visible until the user scrolls past the oldest local cached viewport.
+- **FR-003e**: Transcript hydration preserves raw tool-output lines from Claude/Codex session `jsonl` records when those records already contain ANSI escape sequences, so transcript-backed viewport rendering can keep the source text attributes available in the session file.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.

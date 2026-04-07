@@ -30,6 +30,7 @@
 - Session viewport handling is now unified under `VtState`: rendering, scrollbar metrics, URL hit-testing, and selection copy all consume the same visible cache surface API.
 - Active Claude/Codex panes now hydrate transcript-backed in-memory scrollback from session `jsonl` files, so users can scroll full conversation history when snapshot count is too small.
 - Agent-pane transcript hydration now treats transcript history as an older fallback segment, preserving styled recent VT/snapshot cache first so ANSI colors and text attributes remain visible while scrolling through recent history.
+- Transcript hydration now preserves raw Claude `tool_result` and Codex `function_call_output` lines, so ANSI-styled tool output from session files remains colorized when transcript-backed scrollback is active.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.

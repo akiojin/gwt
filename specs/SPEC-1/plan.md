@@ -57,6 +57,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 7. For panes whose visible screen has `max_scrollback == 0`, capture distinct live screen states into a pane-local in-memory ring buffer and route wheel scrolling through snapshot history instead of vt100 row scrollback.
 8. Keep pane history ephemeral in memory, but allow Claude/Codex agent panes to hydrate that cache from their session `jsonl` files when available so scrollback can extend beyond sparse snapshot history.
 9. When both agent-pane local cache and hydrated transcript history exist, treat transcript history as an older fallback segment: preserve styled local cache first, then transition into transcript-only view after the local cache is exhausted, and reverse that transition symmetrically on downward scroll.
+10. While hydrating Claude/Codex transcript history, preserve raw tool-output blocks (`tool_result`, `function_call_output`) as line-ordered transcript entries so ANSI-bearing session data is not flattened away before viewport rendering.
 
 ## Dependencies
 
