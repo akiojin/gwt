@@ -1459,6 +1459,51 @@ def action_index_files_v2(
 # ---------------------------------------------------------------------
 
 
+def _chunk_spec_content(content: str, max_chunk_len: int = 1800) -> List[Dict[str, str]]:
+    """Split a spec.md body into semantic chunks.
+
+    - Split primarily by H2 headings (`## ...`) so each functional area becomes
+      its own embedding unit.
+    - If a section exceeds `max_chunk_len`, split further by blank lines
+      (paragraphs), packing paragraphs into chunks until the limit is reached.
+    - Returns a list of {heading, body} dicts.
+    """
+    if not content.strip():
+        return []
+
+    # Split while keeping headings at the start of each resulting section.
+    sections = re.split(r"(?m)^(?=## )", content)
+    chunks: List[Dict[str, str]] = []
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        heading_match = re.match(r"^(## .+?)(?:\n|$)", section)
+        heading = heading_match.group(1) if heading_match else "(intro)"
+        if len(section) <= max_chunk_len:
+            chunks.append({"heading": heading, "body": section})
+            continue
+        # Too large: pack paragraphs into smaller chunks under the cap.
+        paragraphs = re.split(r"\n\s*\n", section)
+        current = ""
+        part = 1
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                continue
+            candidate = f"{current}\n\n{paragraph}" if current else paragraph
+            if len(candidate) > max_chunk_len and current:
+                chunks.append(
+                    {"heading": f"{heading} [{part}]", "body": current.strip()}
+                )
+                part += 1
+                current = paragraph
+            else:
+                current = candidate
+        if current.strip():
+            chunks.append({"heading": f"{heading} [{part}]", "body": current.strip()})
+    return chunks
+
+
 def action_index_specs_v2(
     project_root: str,
     repo_hash: str,
@@ -1493,7 +1538,7 @@ def action_index_specs_v2(
         spec_content = ""
         if spec_md.is_file():
             try:
-                spec_content = spec_md.read_text(errors="replace")[:2000]
+                spec_content = spec_md.read_text(errors="replace")
                 stat = spec_md.stat()
                 rel = str(spec_md.relative_to(root))
                 new_entries.append(
@@ -1502,19 +1547,35 @@ def action_index_specs_v2(
             except OSError:
                 pass
 
-        spec_records.append(
-            {
-                "id": f"spec-{spec_id}",
-                "document": f"{title}\n{spec_content}",
-                "metadata": {
-                    "spec_id": spec_id,
-                    "title": title,
-                    "status": status,
-                    "phase": phase,
-                    "dir_name": dir_name,
-                },
-            }
-        )
+        # Chunk spec.md by ## sections so large SPECs (like SPEC-10's
+        # 300+ line Phase 8 additions) do not silently drop content past
+        # the first 2000 characters. Each chunk is embedded separately;
+        # duplicate spec_ids in search results are collapsed in
+        # `_format_spec_results`.
+        chunks = _chunk_spec_content(spec_content)
+        if not chunks:
+            chunks = [{"heading": "(empty)", "body": ""}]
+        total_chunks = len(chunks)
+        for idx, chunk in enumerate(chunks):
+            # Prepend title + heading so semantic search picks up both the
+            # SPEC identity and the section context.
+            document = f"{title}\n{chunk['heading']}\n{chunk['body']}"
+            spec_records.append(
+                {
+                    "id": f"spec-{spec_id}:chunk-{idx}",
+                    "document": document,
+                    "metadata": {
+                        "spec_id": spec_id,
+                        "title": title,
+                        "status": status,
+                        "phase": phase,
+                        "dir_name": dir_name,
+                        "chunk_idx": idx,
+                        "total_chunks": total_chunks,
+                        "chunk_heading": chunk["heading"],
+                    },
+                }
+            )
 
     new_entries.sort(key=lambda e: e["path"])
 
@@ -1766,17 +1827,31 @@ def _format_file_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _format_spec_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [
-        {
-            "spec_id": (it["metadata"] or {}).get("spec_id", it["id"]),
-            "title": (it["metadata"] or {}).get("title", ""),
-            "status": (it["metadata"] or {}).get("status", ""),
-            "phase": (it["metadata"] or {}).get("phase", ""),
-            "dir_name": (it["metadata"] or {}).get("dir_name", ""),
-            "distance": it["distance"],
-        }
-        for it in items
-    ]
+    """Collapse chunked SPEC results so each spec_id appears only once.
+
+    Items are delivered in distance order (lowest first), so the first
+    occurrence of each spec_id is the best-scoring chunk for that SPEC.
+    """
+    formatted: List[Dict[str, Any]] = []
+    seen_spec_ids: set = set()
+    for it in items:
+        meta = it["metadata"] or {}
+        spec_id = meta.get("spec_id", it["id"])
+        if spec_id in seen_spec_ids:
+            continue
+        seen_spec_ids.add(spec_id)
+        formatted.append(
+            {
+                "spec_id": spec_id,
+                "title": meta.get("title", ""),
+                "status": meta.get("status", ""),
+                "phase": meta.get("phase", ""),
+                "dir_name": meta.get("dir_name", ""),
+                "distance": it["distance"],
+                "matched_section": meta.get("chunk_heading", ""),
+            }
+        )
+    return formatted
 
 
 def _format_issue_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1872,12 +1947,15 @@ def action_search_v2(
             "issues": V2_ISSUES_COLLECTION,
         }[scope]
         client, collection = _make_chroma_collection(db_path, collection_name)
-        items = _search_collection_v2(collection, query, n_results)
+        # SPECs are chunked, so a single SPEC can span many Chroma records.
+        # Over-fetch by 5x then collapse by spec_id in the formatter.
+        fetch_n = n_results * 5 if scope == "specs" else n_results
+        items = _search_collection_v2(collection, query, fetch_n)
 
     if scope in ("files", "files-docs"):
         return {"ok": True, "results": _format_file_results(items)}
     if scope == "specs":
-        return {"ok": True, "specResults": _format_spec_results(items)}
+        return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
     return {"ok": True, "issueResults": _format_issue_results(items)}
 
 
