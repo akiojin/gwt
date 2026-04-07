@@ -1,5 +1,32 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: Hooks不具合は単点ではなく「実行チェーン」全体で再発する
+
+### 事象
+
+Claude Code では表示されるのに Codex では Branches のスピナーが出ない、または起動直後に出ない不具合が
+同じ機能領域で複数回再発した。
+
+### 原因
+
+- 原因が単一ではなく、以下の複合条件で発生していた。
+1. `--enable codex_hooks` 未付与で hooks 自体が未実行。
+2. `~/.gwt/sessions/runtime/<pid>` への writable root 未付与で sidecar 書き込み不可。
+3. tracked `.codex/hooks.json` の旧式 Node forwarder が残留し、移行されない worktree が存在。
+4. interactive Codex の `SessionStart` 遅延で launch 直後に sidecar が未生成。
+5. hook assets/settings の materialize が PTY spawn より後ろに回るケース。
+
+### 再発防止策
+
+1. Hooks対応の完了条件を「設定ファイル生成」ではなく「PID-scoped runtime sidecar が実際に書かれ、Branches に表示される」まで拡張する。
+2. launch/config/runtime/UI を別タスクで確認せず、同一検証サイクルで以下を必ず確認する。
+   - launch args: `--enable codex_hooks` と `--add-dir ~/.gwt/sessions/runtime/<pid>`
+   - effective worktree config: `.claude/settings.local.json` / `.codex/hooks.json`
+   - runtime output: `~/.gwt/sessions/runtime/<pid>/<session>.json`
+   - UI結果: 同一 branch 上で Claude/Codex の複数スピナー表示
+3. tracked `.codex/hooks.json` を preserve する仕様変更時は、legacy forwarder を含む tracked fixture の移行テストを必須にする。
+4. interactive Codex については `SessionStart` 前提を禁止し、launch bootstrap + hook上書き契約を SPEC に固定する。
+
 ## 2026-04-07 — fix: interactive Codex は launch 直後の `SessionStart` hook を前提にできない
 
 ### 事象

@@ -115,6 +115,26 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 - Branch rows at narrow widths must keep the branch label and `◆` / `◇` / `▸` legible even when the live session indicator cannot fit.
 - Interactive Codex launches may not emit `SessionStart` before the first user prompt, but the branch list must still show the session as live immediately after spawn.
 
+## Regression Guardrail: Hook-Driven Branch Visibility
+
+This capability has regressed multiple times because "hooks are configured" is not equivalent to "runtime sidecars are actually written and readable by Branches". Future changes to launch, hooks, or sandboxing must validate the full runtime chain.
+
+### Recurring root-cause chain
+
+1. Codex launch omitted `--enable codex_hooks`, so `hooks.json` existed but hooks never executed.
+2. Runtime sidecars targeted `~/.gwt/...` without adding the PID namespace to writable roots under `workspace-write`.
+3. Tracked `.codex/hooks.json` files with legacy Node forwarders were preserved unchanged, leaving stale runtime-hook behavior in active worktrees.
+4. Interactive Codex did not always emit `SessionStart` immediately, so hook-only startup left no initial `Running` sidecar.
+5. Hook assets/settings were not always materialized before PTY spawn, so first-turn events could be missed.
+
+### Mandatory verification checklist (for hook/launch changes)
+
+- Confirm final launch args include both `--enable codex_hooks` and a runtime writable root for `~/.gwt/sessions/runtime/<gwt-pid>`.
+- Confirm the launched worktree's effective `.claude/settings.local.json` / `.codex/hooks.json` are on the no-Node runtime-hook shape, not just the source branch copies.
+- Confirm startup/runtime behavior creates or updates `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json` for both launch bootstrap and subsequent hook events.
+- Confirm Branches shows concurrent multi-agent spinner indicators (Claude + Codex on the same branch) with the fixed palette contract.
+- Confirm tracked legacy `.codex/hooks.json` files migrate only gwt-managed runtime entries while preserving user hooks.
+
 ## Functional Requirements
 
 - **FR-001**: Tab mode shows single active session with session tabs in the Block title, separated by `│`. Shell tabs keep their session name, while agent tabs show the persisted branch name instead of the agent display name whenever branch metadata is available.

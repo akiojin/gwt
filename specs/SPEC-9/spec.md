@@ -77,6 +77,26 @@ As a developer, I want gwt to generate managed Claude/Codex hook configs without
 - npm postinstall script runs in an environment without internet access.
 - GitHub Release workflow runs but binary compilation fails on one platform.
 
+## Regression Guardrail: Claude/Codex Runtime Hooks
+
+Runtime-hook regressions repeatedly occurred when only one layer (config generation, launch args, or UI rendering) was validated in isolation. Hook reliability in this domain is defined by end-to-end sidecar observability, not by config file presence alone.
+
+### Recurring failure pattern to preserve
+
+1. `hooks.json` existed but Codex runtime hooks were inactive because launch omitted `--enable codex_hooks`.
+2. `GWT_SESSION_RUNTIME_PATH` pointed outside the worktree, but Codex sandbox writable roots did not include `~/.gwt/sessions/runtime/<gwt-pid>`.
+3. Tracked `.codex/hooks.json` files kept legacy Node forwarders and did not receive no-Node runtime-hook migration.
+4. Interactive Codex startup could delay `SessionStart`, so hook-only initialization left no early runtime sidecar.
+5. Hook asset/settings distribution happened too late for first-turn hook events.
+
+### Mandatory cross-layer checks for this SPEC scope
+
+- Launch contract: verify `--enable codex_hooks` and runtime writable-root injection on final materialized launch config.
+- Config contract: verify effective worktree hook files (`.claude/settings.local.json`, `.codex/hooks.json`) are current and no-Node.
+- Migration contract: verify tracked legacy `.codex/hooks.json` runtime entries are migrated while user hooks stay intact.
+- Runtime contract: verify PID-scoped sidecars are written/updated at `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`.
+- Startup contract: verify interactive Codex sessions are visible before first prompt via launch bootstrap, then overwritten by real hook events.
+
 ## Functional Requirements
 
 ### Build and Distribution
