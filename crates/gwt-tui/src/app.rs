@@ -620,8 +620,12 @@ where
 
     // -- Worktree → branch mapping --
     if let Ok(worktrees) = gwt_git::WorktreeManager::new(&model.repo_path).list() {
+        // Track every branch that any worktree currently checks out so the
+        // Branch Cleanup flow can refuse to delete them (FR-018b).
+        let mut checked_out: std::collections::HashSet<String> = std::collections::HashSet::new();
         for wt in &worktrees {
             if let Some(ref branch_name) = wt.branch {
+                checked_out.insert(branch_name.clone());
                 // Match worktree branch to existing BranchItem
                 if let Some(item) = model
                     .branches
@@ -633,7 +637,24 @@ where
                 }
             }
         }
+        model.branches.checked_out_branches = checked_out;
     }
+
+    // Refresh the protection inputs the Cleanup gutter consults. The HEAD
+    // branch tracks the gwt-tui process itself; active session branches are
+    // filled in by the session/PTY pipeline elsewhere.
+    model.branches.current_head_branch = model
+        .branches
+        .branches
+        .iter()
+        .find(|b| b.is_head)
+        .map(|b| b.name.clone());
+    refresh_active_session_branches(model);
+
+    // Compute Branch Cleanup merge state (FR-018a/d). This is currently a
+    // synchronous walk; for large repositories it can be moved into the
+    // existing branch-detail preload pipeline in a follow-up.
+    refresh_cleanup_merge_state(model);
 
     schedule_branch_detail_prefetch(model);
 
@@ -1953,9 +1974,11 @@ fn refresh_branches(model: &mut Model) {
         );
     }
 
+    let mut checked_out: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(worktrees) = gwt_git::WorktreeManager::new(&model.repo_path).list() {
         for wt in &worktrees {
             if let Some(ref branch_name) = wt.branch {
+                checked_out.insert(branch_name.clone());
                 if let Some(item) = model
                     .branches
                     .branches
@@ -1967,6 +1990,15 @@ fn refresh_branches(model: &mut Model) {
             }
         }
     }
+    model.branches.checked_out_branches = checked_out;
+    model.branches.current_head_branch = model
+        .branches
+        .branches
+        .iter()
+        .find(|b| b.is_head)
+        .map(|b| b.name.clone());
+    refresh_active_session_branches(model);
+    refresh_cleanup_merge_state(model);
 
     let synced_branches = model.branches.branches.clone();
     screens::branches::update(
@@ -1974,6 +2006,65 @@ fn refresh_branches(model: &mut Model) {
         screens::branches::BranchesMessage::SetBranches(synced_branches),
     );
     schedule_branch_detail_prefetch(model);
+}
+
+/// Recompute the cleanup merge state for every local branch (FR-018a/d).
+///
+/// This walks `git cherry origin/main` and `git cherry origin/develop`
+/// per branch, falling back to gone-upstream detection. Bases that don't
+/// exist in the repository are skipped automatically.
+fn refresh_cleanup_merge_state(model: &mut Model) {
+    use screens::branches::MergeState;
+
+    let bases = [
+        ("origin/main", gwt_git::MergeTarget::Main),
+        ("origin/develop", gwt_git::MergeTarget::Develop),
+    ];
+    let gone = gwt_git::list_gone_branches(&model.repo_path).unwrap_or_default();
+
+    let local_names: Vec<String> = model
+        .branches
+        .branches
+        .iter()
+        .filter(|b| b.is_local)
+        .map(|b| b.name.clone())
+        .collect();
+
+    for name in local_names {
+        let target = gwt_git::detect_cleanable_target(&model.repo_path, &name, &bases, &gone)
+            .unwrap_or(None);
+        let merge_state = match target {
+            Some(t) => MergeState::Cleanable(t),
+            None => MergeState::NotMerged,
+        };
+        model.branches.set_merge_state(name, merge_state);
+    }
+}
+
+/// Refresh the set of branches that have at least one running session pane
+/// bound to them. Used by the Branch Cleanup protection guards (FR-018b).
+fn refresh_active_session_branches(model: &mut Model) {
+    use std::collections::HashSet;
+
+    let mut active: HashSet<String> = HashSet::new();
+    for session in &model.sessions {
+        match &session.tab_type {
+            SessionTabType::Shell => {
+                if let Some(branch) = session.name.strip_prefix("Shell: ") {
+                    active.insert(branch.to_string());
+                }
+            }
+            SessionTabType::Agent { .. } => {
+                // Agent panes track their branch via the persisted session
+                // metadata. We approximate it from the tab name when it
+                // matches the `<agent>: <branch>` shape.
+                if let Some((_, branch)) = session.name.split_once(": ") {
+                    active.insert(branch.to_string());
+                }
+            }
+        }
+    }
+    model.branches.active_session_branches = active;
 }
 
 fn schedule_branch_detail_prefetch(model: &mut Model) {
