@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `181/181` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T11:05:03Z`
+- Task progress: `185/185` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T01:45:00Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -141,11 +141,49 @@
 - Launch Agent's Codex model list now matches the current Codex CLI snapshot,
   including `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`, while
   keeping `Default (Auto)` on the no-`--model` path.
+- New-branch launches now materialize a sibling git worktree before PTY
+  spawn, so Launch Agent no longer falls back to the repository root
+  checkout when creating a new branch.
+- Branch-origin launches now preserve the selected base branch for
+  worktree creation, while SPEC/Issue-prefilled launches default that base
+  branch to `develop`.
+- Selected-branch new-branch launches no longer leak the selected branch's
+  existing worktree into `LaunchConfig`, so launch-time materialization now
+  still creates the requested sibling worktree instead of silently reusing
+  `develop`.
+- Launches started from a linked worktree such as `develop` now resolve the
+  main repository root before deriving the sibling layout, so new branches no
+  longer materialize under `develop-*` paths like `develop-feature-test`.
+- Launches started from a legacy bare workspace layout (`gwt.git` +
+  `develop/`) now use the bare common-dir as the Git control path while
+  deriving sibling paths from the branch hierarchy itself, so new branches no
+  longer materialize under `develop-*` paths like `develop-feature-test2`.
+- New-branch launches now mirror the requested branch hierarchy in the
+  sibling path itself (`feature/aaa` -> `../feature/aaa`) instead of
+  flattening that branch name into repo-name-prefixed directories such as
+  `gwt-feature-aaa`.
+- If a branch was already materialized into a stale worktree path from an
+  earlier launch bug, Launch Agent now reuses that existing branch worktree
+  instead of failing a second `git worktree add`.
+- The actual launched worktree path is now persisted into session metadata
+  and exported through `GWT_PROJECT_ROOT`, so Quick Start / resume operate on
+  the materialized launch target instead of a repo-root alias.
 - Verification for the Codex model sync slice now includes `cargo test -p
   gwt-tui`, `cargo test -p gwt-core -p gwt-tui`,
   `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo build -p gwt-tui`, and `bunx markdownlint-cli2` on the refreshed
   SPEC-3 artifacts.
+- Focused verification for the worktree-materialization slice now includes
+  `cargo test -p gwt-git sibling_worktree_path_preserves_branch_hierarchy -- --nocapture`,
+  `cargo test -p gwt-git create_from_base_creates_new_branch_worktree -- --nocapture`,
+  `cargo test -p gwt-git main_worktree_root_returns_primary_repo_for_linked_worktree -- --nocapture`,
+  `cargo test -p gwt-git bare_common_dir -- --nocapture`,
+  `cargo test -p gwt-tui base_branch -- --nocapture`, and
+  `cargo test -p gwt-tui materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path -- --nocapture`,
+  `cargo test -p gwt-tui linked_worktree_uses_main_repo_branch_layout -- --nocapture`,
+  `cargo test -p gwt-tui bare_workspace_linked_worktree_uses_branch_hierarchy_layout -- --nocapture`,
+  `cargo test -p gwt-tui existing_branch_worktree_reuses_previous_path -- --nocapture`,
+  plus `cargo test -p gwt-tui from_selected_branch -- --nocapture`.
 
 ## Next
 - Run the manual reviewer flow in `quickstart.md` and close the remaining

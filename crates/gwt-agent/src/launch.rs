@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
 use crate::types::{AgentColor, AgentId, SessionMode};
 
 /// Resolved runner command for agent execution.
@@ -85,6 +86,7 @@ pub struct LaunchConfig {
     pub env_vars: HashMap<String, String>,
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
+    pub base_branch: Option<String>,
     pub display_name: String,
     pub color: AgentColor,
     pub model: Option<String>,
@@ -113,6 +115,7 @@ pub struct AgentLaunchBuilder {
     agent_id: AgentId,
     working_dir: Option<PathBuf>,
     branch: Option<String>,
+    base_branch: Option<String>,
     model: Option<String>,
     version: Option<String>,
     fast_mode: bool,
@@ -131,6 +134,7 @@ impl AgentLaunchBuilder {
             agent_id,
             working_dir: None,
             branch: None,
+            base_branch: None,
             model: None,
             version: None,
             fast_mode: false,
@@ -151,6 +155,11 @@ impl AgentLaunchBuilder {
 
     pub fn branch(mut self, branch: impl Into<String>) -> Self {
         self.branch = Some(branch.into());
+        self
+    }
+
+    pub fn base_branch(mut self, branch: impl Into<String>) -> Self {
+        self.base_branch = Some(branch.into());
         self
     }
 
@@ -276,6 +285,7 @@ impl AgentLaunchBuilder {
             env_vars,
             working_dir: self.working_dir,
             branch: self.branch,
+            base_branch: self.base_branch,
             display_name,
             color,
             model,
@@ -347,6 +357,22 @@ impl AgentLaunchBuilder {
             "1".to_string(),
         );
 
+        match self.session_mode {
+            SessionMode::Continue => {
+                args.push("resume".to_string());
+                args.push("--last".to_string());
+            }
+            SessionMode::Resume => {
+                args.push("resume".to_string());
+                if let Some(ref id) = self.resume_session_id {
+                    args.push(id.clone());
+                } else {
+                    args.push("--last".to_string());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+
         if let Some(ref model) = self.model {
             args.push(format!("--model={}", model));
         }
@@ -386,6 +412,8 @@ impl AgentLaunchBuilder {
                 args.push("web_search_request".to_string());
             }
         }
+        args.push("--enable".to_string());
+        args.push("codex_hooks".to_string());
 
         // Sandbox & shell env policies
         args.push("--sandbox".to_string());
@@ -398,6 +426,20 @@ impl AgentLaunchBuilder {
         args.push("shell_environment_policy.ignore_default_excludes=true".to_string());
         args.push("-c".to_string());
         args.push("shell_environment_policy.experimental_use_profile=true".to_string());
+
+        if let Some(runtime_dir) = self.codex_runtime_writable_root(env_vars) {
+            args.push("--add-dir".to_string());
+            args.push(runtime_dir);
+        }
+    }
+
+    fn codex_runtime_writable_root(&self, env_vars: &HashMap<String, String>) -> Option<String> {
+        self.env_overrides
+            .get(GWT_SESSION_RUNTIME_PATH_ENV)
+            .or_else(|| env_vars.get(GWT_SESSION_RUNTIME_PATH_ENV))
+            .map(PathBuf::from)
+            .and_then(|runtime_path| runtime_path.parent().map(|dir| dir.to_path_buf()))
+            .map(|dir| dir.to_string_lossy().into_owned())
     }
 
     fn build_gemini_args(&self, args: &mut Vec<String>) {
@@ -433,6 +475,7 @@ mod tests {
         let builder = AgentLaunchBuilder::new(AgentId::ClaudeCode);
         assert_eq!(builder.agent_id, AgentId::ClaudeCode);
         assert!(builder.working_dir.is_none());
+        assert!(builder.base_branch.is_none());
         assert!(!builder.fast_mode);
         assert_eq!(builder.session_mode, SessionMode::Normal);
     }
@@ -445,7 +488,7 @@ mod tests {
 
         assert_eq!(config.command, "claude");
         assert_eq!(config.display_name, "Claude Code");
-        assert_eq!(config.color, AgentColor::Green);
+        assert_eq!(config.color, AgentColor::Yellow);
         assert_eq!(
             config.env_vars.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
             Some(&"1".to_string())
@@ -458,6 +501,17 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT"),
             Some(&"/tmp/project".to_string())
         );
+    }
+
+    #[test]
+    fn build_carries_base_branch() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .branch("feature/demo")
+            .base_branch("develop")
+            .build();
+
+        assert_eq!(config.branch.as_deref(), Some("feature/demo"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
     }
 
     #[test]
@@ -531,6 +585,43 @@ mod tests {
     }
 
     #[test]
+    fn build_codex_resume_with_id_uses_resume_subcommand() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("sess-123")
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "sess-123"));
+    }
+
+    #[test]
+    fn build_codex_resume_without_id_uses_last_session() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
+    }
+
+    #[test]
+    fn build_codex_continue_uses_last_session() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Continue)
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
+    }
+
+    #[test]
     fn build_gemini_skip_permissions_adds_yolo() {
         let config = AgentLaunchBuilder::new(AgentId::Gemini)
             .skip_permissions(true)
@@ -596,6 +687,30 @@ mod tests {
             .build();
 
         assert!(config.args.contains(&"web_search_request".to_string()));
+    }
+
+    #[test]
+    fn build_codex_enables_hooks_feature_flag() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
+    }
+
+    #[test]
+    fn build_codex_adds_runtime_namespace_as_writable_root() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .env(
+                "GWT_SESSION_RUNTIME_PATH",
+                "/Users/akiojin/.gwt/sessions/runtime/36610/session-123.json",
+            )
+            .build();
+
+        assert!(config.args.windows(2).any(|pair| {
+            pair[0] == "--add-dir" && pair[1] == "/Users/akiojin/.gwt/sessions/runtime/36610"
+        }));
     }
 
     #[test]
