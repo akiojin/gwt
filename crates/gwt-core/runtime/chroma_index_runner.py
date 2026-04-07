@@ -502,8 +502,86 @@ def _search_file_collection(db_path: str, query: str, n_results: int, collection
     return {"ok": True, "results": items}
 
 
+def _legacy_to_v2_args(db_path: str) -> Optional[Dict[str, str]]:
+    """Derive (repo_hash, worktree_hash, project_root) from a legacy
+    `--db-path = $WORKTREE/.gwt/index` argument so the legacy entrypoints
+    can transparently fall through to the v2 auto-build pipeline.
+
+    Returns None when the path does not match the legacy pattern.
+    """
+    p = Path(db_path).resolve()
+    # Expected layout: <worktree>/.gwt/index
+    if p.name != "index":
+        return None
+    parent = p.parent
+    if parent.name != ".gwt":
+        return None
+    worktree = parent.parent
+    if not worktree.is_dir():
+        return None
+    # Compute repo hash via origin URL.
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(worktree),
+            capture_output=True,
+            encoding="utf-8",
+            check=True,
+        )
+        url = result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    if not url:
+        return None
+
+    # Normalize: git@host:path → host/path; scheme://[user@]host[:port]/path → host/path;
+    # strip trailing .git, lowercase.
+    normalized = url
+    if normalized.startswith("git@"):
+        rest = normalized[len("git@"):]
+        if ":" in rest:
+            host, path = rest.split(":", 1)
+            normalized = f"{host}/{path}"
+    elif "://" in normalized:
+        after = normalized.split("://", 1)[1]
+        if "@" in after:
+            after = after.split("@", 1)[1]
+        if "/" in after:
+            host_port, path = after.split("/", 1)
+            host = host_port.split(":", 1)[0]
+            normalized = f"{host}/{path}"
+    if normalized.endswith(".git"):
+        normalized = normalized[: -len(".git")]
+    normalized = normalized.rstrip("/").lower()
+
+    repo_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    worktree_hash = hashlib.sha256(str(worktree).encode("utf-8")).hexdigest()[:16]
+    return {
+        "repo_hash": repo_hash,
+        "worktree_hash": worktree_hash,
+        "project_root": str(worktree),
+    }
+
+
 def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search implementation-focused project files."""
+    """Search implementation-focused project files (legacy entrypoint).
+
+    Phase 8: when the legacy index path is missing, transparently fall
+    through to the v2 auto-build pipeline.
+    """
+    legacy_db = Path(db_path).resolve()
+    if not legacy_db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-files",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=v2["worktree_hash"],
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
     return _search_file_collection(
         db_path,
         query,
@@ -514,7 +592,20 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
 
 
 def action_search_docs(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search project docs kept separate from implementation files."""
+    """Search project docs (legacy entrypoint with v2 auto-build fallback)."""
+    legacy_db = Path(db_path).resolve()
+    if not legacy_db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-files-docs",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=v2["worktree_hash"],
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
     return _search_file_collection(
         db_path,
         query,
@@ -651,11 +742,22 @@ def action_index_issues(project_root: str, db_path: str) -> dict:
 
 
 def action_search_issues(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search the GitHub Issues index."""
+    """Search the GitHub Issues index (legacy entrypoint with v2 fallback)."""
     import chromadb  # type: ignore
 
     db = Path(db_path).resolve()
     if not db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-issues",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=None,
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
         return {"ok": False, "error": f"Index not found at {db}"}
 
     client = chromadb.PersistentClient(path=str(db))
@@ -768,11 +870,22 @@ def action_index_specs(project_root: str, db_path: str) -> dict:
 
 
 def action_search_specs(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search the local SPEC index."""
+    """Search the local SPEC index (legacy entrypoint with v2 fallback)."""
     import chromadb  # type: ignore
 
     db = Path(db_path).resolve()
     if not db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-specs",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=v2["worktree_hash"],
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
         return {"ok": False, "error": f"Index not found at {db}"}
 
     client = chromadb.PersistentClient(path=str(db))
