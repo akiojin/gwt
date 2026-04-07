@@ -250,6 +250,19 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
         wt_hash,
         worktree_path.display()
     ));
+
+    // Phase 8 / FR-022: kick an integrity-check build immediately so the
+    // index reflects the current on-disk state. The runner runs in
+    // incremental mode, which falls back to a full build when the manifest
+    // is missing (compute_manifest_diff returns every file as "added").
+    log_event(&format!(
+        "ensure_watcher: kicking initial integrity build for wt_hash={}",
+        wt_hash
+    ));
+    if let Err(e) = run_incremental_index(&repo_hash, &wt_hash, worktree_path) {
+        log_event(&format!("initial integrity build spawn failed: {e}"));
+    }
+
     let worktree_path = worktree_path.to_path_buf();
     let repo_root = repo_root.to_path_buf();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
