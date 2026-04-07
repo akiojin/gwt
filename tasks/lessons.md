@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: SGR leak 正規化は terminal focus に依存させない
+
+### 事象
+
+Terminal pane 非フォーカス時に発生した SGR wheel leak が
+正規化されず、スクロール開始時に literal escape 断片が混入した。
+
+### 原因
+
+- `InputNormalizer::normalize()` が `terminal_focused == false` のとき
+  早期 return していた。
+- そのため、focus handoff 前に届いたリークシーケンスが
+  MouseInput 化されず通常キー入力として処理されていた。
+
+### 再発防止策
+
+1. SGR leak 正規化はフォーカス状態に関係なく常時適用する。
+2. 非フォーカス時でも `ESC [ < ... M` が MouseInput へ変換される
+   回帰テストを固定する。
+3. フォーカス遷移と入力正規化の責務を分離し、正規化層は
+   「入力の意味復元」に専念させる。
+
 ## 2026-04-07 — fix: SGR mouse leak のタイムアウト基準は「開始時刻」ではなく「無入力時間」
 
 ### 事象

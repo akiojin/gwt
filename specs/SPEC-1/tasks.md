@@ -61,3 +61,5 @@
 - [x] T048 Fix snapshot scroll-up cursor calculation in `model.rs` so live-to-history transition applies exact one-step deltas.
 - [x] T049 [P] Write RED test: leaked SGR wheel reports with short inter-character delays are still normalized as mouse input.
 - [x] T050 Switch SGR leak timeout handling in `event.rs` to inter-character inactivity semantics so delayed fragments do not leak literal `[<...M` text.
+- [x] T051 [P] Write RED test: leaked SGR wheel reports are still normalized when terminal pane is not focused.
+- [x] T052 Apply SGR leak normalization regardless of terminal focus state and keep timeout tuned for practical trackpad sequence jitter.

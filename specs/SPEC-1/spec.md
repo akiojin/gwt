@@ -39,6 +39,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 15. Given historical snapshots already include an old blank frame and newer frames contain visible text, when gwt updates the snapshot history, then it prunes the leading blank frame so scrolling to the oldest position still shows meaningful content.
 16. Given snapshot-backed scrollback is at live-follow and I scroll one step upward, when gwt enters history mode, then it lands on the immediately previous snapshot (one-step movement) instead of skipping older frames.
 17. Given a leaked SGR wheel sequence arrives with small per-character delays, when gwt normalizes that input, then the entire sequence is consumed as mouse input and never appears as literal `[<...M` text.
+18. Given Terminal pane is not focused and host leaks SGR wheel sequences, when the user scrolls over the session area, then gwt still normalizes the sequence into mouse events and can focus+scroll the session instead of forwarding literal escape fragments.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -99,6 +100,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-004d**: If the outer terminal leaks an SGR mouse report as an escape-key sequence, gwt normalizes it back into mouse input (or swallows it) before PTY forwarding so literal mouse-report text is never echoed inside the pane.
 - **FR-004e**: Consecutive wheel events that are already waiting in the outer-terminal queue are drained as a bounded burst before the next render pass so one gesture does not force one full redraw per raw wheel event.
 - **FR-004f**: SGR mouse leak normalization uses inter-character inactivity timeout semantics so moderately delayed sequence fragments are still reconstructed as one mouse event instead of leaking partial literal text.
+- **FR-004g**: SGR leak normalization is applied independent of current terminal-focus state so leaked wheel reports can still recover into mouse events that trigger session focus handoff and scrolling.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
 - **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.
 - **FR-005b**: While the user is viewing an older snapshot-backed frame, new output appends to the history cache without forcing the viewport back to live until the user scrolls down to the newest frame.
@@ -148,3 +150,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-015**: Even if a blank frame was previously captured, subsequent non-blank frames cause the blank history prefix to be pruned, so scrolling to the top still renders visible content.
 - **SC-016**: First upward scroll from live snapshot mode moves exactly one snapshot backward; frame skipping on live-to-history transition is eliminated.
 - **SC-017**: Leaked SGR wheel reports remain normalized even when characters arrive with short gaps; literal `[<...M` artifacts no longer surface in pane output.
+- **SC-018**: Even when Terminal pane was not focused before scrolling, leaked SGR wheel sequences are recovered as mouse scroll input and do not leak into pane text.

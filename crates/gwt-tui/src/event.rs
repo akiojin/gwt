@@ -9,7 +9,7 @@ use crate::message::Message;
 
 /// Tick interval for the event loop.
 const TICK_RATE: Duration = Duration::from_millis(100);
-const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(40);
+const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(120);
 
 /// Poll for the next message. Returns `None` on timeout with no events.
 pub fn poll_event(deadline: Instant) -> Option<Message> {
@@ -62,13 +62,8 @@ impl InputNormalizer {
         &mut self,
         msg: Message,
         now: Instant,
-        terminal_focused: bool,
+        _terminal_focused: bool,
     ) -> Option<Message> {
-        if !terminal_focused {
-            self.flush_all();
-            return Some(msg);
-        }
-
         self.flush_expired(now);
 
         match msg {
@@ -391,6 +386,59 @@ mod tests {
             Message::KeyInput(key(KeyCode::Char('M'))),
             now + Duration::from_millis(120),
             true,
+        );
+        assert!(matches!(
+            msg,
+            Some(Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 174,
+                row: 42,
+                modifiers
+            })) if modifiers == KeyModifiers::NONE
+        ));
+    }
+
+    #[test]
+    fn input_normalizer_parses_sgr_wheel_even_when_terminal_is_not_focused() {
+        let mut normalizer = InputNormalizer::default();
+        let now = Instant::now();
+
+        assert!(normalizer
+            .normalize(Message::KeyInput(key(KeyCode::Esc)), now, false)
+            .is_none());
+        assert!(normalizer
+            .normalize(
+                Message::KeyInput(key(KeyCode::Char('['))),
+                now + Duration::from_millis(5),
+                false,
+            )
+            .is_none());
+
+        for (offset_ms, ch) in [
+            (10, '<'),
+            (15, '6'),
+            (20, '4'),
+            (25, ';'),
+            (30, '1'),
+            (35, '7'),
+            (40, '5'),
+            (45, ';'),
+            (50, '4'),
+            (55, '3'),
+        ] {
+            assert!(normalizer
+                .normalize(
+                    Message::KeyInput(key(KeyCode::Char(ch))),
+                    now + Duration::from_millis(offset_ms),
+                    false,
+                )
+                .is_none());
+        }
+
+        let msg = normalizer.normalize(
+            Message::KeyInput(key(KeyCode::Char('M'))),
+            now + Duration::from_millis(60),
+            false,
         );
         assert!(matches!(
             msg,
