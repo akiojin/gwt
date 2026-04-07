@@ -335,6 +335,7 @@ pub fn update(model: &mut Model, msg: Message) {
             drain_notification_bus(model);
             drain_docker_progress_events(model);
             drain_branch_detail_events(model);
+            drain_cleanup_events(model);
             tick_notification(model);
             check_pty_exits(model);
             // Forward tick to wizard (AI suggest spinner) when active
@@ -490,6 +491,12 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Confirm(msg) => {
             handle_confirm_message(model, msg);
+        }
+        Message::CleanupConfirm(msg) => {
+            handle_cleanup_confirm_message(model, msg);
+        }
+        Message::CleanupProgress(msg) => {
+            handle_cleanup_progress_message(model, msg);
         }
         Message::Voice(msg) => {
             let voice_config = Settings::load()
@@ -1080,6 +1087,43 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
         }
     }
 
+    // Branch Cleanup progress modal — captures all input while running, and
+    // accepts only Enter / Esc to dismiss after completion (FR-018g/h).
+    if model.cleanup_progress.visible {
+        if model.cleanup_progress.is_running() {
+            // Hard input block during the run.
+            return true;
+        }
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+            update(
+                model,
+                Message::CleanupProgress(
+                    screens::cleanup_progress::CleanupProgressMessage::Dismiss,
+                ),
+            );
+        }
+        return true;
+    }
+
+    // Branch Cleanup confirm modal — `r` toggles remote, Enter confirms,
+    // Esc cancels (FR-018e).
+    if model.cleanup_confirm.visible {
+        let msg = match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                Some(screens::cleanup_confirm::CleanupConfirmMessage::ToggleRemote)
+            }
+            KeyCode::Enter => Some(screens::cleanup_confirm::CleanupConfirmMessage::Confirm),
+            KeyCode::Esc => Some(screens::cleanup_confirm::CleanupConfirmMessage::Cancel),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            update(model, Message::CleanupConfirm(msg));
+            return true;
+        }
+        // Other keys are swallowed so they don't leak into Branches list.
+        return true;
+    }
+
     false
 }
 
@@ -1161,13 +1205,6 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
             update(model, Message::ToggleHelp);
             None
         }
-        KeyCode::Char('c')
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && model.branches.detail_section != 3
-                && selected_branch_has_worktree(model) =>
-        {
-            Some(BranchesMessage::DeleteWorktree)
-        }
         KeyCode::Esc => {
             model.active_focus = FocusPane::TabContent;
             return;
@@ -1228,18 +1265,39 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 }
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
+                // Space: toggle Branch Cleanup selection on the focused row
+                // (FR-018c). Falls back to focusing the Branch Detail pane
+                // when there is no selectable branch in scope.
                 KeyCode::Char(' ') => {
-                    model.active_focus = FocusPane::BranchDetail;
+                    if let Some(name) = model.branches.selected_branch().map(|b| b.name.clone()) {
+                        let toggled = model.branches.toggle_cleanup_selection(&name);
+                        if !toggled {
+                            model.active_focus = FocusPane::BranchDetail;
+                        }
+                    } else {
+                        model.active_focus = FocusPane::BranchDetail;
+                    }
                     return;
                 }
-                KeyCode::Char('c')
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && model
-                            .branches
-                            .selected_branch()
-                            .is_some_and(|branch| branch.worktree_path.is_some()) =>
+                // Shift+C: open the Cleanup Confirm modal (FR-018e).
+                KeyCode::Char('C') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    open_cleanup_confirm_for_selection(model);
+                    return;
+                }
+                // `a`: select every visible cleanable branch (FR-018c).
+                KeyCode::Char('a')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::SHIFT) =>
                 {
-                    Some(BranchesMessage::DeleteWorktree)
+                    let visible: Vec<screens::branches::BranchItem> = model
+                        .branches
+                        .filtered_branches()
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let refs: Vec<&screens::branches::BranchItem> = visible.iter().collect();
+                    model.branches.select_all_visible_cleanable(&refs);
+                    return;
                 }
                 KeyCode::Enter => Some(BranchesMessage::Select),
                 KeyCode::Char('s') => Some(BranchesMessage::ToggleSort),
@@ -1531,20 +1589,6 @@ fn check_branch_pending_actions(model: &mut Model) {
                     );
                 }
             }
-        }
-    }
-    if model.branches.pending_delete_worktree && !model.confirm.visible {
-        if let Some(branch) = model
-            .branches
-            .selected_branch()
-            .filter(|branch| branch.worktree_path.is_some())
-        {
-            model.confirm = screens::confirm::ConfirmState::with_message(format!(
-                "Delete worktree for {}?",
-                branch.name
-            ));
-        } else {
-            model.branches.pending_delete_worktree = false;
         }
     }
 }
@@ -2945,6 +2989,227 @@ fn handle_confirm_message(model: &mut Model, msg: screens::confirm::ConfirmMessa
     handle_confirm_message_with(model, msg, AgentDetector::detect_all());
 }
 
+// ---------------- Branch Cleanup integration (FR-018) ----------------
+
+fn open_cleanup_confirm_for_selection(model: &mut Model) {
+    use screens::branches::MergeState;
+    use screens::cleanup_confirm::CleanupConfirmRow;
+
+    let mut rows: Vec<CleanupConfirmRow> = model
+        .branches
+        .filtered_branches()
+        .into_iter()
+        .filter_map(|branch| {
+            if !model.branches.is_cleanup_selected(&branch.name) {
+                return None;
+            }
+            match model.branches.merge_state(&branch.name) {
+                MergeState::Cleanable(target) => Some(CleanupConfirmRow {
+                    branch: branch.name.clone(),
+                    target,
+                }),
+                _ => None,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.branch.cmp(&b.branch));
+
+    if rows.is_empty() {
+        apply_notification(
+            model,
+            Notification::new(
+                gwt_notification::Severity::Warn,
+                "cleanup",
+                "No cleanable branches selected",
+            ),
+        );
+        return;
+    }
+
+    let delete_remote = model.branches.cleanup_settings.delete_remote;
+    model.cleanup_confirm.show(rows, delete_remote);
+}
+
+fn handle_cleanup_confirm_message(
+    model: &mut Model,
+    msg: screens::cleanup_confirm::CleanupConfirmMessage,
+) {
+    use screens::cleanup_confirm::CleanupConfirmOutcome;
+
+    let outcome = screens::cleanup_confirm::update(&mut model.cleanup_confirm, msg);
+    match outcome {
+        CleanupConfirmOutcome::Pending => {}
+        CleanupConfirmOutcome::Cancelled => {}
+        CleanupConfirmOutcome::Confirmed { delete_remote } => {
+            model.branches.cleanup_settings.delete_remote = delete_remote;
+            start_cleanup_run(model, delete_remote);
+        }
+    }
+}
+
+fn handle_cleanup_progress_message(
+    model: &mut Model,
+    msg: screens::cleanup_progress::CleanupProgressMessage,
+) {
+    use screens::cleanup_progress::CleanupProgressMessage;
+
+    let was_dismiss = matches!(msg, CleanupProgressMessage::Dismiss);
+    let was_completed = matches!(msg, CleanupProgressMessage::Completed);
+    screens::cleanup_progress::update(&mut model.cleanup_progress, msg);
+    if was_completed {
+        let succeeded = model
+            .cleanup_progress
+            .run
+            .as_ref()
+            .map(|run| run.succeeded())
+            .unwrap_or(0);
+        let failed = model
+            .cleanup_progress
+            .run
+            .as_ref()
+            .map(|run| run.failed())
+            .unwrap_or(0);
+        let severity = if failed > 0 {
+            gwt_notification::Severity::Warn
+        } else {
+            gwt_notification::Severity::Info
+        };
+        apply_notification(
+            model,
+            Notification::new(
+                severity,
+                "cleanup",
+                format!("Cleaned {succeeded}, failed {failed}"),
+            ),
+        );
+    }
+    if was_dismiss {
+        model.branches.clear_selection_after_cleanup();
+        model.cleanup_progress.run = None;
+        model.cleanup_events = None;
+        load_initial_data(model);
+    }
+}
+
+fn start_cleanup_run(model: &mut Model, delete_remote: bool) {
+    use std::sync::{Arc, Mutex};
+
+    let branches: Vec<String> = model
+        .cleanup_confirm
+        .rows
+        .iter()
+        .map(|row| row.branch.clone())
+        .collect();
+    if branches.is_empty() {
+        return;
+    }
+
+    model.cleanup_progress.show(branches.len(), delete_remote);
+
+    let queue: crate::model::CleanupEventQueue =
+        Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    model.cleanup_events = Some(queue.clone());
+
+    let repo_path = model.repo_path.clone();
+    let active_session_branches: std::collections::HashSet<String> =
+        model.branches.active_session_branches.clone();
+    let checked_out_branches: std::collections::HashSet<String> =
+        model.branches.checked_out_branches.clone();
+    let current_head_branch: Option<String> = model.branches.current_head_branch.clone();
+
+    std::thread::spawn(move || {
+        let manager = gwt_git::WorktreeManager::new(&repo_path);
+        for branch in branches {
+            queue
+                .lock()
+                .unwrap()
+                .push_back(crate::model::CleanupEvent::Started {
+                    branch: branch.clone(),
+                });
+
+            // Revalidate FR-018b protections immediately before deletion.
+            let blocked_reason = if gwt_git::is_protected_branch(&branch) {
+                Some("protected branch".to_string())
+            } else if current_head_branch.as_deref() == Some(branch.as_str()) {
+                Some("current HEAD".to_string())
+            } else if checked_out_branches.contains(&branch) {
+                Some("checked out elsewhere".to_string())
+            } else if active_session_branches.contains(&branch) {
+                Some("active session".to_string())
+            } else {
+                None
+            };
+
+            let (success, message) = if let Some(reason) = blocked_reason {
+                (false, Some(reason))
+            } else {
+                match manager.cleanup_branch(&branch) {
+                    Ok(()) => (true, None),
+                    Err(err) => (false, Some(err.to_string())),
+                }
+            };
+
+            queue
+                .lock()
+                .unwrap()
+                .push_back(crate::model::CleanupEvent::Finished {
+                    branch,
+                    success,
+                    message,
+                });
+        }
+        queue
+            .lock()
+            .unwrap()
+            .push_back(crate::model::CleanupEvent::Completed);
+    });
+}
+
+fn drain_cleanup_events(model: &mut Model) {
+    use crate::model::CleanupEvent;
+    use screens::cleanup_progress::CleanupProgressMessage;
+
+    let Some(queue) = model.cleanup_events.clone() else {
+        return;
+    };
+    let events: Vec<CleanupEvent> = {
+        let mut guard = queue.lock().unwrap();
+        std::mem::take(&mut *guard).into_iter().collect()
+    };
+    for event in events {
+        match event {
+            CleanupEvent::Started { branch } => {
+                update(
+                    model,
+                    Message::CleanupProgress(CleanupProgressMessage::Started { branch }),
+                );
+            }
+            CleanupEvent::Finished {
+                branch,
+                success,
+                message,
+            } => {
+                update(
+                    model,
+                    Message::CleanupProgress(CleanupProgressMessage::Finished {
+                        branch,
+                        success,
+                        message,
+                    }),
+                );
+            }
+            CleanupEvent::Completed => {
+                update(
+                    model,
+                    Message::CleanupProgress(CleanupProgressMessage::Completed),
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+
 fn handle_confirm_message_with(
     model: &mut Model,
     msg: screens::confirm::ConfirmMessage,
@@ -2953,12 +3218,7 @@ fn handle_confirm_message_with(
     let should_apply_session_conversion = matches!(msg, screens::confirm::ConfirmMessage::Accept)
         && model.confirm.accepted()
         && model.pending_session_conversion.is_some();
-    let should_delete_worktree = matches!(msg, screens::confirm::ConfirmMessage::Accept)
-        && model.confirm.accepted()
-        && model.branches.pending_delete_worktree;
     let dismisses_session_conversion = matches!(msg, screens::confirm::ConfirmMessage::Cancel)
-        || (matches!(msg, screens::confirm::ConfirmMessage::Accept) && !model.confirm.accepted());
-    let dismisses_worktree_delete = matches!(msg, screens::confirm::ConfirmMessage::Cancel)
         || (matches!(msg, screens::confirm::ConfirmMessage::Accept) && !model.confirm.accepted());
     screens::confirm::update(&mut model.confirm, msg);
     if should_apply_session_conversion {
@@ -2978,44 +3238,8 @@ fn handle_confirm_message_with(
                 }
             }
         }
-    } else if should_delete_worktree {
-        let worktree_target = model.branches.selected_branch().and_then(|branch| {
-            branch
-                .worktree_path
-                .as_ref()
-                .map(|path| (branch.name.clone(), path.clone()))
-        });
-        model.branches.pending_delete_worktree = false;
-        if let Some((branch_name, path)) = worktree_target {
-            let manager = gwt_git::worktree::WorktreeManager::new(&model.repo_path);
-            match manager.remove(&path) {
-                Ok(()) => {
-                    load_initial_data(model);
-                    apply_notification(
-                        model,
-                        Notification::new(
-                            Severity::Info,
-                            "worktree",
-                            format!("Removed worktree for {branch_name}"),
-                        ),
-                    );
-                }
-                Err(err) => apply_notification(
-                    model,
-                    Notification::new(
-                        Severity::Error,
-                        "worktree",
-                        format!("Failed to remove worktree for {branch_name}"),
-                    )
-                    .with_detail(err.to_string()),
-                ),
-            }
-        }
     } else if dismisses_session_conversion {
         model.pending_session_conversion = None;
-    }
-    if dismisses_worktree_delete {
-        model.branches.pending_delete_worktree = false;
     }
 }
 
@@ -4234,17 +4458,32 @@ fn terminal_hint_text() -> String {
     "Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2".to_string()
 }
 
-fn branches_list_hint_text(compact: bool) -> String {
+fn branches_list_hint_text_with_selection(compact: bool, selection_count: usize) -> String {
     if compact {
-        "↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  Esc→T".to_string()
+        if selection_count > 0 {
+            format!("↑↓  ↵ wiz  Sp sel({selection_count})  ⇧C clean  a all  Esc clr")
+        } else {
+            "↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp sel  ⇧C clean  a all  mvf?  Esc→T".to_string()
+        }
+    } else if selection_count > 0 {
+        format!(
+            "↑↓:move  Enter:wizard  Space:select({selection_count})  Shift+C:cleanup  a:all  Esc:clear"
+        )
     } else {
-        "↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  Space:detail  Ctrl+C:delete  m:view  v:git  f:search  Esc:term  ?:help".to_string()
+        "↑↓:move  ←→:tab  Enter:wizard  Space:select  Shift+C:cleanup  a:all  m:view  v:git  f:search  Esc:term  ?:help".to_string()
     }
+}
+
+fn branches_list_hint_text(compact: bool) -> String {
+    branches_list_hint_text_with_selection(compact, 0)
 }
 
 fn management_hint_text(model: &Model, compact: bool) -> String {
     match model.management_tab {
-        ManagementTab::Branches => branches_list_hint_text(compact),
+        ManagementTab::Branches => branches_list_hint_text_with_selection(
+            compact,
+            model.branches.cleanup_selection_count(),
+        ),
         ManagementTab::Issues => issues_hint_text(model, compact),
         ManagementTab::Settings => {
             if model.settings.editing {
@@ -4375,14 +4614,14 @@ fn versions_hint_text(compact: bool) -> String {
 
 fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
     let direct_action_hints = if selected_branch_has_worktree(model) {
-        "  Shift+Enter:shell  Ctrl+C:delete"
+        "  Shift+Enter:shell"
     } else {
         ""
     };
     let local_mnemonics = "  m:view  v:git  f:search  ?:help";
     if compact {
         let direct_action_hints = if selected_branch_has_worktree(model) {
-            "  S↵ sh  ^C del"
+            "  S↵ sh"
         } else {
             ""
         };
@@ -4435,6 +4674,12 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
 fn render_overlays(model: &Model, frame: &mut Frame, size: Rect) {
     // Confirm dialog overlay
     screens::confirm::render(&model.confirm, frame, size);
+
+    // Branch Cleanup confirm modal (FR-018e)
+    screens::cleanup_confirm::render(&model.cleanup_confirm, frame, size);
+
+    // Branch Cleanup progress modal (FR-018g/h)
+    screens::cleanup_progress::render(&model.cleanup_progress, frame, size);
 
     // Docker progress overlay
     if let Some(ref docker) = model.docker_progress {
@@ -8455,60 +8700,10 @@ CUSTOM_ENV = "enabled"
         assert!(model.pending_session_conversion.is_none());
     }
 
-    #[test]
-    fn handle_confirm_message_with_accept_removes_pending_branch_worktree() {
-        let dir = tempfile::tempdir().expect("temp repo");
-        init_git_repo(dir.path());
-        git_commit_allow_empty(dir.path(), "initial commit");
-
-        let worktree_path = dir.path().join("wt-feature-delete");
-        let output = std::process::Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                worktree_path.to_str().expect("worktree path"),
-                "-b",
-                "feature/delete-me",
-            ])
-            .current_dir(dir.path())
-            .output()
-            .expect("git worktree add");
-        assert!(
-            output.status.success(),
-            "git worktree add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let mut model = Model::new(dir.path().to_path_buf());
-        model.branches.branches = vec![screens::branches::BranchItem {
-            name: "feature/delete-me".into(),
-            is_head: false,
-            is_local: true,
-            category: screens::branches::BranchCategory::Feature,
-            worktree_path: Some(worktree_path.clone()),
-        }];
-
-        update(
-            &mut model,
-            Message::Branches(screens::branches::BranchesMessage::DeleteWorktree),
-        );
-        assert!(model.confirm.visible);
-        model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
-
-        handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Accept, vec![]);
-
-        assert!(!worktree_path.exists(), "worktree should be removed");
-        assert!(!model.branches.pending_delete_worktree);
-        let notification = model
-            .current_notification
-            .as_ref()
-            .expect("worktree notification");
-        assert_eq!(notification.source, "worktree");
-        assert_eq!(
-            notification.message,
-            "Removed worktree for feature/delete-me"
-        );
-    }
+    // Legacy single-branch worktree delete via Ctrl+C → Confirm has been
+    // removed in favor of the multi-select Branch Cleanup flow (FR-018).
+    // The end-to-end coverage now lives in `cleanup_run_*` tests below and
+    // in `screens::branches::tests::*` plus `screens::cleanup_*::tests::*`.
 
     #[test]
     fn maybe_start_wizard_branch_suggestions_with_applies_result() {
@@ -9725,7 +9920,11 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn route_key_to_branch_detail_ctrl_c_opens_delete_confirm() {
+    fn route_key_to_branch_detail_ctrl_c_does_not_open_delete_confirm() {
+        // FR-018: the legacy single-branch Ctrl+C delete-worktree shortcut
+        // has been removed. Ctrl+C on the Branch Detail pane must no longer
+        // open any confirmation modal — deletions go through the multi-select
+        // Cleanup flow instead.
         let mut model = test_model();
         model.branches.branches = vec![screens::branches::BranchItem {
             name: "feature/direct-actions".to_string(),
@@ -9739,11 +9938,7 @@ CUSTOM_ENV = "enabled"
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
-        assert!(model.confirm.visible);
-        assert!(
-            model.confirm.message.contains("feature/direct-actions"),
-            "delete confirmation should reference the selected branch"
-        );
+        assert!(!model.confirm.visible);
     }
 
     #[test]
@@ -9768,7 +9963,8 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn route_key_to_branch_detail_ctrl_c_ignores_branches_without_worktree() {
+    fn route_key_to_branch_detail_ctrl_c_is_noop_for_branches_without_worktree() {
+        // FR-018: see `route_key_to_branch_detail_ctrl_c_does_not_open_delete_confirm`.
         let mut model = test_model();
         model.branches.branches = vec![screens::branches::BranchItem {
             name: "feature/no-worktree".to_string(),
@@ -9783,7 +9979,6 @@ CUSTOM_ENV = "enabled"
         route_key_to_branch_detail(&mut model, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
         assert!(!model.confirm.visible);
-        assert!(!model.branches.pending_delete_worktree);
     }
 
     #[test]
@@ -9967,7 +10162,10 @@ CUSTOM_ENV = "enabled"
 
         let overview = render_model_text(&model, 200, 24);
         assert!(overview.contains("Shift+Enter:shell"));
-        assert!(overview.contains("Ctrl+C:delete"));
+        assert!(
+            !overview.contains("Ctrl+C:delete"),
+            "FR-018: single-branch Ctrl+C delete-worktree hint must be gone"
+        );
         assert!(overview.contains("T:stop"));
 
         model.branches.branches[0].worktree_path = None;

@@ -11,7 +11,10 @@ pub mod pr_status;
 pub mod repository;
 pub mod worktree;
 
-pub use branch::{git_divergence, Branch, DivergenceInfo};
+pub use branch::{
+    delete_local_branch, detect_cleanable_target, git_divergence, is_branch_merged_into,
+    is_protected_branch, list_gone_branches, Branch, DivergenceInfo, MergeTarget,
+};
 pub use commit::CommitEntry;
 pub use diff::{FileEntry, FileStatus};
 pub use issue::{Issue, IssueCache};

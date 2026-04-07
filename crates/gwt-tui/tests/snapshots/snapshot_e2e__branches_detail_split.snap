@@ -26,4 +26,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  │  ⎇main  │  [G]  │  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp dtl  ^C del  mvf?  E
+ ▣ Sh  │  ⎇main  │  [G]  │  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp sel  ⇧C clean  a all

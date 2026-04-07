@@ -262,6 +262,24 @@ pub struct PendingSessionConversion {
 /// Shared queue of terminal Docker lifecycle results produced in the background.
 pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
 
+/// Per-branch event emitted by the Branch Cleanup runner background job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupEvent {
+    /// Cleanup of `branch` started.
+    Started { branch: String },
+    /// Cleanup of `branch` finished.
+    Finished {
+        branch: String,
+        success: bool,
+        message: Option<String>,
+    },
+    /// All branches in the run finished.
+    Completed,
+}
+
+/// Shared queue of cleanup runner events drained from the tick loop.
+pub type CleanupEventQueue = Arc<Mutex<VecDeque<CleanupEvent>>>;
+
 /// Shared queue of branch-detail preload results produced in the background.
 pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
@@ -591,6 +609,12 @@ pub struct Model {
     pub(crate) port_select: Option<PortSelectState>,
     /// Confirmation dialog state.
     pub(crate) confirm: ConfirmState,
+    /// Branch Cleanup confirm modal (FR-018e).
+    pub(crate) cleanup_confirm: crate::screens::cleanup_confirm::CleanupConfirmState,
+    /// Branch Cleanup progress modal (FR-018g/h).
+    pub(crate) cleanup_progress: crate::screens::cleanup_progress::CleanupProgressState,
+    /// Background queue for cleanup runner events.
+    pub(crate) cleanup_events: Option<CleanupEventQueue>,
     /// Pending session conversion awaiting confirmation.
     pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
     /// Launch config built from completed wizard, ready for PTY spawn.
@@ -670,6 +694,9 @@ impl Model {
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),
+            cleanup_confirm: crate::screens::cleanup_confirm::CleanupConfirmState::default(),
+            cleanup_progress: crate::screens::cleanup_progress::CleanupProgressState::default(),
+            cleanup_events: None,
             pending_session_conversion: None,
             pending_launch_config: None,
             voice: VoiceInputState::default(),

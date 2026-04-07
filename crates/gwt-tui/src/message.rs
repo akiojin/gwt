@@ -6,6 +6,8 @@ use gwt_notification::Notification;
 use crate::input::voice::VoiceInputMessage;
 use crate::model::ManagementTab;
 use crate::screens::branches::BranchesMessage;
+use crate::screens::cleanup_confirm::CleanupConfirmMessage;
+use crate::screens::cleanup_progress::CleanupProgressMessage;
 use crate::screens::confirm::ConfirmMessage;
 use crate::screens::docker_progress::DockerProgressMessage;
 use crate::screens::git_view::GitViewMessage;
@@ -95,6 +97,10 @@ pub enum Message {
     PortSelect(PortSelectMessage),
     /// Confirmation dialog message.
     Confirm(ConfirmMessage),
+    /// Branch Cleanup confirm modal message.
+    CleanupConfirm(CleanupConfirmMessage),
+    /// Branch Cleanup progress modal message.
+    CleanupProgress(CleanupProgressMessage),
     /// Voice input message.
     Voice(VoiceInputMessage),
     /// Initialization screen message.
