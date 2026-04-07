@@ -263,6 +263,46 @@ pub struct PendingSessionConversion {
 /// Shared queue of terminal Docker lifecycle results produced in the background.
 pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
 
+/// Per-branch event emitted by the Branch Cleanup runner background job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupEvent {
+    /// Cleanup of `branch` started.
+    Started { branch: String },
+    /// Cleanup of `branch` finished.
+    Finished {
+        branch: String,
+        success: bool,
+        message: Option<String>,
+    },
+    /// All branches in the run finished.
+    Completed,
+}
+
+/// Shared queue of cleanup runner events drained from the tick loop.
+pub type CleanupEventQueue = Arc<Mutex<VecDeque<CleanupEvent>>>;
+
+/// Background event delivering a finished merge-state computation for one
+/// branch back into the Branches model (FR-018d).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeStateEvent {
+    pub branch: String,
+    pub state: crate::screens::branches::MergeState,
+}
+
+/// Shared queue of merge-state events drained from the tick loop.
+pub type MergeStateQueue = Arc<Mutex<VecDeque<MergeStateEvent>>>;
+
+/// Tracked merge-state worker handle: a queue plus an explicit finished
+/// flag the worker sets when its loop completes. Without the flag the tick
+/// loop's drain helper would have to guess from queue emptiness, racing
+/// against single-event pushes and tearing the queue down before the
+/// remaining branches were ever delivered (FR-018d).
+#[derive(Debug, Clone)]
+pub struct MergeStateChannel {
+    pub queue: MergeStateQueue,
+    pub finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Shared queue of branch-detail preload results produced in the background.
 pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
@@ -1570,6 +1610,14 @@ pub struct Model {
     pub(crate) port_select: Option<PortSelectState>,
     /// Confirmation dialog state.
     pub(crate) confirm: ConfirmState,
+    /// Branch Cleanup confirm modal (FR-018e).
+    pub(crate) cleanup_confirm: crate::screens::cleanup_confirm::CleanupConfirmState,
+    /// Branch Cleanup progress modal (FR-018g/h).
+    pub(crate) cleanup_progress: crate::screens::cleanup_progress::CleanupProgressState,
+    /// Background queue for cleanup runner events.
+    pub(crate) cleanup_events: Option<CleanupEventQueue>,
+    /// Background channel for merge-state computation events (FR-018d).
+    pub(crate) merge_state_events: Option<MergeStateChannel>,
     /// Pending session conversion awaiting confirmation.
     pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
     /// Launch config built from completed wizard, ready for PTY spawn.
@@ -1655,6 +1703,10 @@ impl Model {
             service_select: None,
             port_select: None,
             confirm: ConfirmState::default(),
+            cleanup_confirm: crate::screens::cleanup_confirm::CleanupConfirmState::default(),
+            cleanup_progress: crate::screens::cleanup_progress::CleanupProgressState::default(),
+            cleanup_events: None,
+            merge_state_events: None,
             pending_session_conversion: None,
             pending_launch_config: None,
             voice: VoiceInputState::default(),
@@ -1748,8 +1800,9 @@ impl Model {
     }
 
     /// Cloneable handle for sending notifications into the TUI.
-    #[allow(dead_code)]
-    pub(crate) fn notification_bus_handle(&self) -> NotificationBus {
+    /// Public clone of the notification bus sender. Used by `index_worker`
+    /// to publish lifecycle events into the Logs tab.
+    pub fn notification_bus_handle(&self) -> NotificationBus {
         self._notification_bus.clone()
     }
 

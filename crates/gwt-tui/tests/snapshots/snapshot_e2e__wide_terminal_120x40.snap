@@ -42,4 +42,4 @@ expression: output
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
- ▣ Shell  │  ⎇ n/a  │  type: Shell  │  [Mgmt]  │  /tmp/test-repo  │  ↑↓:move  ←→:tab  Enter:wizard  Shift+Enter:shell  S
+ ▣ Shell  │  ⎇ n/a  │  type: Shell  │  [Mgmt]  │  /tmp/test-repo  │  ↑↓:move  ←→:tab  Enter:wizard  Space:select  Shift+

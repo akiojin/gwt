@@ -102,24 +102,34 @@ async fn gitignored_files_are_excluded() {
     fs::write(tmp.path().join("ignored/should_skip.rs"), "// x\n").unwrap();
     fs::write(tmp.path().join("kept/should_keep.rs"), "// y\n").unwrap();
 
-    let batch = tokio::time::timeout(Duration::from_secs(5), handle.recv_batch())
-        .await
-        .expect("watcher must emit batch")
-        .expect("channel open");
-
-    let paths: Vec<String> = batch
-        .changed_paths
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-    assert!(
-        !paths.iter().any(|p| p.contains("should_skip")),
-        "gitignored path leaked into batch: {paths:?}"
-    );
-    assert!(
-        paths.iter().any(|p| p.contains("should_keep")),
-        "kept path missing from batch: {paths:?}"
-    );
+    // The debouncer can split nearby events across multiple batches under
+    // Linux inotify, so drain until we see the kept file or a deadline
+    // fires. Each batch must still pass the "no gitignored path" check.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_kept = false;
+    while !saw_kept {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let batch = tokio::time::timeout(remaining, handle.recv_batch())
+            .await
+            .expect("watcher must emit a batch before deadline")
+            .expect("channel open");
+        let paths: Vec<String> = batch
+            .changed_paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("should_skip")),
+            "gitignored path leaked into batch: {paths:?}"
+        );
+        if paths.iter().any(|p| p.contains("should_keep")) {
+            saw_kept = true;
+        }
+    }
+    assert!(saw_kept, "kept path never observed in any batch");
     handle.shutdown().await;
 }
 

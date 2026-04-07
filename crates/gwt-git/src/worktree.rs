@@ -213,6 +213,85 @@ impl WorktreeManager {
 
         Ok(())
     }
+
+    /// Force-remove the worktree at `path` (FR-018f). Equivalent to
+    /// `git worktree remove --force` so worktrees with uncommitted or
+    /// untracked files can also be deleted by Branch Cleanup.
+    pub fn remove_force(&self, path: &Path) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", path.to_str().unwrap_or("")])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("worktree remove --force: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Run `git worktree prune --expire now` to clear orphaned worktree
+    /// metadata immediately. Plain `git worktree prune` honors the
+    /// `gc.worktreePruneExpire` grace period (default `3.months.ago`), so a
+    /// freshly deleted worktree would stay registered and block the force
+    /// branch delete that follows inside [`Self::cleanup_branch`]. `--expire
+    /// now` disables that grace period.
+    pub fn prune(&self) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["worktree", "prune", "--expire", "now"])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("worktree prune: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Force-remove the worktree bound to `branch` (when one exists) and
+    /// then delete the local branch (FR-018f, FR-018g). Mirrors the old
+    /// `WorktreeManager::cleanup_branch` from `gwt-tauri/src/commands/cleanup.rs`.
+    ///
+    /// The function is idempotent against missing worktrees, missing
+    /// branches, and orphaned worktree metadata: a `git worktree prune`
+    /// fallback handles entries whose on-disk path has already vanished.
+    pub fn cleanup_branch(&self, branch: &str) -> Result<()> {
+        let worktree_path = self
+            .list()?
+            .into_iter()
+            .find(|wt| wt.branch.as_deref() == Some(branch))
+            .map(|wt| wt.path);
+
+        if let Some(path) = worktree_path {
+            match self.remove_force(&path) {
+                Ok(()) => {}
+                Err(err) if is_missing_worktree_error(&err) => {
+                    // Worktree metadata is stale; prune and continue.
+                    self.prune()?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        crate::branch::delete_local_branch(&self.repo_path, branch, true)?;
+        Ok(())
+    }
+}
+
+/// Returns true when `err` looks like a `git worktree remove` failure that
+/// stems from the on-disk worktree path having already disappeared.
+fn is_missing_worktree_error(err: &GwtError) -> bool {
+    let message = err.to_string().to_lowercase();
+    message.contains("not a working tree")
+        || message.contains("not a worktree")
+        || message.contains("not a work tree")
+        || message.contains("no such file or directory")
+        || message.contains("does not exist")
 }
 
 fn normalize_remote_ref(remote_ref: &str) -> String {
@@ -609,6 +688,142 @@ prunable gitdir file points to non-existent location
             String::from_utf8_lossy(&branch_output.stdout).trim(),
             "feature/materialized"
         );
+    }
+
+    #[test]
+    fn remove_force_deletes_worktree_with_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = sibling_worktree_path(&repo_path, "feature/dirty");
+        manager
+            .create_from_base("main", "feature/dirty", &worktree_path)
+            .or_else(|_| {
+                // Default branch may be `master` on older git installations.
+                manager.create_from_base("master", "feature/dirty", &worktree_path)
+            })
+            .unwrap();
+
+        // Dirty the worktree (uncommitted + untracked).
+        std::fs::write(worktree_path.join("dirty.txt"), "dirty\n").unwrap();
+        std::fs::write(worktree_path.join("staged.txt"), "staged\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(&worktree_path)
+            .output()
+            .unwrap();
+
+        // Plain remove() refuses; remove_force() succeeds.
+        assert!(manager.remove(&worktree_path).is_err());
+        manager.remove_force(&worktree_path).unwrap();
+        assert!(!worktree_path.exists());
+    }
+
+    #[test]
+    fn cleanup_branch_removes_worktree_and_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = sibling_worktree_path(&repo_path, "feature/cleanup-me");
+        manager
+            .create_from_base("main", "feature/cleanup-me", &worktree_path)
+            .or_else(|_| manager.create_from_base("master", "feature/cleanup-me", &worktree_path))
+            .unwrap();
+        // Make it dirty so a non-force remove would fail.
+        std::fs::write(worktree_path.join("scratch.txt"), "scratch\n").unwrap();
+
+        manager.cleanup_branch("feature/cleanup-me").unwrap();
+
+        assert!(!worktree_path.exists());
+        let branches = crate::branch::list_branches(&repo_path).unwrap();
+        assert!(
+            !branches
+                .iter()
+                .any(|b| b.is_local && b.name == "feature/cleanup-me"),
+            "branch should be deleted: {branches:?}"
+        );
+    }
+
+    #[test]
+    fn cleanup_branch_is_idempotent_for_missing_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        // Branch was never created — cleanup must still succeed.
+        manager.cleanup_branch("feature/never-existed").unwrap();
+    }
+
+    #[test]
+    fn cleanup_branch_succeeds_after_worktree_dir_was_manually_removed() {
+        // Regression guard for the `prune()` grace-period bug: if the
+        // worktree directory is wiped from disk behind git's back,
+        // `cleanup_branch` must still be able to deregister it and delete
+        // the branch. Without `--expire now` on `git worktree prune`, the
+        // stale metadata would linger for ~3 months and `git branch -D`
+        // would refuse to delete the branch because it still looks
+        // checked out.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = sibling_worktree_path(&repo_path, "feature/orphaned");
+        manager
+            .create_from_base("main", "feature/orphaned", &worktree_path)
+            .or_else(|_| manager.create_from_base("master", "feature/orphaned", &worktree_path))
+            .unwrap();
+
+        // Simulate an external tool (rm -rf, macOS finder, ...) wiping the
+        // worktree directory without telling git.
+        std::fs::remove_dir_all(&worktree_path).unwrap();
+
+        manager.cleanup_branch("feature/orphaned").unwrap();
+
+        let branches = crate::branch::list_branches(&repo_path).unwrap();
+        assert!(
+            !branches
+                .iter()
+                .any(|b| b.is_local && b.name == "feature/orphaned"),
+            "orphaned branch should be deleted: {branches:?}"
+        );
+    }
+
+    #[test]
+    fn cleanup_branch_without_worktree_deletes_branch_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        // Create a branch but no worktree.
+        std::process::Command::new("git")
+            .args(["branch", "feature/no-worktree"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+
+        let manager = WorktreeManager::new(&repo_path);
+        manager.cleanup_branch("feature/no-worktree").unwrap();
+
+        let branches = crate::branch::list_branches(&repo_path).unwrap();
+        assert!(!branches
+            .iter()
+            .any(|b| b.is_local && b.name == "feature/no-worktree"));
     }
 
     #[test]
