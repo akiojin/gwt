@@ -1,6 +1,8 @@
 //! Screen modules — one per management tab, plus overlays.
 
 pub mod branches;
+pub mod cleanup_confirm;
+pub mod cleanup_progress;
 pub mod confirm;
 pub mod docker_progress;
 pub mod error;
