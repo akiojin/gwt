@@ -116,6 +116,23 @@ become gwt shortcuts, or get forwarded to the PTY.
 3. Given `GWT_INPUT_TRACE_PATH` is unset, when the footer and help overlay
    render, then no extra IME-specific toggle or indicator is shown.
 
+### US-10: Enable Minimal Kitty Keyboard Enhancements By Default (P2) -- IMPLEMENTED
+
+As a developer troubleshooting terminal input ambiguity, I want gwt to request
+the minimal kitty keyboard enhancement flags at startup so escape-key ambiguity
+is reduced on compatible terminals without introducing a runtime mode switch.
+
+**Acceptance Scenarios**
+
+1. Given gwt enters terminal mode, when startup initialization runs, then gwt
+   requests `DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES` via
+   `PushKeyboardEnhancementFlags`.
+2. Given gwt leaves terminal mode, when shutdown cleanup runs, then gwt issues
+   `PopKeyboardEnhancementFlags` before restoring the rest of terminal state.
+3. Given the host terminal ignores or rejects kitty enhancement commands, when
+   startup or shutdown proceeds, then gwt still runs and restores terminal state
+   without surfacing a fatal error.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -134,6 +151,8 @@ become gwt shortcuts, or get forwarded to the PTY.
 - Interactive Codex launches may not emit `SessionStart` before the first user prompt, but the branch list must still show the session as live immediately after spawn.
 - IME investigation on terminals that do not expose composition state must stay
   opt-in and must not add a persistent UI mode or always-on logging.
+- Terminals that do not implement kitty keyboard protocol must keep startup and
+  shutdown behavior unchanged via fail-open enhancement handling.
 
 ## Regression Guardrail: Hook-Driven Branch Visibility
 
@@ -170,6 +189,11 @@ This capability has regressed multiple times because "hooks are configured" is n
   shell and agent terminal input. The trace records raw `crossterm` key
   events, post-prefix routing decisions, and PTY-forwarded bytes without adding
   a runtime toggle or footer affordance.
+- **FR-004b**: gwt always requests kitty keyboard protocol enhancements with
+  `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES |
+  KeyboardEnhancementFlags::REPORT_EVENT_TYPES` during terminal enter, and
+  pops the enhancement level during terminal leave. Enhancement push/pop is
+  fail-open so unsupported terminals continue with existing behavior.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.

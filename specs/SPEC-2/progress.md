@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `362/362` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T13:05:00Z`
+- Task progress: `366/366` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T17:37:22Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -77,6 +77,7 @@
 - Materialized Codex launches now append that writable root after the real persisted session id is allocated, so the spawned PTY args finally match the runtime sidecar path injected into the environment.
 - Interactive Codex launches now also bootstrap a PID-scoped `Running` runtime sidecar immediately after PTY spawn succeeds, covering the product gap where interactive Codex does not emit `SessionStart` before the first prompt. Hook events still overwrite that bootstrap state as soon as they arrive.
 - Terminal IME investigation now uses an opt-in `GWT_INPUT_TRACE_PATH` JSONL trace instead of a runtime mode toggle. The trace captures raw `crossterm` key presses, keybind routing decisions, and PTY-forwarded bytes without changing normal terminal UX.
+- Terminal startup now always requests minimal kitty keyboard enhancements (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them during shutdown with fail-open handling, so compatible terminals expose less key ambiguity while unsupported terminals keep existing behavior.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `362/362` completed items after closing Phase 59 for terminal input trace instrumentation.
+- Task traceability snapshot: `tasks.md` currently records `366/366` completed items after closing Phase 60 for minimal kitty keyboard enhancement wiring.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -51,3 +51,4 @@ Status: CLEAR
 - Notes: Phase 40 restores the last missing piece of compact session-title context by keeping the active `n/N` position visible alongside the active session label whenever the full strip collapses, while extra-wide panes continue to show the full strip.
 - Notes: Phase 41 extends that session-identity parity into split/grid mode: each pane title now carries its stable `n:` shortcut position and the session-type icon instead of a plain name-only title.
 - Notes: Phase 59 removes the rejected explicit terminal IME mode and replaces it with an opt-in `GWT_INPUT_TRACE_PATH` JSONL trace. The trace records raw `crossterm` key events, keybind decisions, and PTY-forwarded bytes so IME candidate-navigation behavior can be investigated in the real app without degrading normal UX.
+- Notes: Phase 60 enables `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)` during terminal startup and `PopKeyboardEnhancementFlags` during shutdown with fail-open handling, improving compatibility with kitty keyboard protocol terminals without introducing a runtime toggle.

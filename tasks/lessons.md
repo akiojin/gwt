@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: 重い Cargo テストを並列実行すると flaky なタイムアウトを誘発しやすい
+
+### 事象
+
+`cargo test -p gwt-tui` と `cargo test -p gwt-core -p gwt-tui` を同時に走らせた際、
+`update_branches_docker_stop_executes_and_refreshes_detail` が一度だけ timeout で失敗した。
+同じテストを単独で再実行すると成功した。
+
+### 原因
+
+- package cache / build directory の lock 待ちと並列負荷が重なり、
+  Docker worker の完了待ちが一時的に遅延した。
+- 重い Cargo テストの並列化は、CI と異なるローカル負荷条件で flaky を誘発しやすい。
+
+### 再発防止策
+
+1. `cargo test -p gwt-tui` と `cargo test -p gwt-core -p gwt-tui` のような重複する重い検証は並列で回さず、順次実行する。
+2. flaky が出た場合は直ちに単独再実行し、再現性を確認してから結果を採用する。
+3. 並列化は読み取り系コマンド中心に限定し、負荷の高い Rust ビルド/テストには適用しない。
+
 ## 2026-04-07 — fix: IME 問題に常用トグルを足す前に実アプリの入力証跡を取る
 
 ### 事象

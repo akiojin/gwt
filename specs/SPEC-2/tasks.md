@@ -568,3 +568,10 @@ banner in favor of pane-title chrome.
 - [x] T360 [P] Write RED test: raw `crossterm` key events are serialized into the trace file with stable stage metadata.
 - [x] T361 Implement `GWT_INPUT_TRACE_PATH`-gated input tracing and remove terminal IME mode state, footer/help affordances, toggle notification, and key-guard logic from `crates/gwt-tui/src/input_trace.rs`, `crates/gwt-tui/src/event.rs`, `crates/gwt-tui/src/main.rs`, `crates/gwt-tui/src/app.rs`, `crates/gwt-tui/src/input/keybind.rs`, `crates/gwt-tui/src/message.rs`, `crates/gwt-tui/src/model.rs`, and `crates/gwt-tui/src/widgets/status_bar.rs`.
 - [x] T362 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the input-trace investigation contract.
+
+## Phase 60: Always-On Minimal Kitty Keyboard Enhancements
+
+- [x] T363 [P] Write RED test: terminal enter ANSI sequence includes `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)`.
+- [x] T364 [P] Write RED test: terminal leave ANSI sequence includes `PopKeyboardEnhancementFlags`.
+- [x] T365 Update `crates/gwt-tui/src/main.rs` terminal enter/leave handling to request minimal kitty keyboard enhancements at startup and pop them at shutdown with fail-open behavior.
+- [x] T366 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the minimal kitty keyboard-enhancement contract.

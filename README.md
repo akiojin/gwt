@@ -84,6 +84,10 @@ launch gwt with `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl`. The JSONL
 trace records raw `crossterm` key events, keybind decisions, and forwarded PTY
 bytes without adding a runtime input-mode toggle.
 
+gwt also requests minimal kitty keyboard enhancements during terminal startup
+(`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them on shutdown.
+Unsupported terminals fail open and continue with existing behavior.
+
 ## Environment and requirements
 
 ### Required

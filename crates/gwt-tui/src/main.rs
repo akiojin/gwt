@@ -9,7 +9,10 @@ use std::{
 };
 
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -48,16 +51,37 @@ fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
         EnterAlternateScreen,
         EnableMouseCapture,
         EnableBracketedPaste,
-    )
+    )?;
+    enable_keyboard_enhancements(writer);
+    Ok(())
 }
 
 fn leave_terminal(writer: &mut impl io::Write) -> io::Result<()> {
+    disable_keyboard_enhancements(writer);
     execute!(
         writer,
         LeaveAlternateScreen,
         DisableMouseCapture,
         DisableBracketedPaste,
     )
+}
+
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+}
+
+fn enable_keyboard_enhancements(writer: &mut impl io::Write) {
+    // Fail-open: keep startup working even when the host terminal ignores or rejects kitty flags.
+    let _ = execute!(
+        writer,
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+    );
+}
+
+fn disable_keyboard_enhancements(writer: &mut impl io::Write) {
+    // Fail-open: shutdown should restore the terminal even if keyboard enhancement pop fails.
+    let _ = execute!(writer, PopKeyboardEnhancementFlags);
 }
 
 #[cfg(test)]
@@ -72,12 +96,18 @@ fn terminal_enter_commands_ansi() -> String {
     EnableBracketedPaste
         .write_ansi(&mut ansi)
         .expect("enable bracketed paste ansi");
+    PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+        .write_ansi(&mut ansi)
+        .expect("enable keyboard enhancement ansi");
     ansi
 }
 
 #[cfg(test)]
 fn terminal_leave_commands_ansi() -> String {
     let mut ansi = String::new();
+    PopKeyboardEnhancementFlags
+        .write_ansi(&mut ansi)
+        .expect("disable keyboard enhancement ansi");
     LeaveAlternateScreen
         .write_ansi(&mut ansi)
         .expect("leave alternate screen ansi");
@@ -475,5 +505,25 @@ mod tests {
     fn terminal_leave_commands_disable_bracketed_paste() {
         let ansi = terminal_leave_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004l"));
+    }
+
+    #[test]
+    fn terminal_enter_commands_enable_keyboard_enhancement_flags() {
+        let ansi = terminal_enter_commands_ansi();
+        let mut expected = String::new();
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+            .write_ansi(&mut expected)
+            .expect("keyboard enhancement push ansi");
+        assert!(ansi.contains(expected.as_str()));
+    }
+
+    #[test]
+    fn terminal_leave_commands_pop_keyboard_enhancement_flags() {
+        let ansi = terminal_leave_commands_ansi();
+        let mut expected = String::new();
+        PopKeyboardEnhancementFlags
+            .write_ansi(&mut expected)
+            .expect("keyboard enhancement pop ansi");
+        assert!(ansi.contains(expected.as_str()));
     }
 }

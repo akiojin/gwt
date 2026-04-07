@@ -80,6 +80,10 @@ TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用しま
 JSONL トレースには、生の `crossterm` キーイベント、keybind 判定、PTY に
 転送したバイト列が記録され、実行中に入力モードを切り替える必要はありません。
 
+また gwt は起動時に minimal な kitty keyboard enhancement
+(`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) を要求し、終了時に pop します。
+非対応端末では fail-open で従来挙動を維持します。
+
 ## 必要環境変数と前提
 
 ### 必須

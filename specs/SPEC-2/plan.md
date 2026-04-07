@@ -773,6 +773,24 @@ real terminal input path can be observed in gwt without changing normal UX.
   trace-file records, then rerun focused and broad verification and refresh
   SPEC-2 artifacts and execution tracking.
 
+### Phase 55: Always-On Minimal Kitty Keyboard Enhancements (4 tasks)
+Request the least disruptive kitty keyboard enhancement flags at terminal
+startup to reduce escape-key ambiguity on compatible terminals while keeping
+unsupported terminals fail-open.
+
+55.1: Startup/shutdown contract (2 tasks)
+- During terminal enter, request
+  `DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES` via
+  `PushKeyboardEnhancementFlags`.
+- During terminal leave, issue `PopKeyboardEnhancementFlags` before restoring
+  the rest of terminal state, and keep both operations fail-open.
+
+55.2: Verification and artifact sync (2 tasks)
+- Add RED coverage proving enter/leave ANSI command builders include keyboard
+  enhancement push/pop sequences.
+- Re-run focused plus broad verification and refresh SPEC-2/README artifacts
+  with the always-on minimal keyboard-enhancement contract.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action
