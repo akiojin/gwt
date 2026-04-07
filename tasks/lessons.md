@@ -20,6 +20,206 @@
 2. ユーザーが「フラグ自体ではない」と明示した場合、フラグ復元ロジックを触る前に launch 組み立て層の証跡（実際の引数・環境）を確定する。
 3. 既存UXを弱める回避策（復元OFFなど）は、根本原因を確定するまで入れない。
 
+## 2026-04-07 — fix: semantic file search は collection 設計でノイズを消す
+
+### 事象
+
+`gwt-search --files` が skill docs、SPEC、archive、snapshot まで同じ collection に入れていたため、
+implementation code を探したい query でも markdown 系 artifacts が先に出やすかった。
+
+### 原因
+
+- 「files」を 1 collection で持ち、planning/docs artifacts と implementation files を分離していなかった。
+- embedded skills や local SPECs は別 search surface を持っているのに、file search 側でも再度 index してしまっていた。
+
+### 再発防止策
+
+1. semantic search の品質問題を query tuning だけで片付けず、collection 境界が user intent に合っているか先に確認する。
+2. 別の検索 surface を持つ artifacts（embedded skills, SPECs, archive, task logs, snapshots）は implementation-file collection に入れない。
+3. implementation search と docs search を両立したい場合は 1 collection に混ぜず、collection を分けて default surface を意図的に選ぶ。
+
+## 2026-04-07 — fix: public skill 名は internal action 名ではなくユーザー責務に合わせる
+
+### 事象
+
+`search-files` / `index-files` を canonical action に直した流れで、standalone skill 名まで
+`gwt-file-search` に寄せたが、実際の workflow は「project 内の関連実装箇所を探す」ため、
+public naming が体験の責務からずれた。
+
+### 原因
+
+- internal runner API の名詞を、そのまま user-facing skill surface に投影してしまった。
+- semantic search の返り値が「files」でも、ユーザーが解きたい課題は project understanding /
+  implementation discovery である点を十分に分離できていなかった。
+
+### 再発防止策
+
+1. internal action 名と public skill 名がずれているときは、どちらが「実装都合」でどちらが「ユーザー責務」かを先に言語化する。
+2. naming review では「この skill は何を index するか」ではなく「ユーザーは何を達成するために呼ぶか」を基準に canonical 名を決める。
+3. internal API 名の正規化を public rename に波及させる前に、SKILL の説明文・出力契約・利用導線が同じ責務語彙を使っているか確認する。
+
+## 2026-04-07 — superseded: skill 名は underlying action / historical owner と揃える
+
+### 事象
+
+standalone file search の実体は `search-files` / `index-files` なのに、skill surface が
+`gwt-project-search` に寄っており、`files` 契約と命名が食い違っているように見えた。
+
+### 原因
+
+- internal action 名と public skill 名の責務を分離せず、runtime action の名詞をそのまま public naming に投影した。
+- historical owner 名称を、現在の user-facing workflow semantics より優先してしまった。
+
+### 再発防止策
+
+1. runtime action 名と historical owner は確認するが、public skill 名の決定基準にはしない。
+2. canonical 名を変える場合は、bundled assets・参照 docs・compatibility alias を同じ修正セットで更新する。
+3. asset-only rename でも distribution test で canonical asset と negative case を固定する。
+
+## 2026-04-07 — fix: Python launcher 判定は path heuristic ではなく実行 probe と構造化エラーで固定する
+
+### 事象
+
+project-index runtime の Python bootstrap hardening 後レビューで、Windows Store / launcher Python を
+path だけで弾く実装と、clone 後 warning が英語メッセージ部分一致で `index` / `workspace` を
+振り分ける実装が見つかった。
+
+### 原因
+
+- `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python*.exe` を「壊れた alias」と決め打ちし、実行 probe 前に除外していた。
+- runtime bootstrap failure の分類を構造化せず、人間向け文言の substring に依存していた。
+- その結果、有効な launcher を誤拒否し、失敗理由も `Python not installed` に潰れやすかった。
+
+### 再発防止策
+
+1. 外部 runtime / launcher の可用性判定は path やファイル名の heuristic ではなく、実行 probe と version check を RED テストで固定する。
+2. user-facing warning の source 分類は構造化 prefix / enum で運び、英語メッセージ本文の一致判定を禁止する。
+3. runtime bootstrap の review では「有効 launcher を通すケース」「壊れた launcher の detail を残すケース」「通知 source が startup と clone で一致するケース」を最低セットで確認する。
+
+## 2026-04-07 — fix: Hooks不具合は単点ではなく「実行チェーン」全体で再発する
+
+### 事象
+
+Claude Code では表示されるのに Codex では Branches のスピナーが出ない、または起動直後に出ない不具合が
+同じ機能領域で複数回再発した。
+
+### 原因
+
+- 原因が単一ではなく、以下の複合条件で発生していた。
+1. `--enable codex_hooks` 未付与で hooks 自体が未実行。
+2. `~/.gwt/sessions/runtime/<pid>` への writable root 未付与で sidecar 書き込み不可。
+3. tracked `.codex/hooks.json` の旧式 Node forwarder が残留し、移行されない worktree が存在。
+4. interactive Codex の `SessionStart` 遅延で launch 直後に sidecar が未生成。
+5. hook assets/settings の materialize が PTY spawn より後ろに回るケース。
+
+### 再発防止策
+
+1. Hooks対応の完了条件を「設定ファイル生成」ではなく「PID-scoped runtime sidecar が実際に書かれ、Branches に表示される」まで拡張する。
+2. launch/config/runtime/UI を別タスクで確認せず、同一検証サイクルで以下を必ず確認する。
+   - launch args: `--enable codex_hooks` と `--add-dir ~/.gwt/sessions/runtime/<pid>`
+   - effective worktree config: `.claude/settings.local.json` / `.codex/hooks.json`
+   - runtime output: `~/.gwt/sessions/runtime/<pid>/<session>.json`
+   - UI結果: 同一 branch 上で Claude/Codex の複数スピナー表示
+3. tracked `.codex/hooks.json` を preserve する仕様変更時は、legacy forwarder を含む tracked fixture の移行テストを必須にする。
+4. interactive Codex については `SessionStart` 前提を禁止し、launch bootstrap + hook上書き契約を SPEC に固定する。
+
+## 2026-04-07 — fix: interactive Codex は launch 直後の `SessionStart` hook を前提にできない
+
+### 事象
+
+`feature/branches` の `gwt-tui` から `develop` worktree で Codex を起動すると、
+`--enable codex_hooks`、`GWT_SESSION_RUNTIME_PATH`、`--add-dir ~/.gwt/sessions/runtime/<pid>` が
+すべて入っていても、Branches の spinner sidecar が空のままだった。
+
+### 原因
+
+- launch wiring や `.codex/hooks.json` の no-Node runtime hook 生成自体は正しかった。
+- 最小再現では `codex exec` は `SessionStart` hook で sidecar を書く一方、
+  interactive Codex は launch 直後の `SessionStart` hook を発火しなかった。
+- そのため「hooks が最初の Running sidecar を作る」前提だと、起動直後の interactive Codex は
+  branch spinner に現れない。
+
+### 再発防止策
+
+1. Codex hooks 不具合では `hooks.json` / argv / env の確認だけで終わらせず、`exec` と interactive のイベント差も最小再現で確認する。
+2. interactive Codex の startup 可視化は `SessionStart` hook 前提にせず、successful spawn 時の PID-scoped runtime bootstrap を RED テストで固定する。
+3. hook contract を spec に書くときは「interactive Codex may delay SessionStart」を明記し、launch bootstrap との責務境界を残す。
+
+## 2026-04-07 — fix: tracked な `.codex/hooks.json` の一律スキップは旧式 runtime hook worktree を永久に直せない
+
+### 事象
+
+`feature/branches` の `gwt-tui` から `develop` worktree で Codex を起動しても、
+Branches の spinner sidecar が生成されなかった。
+
+### 原因
+
+- `generate_codex_hooks()` が tracked `.codex/hooks.json` を無条件で skip していた。
+- `develop` 側の tracked `.codex/hooks.json` には旧式の
+  `node .../.codex/hooks/scripts/gwt-forward-hook.mjs` runtime hook が残っていた。
+- そのため `feature/branches` 側で no-Node runtime hook へ移行していても、
+  実際に起動された worktree には新しい hook 形状が一切届かなかった。
+
+### 再発防止策
+
+1. tracked な生成設定ファイルでも、「現行ユーザー設定」と「旧式 gwt 管理設定」を区別し、一律 skip しない。
+2. launch 不具合では、起動元ブランチの埋め込み資産だけでなく、実際に agent が起動する対象 worktree の config ファイル内容まで確認する。
+3. 「tracked file を preserve する」仕様を入れる場合は、旧式 tracked asset を抱えた別 worktree で launch する RED テストも必ず追加する。
+
+## 2026-04-06 — fix: Launch args に依存する runtime path は build 後の env 注入だけでは反映されない
+
+### 事象
+
+`gwt-agent` 側で Codex に `--add-dir` を追加しても、実際に起動した Codex セッションの argv にはその引数が現れず、
+Branches の spinner sidecar は依然として生成されなかった。
+
+### 原因
+
+- `LaunchConfig::build()` の時点では session id がまだ未確定だった。
+- 実際の `GWT_SESSION_RUNTIME_PATH` は `materialize_pending_launch_with()` で session record を保存した後に env へ注入していた。
+- そのため build 時に足した writable-root 補完は、本番 launch で使う runtime path と切り離されていた。
+
+### 再発防止策
+
+1. session id や persisted path に依存する launch args は、`LaunchConfig::build()` ではなく materialization 後に補完する。
+2. env と argv が同じ derived path を共有する設計では、「どの時点で path が確定するか」を先に固定する。
+3. Launch bug の検証では builder unit test だけで完了扱いにせず、materialization 後の最終 config までテストで固定する。
+
+## 2026-04-06 — fix: Codex の hook runtime sidecar は sandbox writable root を明示しないと `~/.gwt` に書けない
+
+### 事象
+
+`feature/branches` の `gwt-tui` から起動した Codex では `codex_hooks` と `GWT_SESSION_RUNTIME_PATH` が入っていても、
+Branches の live spinner 用 sidecar が一切生成されなかった。
+
+### 原因
+
+- runtime sidecar の保存先を `~/.gwt/sessions/runtime/<pid>/<session>.json` にしていた。
+- Codex は `workspace-write` sandbox で動くため、追加 writable root を付けない限り `~/.gwt/...` への書き込みが拒否される。
+- hook command は fail-open でエラーを握りつぶすため、設定が入っていても無症状で sidecar だけ欠落した。
+
+### 再発防止策
+
+1. Codex hook が workspace 外へ書く設計にした場合は、launch args に対応する `--add-dir` も RED テストで固定する。
+2. `GWT_SESSION_RUNTIME_PATH` が入っていることだけで「書ける」と判断しない。sandbox writable roots まで確認する。
+3. hook 不具合では `argv/env` だけでなく、実際に sidecar が生成されるかを同じ runtime path で手動再現して切り分ける。
+
+## 2026-04-06 — fix: Codex の hooks は `hooks.json` だけでは起動せず launch feature flag も必要
+
+### 事象
+
+Claude Code では Branches の live spinner が出るのに、Codex では同じブランチ上でも spinner が一切出なかった。
+
+### 原因
+
+- gwt は `.codex/hooks.json` を生成・配布していたが、Codex launch args に `--enable codex_hooks` を入れていなかった。
+- OpenAI Codex の現行 hooks は feature flag 前提のため、`hooks.json` が存在しても feature flag が無い session では hook 自体が実行されなかった。
+
+### 再発防止策
+
+1. Codex の hook 依存機能を追加・修正するときは、`hooks.json` の生成だけでなく launch args に `codex_hooks` 有効化が入っているかを RED テストで固定する。
+2. Claude と Codex で hook 設定方式が同じだと仮定しない。agent ごとに「設定ファイル」「feature flag」「runtime enablement」を分けて確認する。
+3. Hooks 不具合では、まず runtime sidecar の有無と launch config の feature flags を一緒に確認し、`hooks.json` 内容だけで原因判断しない。
 ## 2026-04-06 — feat: session-title tests must not depend on the real home sessions dir
 
 ### 事象

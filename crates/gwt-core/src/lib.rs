@@ -7,5 +7,6 @@
 pub mod error;
 pub mod paths;
 pub mod process;
+pub mod runtime;
 
 pub use error::{GwtError, Result};

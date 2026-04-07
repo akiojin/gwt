@@ -184,22 +184,29 @@ pub fn install_develop_protection(repo_path: &Path) -> Result<()> {
 
 /// Initialize workspace scaffolding after a successful clone.
 ///
-/// Creates `specs/` directory and `~/.gwt/config.toml` (with defaults) if
-/// they do not already exist.
+/// Creates `specs/`, `~/.gwt/config.toml`, and shared project-index runtime
+/// assets if they do not already exist.
 pub fn initialize_workspace(repo_path: &Path) -> Result<()> {
+    initialize_workspace_with(repo_path, &gwt_core::paths::gwt_home(), |_| {
+        gwt_core::runtime::ensure_project_index_runtime().map(|_| ())
+    })
+}
+
+fn initialize_workspace_with<F>(repo_path: &Path, gwt_home: &Path, ensure_runtime: F) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     // Create specs/ directory (create_dir_all is idempotent)
     fs::create_dir_all(repo_path.join("specs")).map_err(GwtError::Io)?;
 
-    // Create ~/.gwt/config.toml with defaults if not exists
-    if let Some(home) = dirs::home_dir() {
-        let gwt_dir = home.join(".gwt");
-        fs::create_dir_all(&gwt_dir).map_err(GwtError::Io)?;
-        let config_path = gwt_dir.join("config.toml");
-        if !config_path.exists() {
-            let default_config = "[general]\n# gwt default configuration\n";
-            fs::write(&config_path, default_config).map_err(GwtError::Io)?;
-        }
+    fs::create_dir_all(gwt_home).map_err(GwtError::Io)?;
+    let config_path = gwt_home.join("config.toml");
+    if !config_path.exists() {
+        let default_config = "[general]\n# gwt default configuration\n";
+        fs::write(&config_path, default_config).map_err(GwtError::Io)?;
     }
+
+    ensure_runtime(gwt_home)?;
 
     Ok(())
 }
@@ -477,13 +484,54 @@ mod tests {
     #[test]
     fn initialize_workspace_creates_specs_dir() {
         let tmp = tempfile::tempdir().unwrap();
+        let gwt_home = tmp.path().join(".gwt-home");
         Command::new("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
 
-        initialize_workspace(tmp.path()).unwrap();
+        initialize_workspace_with(tmp.path(), &gwt_home, |_| Ok(())).unwrap();
         assert!(tmp.path().join("specs").exists());
+    }
+
+    #[test]
+    fn initialize_workspace_creates_config_in_supplied_gwt_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gwt_home = tmp.path().join(".gwt-home");
+        Command::new("git")
+            .args(["init", tmp.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        initialize_workspace_with(tmp.path(), &gwt_home, |_| Ok(())).unwrap();
+
+        let config = gwt_home.join("config.toml");
+        assert!(config.exists());
+        assert!(std::fs::read_to_string(config)
+            .unwrap()
+            .contains("[general]"));
+    }
+
+    #[test]
+    fn initialize_workspace_invokes_project_index_runtime_bootstrap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gwt_home = tmp.path().join(".gwt-home");
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Command::new("git")
+            .args(["init", tmp.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        let called_clone = called.clone();
+        let expected_home = gwt_home.clone();
+        initialize_workspace_with(tmp.path(), &gwt_home, move |arg_home| {
+            called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(arg_home, expected_home.as_path());
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     // ---- Repository tests ----

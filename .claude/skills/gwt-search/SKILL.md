@@ -11,7 +11,7 @@ gwt maintains ChromaDB vector search indexes for three scopes:
 |-------|---------|-------------------|
 | SPECs | Local SPEC files (`specs/SPEC-{N}/`) | Automatic (file system watcher) |
 | Issues | GitHub Issues (all states) | Manual (`index-issues` action or GUI button) |
-| Files | Project source files | Automatic (file system watcher) |
+| Files | Project implementation files (code/config; excludes embedded skill assets, SPEC trees, and snapshots) | Automatic (file system watcher) |
 
 ## Quick reference
 
@@ -19,7 +19,7 @@ gwt maintains ChromaDB vector search indexes for three scopes:
 gwt-search "query"              # search all three scopes
 gwt-search --specs "query"      # SPECs only
 gwt-search --issues "query"     # GitHub Issues only
-gwt-search --files "query"      # project source files only
+gwt-search --files "query"      # implementation files only
 ```
 
 ## Filter options
@@ -29,7 +29,7 @@ gwt-search --files "query"      # project source files only
 | (none) | All three | Run all three searches | Default behavior |
 | `--specs` | SPECs only | `search-specs` | Local `specs/SPEC-{N}/` directories |
 | `--issues` | Issues only | `search-issues` | GitHub Issues via ChromaDB index |
-| `--files` | Files only | `search` | Project source files |
+| `--files` | Files only | `search-files` | Implementation files only |
 
 ## Search commands
 
@@ -67,7 +67,19 @@ $PYTHON $RUNNER \
 
 ```bash
 $PYTHON $RUNNER \
-  --action search \
+  --action search-files \
+  --db-path "$DB_PATH" \
+  --query "your search query" \
+  --n-results 10
+```
+
+`search-files` is implementation-focused: it excludes embedded skill assets (`.claude/`, `.codex/`), local/archived SPEC trees, local task logs, and snapshot files so code search is not dominated by docs noise.
+
+### Search project docs (advanced runner action)
+
+```bash
+$PYTHON $RUNNER \
+  --action search-files-docs \
   --db-path "$DB_PATH" \
   --query "your search query" \
   --n-results 10
@@ -93,6 +105,7 @@ $PYTHON $RUNNER \
 ```bash
 $PYTHON $RUNNER \
   --action index-issues \
+  --project-root "$GWT_PROJECT_ROOT" \
   --db-path "$DB_PATH"
 ```
 
@@ -104,6 +117,8 @@ $PYTHON $RUNNER \
   --project-root "$GWT_PROJECT_ROOT" \
   --db-path "$DB_PATH"
 ```
+
+`index-files` rebuilds both the implementation-file collection and the separate docs collection.
 
 ## Output formats
 
@@ -144,8 +159,9 @@ $PYTHON $RUNNER \
 
 This skill is a **mandatory preflight step** before:
 
-- `gwt-spec-design`
-- `gwt-issue`
+- `gwt-spec-design` (spec brainstorm, register, clarify, ops)
+- `gwt-spec-register` / `gwt-spec-ops`
+- `gwt-issue-register` / `gwt-issue-resolve`
 
 Run at least 2-3 semantic queries derived from the request before creating any new SPEC or Issue.
 

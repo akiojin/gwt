@@ -152,8 +152,8 @@
   spawn, so Launch Agent no longer falls back to the repository root
   checkout when creating a new branch.
 - Branch-origin launches now preserve the selected base branch for
-  worktree creation, while SPEC/Issue-prefilled launches default that base
-  branch to `develop`.
+  worktree creation by resolving `origin/<selected>`, while SPEC/Issue-prefilled
+  launches default that base branch to `origin/develop`.
 - Selected-branch new-branch launches no longer leak the selected branch's
   existing worktree into `LaunchConfig`, so launch-time materialization now
   still creates the requested sibling worktree instead of silently reusing

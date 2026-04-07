@@ -67,24 +67,31 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 1. **gwt-skills**: Add `distribute` module with:
    - `distribute_to_worktree(worktree_path: &Path) -> Result<DistributeReport>` — writes all bundled files to target.
-   - Distribution targets: `.claude/skills/gwt-*/`, `.claude/commands/gwt-*.md`, `.claude/hooks/scripts/gwt-*.mjs`, `.codex/skills/gwt-*/`.
+   - Distribution targets: `.claude/skills/gwt-*/`, `.claude/commands/gwt-*.md`, `.claude/hooks/scripts/gwt-*.mjs`, `.codex/skills/gwt-*/`, `.codex/hooks/scripts/gwt-*.mjs`.
    - Full overwrite strategy: all gwt-managed files are replaced unconditionally.
 
 2. **gwt-skills**: Add `git_exclude` module:
    - Reads/creates `.git/info/exclude`.
    - Manages gwt-managed block delimited by `# gwt-managed-begin` / `# gwt-managed-end`.
-   - Adds exclude patterns for all distributed asset paths.
+   - Adds exclude patterns for all distributed asset paths plus generated `.codex/hooks.json`.
 
 3. **gwt-skills**: Add `settings_local` module:
-   - Generates `.claude/settings.local.json` with gwt-managed hooks.
-   - Uses existing `hooks.rs` merge logic to preserve user-defined hooks.
+   - Generates `.claude/settings.local.json` and untracked `.codex/hooks.json` from a shared typed hook builder.
+   - Preserves user-defined hooks while replacing only gwt-managed runtime hooks.
+   - Uses direct shell commands that write `GWT_SESSION_RUNTIME_PATH` instead of a Node-based runtime forwarder.
+   - Skips tracked `.codex/hooks.json` files by default, but migrates tracked files that still contain gwt's legacy runtime forward hooks so launched worktrees do not stay pinned to stale Node-based runtime hooks.
 
 4. **gwt-tui (app.rs)**: Call `distribute_to_worktree()` in agent launch flow, after `PaneManager::launch_agent()` resolves the worktree path.
+   - Bootstrap a PID-scoped `Running` runtime sidecar immediately after successful PTY spawn, because interactive Codex may not emit `SessionStart` before the first prompt.
+
+5. **gwt-agent (launch.rs)**:
+   - Enable Codex hooks explicitly in every gwt-managed Codex launch (`--enable codex_hooks`).
+   - Keep the flag alongside the existing web-search feature enablement so Codex hook execution does not depend on per-user `config.toml` state.
 
 ### Dependencies
 
 - Phase 2 (bundled assets available at runtime)
-- Existing `hooks.rs` merge logic
+- Bundled Claude/Codex hook assets
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 
@@ -104,15 +111,15 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 - None (can run in parallel with Phase 2/2b)
 
-## Phase 3: Hooks Merge Completion
+## Phase 3: Historical hooks.rs Utility Completion
 
-**Goal**: Complete the hooks.json merge feature carried over from archived SPEC-1786 (20/31 tasks completed, remaining: Phase 3 Polish and Phase 4 Manual E2E).
+**Goal**: Preserve and finish the generic `hooks.rs` utility work carried over from archived SPEC-1786. This phase is historical support for the generic helper; the active Claude/Codex runtime-hook path no longer depends on it.
 
 ### Carried-Over Progress
 
 The following capabilities from SPEC-1786 are already implemented:
 
-- `write_managed_codex_hooks()` with merge mode.
+- Generic `hooks.rs` safe-merge helpers with merge mode.
 - User hook preservation during managed hook updates.
 - gwt-managed hook identification via marker field.
 - Confirmation dialog for Codex agents.
@@ -132,7 +139,7 @@ The following capabilities from SPEC-1786 are already implemented:
 
 ### Dependencies
 
-- Existing hooks merge implementation in gwt-core.
+- Existing `hooks.rs` implementation in gwt-skills.
 
 ## Phase 4: Build Distribution
 
@@ -154,6 +161,39 @@ The following capabilities from SPEC-1786 are already implemented:
 
 - GitHub Actions runners with cross-compilation toolchains.
 - npm registry access.
+
+## Phase 5: Skill Consolidation
+
+**Goal**: Replace the fragmented skill surface with the methodology-based 8-skill system.
+
+### Key Changes
+
+1. Consolidate design / plan / build / review flows into standalone methodology skills.
+2. Consolidate issue / PR / search / agent operations into auto-detect integration skills.
+3. Update AGENTS and bundled skills so the repo, distributed assets, and workflow guidance stay aligned.
+
+### Dependencies
+
+- Embedded skill bundling and runtime distribution from Phase 2 / 2b.
+
+## Phase 6: Search Runtime Contract Recovery
+
+**Goal**: Keep unified search working across upgrades by restoring the shared runtime and documenting stable action names.
+
+### Key Changes
+
+1. Add repo-tracked project-index runtime assets and requirements under `gwt-core`.
+2. Repair `~/.gwt/runtime/chroma_index_runner.py` and `~/.gwt/runtime/chroma-venv` during startup and workspace initialization.
+3. Standardize file-search actions on `index-files` / `search-files` while preserving `index` / `search` aliases.
+4. Update `gwt-search` family skills so `index-issues` examples include `--project-root`.
+5. Validate bootstrap Python candidates before venv creation, keep working Store/launcher entrypoints, and translate only true no-candidate cases into install guidance.
+6. Restore `gwt-project-search` as the canonical standalone semantic project-search skill / command while keeping `search-files` / `index-files` as the internal runner action names.
+7. Split file indexing into code/docs collections so `search-files` stays implementation-focused while noisy skill/spec/snapshot artifacts are excluded from the code collection.
+
+### Dependencies
+
+- SPEC-10 workspace/runtime bootstrap flow.
+- Shared Python availability for project-index setup.
 
 ## Risk Mitigation
 

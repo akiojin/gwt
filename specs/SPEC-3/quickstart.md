@@ -110,9 +110,10 @@
     requested branch (`feature/aaa` -> `../feature/aaa`) before the PTY
     starts, even when the selected base branch already has its own linked
     worktree such as `develop`.
-42. Repeat the new-branch launch from SPEC or Issue context and verify the
-    created worktree uses the new branch while the session metadata records
-    that actual launched path.
+42. Repeat the new-branch launch from SPEC or Issue context and verify
+    `origin/develop` is used as the remote base branch, the created worktree
+    uses the new branch, and session metadata records that actual launched
+    path.
 43. If a stale worktree for the same branch already exists from a previous
     failed launch attempt, retry Launch Agent and verify it reuses that
     existing branch worktree instead of failing to start.
