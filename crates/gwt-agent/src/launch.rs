@@ -299,6 +299,7 @@ impl AgentLaunchBuilder {
 
     fn build_claude_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
         // Claude Code specific env vars
+        env_vars.insert("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".into(), "1".into());
         env_vars.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
 
         // Telemetry/analytics disable
@@ -466,9 +467,10 @@ mod tests {
         assert_eq!(config.command, "claude");
         assert_eq!(config.display_name, "Claude Code");
         assert_eq!(config.color, AgentColor::Yellow);
-        assert!(!config
-            .env_vars
-            .contains_key("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+            Some(&"1".to_string())
+        );
         assert_eq!(
             config.env_vars.get("TERM"),
             Some(&"xterm-256color".to_string())

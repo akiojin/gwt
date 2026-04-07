@@ -35,9 +35,8 @@
   `Continue`.
 - Quick Start restore now applies persisted `skip_permissions` consistently
   across built-in agents, including Claude.
-- Claude launch no longer injects the experimental
-  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` environment toggle by default, so
-  gwt launch behavior stays aligned with direct CLI execution.
+- Claude launch keeps `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` enabled by
+  default so Agent Teams can be used immediately from launched sessions.
 - Persisted agent session metadata now stores Quick Start restore fields
   (`reasoning_level`, `skip_permissions`, resume session ID) so future
   launches can replay the previous configuration instead of showing a static
