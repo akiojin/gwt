@@ -22,6 +22,26 @@ Codex は gwt の local snapshot history を 1 frame ずつ辿り、
 2. alternate-screen agent が mouse reporting を出さない場合は、wheel / right-drag を repeated cursor up/down として PTY へ返す。
 3. local scrollback fallback は non-alternate-screen pane に限定し、alternate-screen agent の line scroll 代替として使わない。
 
+## 2026-04-07 — fix: alternate-screen は PTY keyboard scroll の十分条件ではあるが必要条件ではない
+
+### 事象
+
+alternate-screen agent 向けに PTY keyboard scroll を実装しても、
+ユーザー環境の Codex は依然として local snapshot scroll に入り続け、挙動が変わらなかった。
+
+### 原因
+
+- 実ログでは Codex pane が `max_scrollback=0` の snapshot mode に入っていたが、
+  `alternate_screen()` 前提で分岐していたため PTY keyboard path に到達しなかった。
+- Codex の full-screen redraw は main-screen 上の clear+home 更新でも発生しうるため、
+  `snapshot-backed かどうか` が本来の判定軸だった。
+
+### 再発防止策
+
+1. agent scroll routing の判定は `alternate_screen()` ではなく、まず `uses_snapshot_scrollback()` を見る。
+2. 「実ログで routing がどの経路に入ったか」を残す `event=scroll_route` を先に入れて、仮説を次回すぐ検証できるようにする。
+3. full-screen redraw 型 agent の再現テストは alternate-screen と non-alternate-screen の両方で固定する。
+
 ## 2026-04-07 — fix: coalesced PTY payloads can hide intermediate agent redraw frames
 
 ### 事象

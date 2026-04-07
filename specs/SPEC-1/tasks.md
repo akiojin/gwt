@@ -93,3 +93,5 @@
 - [x] T080 [P] Write RED tests: alternate-screen agents without SGR mouse reporting receive wheel / right-drag scroll through PTY keyboard input, while non-alternate-screen agents still use local scrollback.
 - [x] T081 Implement alternate-screen agent scroll routing in `app.rs` so PTY ownership supports both SGR mouse and repeated cursor up/down fallback, and hide local scrollbar overlays in every PTY-owned path.
 - [x] T082 Refresh SPEC-1 artifacts, lessons learned, and focused/full verification for alternate-screen agent keyboard-scroll ownership.
+- [x] T083 [P] Write RED tests: snapshot-backed Codex redraw panes that never enter alternate-screen still route wheel / right-drag scroll to PTY keyboard input, while row-backed panes remain local.
+- [x] T084 Generalize agent scroll routing in `app.rs` from alternate-screen-only to snapshot-backed PTY keyboard ownership, and add scroll-route diagnostics for future debugging.
