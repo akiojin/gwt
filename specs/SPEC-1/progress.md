@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `26/26` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T08:39:47Z`
+- Task progress: `96/96` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T17:06:36Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -12,10 +12,46 @@
 - `PtyOutput` now feeds a per-session vt100 surface and the session pane renders live terminal content instead of a placeholder.
 - `Ctrl+click` URL open now resolves visible URL regions from the active session pane and invokes the platform opener with the full URL.
 - Wrapped URLs are now detected across soft-wrapped terminal rows and remain underlined/clickable across every visible segment.
-- Terminal sessions now keep viewport-local scrollback state, expose overflow-only scrollbar chrome, and restore the cursor against the text area even when the gutter is present.
+- Terminal sessions now keep viewport-local scrollback state and restore the cursor against the full-width text area without reserving any scrollbar gutter.
 - Mouse-wheel scrolling now freezes live follow against vt100 scrollback, and drag selection copies from the visible scrollback viewport through `contents_between()`.
 - Session-pane mouse interactions now re-focus the terminal before scrollback routing, so wheel scrolling works from the default management-focus state instead of dropping the first event.
+- Terminal startup now disables alternate-scroll mode so Terminal.app trackpad gestures are not rewritten into cursor keys while gwt owns the alternate screen.
+- Terminal.app-specific `Drag(Right)` gesture sequences now fall back to scrollback motion, matching the observed crossterm event stream when wheel events are absent.
+- Full-screen panes that keep `max_scrollback == 0` now maintain a pane-local in-memory snapshot history and keep selection/copy aligned with the visible historical frame without rendering scrollbar chrome.
+- Snapshot-backed scrollback stays frozen on the chosen historical frame while new output arrives and only returns to live-follow when the user scrolls back to the newest frame.
+- Terminal-focus input is now normalized so leaked SGR wheel reports are converted back into mouse input instead of being echoed into the pane as literal `[<...M` text.
+- Hover-only `Moved` floods are now dropped at the event layer, reducing redraw pressure during Terminal.app trackpad gestures.
+- Consecutive wheel events are now drained as a bounded burst before redraw, so Terminal.app trackpad floods no longer force one full frame render per raw scroll event.
+- PTY output chunks are now coalesced per session within each event-loop drain before `Message::PtyOutput` dispatch, so snapshot-backed scrollback tracks drawn frames instead of reader-chunk intermediate states.
+- Full-screen cache history now records every distinct VT-interpreted frame (including overwrite / clear redraws) while deduplicating consecutive identical frames, so the visible frame always matches terminal semantics and prior distinct frames remain reviewable.
+- Snapshot progression no longer depends on viewport-shift overlap heuristics; blank history prefixes are still pruned so topmost snapshot scrollback never produces a phantom blank screen.
+- Alternate-screen panes now prefer snapshot-backed scrolling even when main-screen row scrollback metadata is non-zero.
+- Session viewport handling is now unified under `VtState`: rendering, URL hit-testing, and selection copy all consume the same visible cache surface API.
+- Claude/Codex agent panes now prefer runtime scrollback from a normalized row-buffer parser, so launch/blank/status redraws do not appear as separate history entries when vt100 row history exists.
+- Agent-pane runtime scrollback is now memory-only: PTY-derived VT cache is the canonical source while the pane is alive, and gwt no longer hydrates scrollback from session `jsonl` or session-log files.
+- Agent-pane row history now uses a larger bounded in-memory budget than standard terminal panes, preserving styled PTY output for longer review windows without transcript fallback.
+- Agent panes whose full-screen redraws never advance vt100 row scrollback now fall back to the same in-memory snapshot cache, restoring scrollback without reintroducing session-log/transcript sources.
+- Snapshot-backed agent history now stays locked to the selected frame while new PTY redraws promote fresh row history in the background, preventing scrollback from looping or switching history sources mid-review.
+- Sparse same-offset matches inside Codex-style redraw churn now count as row-history evidence, so line-granular scrolling survives progress/spinner updates that previously forced page-sized snapshot fallback.
+- Codex launches now request the CLI's documented inline mode via `--no-alt-screen`, so PTY output preserves normal terminal scrollback semantics instead of forcing gwt to reconstruct fullscreen redraw history.
+- Aborted SGR mouse-report normalization now replays buffered `Esc`-prefixed input in original order, preventing reordered escape sequences from reaching downstream terminal apps.
+- Pending normalized messages now traverse the same keybind-aware dispatch path as polled input, so flushed escape-prefix keys cannot bypass focus-aware shortcut handling.
+- Terminal.app right-drag fallback state now clears on outside mouse-up and on terminal-to-nonterminal session/focus changes, preventing stale drag anchors from leaking into later pane interactions.
+- Scroll-debug hot paths now use lazy message construction, so disabled diagnostics no longer pay `format!` cost in viewport sync, PTY output, mouse, and scroll handlers.
+- PTY-bound key input now exits row/snapshot history and returns the viewport to live-follow before forwarding bytes, so typing never continues against a stale historical viewport.
+- Agent panes that enable SGR mouse reporting now receive wheel and Terminal.app right-drag scroll input through the PTY, so gwt stops competing with agent-owned redraw and scroll state when the embedded agent can handle scrolling itself.
+- Agent scroll ownership is now capability-driven with one PTY path: only SGR mouse-enabled panes use PTY-owned scroll, while Codex-style panes without that capability stay on gwt-local scrollback.
+- Codex-style full-screen redraw panes now promote vertical redraw shifts into a pane-local row cache even when the repaint keeps fixed header / status rows or omits `clear+home`, so wheel / trackpad scrolling stays line-granular without synthesizing cursor-key PTY input.
+- Terminal panes no longer render any scrollbar overlay, so Claude Code and Codex use the same full-width terminal surface regardless of whether scrolling is local or PTY-owned.
+- Agent-pane snapshot capture now preserves intermediate clear+redraw frames even when one coalesced PTY payload contains multiple full-screen redraws, keeping the remaining local-fallback path reviewable without transcript/session-log sources.
+- Scroll-route diagnostics now record whether each wheel / right-drag gesture took the local, PTY mouse, or PTY keyboard path together with snapshot/alternate-screen state, so live debugging can distinguish routing bugs from agent-side scroll behavior.
+- Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
+- Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
+- SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.
+- SGR leak normalization now runs regardless of terminal-focus state, so leaked wheel sequences can still recover into mouse scrolling when focus handoff has not happened yet.
+- Snapshot capture now tolerates redraw churn by preserving any distinct visible frame, preventing history starvation on dynamic full-screen panes without overlap-score tuning.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
+- Transcript-ignore regression coverage now resolves and parses real Claude/Codex transcript candidates before asserting that runtime scrollback remains memory-only.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` if manual confirmation is still required for release evidence.

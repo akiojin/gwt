@@ -13,6 +13,7 @@ pub mod model;
 pub mod notification_router;
 pub mod renderer;
 pub mod screens;
+pub(crate) mod scroll_debug;
 pub mod theme;
 pub mod widgets;
 

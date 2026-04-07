@@ -1,8 +1,12 @@
 //! App — Update and View functions for the Elm Architecture.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+#[cfg(test)]
+use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write as _;
+#[cfg(test)]
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +14,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+use chrono::{DateTime, Utc};
 use gwt_agent::{
     custom::CustomAgentType, persist_session_status, runtime_state_path, AgentDetector, AgentId,
     AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig, Session as AgentSession,
@@ -27,9 +36,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
+#[cfg(test)]
+use serde_json::Value;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -39,8 +50,8 @@ use crate::{
     message::Message,
     model::{
         ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
-        ManagementTab, Model, PendingSessionConversion, SessionLayout, SessionTabType,
-        TerminalCell, TerminalSelection,
+        ManagementTab, Model, PendingSessionConversion, ScrollbackStrategy, SessionLayout,
+        SessionTabType, TerminalCell, TerminalSelection,
     },
     screens, theme,
 };
@@ -221,6 +232,479 @@ fn sync_session_viewports(model: &mut Model) {
             .vt
             .set_scrollback(current_scrollback.min(session.vt.max_scrollback()));
     }
+    if let Some(session) = model.active_session_tab() {
+        crate::scroll_debug::log_lazy(|| {
+            format!(
+            "event=viewport_sync session={} content_width={} content_height={} render_width={} vt_rows={} vt_cols={} scrollback={} max_scrollback={} follow_live={}",
+            session.id,
+            content.width,
+            content.height,
+            render_width,
+            session.vt.rows(),
+            session.vt.cols(),
+            session.vt.scrollback(),
+            session.vt.max_scrollback(),
+            session.vt.follow_live(),
+        )
+        });
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct AgentTranscriptSource {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    started_at: Option<SystemTime>,
+    session_key: Option<String>,
+}
+
+#[cfg(test)]
+fn sync_active_agent_transcript_scrollback_with(
+    model: &mut Model,
+    sessions_dir: &Path,
+    claude_projects_root: &Path,
+    codex_sessions_root: &Path,
+) {
+    let Some(session_tab) = model.active_session_tab() else {
+        return;
+    };
+    let SessionTabType::Agent { agent_id, .. } = &session_tab.tab_type else {
+        return;
+    };
+    let persisted_path = sessions_dir.join(format!("{}.toml", session_tab.id));
+    let Ok(persisted) = AgentSession::load(&persisted_path) else {
+        return;
+    };
+    let agent_id = match agent_id.as_str() {
+        "claude" => AgentId::ClaudeCode,
+        "codex" => AgentId::Codex,
+        _ => return,
+    };
+    let source = match agent_id {
+        AgentId::ClaudeCode => resolve_claude_transcript_source(&persisted, claude_projects_root),
+        AgentId::Codex => resolve_codex_transcript_source(&persisted, codex_sessions_root),
+        _ => None,
+    };
+    let _ = source
+        .as_ref()
+        .and_then(|source| read_transcript_lines_for_agent(&agent_id, &source.path));
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn file_modified_time(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
+    let parsed = DateTime::parse_from_rfc3339(value).ok()?;
+    Some(parsed.with_timezone(&Utc).into())
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn transcript_source_started_at(path: &Path) -> Option<SystemTime> {
+    file_modified_time(path)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn transcript_source_selection_distance(
+    source: &AgentTranscriptSource,
+    session_started_at: SystemTime,
+) -> Option<Duration> {
+    let started_at = source
+        .started_at
+        .or_else(|| transcript_source_started_at(&source.path))?;
+    if started_at >= session_started_at {
+        started_at.duration_since(session_started_at).ok()
+    } else {
+        session_started_at.duration_since(started_at).ok()
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn agent_session_started_at(session: &AgentSession) -> Option<SystemTime> {
+    let secs = session.created_at.timestamp();
+    let nanos = session.created_at.timestamp_subsec_nanos() as u64;
+    if secs >= 0 {
+        Some(UNIX_EPOCH + Duration::from_secs(secs as u64) + Duration::from_nanos(nanos))
+    } else {
+        let offset = Duration::from_secs(secs.unsigned_abs()) + Duration::from_nanos(nanos);
+        UNIX_EPOCH.checked_sub(offset)
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn select_transcript_source_for_session(
+    session: &AgentSession,
+    candidates: Vec<AgentTranscriptSource>,
+) -> Option<AgentTranscriptSource> {
+    if let Some(session_key) = session.agent_session_id.as_deref() {
+        if let Some(exact) = candidates
+            .iter()
+            .find(|candidate| candidate.session_key.as_deref() == Some(session_key))
+            .cloned()
+        {
+            return Some(exact);
+        }
+    }
+
+    let session_started_at = agent_session_started_at(session);
+    if let Some(session_started_at) = session_started_at {
+        let mut best: Option<(Duration, AgentTranscriptSource)> = None;
+        for candidate in candidates.iter().cloned() {
+            let Some(distance) =
+                transcript_source_selection_distance(&candidate, session_started_at)
+            else {
+                continue;
+            };
+            let replace = best
+                .as_ref()
+                .map(|(best_distance, best_source)| {
+                    distance < *best_distance
+                        || (distance == *best_distance
+                            && transcript_source_newer_than(&candidate, best_source))
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((distance, candidate));
+            }
+        }
+        if let Some((_, candidate)) = best {
+            return Some(candidate);
+        }
+    }
+
+    candidates.into_iter().max_by(|left, right| {
+        let left_modified = left.modified.unwrap_or(UNIX_EPOCH);
+        let right_modified = right.modified.unwrap_or(UNIX_EPOCH);
+        left_modified.cmp(&right_modified)
+    })
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn resolve_claude_transcript_source(
+    session: &AgentSession,
+    claude_projects_root: &Path,
+) -> Option<AgentTranscriptSource> {
+    let encoded_worktree = session.worktree_path.to_string_lossy().replace('/', "-");
+    let dir = claude_projects_root.join(encoded_worktree);
+    let entries = fs::read_dir(dir).ok()?;
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let modified = file_modified_time(&path);
+        if modified.is_none() {
+            continue;
+        }
+        let started_at = claude_transcript_started_at(&path);
+        let session_key = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string);
+        candidates.push(AgentTranscriptSource {
+            path,
+            modified,
+            started_at,
+            session_key,
+        });
+    }
+    select_transcript_source_for_session(session, candidates)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn resolve_codex_transcript_source(
+    session: &AgentSession,
+    codex_sessions_root: &Path,
+) -> Option<AgentTranscriptSource> {
+    let mut candidates = Vec::new();
+    for candidate in collect_jsonl_files(codex_sessions_root) {
+        let Some(metadata) = codex_transcript_metadata(&candidate) else {
+            continue;
+        };
+        if metadata.cwd != session.worktree_path {
+            continue;
+        }
+        let modified = file_modified_time(&candidate);
+        if modified.is_none() {
+            continue;
+        }
+        candidates.push(AgentTranscriptSource {
+            path: candidate,
+            modified,
+            started_at: metadata.started_at,
+            session_key: metadata.session_key,
+        });
+    }
+    select_transcript_source_for_session(session, candidates)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn transcript_source_newer_than(
+    candidate: &AgentTranscriptSource,
+    current: &AgentTranscriptSource,
+) -> bool {
+    let candidate_modified = candidate.modified.unwrap_or(UNIX_EPOCH);
+    let current_modified = current.modified.unwrap_or(UNIX_EPOCH);
+    candidate_modified > current_modified
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn claude_transcript_started_at(path: &Path) -> Option<SystemTime> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for raw in reader.lines().take(16).map_while(Result::ok) {
+        let event: Value = serde_json::from_str(&raw).ok()?;
+        if let Some(timestamp) = event.get("timestamp").and_then(Value::as_str) {
+            return parse_rfc3339_system_time(timestamp);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct CodexTranscriptMetadata {
+    cwd: PathBuf,
+    started_at: Option<SystemTime>,
+    session_key: Option<String>,
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn codex_transcript_metadata(path: &Path) -> Option<CodexTranscriptMetadata> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = String::new();
+    if reader.read_line(&mut first_line).ok()? == 0 {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(first_line.trim_end()).ok()?;
+    if payload.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let inner = payload.get("payload")?;
+    Some(CodexTranscriptMetadata {
+        cwd: inner
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)?,
+        started_at: inner
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        session_key: inner.get("id").and_then(Value::as_str).map(str::to_string),
+    })
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn collect_jsonl_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_jsonl_files_recursive(root, 0, 4, &mut files);
+    files
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn collect_jsonl_files_recursive(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_files_recursive(&path, depth + 1, max_depth, out);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn read_transcript_lines_for_agent(agent_id: &AgentId, path: &Path) -> Option<Vec<String>> {
+    match agent_id {
+        AgentId::ClaudeCode => read_claude_transcript_lines(path),
+        AgentId::Codex => read_codex_transcript_lines(path),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn read_codex_transcript_lines(path: &Path) -> Option<Vec<String>> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for raw in reader.lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = event.get("payload") else {
+            continue;
+        };
+        match payload.get("type").and_then(Value::as_str) {
+            Some("message") => append_codex_message_lines(&mut lines, payload),
+            Some("function_call_output") => {
+                if let Some(output) = payload.get("output").and_then(Value::as_str) {
+                    append_transcript_raw_lines(&mut lines, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(lines)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn read_claude_transcript_lines(path: &Path) -> Option<Vec<String>> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for raw in reader.lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(role) = event.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(role, "user" | "assistant") {
+            continue;
+        }
+        append_claude_event_lines(&mut lines, role, &event);
+    }
+    Some(lines)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn append_codex_message_lines(lines: &mut Vec<String>, payload: &Value) {
+    let Some(role) = payload.get("role").and_then(Value::as_str) else {
+        return;
+    };
+    if !matches!(role, "user" | "assistant") {
+        return;
+    }
+    let Some(content) = payload.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    let mut merged = Vec::new();
+    for item in content {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(item_type, "input_text" | "output_text" | "text") {
+            continue;
+        }
+        if let Some(text) = item.get("text").and_then(Value::as_str) {
+            merged.push(text);
+        }
+    }
+    let text = merged.join("\n").trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    append_transcript_message_lines(lines, role, &text);
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn append_claude_event_lines(lines: &mut Vec<String>, role: &str, event: &Value) {
+    let Some(message) = event.get("message") else {
+        return;
+    };
+    let Some(content) = message.get("content") else {
+        return;
+    };
+    if let Some(text) = content.as_str() {
+        let text = text.trim();
+        if !text.is_empty() {
+            append_transcript_message_lines(lines, role, text);
+        }
+        return;
+    }
+
+    let Some(items) = content.as_array() else {
+        return;
+    };
+    let mut merged = Vec::new();
+    for item in items {
+        match item.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    merged.push(text.to_string());
+                }
+            }
+            Some("tool_result") => {
+                if !merged.is_empty() {
+                    let text = merged.join("\n");
+                    append_transcript_message_lines(lines, role, text.trim());
+                    merged.clear();
+                }
+                if let Some(text) = item.get("content").and_then(Value::as_str) {
+                    append_transcript_raw_lines(lines, text);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !merged.is_empty() {
+        let text = merged.join("\n");
+        let text = text.trim();
+        if !text.is_empty() {
+            append_transcript_message_lines(lines, role, text);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn append_transcript_message_lines(lines: &mut Vec<String>, role: &str, text: &str) {
+    for (index, raw_line) in text.lines().enumerate() {
+        if index == 0 {
+            lines.push(format!("{role}: {raw_line}"));
+        } else {
+            lines.push(format!("  {raw_line}"));
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn append_transcript_raw_lines(lines: &mut Vec<String>, text: &str) {
+    for raw_line in text.lines() {
+        lines.push(raw_line.to_string());
+    }
 }
 
 /// Drain buffered PTY input and write it to the corresponding PTY handles.
@@ -350,6 +834,9 @@ fn refresh_branch_live_session_summaries_with(model: &mut Model, sessions_dir: &
 
 /// Process a message and update the model (Elm: update).
 pub fn update(model: &mut Model, msg: Message) {
+    let previous_active_session = model.active_session;
+    let previous_active_focus = model.active_focus;
+
     match msg {
         Message::Quit => {
             model.quit = true;
@@ -454,6 +941,18 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::PtyOutput(pane_id, data) => {
             if let Some(session) = model.session_tab_mut(&pane_id) {
                 session.vt.process(&data);
+                crate::scroll_debug::log_lazy(|| {
+                    format!(
+                    "event=pty_output session={} bytes={} vt_rows={} vt_cols={} scrollback={} max_scrollback={} follow_live={}",
+                    pane_id,
+                    data.len(),
+                    session.vt.rows(),
+                    session.vt.cols(),
+                    session.vt.scrollback(),
+                    session.vt.max_scrollback(),
+                    session.vt.follow_live(),
+                )
+                });
             }
             if model
                 .active_session_tab()
@@ -521,10 +1020,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::KeyInput(key) => {
             if route_overlay_key(model, key) {
-                return;
-            }
-
-            if model.active_layer == ActiveLayer::Initialization {
+            } else if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
                 // Dispatch based on focused pane
@@ -722,6 +1218,12 @@ pub fn update(model: &mut Model, msg: Message) {
             model.wizard = None;
         }
     }
+
+    clear_terminal_trackpad_scroll_row_if_context_changed(
+        model,
+        previous_active_session,
+        previous_active_focus,
+    );
 
     // Flush buffered PTY input after every message so keystrokes reach the PTY
     // without waiting for the next Tick.
@@ -1974,10 +2476,21 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
 }
 
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
+    reset_active_session_scrollback_for_input(model);
     let Some(bytes) = key_event_to_bytes(key) else {
         return;
     };
     push_input_to_active_session(model, bytes);
+}
+
+fn reset_active_session_scrollback_for_input(model: &mut Model) {
+    let Some(session) = model.active_session_tab_mut() else {
+        return;
+    };
+    if session.vt.viewing_history() {
+        session.vt.clear_selection();
+        session.vt.set_follow_live(true);
+    }
 }
 
 fn apply_notification(model: &mut Model, notification: Notification) {
@@ -3139,6 +3652,8 @@ fn materialize_pending_launch_with(
     session.save(sessions_dir).map_err(|err| err.to_string())?;
     augment_agent_hook_runtime_launch_config(&mut config, sessions_dir, &session.id);
 
+    let mut vt = crate::model::VtState::new(24, 80);
+    vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
     let tab = crate::model::SessionTab {
         id: session.id.clone(),
         name: config.display_name.clone(),
@@ -3146,7 +3661,7 @@ fn materialize_pending_launch_with(
             agent_id: config.agent_id.command().to_string(),
             color: tui_agent_color(config.color),
         },
-        vt: crate::model::VtState::new(24, 80),
+        vt,
         created_at: std::time::Instant::now(),
     };
     let tab_id = tab.id.clone();
@@ -4120,6 +4635,9 @@ fn apply_pending_session_conversion_with(
         agent_id: detected.agent_id.command().to_string(),
         color: tui_agent_color(detected.agent_id.default_color()),
     };
+    session
+        .vt
+        .set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
 
     Ok(())
 }
@@ -4256,6 +4774,20 @@ where
     F: FnMut(&str) -> Result<(), String>,
     G: FnMut(&str) -> Result<(), String>,
 {
+    let hits_active_session = mouse_hits_active_session(model, mouse);
+    crate::scroll_debug::log_lazy(|| {
+        format!(
+        "event=mouse kind={:?} column={} row={} modifiers={:?} hits_active_session={} active_focus={:?} active_layer={:?}",
+        mouse.kind,
+        mouse.column,
+        mouse.row,
+        mouse.modifiers,
+        hits_active_session,
+        model.active_focus,
+        model.active_layer,
+    )
+    });
+
     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         && mouse.modifiers.contains(KeyModifiers::CONTROL)
     {
@@ -4266,7 +4798,10 @@ where
         return Ok(true);
     }
 
-    if !mouse_hits_active_session(model, mouse) {
+    if !hits_active_session {
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
+            model.terminal_trackpad_scroll_row = None;
+        }
         return Ok(false);
     }
 
@@ -4274,6 +4809,9 @@ where
         mouse.kind,
         MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
+            | MouseEventKind::Down(MouseButton::Right)
+            | MouseEventKind::Drag(MouseButton::Right)
+            | MouseEventKind::Up(MouseButton::Right)
             | MouseEventKind::Down(MouseButton::Left)
             | MouseEventKind::Drag(MouseButton::Left)
             | MouseEventKind::Up(MouseButton::Left)
@@ -4283,27 +4821,51 @@ where
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            if let Some(session) = model.active_session_tab_mut() {
-                session.vt.clear_selection();
-                let next = session
-                    .vt
-                    .scrollback()
-                    .saturating_add(1)
-                    .min(session.vt.max_scrollback());
-                session.vt.set_follow_live(false);
-                session.vt.set_scrollback(next);
-                return Ok(true);
+            let routing = active_session_scroll_routing(model);
+            log_active_session_scroll_routing(model, routing, 1, "wheel");
+            match routing {
+                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, 1)),
+                ScrollInputRouting::PtyMouse => {
+                    Ok(queue_active_session_mouse_scroll(model, mouse, 1))
+                }
             }
-            Ok(false)
         }
         MouseEventKind::ScrollDown => {
-            if let Some(session) = model.active_session_tab_mut() {
-                session.vt.clear_selection();
-                let next = session.vt.scrollback().saturating_sub(1);
-                session.vt.set_scrollback(next);
-                session.vt.set_follow_live(next == 0);
-                return Ok(true);
+            let routing = active_session_scroll_routing(model);
+            log_active_session_scroll_routing(model, routing, -1, "wheel");
+            match routing {
+                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, -1)),
+                ScrollInputRouting::PtyMouse => {
+                    Ok(queue_active_session_mouse_scroll(model, mouse, -1))
+                }
             }
+        }
+        MouseEventKind::Down(MouseButton::Right) => {
+            model.terminal_trackpad_scroll_row = Some(mouse.row);
+            Ok(false)
+        }
+        MouseEventKind::Drag(MouseButton::Right) => {
+            let Some(previous_row) = model.terminal_trackpad_scroll_row.replace(mouse.row) else {
+                return Ok(false);
+            };
+            let delta_rows = i32::from(mouse.row) - i32::from(previous_row);
+            if delta_rows == 0 {
+                return Ok(false);
+            }
+            let delta_rows = delta_rows.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            let routing = active_session_scroll_routing(model);
+            log_active_session_scroll_routing(model, routing, delta_rows, "trackpad_drag");
+            match routing {
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_active_session_by_rows(model, delta_rows))
+                }
+                ScrollInputRouting::PtyMouse => {
+                    Ok(queue_active_session_mouse_scroll(model, mouse, delta_rows))
+                }
+            }
+        }
+        MouseEventKind::Up(MouseButton::Right) => {
+            model.terminal_trackpad_scroll_row = None;
             Ok(false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
@@ -4357,18 +4919,16 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
     }
 
     let session = model.active_session_tab()?;
-    crate::renderer::collect_url_regions(
-        session.vt.screen(),
-        Rect::new(0, 0, area.width, area.height),
-    )
-    .into_iter()
-    .find(|region| {
-        let row = area.y + region.row;
-        let start_col = area.x + region.start_col;
-        let end_col = area.x + region.end_col;
-        mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
-    })
-    .map(|region| region.url)
+    let parser = session.vt.visible_screen_parser();
+    crate::renderer::collect_url_regions(parser.screen(), Rect::new(0, 0, area.width, area.height))
+        .into_iter()
+        .find(|region| {
+            let row = area.y + region.row;
+            let start_col = area.x + region.start_col;
+            let end_col = area.x + region.end_col;
+            mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
+        })
+        .map(|region| region.url)
 }
 
 fn mouse_hits_active_session(model: &Model, mouse: MouseEvent) -> bool {
@@ -4396,16 +4956,161 @@ fn mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell>
     })
 }
 
+fn clamped_mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell> {
+    let area = active_session_text_area(model)?;
+    if area.width == 0 || area.height == 0 || mouse.row < area.y || mouse.row >= area.bottom() {
+        return None;
+    }
+
+    let max_col = area.right().saturating_sub(1);
+    let clamped_col = mouse.column.clamp(area.x, max_col);
+    Some(TerminalCell {
+        row: mouse.row.saturating_sub(area.y),
+        col: clamped_col.saturating_sub(area.x),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollInputRouting {
+    LocalViewport,
+    PtyMouse,
+}
+
+fn active_session_scroll_routing(model: &Model) -> ScrollInputRouting {
+    let Some(session) = model.active_session_tab() else {
+        return ScrollInputRouting::LocalViewport;
+    };
+    session_scroll_routing(session)
+}
+
+fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRouting {
+    if !matches!(session.tab_type, SessionTabType::Agent { .. }) {
+        return ScrollInputRouting::LocalViewport;
+    }
+
+    if session.vt.accepts_mouse_scroll_input() {
+        return ScrollInputRouting::PtyMouse;
+    }
+
+    ScrollInputRouting::LocalViewport
+}
+
+fn log_active_session_scroll_routing(
+    model: &Model,
+    routing: ScrollInputRouting,
+    delta_rows: i16,
+    source: &str,
+) {
+    let Some(session) = model.active_session_tab() else {
+        return;
+    };
+    crate::scroll_debug::log_lazy(|| {
+        format!(
+        "event=scroll_route session={} source={} delta_rows={} routing={:?} alternate_screen={} uses_snapshot_scrollback={} max_scrollback={} snapshot_count={} mouse_reporting={} follow_live={}",
+        session.id,
+        source,
+        delta_rows,
+        routing,
+        session.vt.screen().alternate_screen(),
+        session.vt.uses_snapshot_scrollback(),
+        session.vt.max_scrollback(),
+        session.vt.snapshot_count(),
+        session.vt.accepts_mouse_scroll_input(),
+        session.vt.follow_live(),
+    )
+    });
+}
+
+fn queue_active_session_mouse_scroll(
+    model: &mut Model,
+    mouse: MouseEvent,
+    delta_rows: i16,
+) -> bool {
+    if delta_rows == 0 {
+        return false;
+    }
+
+    let Some(cell) = clamped_mouse_terminal_cell(model, mouse) else {
+        return false;
+    };
+
+    reset_active_session_scrollback_for_input(model);
+    let steps = usize::from(delta_rows.unsigned_abs());
+    let code = if delta_rows > 0 { 64 } else { 65 };
+    let mut bytes = Vec::with_capacity(steps.saturating_mul(12));
+    for _ in 0..steps {
+        bytes.extend_from_slice(
+            format!(
+                "\x1b[<{code};{};{}M",
+                cell.col.saturating_add(1),
+                cell.row.saturating_add(1)
+            )
+            .as_bytes(),
+        );
+    }
+    push_input_to_active_session(model, bytes);
+    true
+}
+
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     let selection = session.vt.selection()?;
     let (start, end) = normalize_selection(selection);
-    let end_col = end.col.saturating_add(1).min(session.vt.cols());
-    Some(
-        session
-            .vt
-            .screen()
-            .contents_between(start.row, start.col, end.row, end_col),
-    )
+    let parser = session.vt.visible_screen_parser();
+    let screen = parser.screen();
+    let end_col = end.col.saturating_add(1).min(screen.size().1);
+    Some(screen.contents_between(start.row, start.col, end.row, end_col))
+}
+
+fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
+    let Some(session) = model.active_session_tab_mut() else {
+        return false;
+    };
+
+    session.vt.clear_selection();
+    let previous_scrollback = session.vt.scrollback();
+    let previous_max_scrollback = session.vt.max_scrollback();
+    let previous_snapshot_position = session.vt.snapshot_position();
+    let previous_snapshot_count = session.vt.snapshot_count();
+    let previous_follow_live = session.vt.follow_live();
+    let mode = if session.vt.uses_snapshot_scrollback() {
+        "snapshot"
+    } else {
+        "row"
+    };
+    let changed = session.vt.scroll_viewport_lines(delta_rows);
+    if changed {
+        crate::scroll_debug::log_lazy(|| {
+            format!(
+            "event=scroll delta_rows={} session={} mode={} previous_scrollback={} next_scrollback={} max_scrollback={} previous_snapshot_position={} next_snapshot_position={} previous_snapshot_count={} next_snapshot_count={} previous_follow_live={} next_follow_live={}",
+            delta_rows,
+            session.id,
+            mode,
+            previous_scrollback,
+            session.vt.scrollback(),
+            previous_max_scrollback,
+            previous_snapshot_position,
+            session.vt.snapshot_position(),
+            previous_snapshot_count,
+            session.vt.snapshot_count(),
+            previous_follow_live,
+            session.vt.follow_live(),
+        )
+        });
+    }
+    changed
+}
+
+fn clear_terminal_trackpad_scroll_row_if_context_changed(
+    model: &mut Model,
+    previous_active_session: usize,
+    previous_active_focus: FocusPane,
+) {
+    if model.active_session != previous_active_session
+        || (previous_active_focus == FocusPane::Terminal
+            && model.active_focus != FocusPane::Terminal)
+    {
+        model.terminal_trackpad_scroll_row = None;
+    }
 }
 
 fn normalize_selection(selection: TerminalSelection) -> (TerminalCell, TerminalCell) {
@@ -4447,24 +5152,14 @@ fn active_session_text_area(model: &Model) -> Option<Rect> {
 }
 
 fn session_text_area(session: &crate::model::SessionTab, area: Rect) -> Rect {
-    if session.vt.max_scrollback() > 0 && area.width > 1 {
-        Rect::new(area.x, area.y, area.width - 1, area.height)
-    } else {
-        area
-    }
+    let _ = session;
+    area
 }
 
-fn session_scrollbar_area(session: &crate::model::SessionTab, area: Rect) -> Option<Rect> {
-    if session.vt.max_scrollback() > 0 && area.width > 1 {
-        Some(Rect::new(
-            area.right().saturating_sub(1),
-            area.y,
-            1,
-            area.height,
-        ))
-    } else {
-        None
-    }
+#[cfg(test)]
+fn session_has_scrollbar(session: &crate::model::SessionTab) -> bool {
+    let _ = session;
+    false
 }
 
 fn management_split(area: Rect) -> [Rect; 2] {
@@ -4572,7 +5267,9 @@ fn render_session_surface(
     show_cursor: bool,
 ) {
     let text_area = session_text_area(session, area);
-    if session.vt.screen().contents().trim().is_empty() {
+    let parser = session.vt.visible_screen_parser();
+    let screen = parser.screen();
+    if screen.contents().trim().is_empty() {
         match &session.tab_type {
             crate::model::SessionTabType::Agent { agent_id, color } => {
                 // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
@@ -4628,36 +5325,16 @@ fn render_session_surface(
         }
     } else {
         let _ = crate::renderer::render_vt_screen_with_selection(
-            session.vt.screen(),
+            screen,
             frame.buffer_mut(),
             text_area,
             session.vt.selection(),
         );
-        if let Some(scrollbar_area) = session_scrollbar_area(session, area) {
-            let content_length = session
-                .vt
-                .max_scrollback()
-                .saturating_add(text_area.height as usize);
-            let position = session
-                .vt
-                .max_scrollback()
-                .saturating_sub(session.vt.scrollback());
-            let mut scrollbar_state = ScrollbarState::new(content_length)
-                .position(position)
-                .viewport_content_length(text_area.height as usize);
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(None)
-                    .end_symbol(None),
-                scrollbar_area,
-                &mut scrollbar_state,
-            );
-        }
     }
 
     // Show the vt100 cursor when this session has terminal focus.
-    if show_cursor && !session.vt.screen().hide_cursor() {
-        let (cursor_row, cursor_col) = session.vt.screen().cursor_position();
+    if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
+        let (cursor_row, cursor_col) = screen.cursor_position();
         let x = text_area.x + cursor_col;
         let y = text_area.y + cursor_row;
         if x < text_area.right() && y < text_area.bottom() {
@@ -5524,6 +6201,38 @@ mod tests {
         );
     }
 
+    fn join_terminal_lines(lines: &[&str]) -> String {
+        lines.join("\r\n")
+    }
+
+    fn enter_alt_screen_with_text(model: &mut Model, session_id: &str, text: &str) {
+        update(
+            model,
+            Message::PtyOutput(
+                session_id.to_string(),
+                format!("\x1b[?1049h\x1b[2J\x1b[H{text}").into_bytes(),
+            ),
+        );
+    }
+
+    fn enter_alt_screen_with_lines(model: &mut Model, session_id: &str, lines: &[&str]) {
+        enter_alt_screen_with_text(model, session_id, &join_terminal_lines(lines));
+    }
+
+    fn replace_alt_screen_text(model: &mut Model, session_id: &str, text: &str) {
+        update(
+            model,
+            Message::PtyOutput(
+                session_id.to_string(),
+                format!("\x1b[2J\x1b[H{text}").into_bytes(),
+            ),
+        );
+    }
+
+    fn replace_alt_screen_lines(model: &mut Model, session_id: &str, lines: &[&str]) {
+        replace_alt_screen_text(model, session_id, &join_terminal_lines(lines));
+    }
+
     fn detected_agent(agent_id: AgentId, version: Option<&str>) -> DetectedAgent {
         disable_global_custom_agents_for_tests();
         DetectedAgent {
@@ -5538,6 +6247,8 @@ mod tests {
         agent_id: &str,
         color: crate::model::AgentColor,
     ) -> crate::model::SessionTab {
+        let mut vt = crate::model::VtState::new(30, 100);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
         crate::model::SessionTab {
             id: "agent-0".to_string(),
             name: name.to_string(),
@@ -5545,7 +6256,7 @@ mod tests {
                 agent_id: agent_id.to_string(),
                 color,
             },
-            vt: crate::model::VtState::new(30, 100),
+            vt,
             created_at: std::time::Instant::now(),
         }
     }
@@ -5719,6 +6430,113 @@ mod tests {
     }
 
     #[test]
+    fn sync_active_agent_transcript_scrollback_with_ignores_session_logs_for_agent_panes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let claude_projects_root = temp.path().join("claude/projects");
+        let codex_sessions_root = temp.path().join("codex/sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&claude_projects_root).expect("claude projects dir");
+        fs::create_dir_all(codex_sessions_root.join("2026/04/07")).expect("codex day dir");
+
+        let worktree = temp.path().join("wt-codex");
+        fs::create_dir_all(&worktree).expect("worktree");
+
+        let session_id = "agent-codex-test";
+        let mut persisted = AgentSession::new(&worktree, "feature/transcript", AgentId::Codex);
+        persisted.id = session_id.to_string();
+        persisted
+            .save(&sessions_dir)
+            .expect("persist codex session");
+
+        let transcript_path = codex_sessions_root
+            .join("2026/04/07")
+            .join("rollout-test.jsonl");
+        let transcript_lines = [
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": { "cwd": worktree.to_string_lossy() }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "prompt-1" }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "answer-1" }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "prompt-2" }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "answer-2" }]
+                }
+            })
+            .to_string(),
+        ];
+        fs::write(&transcript_path, transcript_lines.join("\n")).expect("write codex transcript");
+        let resolved = resolve_codex_transcript_source(&persisted, &codex_sessions_root)
+            .expect("resolved codex transcript source");
+        assert_eq!(resolved.path, transcript_path);
+        let parsed_lines = read_transcript_lines_for_agent(&AgentId::Codex, &resolved.path)
+            .expect("parsed codex transcript lines");
+        assert!(
+            parsed_lines.iter().any(|line| line.contains("prompt-1")),
+            "test setup should exercise real transcript parsing before verifying runtime ignore behavior"
+        );
+
+        let mut model = Model::new(worktree.clone());
+        model.sessions = vec![crate::model::SessionTab {
+            id: session_id.to_string(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(3, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        sync_active_agent_transcript_scrollback_with(
+            &mut model,
+            &sessions_dir,
+            &claude_projects_root,
+            &codex_sessions_root,
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(
+            !session.vt.has_viewport_scrollback(),
+            "agent pane scrollback should stay empty until PTY output arrives; session logs must not hydrate runtime history"
+        );
+        let text = session.vt.visible_screen_parser().screen().contents();
+        assert!(!text.contains("prompt-1"));
+        assert!(!text.contains("answer-1"));
+    }
+
+    #[test]
     fn pane_block_uses_cyan_border_when_focused() {
         let area = Rect::new(0, 0, 12, 3);
         let mut buffer = Buffer::empty(area);
@@ -5859,7 +6677,151 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_terminal_overflow_draws_scrollbar_only_when_needed() {
+    fn right_drag_over_session_scrolls_terminal_for_terminal_app_trackpad_fallback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        update(&mut model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut model, "shell-0", &format!("line-{i}"));
+        }
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: area.x,
+                row: area.y + 3,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_focus,
+            FocusPane::Terminal,
+            "session right-drag fallback should move focus to the terminal pane"
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .scrollback()
+                > 0,
+            "Terminal.app style right-drag fallback should move the viewport away from live follow mode"
+        );
+    }
+
+    #[test]
+    fn right_drag_state_clears_when_mouse_up_occurs_outside_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(model.terminal_trackpad_scroll_row, Some(area.y + 1));
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Right),
+                column: area.right(),
+                row: area.bottom(),
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(
+            model.terminal_trackpad_scroll_row.is_none(),
+            "right-drag fallback state should clear even if mouse-up lands outside the session area"
+        );
+    }
+
+    #[test]
+    fn right_drag_state_clears_when_active_session_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions.push(crate::model::SessionTab {
+            id: "shell-1".to_string(),
+            name: "Shell 2".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        update(&mut model, Message::Resize(18, 8));
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(model.terminal_trackpad_scroll_row, Some(area.y + 1));
+
+        update(&mut model, Message::SwitchSession(1));
+
+        assert!(
+            model.terminal_trackpad_scroll_row.is_none(),
+            "changing the active session should clear right-drag fallback state"
+        );
+    }
+
+    #[test]
+    fn right_drag_state_clears_when_focus_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(model.terminal_trackpad_scroll_row, Some(area.y + 1));
+
+        update(&mut model, Message::FocusNext);
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(
+            model.terminal_trackpad_scroll_row.is_none(),
+            "focus changes should clear right-drag fallback state"
+        );
+    }
+
+    #[test]
+    fn render_model_text_terminal_history_never_reserves_scrollbar_chrome() {
         let mut overflow_model = test_model();
         overflow_model.active_layer = ActiveLayer::Main;
         overflow_model.active_focus = FocusPane::Terminal;
@@ -5877,8 +6839,8 @@ mod tests {
                 .is_empty()
         });
         assert!(
-            overflow_has_scrollbar,
-            "overflowing history should render scrollbar chrome on the right edge"
+            !overflow_has_scrollbar,
+            "overflowing history should no longer reserve scrollbar chrome on the right edge"
         );
 
         let mut non_overflow_model = test_model();
@@ -5898,7 +6860,7 @@ mod tests {
             });
         assert!(
             !non_overflow_has_scrollbar,
-            "non-overflowing history should not reserve scrollbar chrome"
+            "non-overflowing history should also stay free of scrollbar chrome"
         );
     }
 
@@ -6003,6 +6965,1008 @@ mod tests {
         .expect("selection up succeeds");
 
         assert_eq!(copied.as_deref(), Some("line-7"));
+    }
+
+    #[test]
+    fn in_place_full_screen_redraw_keeps_previous_snapshot_history() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        let session = model.active_session_tab().expect("active session");
+        assert_eq!(session.vt.snapshot_count(), 2);
+        assert!(session.vt.has_snapshot_scrollback());
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        let after = render_model_text(&model, 24, 8);
+        assert!(after.contains("frame-1"));
+        assert!(!after.contains("frame-2"));
+    }
+
+    #[test]
+    fn style_only_redraw_flood_does_not_evict_meaningful_snapshot_history() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        for index in 0..2200 {
+            let style_redraw = if index % 2 == 0 {
+                "\x1b[7m\x1b[1;1Hframe-2\x1b[0m"
+            } else {
+                "\x1b[4m\x1b[1;1Hframe-2\x1b[0m"
+            };
+            update(
+                &mut model,
+                Message::PtyOutput("shell-0".to_string(), style_redraw.as_bytes().to_vec()),
+            );
+        }
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            session.vt.snapshot_count() <= 3,
+            "style-only redraw flood should collapse into a tiny bounded history footprint"
+        );
+        assert!(session.vt.has_snapshot_scrollback());
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let mut reached_frame_1 = false;
+        for _ in 0..3 {
+            update(
+                &mut model,
+                Message::MouseInput(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: area.x,
+                    row: area.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            );
+            let after = render_model_text(&model, 24, 8);
+            if after.contains("frame-1") {
+                reached_frame_1 = true;
+                break;
+            }
+        }
+
+        assert!(
+            reached_frame_1,
+            "bounded history should still preserve the oldest meaningful frame after redraw flood"
+        );
+    }
+
+    #[test]
+    fn snapshot_scrollback_works_in_alt_screen_after_main_output() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+
+        for index in 0..20 {
+            append_session_line(&mut model, "shell-0", &format!("seed-{index}"));
+        }
+
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(session.vt.uses_snapshot_scrollback());
+        assert!(session.vt.has_snapshot_scrollback());
+
+        let before = render_model_text(&model, 24, 8);
+        assert!(before.contains("frame-2"));
+        assert!(!before.contains("frame-1"));
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let after = render_model_text(&model, 24, 8);
+        assert!(after.contains("frame-1"));
+        assert!(!after.contains("frame-2"));
+    }
+
+    #[test]
+    fn bottom_aligned_first_frame_does_not_leave_blank_snapshot_history() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+
+        enter_alt_screen_with_text(&mut model, "shell-0", "");
+        let rows = model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .rows();
+        replace_alt_screen_text(
+            &mut model,
+            "shell-0",
+            &format!("\u{1b}[{};1Htail-frame", rows),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert_eq!(
+            session.vt.snapshot_count(),
+            1,
+            "first visible full-screen frame should replace the transient blank frame instead of extending history"
+        );
+        assert!(
+            !session.vt.has_snapshot_scrollback(),
+            "scrollback must stay disabled when only one meaningful frame exists"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        let text = render_model_text(&model, 24, 8);
+        assert!(text.contains("tail-frame"));
+    }
+
+    #[test]
+    fn snapshot_scrollback_reveals_previous_full_screen_viewport_after_line_shift() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        assert_eq!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .max_scrollback(),
+            0,
+            "full-screen updates should not create vt100 row scrollback"
+        );
+
+        let before = render_model_text(&model, 24, 8);
+        assert!(before.contains("line-6"));
+        assert!(!before.contains("line-1"));
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let after = render_model_text(&model, 24, 8);
+        assert!(
+            after.contains("line-1"),
+            "snapshot scrollback should reveal the previous full-screen viewport when the content advanced vertically"
+        );
+        assert!(!after.contains("line-6"));
+    }
+
+    #[test]
+    fn full_screen_snapshot_history_does_not_render_scrollbar_when_row_scrollback_is_zero() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        let area = active_session_content_area(&model).expect("active session area");
+        let buffer = render_model_buffer(&model, 24, 8);
+        let has_scrollbar = (area.y..area.bottom())
+            .any(|y| !buffer[(area.right() - 1, y)].symbol().trim().is_empty());
+
+        assert!(
+            !has_scrollbar,
+            "snapshot history should no longer reserve scrollbar chrome even without vt100 row scrollback"
+        );
+    }
+
+    #[test]
+    fn snapshot_history_keeps_full_terminal_width_without_scrollbar_gutter() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        let content = active_session_content_area(&model).expect("content area");
+        let text = active_session_text_area(&model).expect("text area");
+
+        assert_eq!(
+            text.width, content.width,
+            "snapshot-backed history should keep the full terminal width once scrollbar chrome is removed"
+        );
+    }
+
+    #[test]
+    fn selection_copy_uses_snapshot_viewport_surface_when_viewing_past_full_screen_frame() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let mut copied = None;
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("selection down succeeds");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x + 6,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("selection drag succeeds");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x + 6,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("selection up succeeds");
+
+        assert_eq!(
+            copied.as_deref(),
+            Some("line-1"),
+            "selection copy should read from the visible snapshot surface instead of the live frame"
+        );
+    }
+
+    #[test]
+    fn snapshot_scrollback_stays_frozen_until_it_returns_to_live() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &["line-3", "line-4", "line-5", "line-6", "line-7"],
+        );
+
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("line-1"));
+        assert!(!frozen.contains("line-7"));
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        let previous = render_model_text(&model, 24, 8);
+        assert!(!previous.contains("line-1"));
+        assert!(
+            previous.contains("line-6") || previous.contains("line-7"),
+            "scrolling down from the oldest cached viewport should leave the frozen history view and move toward the newest available content"
+        );
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        let live = render_model_text(&model, 24, 8);
+        assert!(live.contains("line-7"));
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .follow_live(),
+            "returning to the newest snapshot should restore live-follow mode"
+        );
+    }
+
+    #[test]
+    fn agent_memory_scrollback_uses_in_memory_snapshots_when_frames_do_not_overlap() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &["alpha-1", "alpha-2", "alpha-3", "alpha-4", "alpha-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "agent-0",
+            &["beta-1", "beta-2", "beta-3", "beta-4", "beta-5"],
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(
+            session.vt.has_snapshot_scrollback(),
+            "full-screen redraw agents should still keep snapshot history when consecutive frames do not share a vertical overlap that can be normalized into row scrollback"
+        );
+        assert!(session.vt.scroll_snapshot_up(1));
+
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("alpha-1"));
+        assert!(!frozen.contains("beta-1"));
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .viewing_history(),
+            "full-screen redraw agents should still enter history view when they truly need snapshot fallback"
+        );
+    }
+
+    #[test]
+    fn codex_status_churn_shift_uses_local_row_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &["status-a", "line-1", "line-2", "line-3", "line-4"],
+        );
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[H\x1b[1;1Hstatus-b\x1b[2;1Hline-2\x1b[3;1Hline-3\x1b[4;1Hline-4\x1b[5;1Hline-5".to_vec(),
+            ),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session.vt.uses_snapshot_scrollback(),
+            "Codex-like redraws with one changing status row should still derive local row history instead of falling back to page-sized snapshot scrolling"
+        );
+        assert!(
+            session.vt.max_scrollback() > 0,
+            "a vertical shift hidden by status churn should still contribute at least one local history row"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("line-1"));
+        assert!(!frozen.contains("status-a"));
+        assert!(!frozen.contains("line-5"));
+    }
+
+    #[test]
+    fn agent_memory_scrollback_preserves_coalesced_full_screen_redraw_frames() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1049h\x1b[2J\x1b[Hframe-1\x1b[2J\x1b[Hframe-2".to_vec(),
+            ),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(
+            session.vt.has_snapshot_scrollback(),
+            "coalesced redraw capture should still populate snapshot history even when wheel routing is PTY-owned"
+        );
+        assert!(session.vt.scroll_snapshot_up(1));
+
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("frame-1"));
+        assert!(!frozen.contains("frame-2"));
+    }
+
+    #[test]
+    fn agent_mouse_wheel_forwards_to_pty_when_mouse_reporting_is_enabled() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1000h\x1b[?1006hframe-1".to_vec(),
+            ),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[<64;1;1M".to_vec());
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .follow_live(),
+            "PTY-driven agent scrolling should keep the local viewport pinned to live output"
+        );
+    }
+
+    #[test]
+    fn agent_sessions_keep_full_terminal_width_without_scrollbar_overlay() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1000h\x1b[?1006h\x1b[?1049h\x1b[2J\x1b[Hframe-1".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"\x1b[2J\x1b[Hframe-2".to_vec()),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            session.vt.has_viewport_scrollback(),
+            "precondition: local snapshot history still exists even though wheel handling is delegated to PTY"
+        );
+        assert!(
+            !session_has_scrollbar(session),
+            "gwt should never expose a local scrollbar overlay for agent panes"
+        );
+
+        let content = active_session_content_area(&model).expect("content area");
+        let text = active_session_text_area(&model).expect("text area");
+        assert_eq!(
+            text.width, content.width,
+            "removing scrollbar chrome should keep the full pane width for terminal rendering"
+        );
+    }
+
+    #[test]
+    fn alternate_screen_agent_without_mouse_reporting_uses_local_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "agent-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"\x1b[2J\x1b[Hframe-2".to_vec()),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "agents without mouse reporting should keep wheel input inside gwt's local viewport cache"
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session_has_scrollbar(session),
+            "local viewport scrolling should still render without any scrollbar overlay"
+        );
+        assert!(
+            session.vt.viewing_history(),
+            "wheel input should move alternate-screen agents into local history when no PTY mouse capability was negotiated"
+        );
+    }
+
+    #[test]
+    fn non_alternate_screen_agent_without_mouse_reporting_uses_local_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                (1..=40)
+                    .map(|line| format!("line-{line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into_bytes(),
+            ),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "non alternate-screen agents should keep using local scrollback when no PTY scroll capability was negotiated"
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session_has_scrollbar(session),
+            "local scrollback panes should also stay free of scrollbar overlay"
+        );
+        assert!(
+            session.vt.viewing_history(),
+            "wheel input should move non alternate-screen panes into local history"
+        );
+    }
+
+    #[test]
+    fn snapshot_backed_agent_without_mouse_reporting_uses_local_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[Hline-1\r\nline-2\r\nline-3\r\nline-4\r\nline-5".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[Hline-2\r\nline-3\r\nline-4\r\nline-5\r\nline-6".to_vec(),
+            ),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session.vt.uses_snapshot_scrollback(),
+            "redraw-shift normalization should promote Codex-like panes into row-based local history before the first wheel step"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "snapshot-backed agents without mouse reporting should still scroll locally instead of synthesizing arrow-key input"
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session_has_scrollbar(session),
+            "even row-based local history should not reintroduce a scrollbar overlay"
+        );
+        assert!(
+            session.vt.viewing_history(),
+            "wheel input should move the local viewport into history rather than injecting arrow keys into the PTY"
+        );
+    }
+
+    #[test]
+    fn agent_trackpad_drag_forwards_repeated_mouse_wheel_steps_to_pty() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1002h\x1b[?1006hframe-1".to_vec(),
+            ),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: area.x,
+                row: area.y.saturating_add(2),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right drag should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued wheel input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[<64;1;3M\x1b[<64;1;3M".to_vec());
+    }
+
+    #[test]
+    fn alternate_screen_agent_trackpad_drag_routes_to_local_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "agent-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::LocalViewport,
+            "agents without mouse reporting should keep trackpad drags on the local viewport path"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right down should succeed");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: area.x,
+                row: area.bottom().saturating_sub(1),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right drag should succeed");
+
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "trackpad drag should not be translated into arrow-key input for local-scroll agents"
+        );
+    }
+
+    #[test]
+    fn snapshot_backed_agent_trackpad_drag_routes_to_local_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[Hline-1\r\nline-2\r\nline-3\r\nline-4\r\nline-5".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[Hline-2\r\nline-3\r\nline-4\r\nline-5\r\nline-6".to_vec(),
+            ),
+        );
+
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::LocalViewport,
+            "snapshot-backed agents without mouse reporting should keep trackpad drags on the local viewport path"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right down should succeed");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: area.x,
+                row: area.bottom().saturating_sub(1),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right drag should succeed");
+
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "snapshot-backed agents should keep trackpad drags local instead of injecting arrow-key input"
+        );
     }
 
     #[test]
@@ -8637,6 +10601,24 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_codex_disables_alternate_screen() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(
+            config.args.contains(&"--no-alt-screen".to_string()),
+            "Codex launches should prefer inline mode so gwt can rely on PTY row scrollback instead of reconstructing page-sized snapshots: {:?}",
+            config.args
+        );
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_falls_back_to_continue_without_resume_session_id() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -9027,8 +11009,10 @@ CUSTOM_ENV = "enabled"
         let mut observed = None;
         for _ in 0..50 {
             if let Ok(value) = fs::read_to_string(&marker) {
-                observed = Some(value);
-                break;
+                if !value.is_empty() {
+                    observed = Some(value);
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9073,8 +11057,10 @@ CUSTOM_ENV = "enabled"
         let mut observed = None;
         for _ in 0..50 {
             if let Ok(value) = fs::read_to_string(&marker) {
-                observed = Some(value);
-                break;
+                if !value.is_empty() {
+                    observed = Some(value);
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -10258,6 +12244,90 @@ CUSTOM_ENV = "enabled"
         let forwarded = model.pending_pty_inputs().back().unwrap();
         assert_eq!(forwarded.session_id, "shell-0");
         assert_eq!(forwarded.bytes, vec![0x03]);
+    }
+
+    #[test]
+    fn forward_key_to_active_session_returns_row_scrollback_to_live() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut model, "shell-0", &format!("line-{i}"));
+        }
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .viewing_history(),
+            "precondition: shell session should be browsing history before key input"
+        );
+
+        forward_key_to_active_session(&mut model, key(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(session.vt.follow_live());
+        assert!(!session.vt.viewing_history());
+        assert_eq!(session.vt.scrollback(), 0);
+        let forwarded = model.pending_pty_inputs().back().expect("queued key input");
+        assert_eq!(forwarded.bytes, b"a".to_vec());
+    }
+
+    #[test]
+    fn forward_key_to_active_session_returns_snapshot_history_to_live() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .viewing_history(),
+            "precondition: full-screen session should be browsing snapshot history before key input"
+        );
+
+        forward_key_to_active_session(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(session.vt.follow_live());
+        assert!(!session.vt.viewing_history());
+        let visible = session.vt.visible_screen_parser().screen().contents();
+        assert!(visible.contains("frame-2"));
+        assert!(!visible.contains("frame-1"));
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued enter input");
+        assert_eq!(forwarded.bytes, vec![b'\r']);
     }
 
     #[test]
