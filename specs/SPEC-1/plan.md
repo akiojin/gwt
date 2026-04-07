@@ -64,6 +64,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 14. When an agent pane enables SGR mouse reporting, forward wheel / trackpad scroll gestures to the PTY instead of applying gwt-local scrollback so the agent owns redraw semantics.
 15. Keep the decision capability-driven: panes without explicit PTY mouse-scroll negotiation continue to use gwt-local scrollback.
 16. When an agent pane uses PTY-owned scrolling, suppress the gwt local scrollbar overlay because local snapshot metrics no longer represent the visible viewport position.
+17. For agent panes that stay on local snapshot scrollback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so Codex-style redraw bursts do not collapse history to a single final frame.
 
 ## Dependencies
 

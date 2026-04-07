@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: coalesced PTY payloads can hide intermediate agent redraw frames
+
+### 事象
+
+Codex pane は local snapshot scrollback 経路に入っているのに、
+実際には少数 frame しか遡れず「ほとんどスクロールできない」状態になった。
+
+### 原因
+
+- event loop は同一 session の PTY 出力 chunk を 1 payload に coalesce していた。
+- `VtState::process()` はその payload 全体を処理した後に 1 回だけ snapshot を取っていたため、
+  1 payload 内に複数の `clear + home` full-screen redraw があると中間 frame が履歴に残らなかった。
+- Claude Code は PTY-owned scroll で回避されていたが、Codex は local snapshot path を使うため、
+  この frame collapse がそのまま scrollback 欠落として見えていた。
+
+### 再発防止策
+
+1. agent memory-backed snapshot capture は coalesced payload 内の redraw 境界ごとに distinct frame を保持する。
+2. 「1 payload 内に複数 full-screen frame がある Codex 相当ケース」の model/app 回帰テストを固定する。
+3. PTY coalescing の有無だけで scrollback 深さが変わらないことを前提に設計する。
+
 ## 2026-04-07 — fix: agent scroll should defer to PTY mouse reporting when available
 
 ### 事象

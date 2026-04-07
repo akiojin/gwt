@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `78/78` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T09:12:00Z`
+- Task progress: `79/79` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T10:10:00Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -35,6 +35,7 @@
 - PTY-bound key input now exits row/snapshot history and returns the viewport to live-follow before forwarding bytes, so typing never continues against a stale historical viewport.
 - Agent panes that enable SGR mouse reporting now receive wheel and Terminal.app right-drag scroll input through the PTY, so gwt stops competing with agent-owned redraw and scroll state when the embedded agent can handle scrolling itself.
 - Agent scroll ownership is now capability-driven: panes that explicitly negotiate PTY mouse scrolling use the PTY-owned path and hide the stale local scrollbar overlay, while panes without that capability continue to use gwt-local scrollback.
+- Agent-pane snapshot capture now preserves intermediate clear+redraw frames even when one coalesced PTY payload contains multiple full-screen redraws, restoring Codex local scrollback depth without falling back to PTY-owned scrolling.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.

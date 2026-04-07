@@ -540,6 +540,42 @@ fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
+fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
+    const CLEAR_HOME: &[u8] = b"\x1b[2J\x1b[H";
+
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut starts = vec![0usize];
+    let mut search_index = 0usize;
+    while search_index + CLEAR_HOME.len() <= bytes.len() {
+        let Some(relative) = bytes[search_index..]
+            .windows(CLEAR_HOME.len())
+            .position(|window| window == CLEAR_HOME)
+        else {
+            break;
+        };
+        let absolute = search_index + relative;
+        if absolute != 0 {
+            starts.push(absolute);
+        }
+        search_index = absolute.saturating_add(CLEAR_HOME.len());
+    }
+
+    starts.sort_unstable();
+    starts.dedup();
+
+    let mut segments = Vec::with_capacity(starts.len());
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(bytes.len());
+        if *start < end {
+            segments.push(&bytes[*start..end]);
+        }
+    }
+    segments
+}
+
 fn preview_visible_line(line: &str) -> String {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -695,9 +731,23 @@ impl VtState {
         let previous_scrollback = self.scrollback();
         let previous_max_scrollback = self.max_scrollback;
         let previous_snapshot_count = self.snapshots.len();
-        self.update_mouse_reporting_modes(bytes);
-        self.parser.process(bytes);
-        self.process_scrollback_bytes(bytes);
+        let segments = if matches!(
+            self.scrollback_strategy,
+            ScrollbackStrategy::AgentMemoryBacked
+        ) {
+            split_agent_snapshot_segments(bytes)
+        } else {
+            vec![bytes]
+        };
+
+        for (index, segment) in segments.iter().enumerate() {
+            self.update_mouse_reporting_modes(segment);
+            self.parser.process(segment);
+            self.process_scrollback_bytes(segment);
+            if index + 1 < segments.len() {
+                self.capture_snapshot();
+            }
+        }
         self.refresh_scrollback_metrics();
         if self.max_scrollback > 0 {
             self.snapshot_cursor = None;
@@ -1829,6 +1879,32 @@ mod tests {
         assert!(vt.uses_snapshot_scrollback());
 
         assert!(vt.scroll_viewport_lines(1));
+        let contents = vt.visible_screen_parser().screen().contents();
+        assert!(contents.contains("frame-1"));
+        assert!(!contents.contains("frame-2"));
+    }
+
+    #[test]
+    fn agent_scrollback_strategy_keeps_intermediate_full_screen_frames_within_one_payload() {
+        let mut vt = VtState::new(5, 20);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        let mut payload = b"\x1b[?1049h".to_vec();
+        payload.extend_from_slice(&full_screen_frame(&[
+            "frame-1", "line-2", "line-3", "line-4", "line-5",
+        ]));
+        payload.extend_from_slice(&full_screen_frame(&[
+            "frame-2", "line-3", "line-4", "line-5", "line-6",
+        ]));
+
+        vt.process(&payload);
+
+        assert!(
+            vt.has_snapshot_scrollback(),
+            "coalesced PTY payloads should still preserve older full-screen frames for agent scrollback"
+        );
+        assert!(vt.scroll_viewport_lines(1));
+
         let contents = vt.visible_screen_parser().screen().contents();
         assert!(contents.contains("frame-1"));
         assert!(!contents.contains("frame-2"));

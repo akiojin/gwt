@@ -129,6 +129,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005l**: Any key input forwarded to the active PTY returns the session viewport to live-follow first, so command input never stays attached to a stale historical viewport.
 - **FR-005m**: Agent panes that explicitly negotiate PTY mouse scrolling receive wheel / trackpad scroll input through the PTY instead of gwt-local scrollback so the agent remains the source of truth for redraw and scroll state.
 - **FR-005n**: While an agent pane is using PTY-owned scrolling, gwt suppresses its local scrollbar overlay rather than showing a stale thumb derived from unrelated local snapshot history.
+- **FR-005o**: Even when one coalesced PTY payload contains multiple full-screen clear+redraw frames, agent-pane in-memory snapshot history preserves each distinct frame so local Codex-style scrollback does not collapse to only the final visible frame.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
@@ -180,3 +181,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-024**: While browsing row or snapshot history, any PTY-bound key input returns the viewport to the live screen before the input is forwarded.
 - **SC-025**: When an agent pane explicitly negotiates PTY-owned scrolling, mouse-wheel and Terminal.app right-drag fallback input are forwarded to the PTY as SGR wheel events, and gwt does not try to reinterpret that interaction as local scrollback.
 - **SC-026**: While PTY-owned scrolling is active, the gwt scrollbar overlay is hidden so the pane no longer shows a misleading thumb that does not track the agent-controlled viewport.
+- **SC-027**: If an agent redraws multiple full-screen frames inside one coalesced PTY payload, wheel-driven local scrollback can still step back through those intermediate distinct frames instead of exposing only the last frame in the payload.

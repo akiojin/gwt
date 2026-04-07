@@ -6685,6 +6685,43 @@ mod tests {
     }
 
     #[test]
+    fn agent_memory_scrollback_preserves_coalesced_full_screen_redraw_frames() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1049h\x1b[2J\x1b[Hframe-1\x1b[2J\x1b[Hframe-2".to_vec(),
+            ),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("frame-1"));
+        assert!(!frozen.contains("frame-2"));
+    }
+
+    #[test]
     fn agent_mouse_wheel_forwards_to_pty_when_mouse_reporting_is_enabled() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
