@@ -31,6 +31,7 @@ use gwt_tui::{
 };
 
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
+const PTY_OUTPUT_INPUT_GRACE_SLICE: Duration = Duration::from_millis(1);
 const MAX_MOUSE_SCROLL_BURST_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,27 @@ where
     }
 
     burst
+}
+
+fn next_message_for_loop_iteration<F>(
+    pending_messages: &mut VecDeque<Message>,
+    deadline: Instant,
+    had_pty_output: bool,
+    mut poll_event: F,
+) -> Option<Message>
+where
+    F: FnMut(Instant, Duration) -> Option<Message>,
+{
+    if let Some(msg) = pending_messages.pop_front() {
+        return Some(msg);
+    }
+
+    let poll_slice = if had_pty_output {
+        PTY_OUTPUT_INPUT_GRACE_SLICE
+    } else {
+        PTY_OUTPUT_POLL_SLICE
+    };
+    poll_event(deadline, poll_slice)
 }
 
 fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
@@ -320,14 +342,16 @@ fn run_app(
                 break;
             }
 
-            if drain_pty_output_into_model(&mut model) {
-                break;
-            }
+            let had_pty_output = drain_pty_output_into_model(&mut model);
 
-            let Some(msg) = pending_messages
-                .pop_front()
-                .or_else(|| event::poll_event_slice(deadline, PTY_OUTPUT_POLL_SLICE))
+            let Some(msg) =
+                next_message_for_loop_iteration(&mut pending_messages, deadline, had_pty_output, {
+                    |deadline, slice| event::poll_event_slice(deadline, slice)
+                })
             else {
+                if had_pty_output {
+                    break;
+                }
                 continue;
             };
 
@@ -623,6 +647,66 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn next_message_for_loop_iteration_prioritizes_pending_queue_during_pty_updates() {
+        let mut pending_messages = VecDeque::from([Message::Tick]);
+        let mut polled = false;
+
+        let next = next_message_for_loop_iteration(
+            &mut pending_messages,
+            Instant::now(),
+            true,
+            |_deadline, _slice| {
+                polled = true;
+                None
+            },
+        );
+
+        assert!(matches!(next, Some(Message::Tick)));
+        assert!(
+            !polled,
+            "queued input should be consumed before polling when PTY output is active"
+        );
+    }
+
+    #[test]
+    fn next_message_for_loop_iteration_uses_grace_slice_after_pty_output() {
+        let mut pending_messages = VecDeque::new();
+        let mut observed_slice = None;
+
+        let next = next_message_for_loop_iteration(
+            &mut pending_messages,
+            Instant::now(),
+            true,
+            |_deadline, slice| {
+                observed_slice = Some(slice);
+                Some(Message::Tick)
+            },
+        );
+
+        assert!(matches!(next, Some(Message::Tick)));
+        assert_eq!(observed_slice, Some(PTY_OUTPUT_INPUT_GRACE_SLICE));
+    }
+
+    #[test]
+    fn next_message_for_loop_iteration_uses_standard_slice_without_pty_output() {
+        let mut pending_messages = VecDeque::new();
+        let mut observed_slice = None;
+
+        let next = next_message_for_loop_iteration(
+            &mut pending_messages,
+            Instant::now(),
+            false,
+            |_deadline, slice| {
+                observed_slice = Some(slice);
+                Some(Message::Tick)
+            },
+        );
+
+        assert!(matches!(next, Some(Message::Tick)));
+        assert_eq!(observed_slice, Some(PTY_OUTPUT_POLL_SLICE));
     }
 
     #[test]
