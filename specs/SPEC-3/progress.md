@@ -33,10 +33,11 @@
   agent sessions, render the old-TUI grouped history layout, and restore
   `Resume` / `Start new` semantics including the resume-ID fallback to
   `Continue`.
-- Quick Start restore now treats Claude as an explicit opt-in path for
-  skip-permissions: persisted Claude history no longer auto-restores
-  `skip_permissions=true`, and the wizard defaults Claude back to `No` unless
-  re-selected during the current launch.
+- Quick Start restore now applies persisted `skip_permissions` consistently
+  across built-in agents, including Claude.
+- Claude launch no longer injects the experimental
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` environment toggle by default, so
+  gwt launch behavior stays aligned with direct CLI execution.
 - Persisted agent session metadata now stores Quick Start restore fields
   (`reasoning_level`, `skip_permissions`, resume session ID) so future
   launches can replay the previous configuration instead of showing a static

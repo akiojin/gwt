@@ -306,7 +306,8 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-044**: After launch materialization, `GWT_PROJECT_ROOT` and persisted
   session metadata use the actual launched worktree path, and any
   materialization error aborts launch before PTY spawn.
-- **FR-045**: Quick Start restores `skip_permissions` for non-Claude agents only; for Claude entries, wizard restoration forces `SkipPermissions=No` until the user explicitly selects `Yes` in the current launch flow.
+- **FR-045**: Quick Start restores persisted `skip_permissions` for all built-in agents, including Claude.
+- **FR-046**: GWT must not inject Claude-only experimental auto-mode environment toggles by default; Claude launch environment should match direct CLI behavior unless explicitly configured by the user.
 
 ## Non-Functional Requirements
 
@@ -324,7 +325,6 @@ As a developer, I want to convert an existing session to a different agent type 
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | Enable agent teams |
 | `CLAUDE_CODE_NO_FLICKER` | `1` | Disable TUI flicker |
 | `DISABLE_TELEMETRY` | `1` | Disable Statsig metrics |
 | `DISABLE_ERROR_REPORTING` | `1` | Disable Sentry error reporting |
@@ -363,7 +363,6 @@ As a developer, I want to convert an existing session to a different agent type 
 | `--print` | Non-interactive mode (SDK mode) |
 | `--dangerously-skip-permissions` | Skip permission prompts (legacy behavior) |
 | `--permission-mode bypassPermissions` | Bypass all permission checks (alternate permission-mode form) |
-| `--enable-auto-mode` | Unlock auto mode in Shift+Tab cycle |
 | `--model <model>` | Model selection (alias: `sonnet`, `opus`, or full name) |
 | `--allowedTools <tools>` | Tools that execute without prompting (pattern matching supported) |
 | `--disallowedTools <tools>` | Tools removed from context entirely |
