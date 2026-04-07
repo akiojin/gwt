@@ -267,6 +267,8 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 8. Given the managed search runtime cannot be bootstrapped because no suitable Python candidate exists at all, when gwt surfaces the warning, then the message includes install guidance.
 9. Given a user invokes standalone semantic search over project implementation files, when gwt exposes the standalone skill and slash command surface, then `gwt-project-search` is the canonical name.
 10. Given the bundled assets are distributed to a worktree, when standalone project search assets are materialized, then no `gwt-file-search` skill or slash-command asset is written.
+11. Given `search-files` is used for implementation discovery, when file indexing runs, then embedded skill assets, local SPEC directories, archived SPEC directories, local task logs, and snapshot files are excluded from the implementation-file collection.
+12. Given project documentation is indexed separately from implementation files, when `index-files` completes, then `search-files` searches the code-focused collection by default and `search-files-docs` can search the docs-focused collection explicitly.
 
 ## Functional Requirements (Phase 4: Skill Consolidation)
 
@@ -294,6 +296,8 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 - **FR-045**: Startup and clone-completion notifications use the same stable project-index runtime classification rather than brittle human-text matching.
 - **FR-046**: `gwt-project-search` is the canonical standalone skill and slash-command name for semantic search over project implementation files, while internal runner actions remain `search-files` / `index-files`.
 - **FR-047**: Search-related skill documentation that points users to standalone project-file search references `gwt-project-search` as the primary entrypoint, and `gwt-file-search` is not distributed as a public asset.
+- **FR-048**: `index-files` splits indexed project files into separate code and docs collections. `search-files` targets the code-focused collection by default, while `search-files-docs` targets project docs explicitly.
+- **FR-049**: The code-focused file collection excludes embedded skill assets (`.claude/`, `.codex/`), local SPEC directories (`specs/`), archived SPEC directories (`specs-archive/`), local task logs (`tasks/`), and snapshot files (`*.snap`) so implementation search is not dominated by generated or planning artifacts.
 
 ## Success Criteria
 
@@ -327,3 +331,5 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 - **SC-026**: When no suitable bootstrap Python is available, gwt surfaces install guidance that references Python 3.9+ and the expected Windows `python` / `py -3` commands.
 - **SC-027**: Distributed skill assets include `gwt-project-search` for both Claude and Codex, and `/gwt:gwt-project-search` is available as the canonical slash command.
 - **SC-028**: Distributed worktrees do not contain `gwt-file-search` skill or slash-command assets, preventing public naming drift away from the project-search workflow.
+- **SC-029**: Reindexing a repository with `.claude/`, `.codex/`, `specs/`, `specs-archive/`, `tasks/`, and snapshot files present leaves those artifacts out of the implementation-file collection while still indexing implementation code.
+- **SC-030**: After `index-files`, a query executed through `search-files` returns implementation files without README/spec/skill asset noise, and `search-files-docs` can still retrieve project documentation separately.

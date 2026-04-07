@@ -1,5 +1,23 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: semantic file search は collection 設計でノイズを消す
+
+### 事象
+
+`gwt-search --files` が skill docs、SPEC、archive、snapshot まで同じ collection に入れていたため、
+implementation code を探したい query でも markdown 系 artifacts が先に出やすかった。
+
+### 原因
+
+- 「files」を 1 collection で持ち、planning/docs artifacts と implementation files を分離していなかった。
+- embedded skills や local SPECs は別 search surface を持っているのに、file search 側でも再度 index してしまっていた。
+
+### 再発防止策
+
+1. semantic search の品質問題を query tuning だけで片付けず、collection 境界が user intent に合っているか先に確認する。
+2. 別の検索 surface を持つ artifacts（embedded skills, SPECs, archive, task logs, snapshots）は implementation-file collection に入れない。
+3. implementation search と docs search を両立したい場合は 1 collection に混ぜず、collection を分けて default surface を意図的に選ぶ。
+
 ## 2026-04-07 — fix: public skill 名は internal action 名ではなくユーザー責務に合わせる
 
 ### 事象
