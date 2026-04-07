@@ -180,6 +180,9 @@ fn run_app(
 
     // Phase 8: bootstrap the index worker (reconcile + Issue refresh + watchers).
     if model.active_layer != ActiveLayer::Initialization {
+        // Wire the notification bus first so log_event() entries flow into the
+        // Logs tab as well as `~/.gwt/logs/index.log`.
+        gwt_tui::index_worker::init_notification_bus(model.notification_bus_handle());
         let repo_root = model.repo_path().to_path_buf();
         let active_worktrees = model.active_worktree_paths();
         gwt_tui::index_worker::bootstrap(&repo_root, &active_worktrees);

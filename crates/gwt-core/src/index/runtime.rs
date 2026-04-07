@@ -127,6 +127,17 @@ pub struct RefreshIssuesOptions {
     pub ttl: Duration,
 }
 
+/// Outcome of a single `refresh_issues_if_stale` invocation. Lets callers
+/// distinguish "actually spawned a runner" from "TTL still valid, skipped".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshDecision {
+    /// Index was missing or stale; the spawner was invoked.
+    Spawned,
+    /// TTL has not expired yet. `remaining_seconds` is how long until the
+    /// next refresh becomes due.
+    SkippedWithinTtl { remaining_seconds: u64 },
+}
+
 /// Refresh the Issue index if (a) no metadata exists, or (b) the recorded
 /// `last_full_refresh` is older than `ttl`. Returns immediately after
 /// dispatching to the spawner — the spawner is responsible for any
@@ -134,15 +145,22 @@ pub struct RefreshIssuesOptions {
 pub async fn refresh_issues_if_stale<S: RunnerSpawner + ?Sized>(
     opts: &RefreshIssuesOptions,
     spawner: &S,
-) -> Result<()> {
+) -> Result<RefreshDecision> {
     let issues_dir = gwt_index_repo_dir_under(&opts.index_root, &opts.repo_hash).join("issues");
     let meta_path = issues_dir.join("meta.json");
+    let mut remaining_seconds: u64 = 0;
     let stale = if meta_path.is_file() {
         match read_issue_meta(&meta_path) {
             Some(meta) => match DateTime::parse_from_rfc3339(&meta.last_full_refresh) {
                 Ok(dt) => {
                     let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
-                    age.to_std().unwrap_or(Duration::MAX) >= opts.ttl
+                    let age_std = age.to_std().unwrap_or(Duration::MAX);
+                    if age_std >= opts.ttl {
+                        true
+                    } else {
+                        remaining_seconds = (opts.ttl - age_std).as_secs();
+                        false
+                    }
                 }
                 Err(_) => true,
             },
@@ -156,8 +174,10 @@ pub async fn refresh_issues_if_stale<S: RunnerSpawner + ?Sized>(
         spawner
             .spawn_index_issues(opts.repo_hash.as_str(), &opts.project_root, false)
             .map_err(|e| GwtError::Other(format!("spawn issue index: {e}")))?;
+        Ok(RefreshDecision::Spawned)
+    } else {
+        Ok(RefreshDecision::SkippedWithinTtl { remaining_seconds })
     }
-    Ok(())
 }
 
 fn gwt_index_repo_dir_under(index_root: &Path, repo: &RepoHash) -> PathBuf {

@@ -3206,6 +3206,11 @@ fn materialize_pending_launch_with(
         // Phase 8: ensure a watcher is running for this Worktree so live
         // SPEC/file edits feed the incremental indexer.
         crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
+        // Kick an initial integrity build for this worktree (only when a
+        // pane actually opens) so the index reflects current on-disk state
+        // before the first search. Throttled by a global semaphore so
+        // multiple pane opens don't overwhelm the system.
+        crate::index_worker::kick_initial_build_for_worktree(&repo_path_for_watcher, &worktree);
     }
 
     refresh_branch_live_session_summaries_with(model, sessions_dir);

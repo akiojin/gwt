@@ -156,6 +156,27 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
     })
 }
 
+/// Prefixes under the Worktree root that should never feed into the index
+/// even when they are not listed in `.gitignore`. These mirror the
+/// runner's `classify_file_bucket` skip list plus common heavy build
+/// artifact directories so the watcher does not trigger rebuilds from
+/// agent hook writes or cargo target churn.
+const WATCHER_BUILTIN_SKIP_PREFIXES: &[&str] = &[
+    ".git",
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".gwt",
+    "specs-archive",
+    "tasks",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+];
+
 fn build_gitignore(worktree: &Path) -> Gitignore {
     let mut builder = GitignoreBuilder::new(worktree);
     let gitignore_path = worktree.join(".gitignore");
@@ -165,7 +186,19 @@ fn build_gitignore(worktree: &Path) -> Gitignore {
     builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
+fn is_builtin_skip(worktree: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(worktree).unwrap_or(path);
+    let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
+    match first {
+        Some(name) => WATCHER_BUILTIN_SKIP_PREFIXES.contains(&name),
+        None => false,
+    }
+}
+
 fn is_ignored(gi: &Gitignore, worktree: &Path, path: &Path) -> bool {
+    if is_builtin_skip(worktree, path) {
+        return true;
+    }
     let rel = path.strip_prefix(worktree).unwrap_or(path);
     let is_dir = path.is_dir();
     // Use matched_path_or_any_parents so a `ignored/` rule excludes
