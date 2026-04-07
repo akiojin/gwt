@@ -294,6 +294,10 @@ pub struct BranchesState {
     pub(crate) active_session_branches: HashSet<String>,
     /// HEAD branch of the gwt-tui process itself, if known.
     pub(crate) current_head_branch: Option<String>,
+    /// Spinner frame counter advanced once per tick while at least one
+    /// branch is still in `MergeState::Computing`. Drives the animated
+    /// `⋯` glyph in the Branch Cleanup gutter.
+    pub(crate) merge_spinner_tick: usize,
     /// SPECs loaded from the selected branch worktree.
     pub(crate) detail_specs: Vec<DetailSpecItem>,
     /// Git status files for the selected branch worktree.
@@ -590,6 +594,31 @@ impl BranchesState {
             MergeState::Cleanable(target) => Some(target),
             _ => None,
         }
+    }
+
+    /// Returns true when at least one branch is still being computed by
+    /// the background merge-state worker.
+    pub fn has_computing_branches(&self) -> bool {
+        self.merged_state
+            .values()
+            .any(|state| matches!(state, MergeState::Computing))
+    }
+
+    /// Advance the spinner frame counter. Called from the tick loop only
+    /// while `has_computing_branches()` is true.
+    pub fn tick_merge_spinner(&mut self) {
+        self.merge_spinner_tick = self.merge_spinner_tick.wrapping_add(1);
+    }
+
+    /// Current spinner glyph for the `⋯` gutter slot. Cycles through a
+    /// short Braille pattern so the gutter visibly animates while merge
+    /// detection is running.
+    pub fn merge_spinner_glyph(&self) -> &'static str {
+        const FRAMES: [&str; 10] = [
+            "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}",
+            "\u{2827}", "\u{2807}", "\u{280F}",
+        ];
+        FRAMES[self.merge_spinner_tick % FRAMES.len()]
     }
 }
 
@@ -986,13 +1015,14 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             //   `⋯` — merge detection still running
             //   `✔` — branch is cleanable right now but not selected
             //   ` ` — protected, not merged, or otherwise non-selectable
+            let spinner_glyph = state.merge_spinner_glyph();
             let (gutter_glyph, gutter_color) = if state.is_cleanup_selected(&branch.name) {
                 ("\u{25CF}", theme::color::ACTIVE)
             } else if !state.is_cleanable_candidate(&branch.name) {
                 (" ", theme::color::TEXT_SECONDARY)
             } else {
                 match state.merge_state(&branch.name) {
-                    MergeState::Computing => ("\u{22EF}", theme::color::TEXT_SECONDARY),
+                    MergeState::Computing => (spinner_glyph, theme::color::ACTIVE),
                     MergeState::Cleanable(_) => ("\u{2714}", theme::color::SUCCESS),
                     MergeState::NotMerged => (" ", theme::color::TEXT_SECONDARY),
                 }

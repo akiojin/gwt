@@ -337,6 +337,9 @@ pub fn update(model: &mut Model, msg: Message) {
             drain_branch_detail_events(model);
             drain_cleanup_events(model);
             drain_merge_state_events(model);
+            if model.branches.has_computing_branches() {
+                model.branches.tick_merge_spinner();
+            }
             tick_notification(model);
             check_pty_exits(model);
             // Forward tick to wizard (AI suggest spinner) when active
@@ -2063,17 +2066,34 @@ fn refresh_cleanup_merge_state(model: &mut Model) {
     });
 }
 
-/// Drain pending merge-state events into `BranchesState::merged_state`.
+/// Maximum number of merge-state events drained per tick. Capping the
+/// drain rate keeps the `⋯` spinner glyph on screen long enough for the
+/// user to actually see it on small repositories where the worker would
+/// otherwise complete in a single frame (FR-018d).
+const MERGE_STATE_DRAIN_PER_TICK: usize = 2;
+
+/// Drain pending merge-state events into `BranchesState::merged_state`,
+/// at most [`MERGE_STATE_DRAIN_PER_TICK`] events per call.
 fn drain_merge_state_events(model: &mut Model) {
     let Some(queue) = model.merge_state_events.clone() else {
         return;
     };
     let events: Vec<crate::model::MergeStateEvent> = {
         let mut guard = queue.lock().unwrap();
-        std::mem::take(&mut *guard).into_iter().collect()
+        let take = MERGE_STATE_DRAIN_PER_TICK.min(guard.len());
+        guard.drain(..take).collect()
     };
+    let drained_any = !events.is_empty();
     for event in events {
         model.branches.set_merge_state(event.branch, event.state);
+    }
+    // Once the queue is empty after at least one event was drained, drop
+    // the queue handle so the worker thread state is fully cleaned up.
+    if drained_any {
+        let queue_empty = queue.lock().unwrap().is_empty();
+        if queue_empty {
+            model.merge_state_events = None;
+        }
     }
 }
 
