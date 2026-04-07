@@ -42,6 +42,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 18. Given Terminal pane is not focused and host leaks SGR wheel sequences, when the user scrolls over the session area, then gwt still normalizes the sequence into mouse events and can focus+scroll the session instead of forwarding literal escape fragments.
 19. Given full-screen redraws mutate overlap rows (for example header/status churn), when the resulting visible VT frame differs from the previous frame, then gwt records that frame as a new snapshot without relying on overlap heuristics.
 20. Given a pane has existing main-screen row scrollback and then enters alternate screen, when the user scrolls while viewing alternate-screen output, then gwt uses snapshot-backed history for the visible alternate-screen frames instead of stale main-screen row scrollback.
+21. Given scrollback interaction, URL hit-testing, selection copy, and terminal rendering happen in one pane, when the viewport moves, then all of them resolve against the same cached visible surface instead of mixing separate live/snapshot sources.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -112,6 +113,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005f**: Snapshot append decisions are based on final VT screen state (not raw PTY chunk boundaries or overlap heuristics), with consecutive identical frames deduplicated.
 - **FR-005i**: Snapshot progression for full-screen panes does not require viewport-shift overlap scoring; any distinct visible frame remains reviewable through snapshot scrollback.
 - **FR-005j**: While alternate screen is active, snapshot-backed scrollback is the primary history source even if main-screen row scrollback exists.
+- **FR-005k**: Session viewport operations are routed through one cache-backed visible-surface API, and renderer / URL detection / selection copy all consume that same surface.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
@@ -157,3 +159,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-018**: Even when Terminal pane was not focused before scrolling, leaked SGR wheel sequences are recovered as mouse scroll input and do not leak into pane text.
 - **SC-019**: Snapshot history advances for any distinct full-screen frame even under overlap-row churn, preventing practical scrollback starvation on dynamic panes.
 - **SC-020**: Alternate-screen panes remain scrollable through snapshot history even when legacy main-screen row scrollback exists; scrollbar and visible frame stay in sync.
+- **SC-021**: Viewport movement updates scrollbar, rendered text, URL hit-tests, and copy selection consistently from one visible cache surface, with no source mismatch between features.

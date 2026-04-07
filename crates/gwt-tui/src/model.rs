@@ -540,6 +540,14 @@ impl VtState {
         self.max_scrollback == 0 || self.parser.screen().alternate_screen()
     }
 
+    pub fn has_viewport_scrollback(&self) -> bool {
+        if self.uses_snapshot_scrollback() {
+            self.has_snapshot_scrollback()
+        } else {
+            self.max_scrollback > 0
+        }
+    }
+
     pub fn set_scrollback(&mut self, rows: usize) {
         self.parser.set_scrollback(rows.min(self.max_scrollback));
     }
@@ -580,6 +588,24 @@ impl VtState {
         Some(parser)
     }
 
+    pub fn visible_screen_parser(&self) -> vt100::Parser {
+        if let Some(snapshot) = self.active_snapshot() {
+            let mut parser = vt100::Parser::new(snapshot.rows(), snapshot.cols(), 0);
+            parser.process(snapshot.state());
+            return parser;
+        }
+
+        let mut parser = vt100::Parser::new(self.rows, self.cols, 10_000);
+        let state = self.parser.screen().state_formatted();
+        parser.process(&state);
+        parser.set_scrollback(self.scrollback());
+        parser
+    }
+
+    pub fn viewing_history(&self) -> bool {
+        self.active_snapshot().is_some()
+    }
+
     pub fn scroll_snapshot_up(&mut self, rows: usize) -> bool {
         if rows == 0 || !self.has_snapshot_scrollback() {
             return false;
@@ -611,6 +637,60 @@ impl VtState {
             self.follow_live = false;
         }
         true
+    }
+
+    pub fn scroll_viewport_lines(&mut self, delta_rows: i16) -> bool {
+        if delta_rows == 0 {
+            return false;
+        }
+
+        if self.uses_snapshot_scrollback() {
+            if delta_rows > 0 {
+                return self.scroll_snapshot_up(delta_rows as usize);
+            }
+            return self.scroll_snapshot_down(delta_rows.unsigned_abs() as usize);
+        }
+
+        if delta_rows > 0 {
+            let next = self
+                .scrollback()
+                .saturating_add(delta_rows as usize)
+                .min(self.max_scrollback());
+            self.set_follow_live(false);
+            self.set_scrollback(next);
+            return true;
+        }
+
+        let next = self
+            .scrollback()
+            .saturating_sub(delta_rows.unsigned_abs() as usize);
+        self.set_scrollback(next);
+        self.set_follow_live(next == 0);
+        true
+    }
+
+    pub fn scrollbar_metrics(&self, viewport_height: usize) -> Option<(usize, usize, usize)> {
+        if self.uses_snapshot_scrollback() {
+            if !self.has_snapshot_scrollback() {
+                return None;
+            }
+            let visible_viewport = viewport_height.max(1);
+            return Some((
+                self.snapshot_count()
+                    .saturating_sub(1)
+                    .saturating_add(visible_viewport),
+                self.snapshot_position(),
+                visible_viewport,
+            ));
+        }
+
+        if self.max_scrollback() > 0 {
+            let content_length = self.max_scrollback().saturating_add(viewport_height);
+            let position = self.max_scrollback().saturating_sub(self.scrollback());
+            return Some((content_length, position, viewport_height));
+        }
+
+        None
     }
 
     pub fn selection(&self) -> Option<TerminalSelection> {

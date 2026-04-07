@@ -3457,8 +3457,8 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
     }
 
     let session = model.active_session_tab()?;
-    let surface = displayed_session_surface(session);
-    crate::renderer::collect_url_regions(surface.screen(), Rect::new(0, 0, area.width, area.height))
+    let parser = session.vt.visible_screen_parser();
+    crate::renderer::collect_url_regions(parser.screen(), Rect::new(0, 0, area.width, area.height))
         .into_iter()
         .find(|region| {
             let row = area.y + region.row;
@@ -3494,117 +3494,50 @@ fn mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell>
     })
 }
 
-enum SessionSurface<'a> {
-    Live(&'a vt100::Screen),
-    Snapshot(Box<vt100::Parser>),
-}
-
-impl SessionSurface<'_> {
-    fn screen(&self) -> &vt100::Screen {
-        match self {
-            SessionSurface::Live(screen) => screen,
-            SessionSurface::Snapshot(parser) => parser.screen(),
-        }
-    }
-
-    fn suppress_cursor(&self) -> bool {
-        matches!(self, SessionSurface::Snapshot(_))
-    }
-}
-
-fn displayed_session_surface(session: &crate::model::SessionTab) -> SessionSurface<'_> {
-    if let Some(parser) = session.vt.snapshot_parser() {
-        SessionSurface::Snapshot(Box::new(parser))
-    } else {
-        SessionSurface::Live(session.vt.screen())
-    }
-}
-
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     let selection = session.vt.selection()?;
     let (start, end) = normalize_selection(selection);
-    let surface = displayed_session_surface(session);
-    let screen = surface.screen();
+    let parser = session.vt.visible_screen_parser();
+    let screen = parser.screen();
     let end_col = end.col.saturating_add(1).min(screen.size().1);
     Some(screen.contents_between(start.row, start.col, end.row, end_col))
 }
 
 fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
-    if delta_rows == 0 {
-        return false;
-    }
-
     let Some(session) = model.active_session_tab_mut() else {
         return false;
     };
 
     session.vt.clear_selection();
-    if session.vt.uses_snapshot_scrollback() {
-        let previous_position = session.vt.snapshot_position();
-        let previous_follow_live = session.vt.follow_live();
-        let changed = if delta_rows > 0 {
-            session.vt.scroll_snapshot_up(delta_rows as usize)
-        } else {
-            session
-                .vt
-                .scroll_snapshot_down(delta_rows.unsigned_abs() as usize)
-        };
-        if changed {
-            crate::scroll_debug::log(format!(
-                "event=scroll delta_rows={} session={} mode=snapshot previous_position={} next_position={} snapshot_count={} previous_follow_live={} next_follow_live={}",
-                delta_rows,
-                session.id,
-                previous_position,
-                session.vt.snapshot_position(),
-                session.vt.snapshot_count(),
-                previous_follow_live,
-                session.vt.follow_live(),
-            ));
-        }
-        return changed;
-    }
-
     let previous_scrollback = session.vt.scrollback();
     let previous_max_scrollback = session.vt.max_scrollback();
+    let previous_snapshot_position = session.vt.snapshot_position();
+    let previous_snapshot_count = session.vt.snapshot_count();
     let previous_follow_live = session.vt.follow_live();
-    if delta_rows > 0 {
-        let next = session
-            .vt
-            .scrollback()
-            .saturating_add(delta_rows as usize)
-            .min(session.vt.max_scrollback());
-        session.vt.set_follow_live(false);
-        session.vt.set_scrollback(next);
+    let mode = if session.vt.uses_snapshot_scrollback() {
+        "snapshot"
+    } else {
+        "row"
+    };
+    let changed = session.vt.scroll_viewport_lines(delta_rows);
+    if changed {
         crate::scroll_debug::log(format!(
-            "event=scroll delta_rows={} session={} previous_scrollback={} next_scrollback={} max_scrollback={} previous_follow_live={} next_follow_live={}",
+            "event=scroll delta_rows={} session={} mode={} previous_scrollback={} next_scrollback={} max_scrollback={} previous_snapshot_position={} next_snapshot_position={} previous_snapshot_count={} next_snapshot_count={} previous_follow_live={} next_follow_live={}",
             delta_rows,
             session.id,
+            mode,
             previous_scrollback,
             session.vt.scrollback(),
             previous_max_scrollback,
+            previous_snapshot_position,
+            session.vt.snapshot_position(),
+            previous_snapshot_count,
+            session.vt.snapshot_count(),
             previous_follow_live,
             session.vt.follow_live(),
         ));
-        return true;
     }
-
-    let next = session
-        .vt
-        .scrollback()
-        .saturating_sub(delta_rows.unsigned_abs() as usize);
-    session.vt.set_scrollback(next);
-    session.vt.set_follow_live(next == 0);
-    crate::scroll_debug::log(format!(
-        "event=scroll delta_rows={} session={} previous_scrollback={} next_scrollback={} max_scrollback={} previous_follow_live={} next_follow_live={}",
-        delta_rows,
-        session.id,
-        previous_scrollback,
-        session.vt.scrollback(),
-        previous_max_scrollback,
-        previous_follow_live,
-        session.vt.follow_live(),
-    ));
-    true
+    changed
 }
 
 fn normalize_selection(selection: TerminalSelection) -> (TerminalCell, TerminalCell) {
@@ -3667,43 +3600,14 @@ fn session_scrollbar_area(session: &crate::model::SessionTab, area: Rect) -> Opt
 }
 
 fn session_has_scrollbar(session: &crate::model::SessionTab) -> bool {
-    if session.vt.uses_snapshot_scrollback() {
-        session.vt.has_snapshot_scrollback()
-    } else {
-        session.vt.max_scrollback() > 0
-    }
+    session.vt.has_viewport_scrollback()
 }
 
 fn session_scrollbar_metrics(
     session: &crate::model::SessionTab,
     viewport_height: usize,
 ) -> Option<(usize, usize, usize)> {
-    if session.vt.uses_snapshot_scrollback() {
-        if !session.vt.has_snapshot_scrollback() {
-            return None;
-        }
-        let visible_viewport = viewport_height.max(1);
-        return Some((
-            session
-                .vt
-                .snapshot_count()
-                .saturating_sub(1)
-                .saturating_add(visible_viewport),
-            session.vt.snapshot_position(),
-            visible_viewport,
-        ));
-    }
-
-    if session.vt.max_scrollback() > 0 {
-        let content_length = session.vt.max_scrollback().saturating_add(viewport_height);
-        let position = session
-            .vt
-            .max_scrollback()
-            .saturating_sub(session.vt.scrollback());
-        return Some((content_length, position, viewport_height));
-    }
-
-    None
+    session.vt.scrollbar_metrics(viewport_height)
 }
 
 fn management_split(area: Rect) -> [Rect; 2] {
@@ -3811,8 +3715,8 @@ fn render_session_surface(
     show_cursor: bool,
 ) {
     let text_area = session_text_area(session, area);
-    let surface = displayed_session_surface(session);
-    let screen = surface.screen();
+    let parser = session.vt.visible_screen_parser();
+    let screen = parser.screen();
     if screen.contents().trim().is_empty() {
         match &session.tab_type {
             crate::model::SessionTabType::Agent { agent_id, color } => {
@@ -3893,7 +3797,7 @@ fn render_session_surface(
     }
 
     // Show the vt100 cursor when this session has terminal focus.
-    if show_cursor && !surface.suppress_cursor() && !screen.hide_cursor() {
+    if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
         let (cursor_row, cursor_col) = screen.cursor_position();
         let x = text_area.x + cursor_col;
         let y = text_area.y + cursor_row;

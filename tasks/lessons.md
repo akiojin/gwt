@@ -1,5 +1,22 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: 画面描画とスクロール指標は同一の可視サーフェスを参照させる
+
+### 事象
+
+スクロールバーは動くのに、画面表示が追従しない不整合が発生した。
+
+### 原因
+
+- app 層に live/snapshot の分岐があり、scrollbar・描画・URL/選択コピーで
+  参照サーフェスが分岐ごとにズレる余地があった。
+
+### 再発防止策
+
+1. viewport 操作は `VtState` に集約し、`visible_screen_parser` / `scroll_viewport_lines` / `scrollbar_metrics` を単一入口にする。
+2. app 層は visible surface の取得ロジックを持たず、`VtState` API の結果だけを使う。
+3. scrollbar 追従時に描画も変わることを focused test とフルテストで固定する。
+
 ## 2026-04-07 — fix: alt-screen では row scrollback ではなく snapshot を優先する
 
 ### 事象

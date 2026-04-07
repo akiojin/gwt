@@ -67,3 +67,6 @@
 - [x] T054 Finalize snapshot capture in `model.rs`/`app.rs` around distinct-frame history semantics and update focused regression expectations.
 - [x] T055 [P] Write RED tests: alternate-screen snapshot scrollback remains functional even when main-screen row scrollback already exists.
 - [x] T056 Prefer snapshot-backed scroll path and scrollbar metrics while alternate-screen is active, regardless of non-zero row scrollback.
+- [x] T057 Consolidate session viewport behavior behind `VtState` (`visible_screen_parser`, `scroll_viewport_lines`, `scrollbar_metrics`) so app-level mode branching is removed.
+- [x] T058 Route render, URL hit-testing, and selection copy in `app.rs` through the same `VtState` visible-surface API.
+- [x] T059 [P] Verify unified viewport path with focused + full `gwt-tui` tests, ensuring scrollbar movement and rendered surface stay synchronized.
