@@ -357,6 +357,22 @@ impl AgentLaunchBuilder {
             "1".to_string(),
         );
 
+        match self.session_mode {
+            SessionMode::Continue => {
+                args.push("resume".to_string());
+                args.push("--last".to_string());
+            }
+            SessionMode::Resume => {
+                args.push("resume".to_string());
+                if let Some(ref id) = self.resume_session_id {
+                    args.push(id.clone());
+                } else {
+                    args.push("--last".to_string());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+
         if let Some(ref model) = self.model {
             args.push(format!("--model={}", model));
         }
@@ -566,6 +582,43 @@ mod tests {
 
         assert!(config.args.contains(&"--yolo".to_string()));
         assert!(config.skip_permissions);
+    }
+
+    #[test]
+    fn build_codex_resume_with_id_uses_resume_subcommand() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("sess-123")
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "sess-123"));
+    }
+
+    #[test]
+    fn build_codex_resume_without_id_uses_last_session() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
+    }
+
+    #[test]
+    fn build_codex_continue_uses_last_session() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Continue)
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
     }
 
     #[test]

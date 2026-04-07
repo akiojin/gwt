@@ -382,6 +382,8 @@ Model list snapshot: **2026-04-06**.
 
 | Flag | Description |
 |------|-------------|
+| `resume [SESSION_ID]` | Resume a specific Codex interactive session by session/thread ID |
+| `resume --last` | Continue the most recent Codex interactive session |
 | `--model <model>` | Default: `gpt-5.4`; available: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` |
 | `-c model_reasoning_effort=<level>` | Reasoning level: low/medium/high |
 | `-c service_tier=fast` | Fast mode (Codex-only speed tier). Independent from skip-permission settings |

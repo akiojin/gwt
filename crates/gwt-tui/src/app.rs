@@ -7970,6 +7970,23 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_codex_quick_start_resume_uses_resume_subcommand() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            mode: "resume".to_string(),
+            resume_session_id: Some("sess-123".to_string()),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.args.contains(&"resume".to_string()));
+        assert!(config.args.contains(&"sess-123".to_string()));
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_falls_back_to_continue_without_resume_session_id() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
