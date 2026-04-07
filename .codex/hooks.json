@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" PostToolUse",
+            "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'runtime_path=\"${GWT_SESSION_RUNTIME_PATH:-}\"; [ -n \"$runtime_path\" ] || exit 0; runtime_dir=$(dirname \"$runtime_path\"); mkdir -p \"$runtime_dir\" || exit 0; now=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\"); tmp=\"${runtime_path}.tmp.$$\"; printf \"{\\\"status\\\":\\\"%s\\\",\\\"updated_at\\\":\\\"%s\\\",\\\"last_activity_at\\\":\\\"%s\\\",\\\"source_event\\\":\\\"%s\\\"}\" \"Running\" \"$now\" \"$now\" \"PostToolUse\" > \"$tmp\" && mv \"$tmp\" \"$runtime_path\"' || true",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" PreToolUse",
+            "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'runtime_path=\"${GWT_SESSION_RUNTIME_PATH:-}\"; [ -n \"$runtime_path\" ] || exit 0; runtime_dir=$(dirname \"$runtime_path\"); mkdir -p \"$runtime_dir\" || exit 0; now=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\"); tmp=\"${runtime_path}.tmp.$$\"; printf \"{\\\"status\\\":\\\"%s\\\",\\\"updated_at\\\":\\\"%s\\\",\\\"last_activity_at\\\":\\\"%s\\\",\\\"source_event\\\":\\\"%s\\\"}\" \"Running\" \"$now\" \"$now\" \"PreToolUse\" > \"$tmp\" && mv \"$tmp\" \"$runtime_path\"' || true",
             "type": "command"
           }
         ],
@@ -24,19 +24,19 @@
       {
         "hooks": [
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-block-git-branch-ops.mjs\"",
+            "command": "node .codex/hooks/scripts/gwt-block-git-branch-ops.mjs",
             "type": "command"
           },
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-block-cd-command.mjs\"",
+            "command": "node .codex/hooks/scripts/gwt-block-cd-command.mjs",
             "type": "command"
           },
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-block-file-ops.mjs\"",
+            "command": "node .codex/hooks/scripts/gwt-block-file-ops.mjs",
             "type": "command"
           },
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-block-git-dir-override.mjs\"",
+            "command": "node .codex/hooks/scripts/gwt-block-git-dir-override.mjs",
             "type": "command"
           }
         ],
@@ -47,7 +47,7 @@
       {
         "hooks": [
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" SessionStart",
+            "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'runtime_path=\"${GWT_SESSION_RUNTIME_PATH:-}\"; [ -n \"$runtime_path\" ] || exit 0; runtime_dir=$(dirname \"$runtime_path\"); mkdir -p \"$runtime_dir\" || exit 0; now=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\"); tmp=\"${runtime_path}.tmp.$$\"; printf \"{\\\"status\\\":\\\"%s\\\",\\\"updated_at\\\":\\\"%s\\\",\\\"last_activity_at\\\":\\\"%s\\\",\\\"source_event\\\":\\\"%s\\\"}\" \"Running\" \"$now\" \"$now\" \"SessionStart\" > \"$tmp\" && mv \"$tmp\" \"$runtime_path\"' || true",
             "type": "command"
           }
         ],
@@ -58,7 +58,7 @@
       {
         "hooks": [
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" Stop",
+            "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'runtime_path=\"${GWT_SESSION_RUNTIME_PATH:-}\"; [ -n \"$runtime_path\" ] || exit 0; runtime_dir=$(dirname \"$runtime_path\"); mkdir -p \"$runtime_dir\" || exit 0; now=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\"); tmp=\"${runtime_path}.tmp.$$\"; printf \"{\\\"status\\\":\\\"%s\\\",\\\"updated_at\\\":\\\"%s\\\",\\\"last_activity_at\\\":\\\"%s\\\",\\\"source_event\\\":\\\"%s\\\"}\" \"WaitingInput\" \"$now\" \"$now\" \"Stop\" > \"$tmp\" && mv \"$tmp\" \"$runtime_path\"' || true",
             "type": "command"
           }
         ],
@@ -69,7 +69,7 @@
       {
         "hooks": [
           {
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" UserPromptSubmit",
+            "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'runtime_path=\"${GWT_SESSION_RUNTIME_PATH:-}\"; [ -n \"$runtime_path\" ] || exit 0; runtime_dir=$(dirname \"$runtime_path\"); mkdir -p \"$runtime_dir\" || exit 0; now=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\"); tmp=\"${runtime_path}.tmp.$$\"; printf \"{\\\"status\\\":\\\"%s\\\",\\\"updated_at\\\":\\\"%s\\\",\\\"last_activity_at\\\":\\\"%s\\\",\\\"source_event\\\":\\\"%s\\\"}\" \"Running\" \"$now\" \"$now\" \"UserPromptSubmit\" > \"$tmp\" && mv \"$tmp\" \"$runtime_path\"' || true",
             "type": "command"
           }
         ],
