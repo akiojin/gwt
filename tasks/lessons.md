@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: agent scrollback source must stay PTY-derived and memory-only
+
+### 事象
+
+Agent pane の scrollback で色・装飾が消えたり、
+session log 由来の plain text / 別 session / dead zone が混ざったりした。
+
+### 原因
+
+- gwt 側が agent runtime scrollback の正本を PTY ではなく session `jsonl` にも求めていた。
+- その結果、terminal 状態ではなく transcript 再構成文字列が viewport source に混入し、
+  ANSI 属性・overwrite・clear・launch redraw の terminal semantics を壊していた。
+- 「復元」は agent 側の責務なのに、gwt 側が履歴補完まで担って責務境界を越えていた。
+
+### 再発防止策
+
+1. Agent pane の runtime scrollback source は `PTY -> vt100 -> in-memory cache` だけに限定する。
+2. gwt は pane が生きている間の一時 cache と viewport 制御だけを担当し、session log を scrollback source にしない。
+3. session log / transcript は必要でも別責務に隔離し、terminal viewport の描画・scrollbar・copy 経路へ混ぜない。
+
 ## 2026-04-07 — fix: snapshot frame history is not terminal scrollback for agent panes
 
 ### 事象

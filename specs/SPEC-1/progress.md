@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `62/62` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T04:23:29Z`
+- Task progress: `75/75` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T07:05:13Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -28,11 +28,9 @@
 - Snapshot progression no longer depends on viewport-shift overlap heuristics; blank history prefixes are still pruned so topmost snapshot scrollback never produces a phantom blank screen.
 - Alternate-screen panes now prefer snapshot-backed scrolling and scrollbar metrics even when main-screen row scrollback metadata is non-zero, so thumb movement always matches visible frame changes.
 - Session viewport handling is now unified under `VtState`: rendering, scrollbar metrics, URL hit-testing, and selection copy all consume the same visible cache surface API.
-- Active Claude/Codex panes now hydrate transcript-backed in-memory scrollback from session `jsonl` files, so users can scroll full conversation history when snapshot count is too small.
-- Agent-pane transcript hydration now treats transcript history as an older fallback segment, preserving styled recent VT/snapshot cache first so ANSI colors and text attributes remain visible while scrolling through recent history.
-- Transcript hydration now preserves raw Claude `tool_result` and Codex `function_call_output` lines, so ANSI-styled tool output from session files remains colorized when transcript-backed scrollback is active.
-- Snapshot-backed agent panes now collapse the overlapping recent transcript tail out of the combined history model, so scrollbar movement no longer spends steps on duplicated recent surfaces before older unique history appears.
-- Claude/Codex agent panes now build recent scrollback from a normalized row-buffer parser instead of full-screen snapshot frames, and transcript resolution now targets the session nearest the gwt launch time rather than whichever worktree transcript was modified most recently.
+- Claude/Codex agent panes now build runtime scrollback from a normalized row-buffer parser instead of full-screen snapshot frames, so launch/blank/status redraws do not appear as separate history entries.
+- Agent-pane runtime scrollback is now memory-only: PTY-derived VT cache is the canonical source while the pane is alive, and gwt no longer hydrates scrollback from session `jsonl` or session-log files.
+- Agent-pane row history now uses a larger bounded in-memory budget than standard terminal panes, preserving styled PTY output for longer review windows without transcript fallback.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.

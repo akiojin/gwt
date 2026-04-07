@@ -55,11 +55,10 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 5. During outer-terminal initialization, explicitly disable alternate-scroll mode so Terminal.app does not translate trackpad gestures into cursor-key input while gwt owns the alternate screen.
 6. Add a Terminal.app-specific fallback that maps `Down/Drag/Up(Right)` gesture sequences into vertical scrollback deltas because crossterm may not emit `ScrollUp/ScrollDown` for trackpad motion there.
 7. For panes whose visible screen has `max_scrollback == 0`, capture distinct live screen states into a pane-local in-memory ring buffer and route wheel scrolling through snapshot history instead of vt100 row scrollback.
-8. Keep pane history ephemeral in memory, but allow Claude/Codex agent panes to hydrate that cache from their session `jsonl` files when available so scrollback can extend beyond sparse snapshot history.
-9. When both agent-pane local cache and hydrated transcript history exist, treat transcript history as an older fallback segment: preserve styled local cache first, then transition into transcript-only view after the local cache is exhausted, and reverse that transition symmetrically on downward scroll.
-10. While hydrating Claude/Codex transcript history, preserve raw tool-output blocks (`tool_result`, `function_call_output`) as line-ordered transcript entries so ANSI-bearing session data is not flattened away before viewport rendering.
-11. When transcript history overlaps recent snapshot-backed cache, detect that shared tail from the visible surfaces themselves and collapse it out of both viewport routing and scrollbar metrics.
-12. For Claude/Codex agent panes, replace snapshot-frame-based recent scrollback with a normalized row-scrollback parser that strips alternate-screen toggles, and choose transcript sources by session start metadata instead of worktree-global newest-file heuristics.
+8. Keep pane history ephemeral in memory and treat PTY-derived VT state as the only runtime scrollback source for Claude/Codex agent panes.
+9. For Claude/Codex agent panes, replace snapshot-frame-based recent scrollback with a normalized row-scrollback parser that strips alternate-screen toggles so launch/blank/status redraws do not become separate history entries.
+10. Increase the agent-pane row scrollback capacity above the standard terminal default while keeping it bounded in memory and discarded when the pane closes.
+11. Do not hydrate agent-pane runtime scrollback from session `jsonl` or session-log files; agent-side PTY re-output is the only restoration mechanism.
 
 ## Dependencies
 
