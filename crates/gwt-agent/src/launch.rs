@@ -351,7 +351,7 @@ impl AgentLaunchBuilder {
         }
     }
 
-    fn build_codex_args(&self, args: &mut Vec<String>, _env_vars: &mut HashMap<String, String>) {
+    fn build_codex_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());
