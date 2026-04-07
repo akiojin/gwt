@@ -4990,7 +4990,10 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
     let compact = area.width <= 80;
     let hints = match model.active_focus {
         FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-            branches_list_hint_text(compact)
+            branches_list_hint_text_with_selection(
+                compact,
+                model.branches.cleanup_selection_count(),
+            )
         }
         FocusPane::TabContent => management_hint_text(model, compact),
         FocusPane::BranchDetail => branch_detail_hint_text(model, compact),
@@ -5024,10 +5027,6 @@ fn branches_list_hint_text_with_selection(compact: bool, selection_count: usize)
     } else {
         "↑↓:move  ←→:tab  Enter:wizard  Space:select  Shift+C:cleanup  a:all  m:view  v:git  f:search  Esc:term  ?:help".to_string()
     }
-}
-
-fn branches_list_hint_text(compact: bool) -> String {
-    branches_list_hint_text_with_selection(compact, 0)
 }
 
 fn management_hint_text(model: &Model, compact: bool) -> String {
