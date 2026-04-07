@@ -584,6 +584,9 @@ pub struct VtState {
     snapshot_cursor: Option<usize>,
     scrollback_strategy: ScrollbackStrategy,
     scrollback_filter_pending: Vec<u8>,
+    mouse_mode_pending: Vec<u8>,
+    mouse_tracking_enabled: bool,
+    sgr_mouse_enabled: bool,
 }
 
 impl std::fmt::Debug for VtState {
@@ -620,6 +623,9 @@ impl Clone for VtState {
             snapshot_cursor: self.snapshot_cursor,
             scrollback_strategy: self.scrollback_strategy,
             scrollback_filter_pending: self.scrollback_filter_pending.clone(),
+            mouse_mode_pending: self.mouse_mode_pending.clone(),
+            mouse_tracking_enabled: self.mouse_tracking_enabled,
+            sgr_mouse_enabled: self.sgr_mouse_enabled,
         }
     }
 }
@@ -638,6 +644,9 @@ impl VtState {
             snapshot_cursor: None,
             scrollback_strategy: ScrollbackStrategy::Standard,
             scrollback_filter_pending: Vec::new(),
+            mouse_mode_pending: Vec::new(),
+            mouse_tracking_enabled: false,
+            sgr_mouse_enabled: false,
         };
         state.refresh_scrollback_metrics();
         state
@@ -650,6 +659,7 @@ impl VtState {
 
         self.scrollback_strategy = strategy;
         self.scrollback_filter_pending.clear();
+        self.mouse_mode_pending.clear();
         self.scrollback_parser =
             vt100::Parser::new(self.rows, self.cols, self.row_scrollback_capacity());
         let live_state = self.parser.screen().state_formatted();
@@ -685,6 +695,7 @@ impl VtState {
         let previous_scrollback = self.scrollback();
         let previous_max_scrollback = self.max_scrollback;
         let previous_snapshot_count = self.snapshots.len();
+        self.update_mouse_reporting_modes(bytes);
         self.parser.process(bytes);
         self.process_scrollback_bytes(bytes);
         self.refresh_scrollback_metrics();
@@ -725,6 +736,55 @@ impl VtState {
         }
     }
 
+    fn update_mouse_reporting_modes(&mut self, bytes: &[u8]) {
+        let mut input = std::mem::take(&mut self.mouse_mode_pending);
+        input.extend_from_slice(bytes);
+
+        let mut index = 0;
+        while index < input.len() {
+            if input[index] != 0x1b {
+                index += 1;
+                continue;
+            }
+
+            if index + 1 >= input.len() {
+                self.mouse_mode_pending.extend_from_slice(&input[index..]);
+                break;
+            }
+
+            if input[index + 1] != b'[' {
+                index += 1;
+                continue;
+            }
+
+            let mut end = index + 2;
+            while end < input.len() && !(0x40..=0x7e).contains(&input[end]) {
+                end += 1;
+            }
+            if end >= input.len() {
+                self.mouse_mode_pending.extend_from_slice(&input[index..]);
+                break;
+            }
+
+            match &input[index..=end] {
+                b"\x1b[?1000h" | b"\x1b[?1002h" | b"\x1b[?1003h" => {
+                    self.mouse_tracking_enabled = true;
+                }
+                b"\x1b[?1000l" | b"\x1b[?1002l" | b"\x1b[?1003l" => {
+                    self.mouse_tracking_enabled = false;
+                }
+                b"\x1b[?1006h" => {
+                    self.sgr_mouse_enabled = true;
+                }
+                b"\x1b[?1006l" => {
+                    self.sgr_mouse_enabled = false;
+                }
+                _ => {}
+            }
+            index = end + 1;
+        }
+    }
+
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
     }
@@ -761,6 +821,10 @@ impl VtState {
 
     pub fn follow_live(&self) -> bool {
         self.follow_live
+    }
+
+    pub fn accepts_mouse_scroll_input(&self) -> bool {
+        self.mouse_tracking_enabled && self.sgr_mouse_enabled
     }
 
     pub fn set_follow_live(&mut self, follow_live: bool) {
@@ -1899,6 +1963,29 @@ mod tests {
         assert!(
             vt.max_scrollback() > ROW_SCROLLBACK_CAPACITY,
             "agent panes should keep a larger in-memory row scrollback than the default terminal history limit"
+        );
+    }
+
+    #[test]
+    fn mouse_reporting_state_tracks_split_enable_and_disable_sequences() {
+        let mut vt = VtState::new(4, 32);
+
+        vt.process(b"\x1b[?100");
+        assert!(!vt.accepts_mouse_scroll_input());
+
+        vt.process(b"0h\x1b[?100");
+        assert!(!vt.accepts_mouse_scroll_input());
+
+        vt.process(b"6h");
+        assert!(
+            vt.accepts_mouse_scroll_input(),
+            "mouse wheel forwarding should enable once both report mode and SGR encoding are active"
+        );
+
+        vt.process(b"\x1b[?1000l");
+        assert!(
+            !vt.accepts_mouse_scroll_input(),
+            "disabling button tracking should disable forwarded mouse scroll input"
         );
     }
 

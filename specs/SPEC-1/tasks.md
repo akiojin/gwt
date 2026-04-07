@@ -87,3 +87,4 @@
 - [x] T074 Simplify `VtState` agent scrollback to `AgentMemoryBacked` memory-only history that prefers normalized row scrollback, falls back to in-memory snapshots when rows never advance, and never uses transcript fallback.
 - [x] T075 Refresh SPEC-1 artifacts, lessons learned, and focused/full verification for the memory-only agent scrollback design.
 - [x] T076 Write RED tests and implement `forward_key_to_active_session()` live-follow reset so PTY-bound key input exits row/snapshot history before forwarding bytes.
+- [x] T077 Write RED tests and implement agent-pane PTY mouse-scroll forwarding so SGR mouse-enabled agents receive wheel / right-drag scroll input directly instead of gwt-local scrollback.

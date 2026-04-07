@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: agent scroll should defer to PTY mouse reporting when available
+
+### 事象
+
+agent pane の scroll を gwt 側の local scrollback で抱え続けた結果、
+full-screen redraw と local snapshot/history が競合し、修正を重ねても
+「途中しか遡れない」「起動画面が混ざる」「更新中に破綻する」が再発した。
+
+### 原因
+
+- source code 上、agent pane は「PTY 出力は agent 側が責務」という前提なのに、
+  gwt が wheel / trackpad scroll まで local history として奪っていた。
+- とくに SGR mouse reporting を有効化している agent では、
+  本来 PTY に返すべき scroll input を gwt が消費してしまい、
+  agent 自身の redraw / viewport 制御と二重管理になっていた。
+
+### 再発防止策
+
+1. agent pane が SGR mouse reporting を有効化している場合は、wheel / trackpad scroll を PTY へ返す。
+2. gwt local scrollback は mouse-reporting 未対応 pane の fallback に限定する。
+3. wheel と Terminal.app の right-drag fallback の両方で、PTY forwarding の回帰テストを固定する。
+
 ## 2026-04-07 — fix: PTY-bound key input must exit history mode before forwarding
 
 ### 事象

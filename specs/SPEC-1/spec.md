@@ -127,6 +127,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005j**: While alternate screen is active, snapshot-backed scrollback is the primary history source even if main-screen row scrollback exists.
 - **FR-005k**: Session viewport operations are routed through one cache-backed visible-surface API, and renderer / URL detection / selection copy all consume that same surface.
 - **FR-005l**: Any key input forwarded to the active PTY returns the session viewport to live-follow first, so command input never stays attached to a stale historical viewport.
+- **FR-005m**: Agent panes that advertise SGR mouse reporting receive wheel / trackpad scroll input through the PTY instead of gwt-local scrollback so the agent remains the source of truth for redraw and scroll state.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
@@ -176,3 +177,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-022**: Agent-pane scrollback preserves VT-derived color and text attributes throughout in-memory history navigation without switching to transcript/session-log fallback.
 - **SC-023**: Agent panes whose output redraws full-screen frames without producing vt100 row scrollback still remain scrollable through pane-local in-memory snapshot history; row-only regressions are prevented.
 - **SC-024**: While browsing row or snapshot history, any PTY-bound key input returns the viewport to the live screen before the input is forwarded.
+- **SC-025**: When an agent pane enables SGR mouse reporting, mouse-wheel and Terminal.app right-drag fallback input are forwarded to the PTY as SGR wheel events, and gwt does not try to reinterpret that interaction as local scrollback.
