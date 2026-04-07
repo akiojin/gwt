@@ -92,7 +92,7 @@ and conversation. Prevents confusion from synonyms or overloaded terms.
 
 1. Extract domain terms from the intake memo and interview answers.
 2. Check each term against existing codebase usage:
-   - Search with `gwt-file-search` for existing definitions.
+   - Search with `gwt-project-search` for existing definitions.
    - Check struct/enum/function names in `gwt-core` and `gwt-tui`.
 3. For each term, write a one-sentence definition.
 4. Flag conflicts:

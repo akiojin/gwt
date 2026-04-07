@@ -1,12 +1,12 @@
 ---
-description: Compatibility-oriented project file index command; prefer gwt-file-search for standalone file search
+description: Compatibility-oriented project file index command; prefer gwt-project-search for standalone project search
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # GWT Project Index Command
 
-Use this command to inspect the project file index. Prefer `/gwt:gwt-file-search` for standalone file search.
+Use this command to inspect the project file index. Prefer `/gwt:gwt-project-search` for standalone project search.
 
 ## Usage
 
@@ -22,7 +22,7 @@ Use this command to inspect the project file index. Prefer `/gwt:gwt-file-search
    - path
    - relevance summary
    - next file(s) to inspect
-4. If index is missing/outdated, explain that and provide the shortest recovery action.
+4. If index is missing or outdated, explain that and provide the shortest recovery action.
 5. For Issue search, use `/gwt:gwt-issue-search` instead.
 
 ## Examples

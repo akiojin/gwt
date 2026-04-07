@@ -401,4 +401,4 @@ Search tools:
 
 - `gwt-issue-search` for GitHub Issues
 - `gwt-spec-search` for local SPEC files
-- `gwt-file-search` for source files
+- `gwt-project-search` for source files

@@ -69,5 +69,5 @@ To manually re-index (normally handled by file watcher):
 - SPEC index is automatically maintained by the file system watcher (changes to `specs/` trigger re-indexing)
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
-- For file search, use `gwt-file-search` instead
+- For file search, use `gwt-project-search` instead
 - For GitHub Issue search, use `gwt-issue-search` instead

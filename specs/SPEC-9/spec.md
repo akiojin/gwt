@@ -121,7 +121,7 @@ Runtime-hook regressions repeatedly occurred when only one layer (config generat
   - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-deepen, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
   - Issue management: gwt-issue-register, gwt-issue-resolve, gwt-issue-search
   - Agent pane management: gwt-agent-discover, gwt-agent-read, gwt-agent-send, gwt-agent-lifecycle
-  - Utilities: gwt-file-search, gwt-project-search (legacy alias), gwt-spec-to-issue-migration
+  - Utilities: gwt-project-search, gwt-project-index, gwt-spec-to-issue-migration
 - **FR-010**: `build.rs` validates YAML frontmatter of every `SKILL.md` at compile time using `serde_yaml`. Malformed YAML causes a build failure with file path and error details.
 - **FR-011**: The `BuiltinSkill` enum, `SKILL_CATALOG` constant, `register_builtins()` function, and `skill_fields()` in the TUI Settings screen are removed. Skill interpretation is the responsibility of Claude Code / Codex, not gwt.
 
@@ -265,8 +265,8 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 6. Given Windows PATH resolves launcher entrypoints first, when gwt chooses a bootstrap Python for the managed search runtime, then it probes them and accepts any candidate that successfully reports Python 3.9+.
 7. Given Python candidates exist but are broken or too old, when the managed search runtime cannot be bootstrapped, then gwt surfaces the runtime failure detail instead of misreporting the situation as “Python not installed”.
 8. Given the managed search runtime cannot be bootstrapped because no suitable Python candidate exists at all, when gwt surfaces the warning, then the message includes install guidance.
-9. Given a user invokes standalone file search, when gwt exposes the skill and slash command surface, then `gwt-file-search` is the canonical file-search name.
-10. Given existing docs or habits still refer to `gwt-project-search`, when standalone file search is invoked, then that legacy name continues to work as a compatibility alias.
+9. Given a user invokes standalone semantic search over project implementation files, when gwt exposes the standalone skill and slash command surface, then `gwt-project-search` is the canonical name.
+10. Given the bundled assets are distributed to a worktree, when standalone project search assets are materialized, then no `gwt-file-search` skill or slash-command asset is written.
 
 ## Functional Requirements (Phase 4: Skill Consolidation)
 
@@ -292,8 +292,8 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 - **FR-043**: Search runtime failure guidance tells the user to install Python 3.9+ only when no candidate exists; broken or too-old candidates surface their runtime failure detail.
 - **FR-044**: Search runtime bootstrap discovers versioned `python3.x` executables beyond a fixed hard-coded list when they are present on PATH.
 - **FR-045**: Startup and clone-completion notifications use the same stable project-index runtime classification rather than brittle human-text matching.
-- **FR-046**: `gwt-file-search` is the canonical standalone file-search skill and slash-command name; `gwt-project-search` remains a compatibility alias.
-- **FR-047**: Search-related skill documentation that points users to standalone file search references `gwt-file-search` as the primary entrypoint.
+- **FR-046**: `gwt-project-search` is the canonical standalone skill and slash-command name for semantic search over project implementation files, while internal runner actions remain `search-files` / `index-files`.
+- **FR-047**: Search-related skill documentation that points users to standalone project-file search references `gwt-project-search` as the primary entrypoint, and `gwt-file-search` is not distributed as a public asset.
 
 ## Success Criteria
 
@@ -325,5 +325,5 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 - **SC-024**: On Windows, a PATH entry that resolves to a working Microsoft Store / launcher Python entrypoint is accepted when it reports Python 3.9+.
 - **SC-025**: When only broken or too-old Python candidates are present, gwt surfaces runtime failure detail rather than install guidance.
 - **SC-026**: When no suitable bootstrap Python is available, gwt surfaces install guidance that references Python 3.9+ and the expected Windows `python` / `py -3` commands.
-- **SC-027**: Distributed skill assets include `gwt-file-search` for both Claude and Codex, and `/gwt:gwt-file-search` is available as the canonical slash command.
-- **SC-028**: `/gwt:gwt-project-search` continues to work as a compatibility alias while delegating to the canonical `gwt-file-search` workflow.
+- **SC-027**: Distributed skill assets include `gwt-project-search` for both Claude and Codex, and `/gwt:gwt-project-search` is available as the canonical slash command.
+- **SC-028**: Distributed worktrees do not contain `gwt-file-search` skill or slash-command assets, preventing public naming drift away from the project-search workflow.

@@ -1,6 +1,6 @@
 ---
 name: gwt-project-index
-description: Compatibility-oriented reference for the project file index. Prefer gwt-file-search for standalone semantic file search.
+description: Compatibility-oriented reference for the project file index. Prefer gwt-project-search for standalone semantic project search.
 ---
 
 # Project Structure Index
@@ -48,5 +48,5 @@ JSON object with ranked results:
 - File index is auto-generated when the project is opened in gwt
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
-- Canonical standalone file-search skill: `gwt-file-search`
+- Canonical standalone file-search skill: `gwt-project-search`
 - For Issue search, use `gwt-issue-search` instead

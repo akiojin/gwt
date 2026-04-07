@@ -79,4 +79,4 @@ Then search Issues semantically:
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - For SPEC search, use `gwt-spec-search` instead (SPECs are now local files)
-- For file search, use `gwt-file-search` instead
+- For file search, use `gwt-project-search` instead

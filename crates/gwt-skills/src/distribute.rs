@@ -192,12 +192,14 @@ mod tests {
     }
 
     #[test]
-    fn distribute_creates_canonical_file_search_skills() {
+    fn distribute_creates_canonical_project_search_skills() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
 
-        let claude_skill = dir.path().join(".claude/skills/gwt-file-search/SKILL.md");
-        let codex_skill = dir.path().join(".codex/skills/gwt-file-search/SKILL.md");
+        let claude_skill = dir
+            .path()
+            .join(".claude/skills/gwt-project-search/SKILL.md");
+        let codex_skill = dir.path().join(".codex/skills/gwt-project-search/SKILL.md");
 
         assert!(claude_skill.exists(), "expected {}", claude_skill.display());
         assert!(codex_skill.exists(), "expected {}", codex_skill.display());
@@ -220,24 +222,38 @@ mod tests {
     }
 
     #[test]
-    fn distribute_creates_canonical_file_search_command() {
-        let dir = tempfile::tempdir().unwrap();
-        distribute_to_worktree(dir.path()).unwrap();
-
-        let command = dir.path().join(".claude/commands/gwt-file-search.md");
-        assert!(command.exists(), "expected {}", command.display());
-    }
-
-    #[test]
-    fn distribute_keeps_project_search_command_as_alias_to_file_search() {
+    fn distribute_creates_canonical_project_search_command() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
 
         let command = dir.path().join(".claude/commands/gwt-project-search.md");
-        let content = fs::read_to_string(&command).unwrap();
+        assert!(command.exists(), "expected {}", command.display());
 
-        assert!(content.contains(".claude/skills/gwt-file-search/SKILL.md"));
-        assert!(content.contains("/gwt:gwt-file-search"));
+        let content = fs::read_to_string(&command).unwrap();
+        assert!(content.contains(".claude/skills/gwt-project-search/SKILL.md"));
+        assert!(!content.contains("gwt-file-search"));
+    }
+
+    #[test]
+    fn distribute_does_not_create_file_search_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        distribute_to_worktree(dir.path()).unwrap();
+
+        let command = dir.path().join(".claude/commands/gwt-file-search.md");
+        let claude_skill = dir.path().join(".claude/skills/gwt-file-search/SKILL.md");
+        let codex_skill = dir.path().join(".codex/skills/gwt-file-search/SKILL.md");
+
+        assert!(!command.exists(), "unexpected {}", command.display());
+        assert!(
+            !claude_skill.exists(),
+            "unexpected {}",
+            claude_skill.display()
+        );
+        assert!(
+            !codex_skill.exists(),
+            "unexpected {}",
+            codex_skill.display()
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ Use this command to run semantic search against the local SPEC index.
    - relevance summary
    - next spec(s) to inspect
 3. For Issue search, use `/gwt:gwt-issue-search` instead.
-4. For file search, use `/gwt:gwt-file-search` instead.
+4. For file search, use `/gwt:gwt-project-search` instead.
 
 ## Examples
 
