@@ -18,7 +18,6 @@ async fn burst_of_events_collapses_to_one_batch() {
     let cfg = WatcherConfig {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
-        ..WatcherConfig::default()
     };
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
@@ -46,7 +45,6 @@ async fn batch_size_limit_splits_burst() {
     let cfg = WatcherConfig {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
-        ..WatcherConfig::default()
     };
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
@@ -91,7 +89,6 @@ async fn gitignored_files_are_excluded() {
     let cfg = WatcherConfig {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
-        ..WatcherConfig::default()
     };
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 

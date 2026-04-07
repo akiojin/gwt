@@ -24,7 +24,7 @@
   - `e5-base` (~440 MB) hits a sweet spot: solid multilingual recall, ~3-5× slower inference than MiniLM but still acceptable for batch indexing on a developer laptop.
   - `bge-m3` (~2 GB) has the best benchmark numbers but the model footprint and inference cost are excessive for the spec scale (sub-1000 docs).
   - `e5-small` is too lossy for the long-form Japanese narrative in `spec.md`.
-- **Prefix requirement:** All e5 family models require `passage: ` for documents and `query: ` for queries. Omitting the prefix degrades recall by ~30-40 percentage points. The runner injects this transparently via a custom `EmbeddingFunction` so callers never deal with it.
+- **Prefix requirement:** All e5 family models require a `passage:` prefix for documents and a `query:` prefix for queries. Omitting the prefix degrades recall by ~30-40 percentage points. The runner injects this transparently via a custom `EmbeddingFunction` so callers never deal with it.
 - **First-run cost:** ~440 MB download to `~/.cache/huggingface/`. Subsequent runs reuse the cache. The TUI bootstrap will surface a one-time warning notification during the initial download.
 
 ### `notify` vs `notify-debouncer-mini`

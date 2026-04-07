@@ -95,7 +95,7 @@
 - [x] T-IDX-017 Implement `resolve_db_path()` helper in runner (computes `~/.gwt/index/<repo>/...`) [Test: T-IDX-006]
 - [x] T-IDX-018 Implement `E5EmbeddingFunction` class with prefix handling, inject into all `get_or_create_collection()` calls [Test: T-IDX-001]
 - [x] T-IDX-019 Implement `acquire_lock(db_path, exclusive: bool)` context manager using `portalocker` [Test: T-IDX-004]
-- [x] T-IDX-020 Implement search-* auto-build fallback: detect missing index, run index-* in-process, emit NDJSON progress on stderr [Test: T-IDX-002]
+- [x] T-IDX-020 Implement `search-*` auto-build fallback: detect missing index, run `index-*` in-process, emit NDJSON progress on stderr [Test: T-IDX-002]
 - [x] T-IDX-021 Implement manifest read/write helpers and incremental indexing for `index-files` and `index-specs` [Test: T-IDX-003]
 - [x] T-IDX-022 Implement Issue TTL: write `last_full_refresh` in `meta.json`, expose via `status` action, honor `--respect-ttl` [Test: T-IDX-005]
 - [x] T-IDX-023 Drive Phase 8a Python tests to GREEN; remove obsolete code paths [Test: T-IDX-001..006]

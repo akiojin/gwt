@@ -8,7 +8,7 @@ use gwt_core::worktree_hash::compute_worktree_hash;
 fn gwt_index_root_ends_with_index() {
     let root = gwt_index_root();
     assert!(root.ends_with("index"));
-    assert!(root.parent().unwrap().ends_with(".gwt"));
+    assert!(root.parent().unwrap().file_name().and_then(|s| s.to_str()) == Some(".gwt"));
 }
 
 #[test]
