@@ -44,3 +44,25 @@
 - [x] T031 Run cargo clippy --workspace --all-targets -- -D warnings
 - [x] T032 Verify coverage >= 90%
 - [x] T033 Update SPEC-10 metadata phase to Done
+
+## Phase 5: Project Index Runtime Bootstrap
+
+- [x] T034 Add RED tests for `gwt-core` runtime bootstrap asset writing, idempotency, and broken-venv rebuild behavior.
+- [x] T035 Implement repo-tracked `chroma_index_runner.py` + requirements asset bootstrap in `gwt-core`.
+- [x] T036 Wire runtime bootstrap into `gwt-git::initialize_workspace()` with injected-home tests.
+- [x] T037 Wire startup/clone warning degradation into `gwt-tui` and verify focused helper tests.
+
+## Phase 6: Python Runtime Hardening
+
+- [x] T038 Add RED tests for validated bootstrap Python candidate selection, including ignored Windows launcher stubs.
+- [x] T039 Add RED tests for user-facing Python install guidance in startup / clone warning notifications.
+- [x] T040 Implement project-index bootstrap Python validation and guidance-aware error shaping in `gwt-core`.
+- [x] T041 Update TUI warning messaging and README docs for managed project-index Python setup, then rerun focused plus broad verification.
+
+## Phase 7: Review Follow-up
+
+- [x] T042 Add RED tests for working Windows Store / launcher Python acceptance, `py -3` propagation, and 3.8→3.9 fallback.
+- [x] T043 Add RED tests for stable project-index runtime error classification across startup and clone-completion paths.
+- [x] T044 Implement runtime candidate discovery / error classification fixes in `gwt-core`.
+- [x] T045 Implement shared notification classification + README corrections in `gwt-tui` / docs.
+- [x] T046 Refresh SPEC artifacts and rerun focused plus broad verification.

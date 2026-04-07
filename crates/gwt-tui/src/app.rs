@@ -591,9 +591,14 @@ pub fn update(model: &mut Model, msg: Message) {
                         match gwt_git::clone_repo(&url, &target) {
                             Ok(path) => {
                                 let _ = gwt_git::install_develop_protection(&path);
-                                let _ = gwt_git::initialize_workspace(&path);
+                                let workspace_warning = gwt_git::initialize_workspace(&path)
+                                    .err()
+                                    .map(workspace_initialization_warning);
                                 model.reset(path);
                                 load_initial_data(model);
+                                if let Some(notification) = workspace_warning {
+                                    apply_notification(model, notification);
+                                }
                             }
                             Err(e) => {
                                 state.clone_status =
@@ -1826,6 +1831,23 @@ fn apply_notification(model: &mut Model, notification: Notification) {
     if let Some(msg) = crate::notification_router::route(&notification) {
         update(model, msg);
     }
+}
+
+fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
+    let detail = err.to_string();
+    if gwt_core::runtime::project_index_runtime_error_kind(&detail).is_some() {
+        return Notification::new(Severity::Warn, "index", "Project index runtime unavailable")
+            .with_detail(gwt_core::runtime::project_index_runtime_error_detail(
+                &detail,
+            ));
+    }
+
+    Notification::new(
+        Severity::Warn,
+        "workspace",
+        "Workspace initialization incomplete",
+    )
+    .with_detail(detail)
 }
 
 fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
@@ -11371,5 +11393,40 @@ CUSTOM_ENV = "enabled"
         assert_eq!(model.settings.fields[0].label, "Bundled skills");
         let count: usize = model.settings.fields[0].value.parse().unwrap_or(0);
         assert!(count > 0, "should have bundled skills");
+    }
+
+    #[test]
+    fn workspace_initialization_warning_is_warn_notification() {
+        let notification = workspace_initialization_warning("runtime setup failed");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "workspace");
+        assert_eq!(notification.message, "Workspace initialization incomplete");
+        assert_eq!(notification.detail.as_deref(), Some("runtime setup failed"));
+    }
+
+    #[test]
+    fn workspace_initialization_warning_uses_project_index_guidance_when_python_is_missing() {
+        let notification = workspace_initialization_warning("[gwt-project-index-python-install] Project index runtime requires Python 3.9+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert!(notification
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("py -3"));
+    }
+
+    #[test]
+    fn workspace_initialization_warning_uses_project_index_source_for_runtime_failures() {
+        let notification =
+            workspace_initialization_warning("[gwt-project-index-runtime] pip install -r failed");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert_eq!(
+            notification.detail.as_deref(),
+            Some("pip install -r failed")
+        );
     }
 }

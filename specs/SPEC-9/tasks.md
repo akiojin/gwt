@@ -248,3 +248,10 @@
 ### 5e. Runtime Hook Contract Follow-up
 
 - [x] **T-150**: Document the interactive Codex `SessionStart` gap and downstream launch-bootstrap contract in `SPEC-9` artifacts.
+
+## Phase 6: Search Runtime Contract Recovery
+
+- [x] **T-131**: Add canonical `index-files` / `search-files` action names to the repo-tracked project-index runner and keep `index` / `search` aliases for compatibility.
+- [x] **T-132**: Add repo-tracked project-index requirements + managed venv bootstrap so gwt can repair the shared search runtime.
+- [x] **T-133**: Update `gwt-search`, `gwt-project-search`, `gwt-project-index`, and `gwt-issue-search` examples to use canonical file-search actions and `index-issues --project-root`.
+- [x] **T-134**: Update SPEC-9 runtime contract language so the search interface, shared runtime, and warning-only degradation stay aligned with implementation.

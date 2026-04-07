@@ -43,6 +43,7 @@ As a developer, I want gwt-tui to detect an existing Git repository and enter th
 
 1. Given gwt-tui is launched inside a Git repository, when the TUI starts, then it detects the repo root and enters Management layer with Branches tab.
 2. Given gwt-tui is launched inside a worktree, when the TUI starts, then it resolves to the main repo root.
+3. Given the shared project-index runtime is missing or corrupted, when gwt-tui enters an existing repository, then it repairs `~/.gwt/runtime/chroma_index_runner.py` and the managed Python venv before search features are used.
 
 ### US-4: Legacy bare repo migration guidance (P1)
 
@@ -80,6 +81,14 @@ As a project maintainer, I want develop to be protected from accidental direct c
 - **FR-006**: Bare repo detection shows migration error screen (not Initialization)
 - **FR-007**: Pre-commit hook auto-installed after clone, blocking commits on develop/main
 - **FR-008**: Hook preserves existing `.git/hooks/pre-commit` content (append, not overwrite)
+- **FR-009**: Workspace initialization creates or repairs `~/.gwt/runtime/chroma_index_runner.py` from the repo-tracked runtime asset.
+- **FR-010**: Workspace initialization creates or repairs the managed project-index Python venv under `~/.gwt/runtime/chroma-venv`.
+- **FR-011**: Existing repository startup runs the same runtime repair path before search features load.
+- **FR-012**: Runtime bootstrap failures degrade to a warning notification and do not abort TUI startup or clone completion.
+- **FR-013**: Runtime bootstrap validates bootstrap Python candidates by execution and accepts only supported Python 3.9+ candidates before creating the managed search venv.
+- **FR-014**: Runtime bootstrap validates Windows launcher candidates by execution instead of path heuristics, accepting any candidate that successfully reports a supported Python 3.9+ runtime.
+- **FR-015**: Warning notifications for runtime bootstrap failure include stable project-index classification plus user-facing detail; installation guidance is reserved for true no-candidate cases.
+- **FR-016**: Runtime bootstrap discovers versioned `python3.x` executables beyond a fixed baked-in list so future Python minors remain eligible when present on PATH.
 
 ## Implementation Details
 
@@ -135,7 +144,18 @@ branch name itself as the relative directory hierarchy:
 1. `~/.gwt/config.toml` — create with defaults if not exists
 2. `.git/hooks/pre-commit` — install develop/main commit protection
 3. `specs/` — create directory if not exists
-4. Skill embedding — deferred to agent launch (per SPEC-1438 lifecycle)
+4. `~/.gwt/runtime/chroma_index_runner.py` — write the repo-tracked project-index runner if missing or outdated
+5. `~/.gwt/runtime/chroma-venv/` — create or repair the managed Python venv used for project index operations
+6. Skill embedding — deferred to agent launch (per SPEC-1438 lifecycle)
+
+### Project Index Runtime Lifecycle
+
+- Runtime assets live in the repo and are copied into `~/.gwt/runtime/` during workspace initialization and normal startup repair.
+- The managed venv lives at `~/.gwt/runtime/chroma-venv/` for backward compatibility with existing skills and user environments.
+- If the venv is missing, lacks `chromadb`, or fails the import probe, gwt rebuilds it once before surfacing a warning.
+- Bootstrap Python selection is validated by actually executing candidates, so broken aliases do not get chosen for venv creation while working Store/launcher entrypoints remain usable.
+- On Windows, bootstrap guidance references `python` and `py -3` because either may be the working entrypoint after installation.
+- Startup and clone completion continue even when runtime repair fails; the user sees a warning instead of an app crash.
 
 ### Skill Embedding Lifecycle (per SPEC-1438)
 
@@ -173,6 +193,7 @@ fi
 - **NFR-001**: Clone shows progress indication
 - **NFR-002**: Model reset after clone completes within 2 seconds
 - **NFR-003**: Pre-commit hook does not interfere with existing hooks
+- **NFR-004**: Runtime repair is idempotent; re-running startup without asset drift does not reinstall dependencies.
 
 ## Success Criteria
 
@@ -181,3 +202,8 @@ fi
 - **SC-003**: After clone, TUI transitions to Management layer without restart
 - **SC-004**: `git commit` on develop is blocked by pre-commit hook
 - **SC-005**: Bare repo shows migration instructions
+- **SC-006**: Removing `~/.gwt/runtime/chroma_index_runner.py` and restarting gwt recreates the runner automatically.
+- **SC-007**: Removing or corrupting `~/.gwt/runtime/chroma-venv` and restarting gwt repairs the managed venv automatically.
+- **SC-008**: Runtime bootstrap accepts a working Windows Store / launcher Python entrypoint when it successfully reports Python 3.9+.
+- **SC-009**: When only unusable or too-old Python candidates exist, startup or clone completion continues and the warning reports the runtime problem without masquerading it as “Python not installed”.
+- **SC-010**: When no executable Python 3.9+ candidate exists, startup or clone completion continues and the warning explains how to install Python and verify `python` or `py -3`.

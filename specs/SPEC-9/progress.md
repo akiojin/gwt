@@ -4,8 +4,8 @@
 
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 41/41, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 14/20
-- Artifact refresh: `2026-04-07T02:45:00Z`
+- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 41/41, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 14/20, Phase 6: 4/4
+- Artifact refresh: `2026-04-07T12:56:00Z`
 
 ## Done
 
@@ -20,9 +20,12 @@
 - Phase 3 (Hooks Merge): All merge logic, backup/recovery, and polish completed.
 - Phase 4 (Build Distribution): Release workflow and npm distribution verified.
 - Phase 5 (Skill Consolidation): the consolidated 8-skill structure is implemented; only the explicit standalone verification tasks remain open.
+- Phase 6 (Search Runtime Contract Recovery): shared search runtime bootstrap, canonical `index-files` / `search-files` naming, and `index-issues --project-root` documentation are now aligned.
+- Search runtime bootstrap now validates Python candidates before venv creation and surfaces install guidance when Python 3.9+ is unavailable.
 
 ## Next
 
 - Run completion gate: reconcile spec.md, tasks.md, analysis.md, checklists
 - Update analysis.md to CLEAR
+- Verify the remaining Phase 5 standalone skill checks
 - Consider PR creation

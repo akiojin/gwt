@@ -155,6 +155,11 @@ fn run_app(
         );
     }
     if model.active_layer != ActiveLayer::Initialization {
+        if let Some(notification) = project_index_runtime_bootstrap_notification_with(|| {
+            gwt_core::runtime::ensure_project_index_runtime().map(|_| ())
+        }) {
+            app::update(&mut model, Message::Notify(notification));
+        }
         let session_state_path = Model::session_state_path(model.repo_path());
         if let Some(warning) = restore_startup_session_state_with(&mut model, &session_state_path) {
             app::update(
@@ -284,6 +289,21 @@ fn sync_startup_terminal_size(model: &mut Model, width: u16, height: u16) {
     app::update(model, Message::Resize(width, height));
 }
 
+fn project_index_runtime_bootstrap_notification_with<F, E>(
+    ensure_runtime: F,
+) -> Option<Notification>
+where
+    F: FnOnce() -> std::result::Result<(), E>,
+    E: ToString,
+{
+    ensure_runtime().err().map(|err| {
+        let detail = err.to_string();
+        Notification::new(Severity::Warn, "index", "Project index runtime unavailable").with_detail(
+            gwt_core::runtime::project_index_runtime_error_detail(&detail),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +392,29 @@ mod tests {
         let active = model.active_session_tab().expect("active session");
         assert_eq!(active.vt.cols(), cols);
         assert_eq!(active.vt.rows(), rows);
+    }
+
+    #[test]
+    fn project_index_runtime_bootstrap_notification_with_returns_warning_on_failure() {
+        let notification = project_index_runtime_bootstrap_notification_with(|| {
+            Err::<(), _>("[gwt-project-index-runtime] pip install -r failed".to_string())
+        })
+        .expect("warning notification");
+
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert_eq!(
+            notification.detail.as_deref(),
+            Some("pip install -r failed")
+        );
+    }
+
+    #[test]
+    fn project_index_runtime_bootstrap_notification_with_returns_none_on_success() {
+        let notification =
+            project_index_runtime_bootstrap_notification_with(|| Ok::<(), &'static str>(()));
+        assert!(notification.is_none());
     }
 
     #[test]

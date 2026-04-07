@@ -251,6 +251,21 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 1. Given any repository, when I call `gwt-review`, then it analyzes domain boundaries, module depth, testability, and agent-friendliness.
 2. Given the review report, when improvements are identified, then it suggests creating improvement SPECs via `gwt-design`.
 
+### US-8: Search Runtime Contract Recovery (P1) -- IMPLEMENTED
+
+As a developer using `gwt-search`, I want the shared search runtime to repair itself and expose stable action names so that project, issue, and SPEC search keep working across upgrades.
+
+**Acceptance Scenarios**
+
+1. Given `~/.gwt/runtime/chroma_index_runner.py` is missing or outdated, when gwt starts or initializes a workspace, then the repo-tracked runner is restored automatically.
+2. Given the managed search venv is missing or broken, when gwt starts or initializes a workspace, then `~/.gwt/runtime/chroma-venv` is rebuilt automatically.
+3. Given file search is invoked, when the runner parses CLI args, then `search-files` and `index-files` are the canonical action names.
+4. Given legacy callers still use `search` or `index`, when the runner executes, then those aliases are normalized to `search-files` and `index-files`.
+5. Given issue indexing is invoked, when the runner executes `index-issues`, then `--project-root` is required in addition to `--db-path`.
+6. Given Windows PATH resolves launcher entrypoints first, when gwt chooses a bootstrap Python for the managed search runtime, then it probes them and accepts any candidate that successfully reports Python 3.9+.
+7. Given Python candidates exist but are broken or too old, when the managed search runtime cannot be bootstrapped, then gwt surfaces the runtime failure detail instead of misreporting the situation as “Python not installed”.
+8. Given the managed search runtime cannot be bootstrapped because no suitable Python candidate exists at all, when gwt surfaces the warning, then the message includes install guidance.
+
 ## Functional Requirements (Phase 4: Skill Consolidation)
 
 - **FR-024**: gwt-design runs DDD domain discovery (Bounded Context identification, entity relationships, Ubiquitous Language) in Phase 2.
@@ -265,6 +280,16 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 - **FR-033**: gwt-agent auto-detects discover/read/send/lifecycle mode from arguments.
 - **FR-034**: All 8 skills work standalone without requiring other skills as dependencies.
 - **FR-035**: design → plan → build → review automatic chain suggests the next skill on completion.
+- **FR-036**: gwt-search runtime assets are repo-tracked and copied into `~/.gwt/runtime/` instead of being edited in place.
+- **FR-037**: File search canonical action names are `index-files` and `search-files`; `index` and `search` remain compatibility aliases only.
+- **FR-038**: `index-issues` requires both `--project-root` and `--db-path`.
+- **FR-039**: Search skill documentation and command examples use the canonical file-search action names and the managed `chroma-venv` path.
+- **FR-040**: Search runtime repair uses warning-only degradation when Python or dependency setup fails.
+- **FR-041**: Search runtime bootstrap validates Python candidates by executing them and checking for a supported Python 3 runtime before creating the managed venv.
+- **FR-042**: Search runtime bootstrap probes launcher candidates by execution and accepts working Python 3.9+ Store/launcher entrypoints instead of rejecting them by path heuristic alone.
+- **FR-043**: Search runtime failure guidance tells the user to install Python 3.9+ only when no candidate exists; broken or too-old candidates surface their runtime failure detail.
+- **FR-044**: Search runtime bootstrap discovers versioned `python3.x` executables beyond a fixed hard-coded list when they are present on PATH.
+- **FR-045**: Startup and clone-completion notifications use the same stable project-index runtime classification rather than brittle human-text matching.
 
 ## Success Criteria
 
@@ -290,3 +315,9 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 - **SC-018**: All 8 skills are callable standalone and produce correct results.
 - **SC-019**: `gwt-review` generates an architecture improvement report on the gwt repository.
 - **SC-020**: The design → plan → build → review chain suggests the next skill at each completion point.
+- **SC-021**: `gwt-search` documentation references `search-files` / `index-files` as the file-search contract.
+- **SC-022**: `index-issues` command examples include `--project-root "$GWT_PROJECT_ROOT"`.
+- **SC-023**: Deleting the shared runner or managed venv and restarting gwt triggers runtime self-repair instead of leaving search silently broken.
+- **SC-024**: On Windows, a PATH entry that resolves to a working Microsoft Store / launcher Python entrypoint is accepted when it reports Python 3.9+.
+- **SC-025**: When only broken or too-old Python candidates are present, gwt surfaces runtime failure detail rather than install guidance.
+- **SC-026**: When no suitable bootstrap Python is available, gwt surfaces install guidance that references Python 3.9+ and the expected Windows `python` / `py -3` commands.
