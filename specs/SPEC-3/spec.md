@@ -308,6 +308,7 @@ As a developer, I want to convert an existing session to a different agent type 
   materialization error aborts launch before PTY spawn.
 - **FR-045**: Quick Start restores persisted `skip_permissions` for all built-in agents, including Claude.
 - **FR-046**: Claude launch sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` so Agent Teams capability is always available without an explicit pre-launch toggle.
+- **FR-047**: Every agent launch appends a structured audit line to `~/.gwt/logs/agent-launch.jsonl` including command/args/cwd/env for the spawned PTY config, with sensitive env values redacted.
 
 ## Non-Functional Requirements
 
