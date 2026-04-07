@@ -336,6 +336,7 @@ pub fn update(model: &mut Model, msg: Message) {
             drain_docker_progress_events(model);
             drain_branch_detail_events(model);
             drain_cleanup_events(model);
+            drain_merge_state_events(model);
             tick_notification(model);
             check_pty_exits(model);
             // Forward tick to wizard (AI suggest spinner) when active
@@ -2008,19 +2009,12 @@ fn refresh_branches(model: &mut Model) {
     schedule_branch_detail_prefetch(model);
 }
 
-/// Recompute the cleanup merge state for every local branch (FR-018a/d).
-///
-/// This walks `git cherry origin/main` and `git cherry origin/develop`
-/// per branch, falling back to gone-upstream detection. Bases that don't
-/// exist in the repository are skipped automatically.
+/// Spawn the background merge-state worker for every local branch
+/// (FR-018a/d). The model immediately resets `merged_state` so the list
+/// renders the `⋯` spinner glyph until the worker pushes results into the
+/// queue drained by the tick loop.
 fn refresh_cleanup_merge_state(model: &mut Model) {
     use screens::branches::MergeState;
-
-    let bases = [
-        ("origin/main", gwt_git::MergeTarget::Main),
-        ("origin/develop", gwt_git::MergeTarget::Develop),
-    ];
-    let gone = gwt_git::list_gone_branches(&model.repo_path).unwrap_or_default();
 
     let local_names: Vec<String> = model
         .branches
@@ -2030,14 +2024,56 @@ fn refresh_cleanup_merge_state(model: &mut Model) {
         .map(|b| b.name.clone())
         .collect();
 
-    for name in local_names {
-        let target = gwt_git::detect_cleanable_target(&model.repo_path, &name, &bases, &gone)
-            .unwrap_or(None);
-        let merge_state = match target {
-            Some(t) => MergeState::Cleanable(t),
-            None => MergeState::NotMerged,
-        };
-        model.branches.set_merge_state(name, merge_state);
+    // Reset every local branch to Computing so the gutter shows the spinner
+    // until the worker reports the new value.
+    for name in &local_names {
+        model
+            .branches
+            .set_merge_state(name.clone(), MergeState::Computing);
+    }
+
+    if local_names.is_empty() {
+        model.merge_state_events = None;
+        return;
+    }
+
+    let queue: crate::model::MergeStateQueue =
+        Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    model.merge_state_events = Some(queue.clone());
+    let repo_path = model.repo_path.clone();
+
+    std::thread::spawn(move || {
+        let bases = [
+            ("origin/main", gwt_git::MergeTarget::Main),
+            ("origin/develop", gwt_git::MergeTarget::Develop),
+        ];
+        let gone = gwt_git::list_gone_branches(&repo_path).unwrap_or_default();
+        for branch in local_names {
+            let target = gwt_git::detect_cleanable_target(&repo_path, &branch, &bases, &gone)
+                .unwrap_or(None);
+            let state = match target {
+                Some(t) => MergeState::Cleanable(t),
+                None => MergeState::NotMerged,
+            };
+            queue
+                .lock()
+                .unwrap()
+                .push_back(crate::model::MergeStateEvent { branch, state });
+        }
+    });
+}
+
+/// Drain pending merge-state events into `BranchesState::merged_state`.
+fn drain_merge_state_events(model: &mut Model) {
+    let Some(queue) = model.merge_state_events.clone() else {
+        return;
+    };
+    let events: Vec<crate::model::MergeStateEvent> = {
+        let mut guard = queue.lock().unwrap();
+        std::mem::take(&mut *guard).into_iter().collect()
+    };
+    for event in events {
+        model.branches.set_merge_state(event.branch, event.state);
     }
 }
 

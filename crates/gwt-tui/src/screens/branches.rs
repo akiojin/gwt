@@ -978,34 +978,30 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
                 ""
             };
 
-            // Branch Cleanup gutter (FR-018c/d): two-column prefix that
-            // surfaces merge state at a glance.
-            //   `⋯ ` — merge detection still running for this branch
-            //   `✔ ` — branch is cleanable right now
-            //   `  ` — protected, not merged, or otherwise non-selectable
-            let (gutter_glyph, gutter_color) = if !state.is_cleanable_candidate(&branch.name) {
-                ("  ", theme::color::TEXT_SECONDARY)
+            // Branch Cleanup gutter (FR-018c/d): a single column that
+            // collapses merge state and selection into one glyph so the
+            // branch list keeps its compact width.
+            //
+            //   `●` — selected for cleanup (FR-018c)
+            //   `⋯` — merge detection still running
+            //   `✔` — branch is cleanable right now but not selected
+            //   ` ` — protected, not merged, or otherwise non-selectable
+            let (gutter_glyph, gutter_color) = if state.is_cleanup_selected(&branch.name) {
+                ("\u{25CF}", theme::color::ACTIVE)
+            } else if !state.is_cleanable_candidate(&branch.name) {
+                (" ", theme::color::TEXT_SECONDARY)
             } else {
                 match state.merge_state(&branch.name) {
-                    MergeState::Computing => ("\u{22EF} ", theme::color::TEXT_SECONDARY),
-                    MergeState::Cleanable(_) => ("\u{2714} ", theme::color::SUCCESS),
-                    MergeState::NotMerged => ("  ", theme::color::TEXT_SECONDARY),
+                    MergeState::Computing => ("\u{22EF}", theme::color::TEXT_SECONDARY),
+                    MergeState::Cleanable(_) => ("\u{2714}", theme::color::SUCCESS),
+                    MergeState::NotMerged => (" ", theme::color::TEXT_SECONDARY),
                 }
-            };
-
-            // Multi-select marker (FR-018c): `[x] ` when the row is in the
-            // current cleanup selection set, two-space pad otherwise so
-            // every row keeps the same column alignment.
-            let (selection_marker, selection_color) = if state.is_cleanup_selected(&branch.name) {
-                ("[x] ", theme::color::ACTIVE)
-            } else {
-                ("    ", theme::color::TEXT_SECONDARY)
             };
 
             let line = Line::from(vec![
                 super::selection_prefix(idx == state.selected),
                 Span::styled(gutter_glyph, Style::default().fg(gutter_color)),
-                Span::styled(selection_marker, Style::default().fg(selection_color)),
+                Span::raw(" "),
                 Span::styled(
                     &branch.name,
                     Style::default().fg(theme::color::TEXT_PRIMARY),
