@@ -1,5 +1,23 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: skill 名は underlying action / historical owner と揃える
+
+### 事象
+
+standalone file search の実体は `search-files` / `index-files` なのに、skill surface が
+`gwt-project-search` に寄っており、`files` 契約と命名が食い違っていた。
+
+### 原因
+
+- runtime action 名を `files` に正規化した後も、standalone skill / command 名が旧 `project` のまま残っていた。
+- 過去 owner Issue #1739 の `gwt-file-search` 命名を現行 bundled assets に戻していなかった。
+
+### 再発防止策
+
+1. skill / slash-command rename では runtime action 名と historical owner を一緒に確認する。
+2. canonical 名を変える場合は、bundled assets・参照 docs・compatibility alias を同じ修正セットで更新する。
+3. asset-only rename でも distribution test で canonical asset と legacy alias の両方を固定する。
+
 ## 2026-04-07 — fix: Python launcher 判定は path heuristic ではなく実行 probe と構造化エラーで固定する
 
 ### 事象

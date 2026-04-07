@@ -4,8 +4,8 @@
 
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 41/41, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 14/20, Phase 6: 4/4
-- Artifact refresh: `2026-04-07T12:56:00Z`
+- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 41/41, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 14/20, Phase 6: 7/7
+- Artifact refresh: `2026-04-07T06:33:51Z`
 
 ## Done
 
@@ -22,6 +22,8 @@
 - Phase 5 (Skill Consolidation): the consolidated 8-skill structure is implemented; only the explicit standalone verification tasks remain open.
 - Phase 6 (Search Runtime Contract Recovery): shared search runtime bootstrap, canonical `index-files` / `search-files` naming, and `index-issues --project-root` documentation are now aligned.
 - Search runtime bootstrap now validates Python candidates before venv creation and surfaces install guidance when Python 3.9+ is unavailable.
+- Historical owner Issue #1739 confirmed `gwt-file-search` as the original standalone file-search name; Phase 6 now restores that canonical naming while keeping `gwt-project-search` and `gwt-project-index` as compatibility-oriented entrypoints.
+- Bundled Claude/Codex skills now include canonical `gwt-file-search` assets, and `/gwt:gwt-project-search` delegates to the canonical file-search workflow.
 
 ## Next
 
