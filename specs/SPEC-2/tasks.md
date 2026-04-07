@@ -560,3 +560,11 @@ banner in favor of pane-title chrome.
 
 - [x] T356 [P] Write RED test: successful materialized Codex launches bootstrap a PID-scoped `Running` runtime sidecar before the first interactive hook event arrives.
 - [x] T357 Implement launch-time runtime-state bootstrap in `crates/gwt-tui/src/app.rs` and keep failed launches sidecar-free.
+
+## Phase 59: Terminal IME Candidate Safety
+
+- [x] T358 [P] Write RED test: terminal IME mode swallows candidate-navigation keys (`Left` / `Right` / `Up` / `Down` / `Tab` / `Shift+Tab` / `Enter` / `Esc`) so they do not enqueue PTY bytes or change focus.
+- [x] T359 [P] Write RED test: ordinary printable terminal input still reaches the active PTY while terminal IME mode is enabled.
+- [x] T360 [P] Write RED test: `Ctrl+G,y` toggles terminal IME mode, updates the help registry, and suppresses prefixed `Tab` focus cycling while IME mode is active in the terminal.
+- [x] T361 Implement terminal IME mode state, footer indicator, toggle notification, and terminal key-guard logic in `crates/gwt-tui/src/model.rs`, `crates/gwt-tui/src/message.rs`, `crates/gwt-tui/src/input/keybind.rs`, `crates/gwt-tui/src/main.rs`, `crates/gwt-tui/src/app.rs`, and `crates/gwt-tui/src/widgets/status_bar.rs`.
+- [x] T362 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the terminal IME mode contract.

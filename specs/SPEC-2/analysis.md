@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `253/253` completed items after closing Phase 41 for the split-grid session-title identity follow-up.
+- Task traceability snapshot: `tasks.md` currently records `362/362` completed items after closing Phase 59 for terminal IME candidate safety.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -50,3 +50,4 @@ Status: CLEAR
 - Notes: Phase 39 removes the last redundant nested chrome inside Branch Detail: once the pane border already names the active section and selected branch, the inner Overview / SPECs / Git / Sessions renderers now stay title-free and let the body content start immediately.
 - Notes: Phase 40 restores the last missing piece of compact session-title context by keeping the active `n/N` position visible alongside the active session label whenever the full strip collapses, while extra-wide panes continue to show the full strip.
 - Notes: Phase 41 extends that session-identity parity into split/grid mode: each pane title now carries its stable `n:` shortcut position and the session-type icon instead of a plain name-only title.
+- Notes: Phase 59 adds an explicit terminal IME mode (`Ctrl+G,y`) because iTerm2 / Terminal.app plus `crossterm` do not expose a reliable composition-state signal. While the mode is enabled, candidate-navigation keys are swallowed at the terminal-focus boundary and never become focus shortcuts or PTY bytes.

@@ -98,6 +98,27 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 9. Given two gwt processes are running at the same time, when their agents emit hook events, then each TUI reads only its own PID-scoped runtime sidecars and their branch indicators do not overwrite each other.
 10. Given an interactive Codex session is launched and Codex has not emitted any runtime hook event yet, when the PTY spawn succeeds, then gwt bootstraps that session's PID-scoped runtime sidecar to `Running` so the branch spinner appears before the first prompt is sent.
 
+### US-9: Protect IME Candidate Selection In Terminal Sessions (P1) -- IMPLEMENTED
+
+As a developer using Japanese IME in a shell or agent terminal, I want
+candidate-navigation keys to stop triggering gwt focus or PTY forwarding so
+that choosing a candidate does not submit partial input.
+
+**Acceptance Scenarios**
+
+1. Given terminal focus and terminal IME mode enabled, when I open IME
+   candidate selection and press arrow keys, `Tab`, `Enter`, or `Esc`, then gwt
+   does not treat those keys as focus shortcuts, management navigation, or PTY
+   input.
+2. Given terminal focus and terminal IME mode enabled, when I press `Ctrl+G,y`,
+   then gwt toggles terminal IME mode and shows an English status message for
+   the new state.
+3. Given terminal IME mode is enabled, when the footer or help overlay renders,
+   then the IME mode indicator and toggle shortcut are discoverable without
+   opening a separate modal.
+4. Given terminal IME mode is enabled, when I type ordinary printable
+   characters, then gwt continues forwarding that input to the active PTY.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -114,6 +135,8 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 - A session has emitted `Stop` (waiting for input) but the user closes the PTY before another hook event arrives.
 - Branch rows at narrow widths must keep the branch label and `◆` / `◇` / `▸` legible even when the live session indicator cannot fit.
 - Interactive Codex launches may not emit `SessionStart` before the first user prompt, but the branch list must still show the session as live immediately after spawn.
+- IME candidate navigation on terminals that do not expose composition state must
+  remain safe without relying on terminal-specific auto-detection.
 
 ## Regression Guardrail: Hook-Driven Branch Visibility
 
@@ -146,6 +169,9 @@ This capability has regressed multiple times because "hooks are configured" is n
 - **FR-002a**: Split/grid mode pane titles preserve session identity by showing each pane's stable `n:` shortcut position plus the session-type icon alongside the session name, so the old-TUI numeric muscle memory still applies when multiple panes are visible.
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.
+- **FR-004a**: `Ctrl+G,y` toggles an explicit terminal IME mode for shell and
+  agent terminal input. Toggling the mode emits an English status notification
+  and updates the help registry / footer affordances.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.
@@ -214,6 +240,11 @@ This capability has regressed multiple times because "hooks are configured" is n
 - **FR-014a**: Session PTY geometry is initialized from the actual visible session-pane size at startup. The default shell must not stay on the stale `80x24` model default until a later terminal resize event arrives.
 - **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border. Reverse focus cycling must work whether the terminal reports `Shift+Tab` as `BackTab` or as `Tab` with the Shift modifier.
 - **FR-015a**: The prefixed focus shortcuts remain available even when a session PTY owns `Tab`. When the management panel is hidden, `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab` first reveal it and then land on the next logical focus target.
+- **FR-015b**: When terminal IME mode is enabled and terminal focus is active,
+  plain candidate-navigation keys (`Left`, `Right`, `Up`, `Down`, `Tab`,
+  `Shift+Tab`, `Enter`, `Esc`) are consumed by gwt instead of being interpreted
+  as focus shortcuts or forwarded to the PTY. Printable characters and non-IME
+  control input keep their existing routing.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 

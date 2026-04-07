@@ -239,7 +239,11 @@ fn run_app(
                     let terminal_focused =
                         model.active_focus == gwt_tui::model::FocusPane::Terminal;
                     keybinds
-                        .process_key_with_focus(key, terminal_focused)
+                        .process_key_with_context(
+                            key,
+                            terminal_focused,
+                            model.terminal_ime_mode_enabled(),
+                        )
                         .unwrap_or(Message::KeyInput(key))
                 }
                 other => other,
