@@ -36,8 +36,19 @@ use gwt_core::repo_hash::{compute_repo_hash, RepoHash};
 use gwt_core::worktree_hash::{compute_worktree_hash, WorktreeHash};
 use gwt_notification::{Notification, NotificationBus, Severity};
 use tokio::runtime::Runtime;
+use tokio::sync::Semaphore;
 
 const ISSUE_REFRESH_TTL_MINUTES: u64 = 15;
+/// Maximum number of concurrent runner subprocesses (each loads e5-base
+/// ~440 MB into RAM, so a hard cap is required to avoid overwhelming the
+/// host when many worktrees need indexing).
+const RUNNER_CONCURRENCY: usize = 1;
+
+/// Global semaphore that throttles concurrent Python runner spawns.
+fn runner_semaphore() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(RUNNER_CONCURRENCY))
+}
 
 /// Process-global tokio runtime owned by the worker. Lazily initialized.
 fn worker_runtime() -> &'static Runtime {
@@ -251,20 +262,7 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
         worktree_path.display()
     ));
 
-    // Phase 8 / FR-022: kick an integrity-check build immediately so the
-    // index reflects the current on-disk state. The runner runs in
-    // incremental mode, which falls back to a full build when the manifest
-    // is missing (compute_manifest_diff returns every file as "added").
-    log_event(&format!(
-        "ensure_watcher: kicking initial integrity build for wt_hash={}",
-        wt_hash
-    ));
-    if let Err(e) = run_incremental_index(&repo_hash, &wt_hash, worktree_path) {
-        log_event(&format!("initial integrity build spawn failed: {e}"));
-    }
-
     let worktree_path = worktree_path.to_path_buf();
-    let repo_root = repo_root.to_path_buf();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
     let handle = worker_runtime().spawn(async move {
@@ -295,9 +293,11 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
                         wt_hash,
                         batch.changed_paths.len()
                     ));
-                    if let Err(e) = run_incremental_index(&repo_hash, &wt_hash, &repo_root) {
-                        log_event(&format!("incremental index spawn failed: {e}"));
-                    }
+                    schedule_incremental_index(
+                        repo_hash.clone(),
+                        wt_hash.clone(),
+                        worktree_path.clone(),
+                    );
                 }
             }
         }
@@ -342,11 +342,10 @@ pub fn shutdown_and_remove(repo_root: &Path, worktree_path: &Path) -> Result<()>
     Ok(())
 }
 
-fn run_incremental_index(
-    repo_hash: &RepoHash,
-    wt_hash: &WorktreeHash,
-    project_root: &Path,
-) -> std::io::Result<()> {
+/// Kick a background full/incremental rebuild for the three scopes
+/// (files, files-docs, specs) on the worker runtime. Returns immediately;
+/// the actual subprocess execution is throttled by `runner_semaphore`.
+fn schedule_incremental_index(repo_hash: RepoHash, wt_hash: WorktreeHash, project_root: PathBuf) {
     let python = gwt_project_index_venv_dir().join(if cfg!(windows) {
         "Scripts/python.exe"
     } else {
@@ -355,52 +354,102 @@ fn run_incremental_index(
     let runner = gwt_runtime_runner_path();
     if !python.exists() || !runner.exists() {
         log_event(&format!(
-            "run_incremental_index: runtime missing (python={} runner={})",
+            "schedule_incremental_index: runtime missing (python={} runner={})",
             python.display(),
             runner.display()
         ));
-        return Ok(());
+        return;
     }
 
-    for scope in ["files", "files-docs", "specs"] {
-        let action = if scope == "specs" {
-            "index-specs"
-        } else {
-            "index-files"
-        };
-        let log_file = open_runner_log_file(&format!("{action}-{scope}-incremental"));
+    worker_runtime().spawn(async move {
+        for scope in ["files", "files-docs", "specs"] {
+            let action = if scope == "specs" {
+                "index-specs"
+            } else {
+                "index-files"
+            };
+            let log_file = open_runner_log_file(&format!("{action}-{scope}-incremental"));
+
+            let permit = match runner_semaphore().acquire().await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+
+            log_event(&format!(
+                "spawn runner: action={} scope={} repo_hash={} wt_hash={}",
+                action, scope, repo_hash, wt_hash
+            ));
+
+            let mut cmd = tokio::process::Command::new(&python);
+            cmd.arg(&runner)
+                .arg("--action")
+                .arg(action)
+                .arg("--repo-hash")
+                .arg(repo_hash.as_str())
+                .arg("--worktree-hash")
+                .arg(wt_hash.as_str())
+                .arg("--project-root")
+                .arg(&project_root)
+                .arg("--mode")
+                .arg("incremental")
+                .arg("--scope")
+                .arg(scope);
+            if let Some(file) = log_file.as_ref().and_then(|f| f.try_clone().ok()) {
+                cmd.stdout(file);
+            } else {
+                cmd.stdout(std::process::Stdio::null());
+            }
+            if let Some(file) = log_file.and_then(|f| f.try_clone().ok()) {
+                cmd.stderr(file);
+            } else {
+                cmd.stderr(std::process::Stdio::null());
+            }
+            cmd.stdin(std::process::Stdio::null());
+
+            match cmd.spawn() {
+                Ok(mut child) => match child.wait().await {
+                    Ok(status) => log_event(&format!(
+                        "runner exit: action={} scope={} status={} wt_hash={}",
+                        action, scope, status, wt_hash
+                    )),
+                    Err(e) => log_event(&format!(
+                        "runner wait failed: action={} scope={} err={}",
+                        action, scope, e
+                    )),
+                },
+                Err(e) => log_event(&format!(
+                    "runner spawn failed: action={} scope={} err={}",
+                    action, scope, e
+                )),
+            }
+
+            drop(permit);
+        }
+    });
+}
+
+/// Kick an initial integrity-check build for a single Worktree. Used by
+/// the pane spawn site (`materialize_pending_launch_with`) to ensure the
+/// index reflects the current on-disk state when the user actually starts
+/// working in that Worktree. Bootstrap-time eager builds across all 9
+/// worktrees were too expensive (each runner loads ~440 MB e5 model), so
+/// we defer this to per-pane spawn instead.
+pub fn kick_initial_build_for_worktree(repo_root: &Path, worktree_path: &Path) {
+    let Some(repo_hash) = detect_repo_hash(repo_root) else {
+        return;
+    };
+    let Ok(wt_hash) = compute_worktree_hash(worktree_path) else {
         log_event(&format!(
-            "spawn runner: action={} scope={} repo_hash={} wt_hash={}",
-            action, scope, repo_hash, wt_hash
+            "kick_initial_build: failed to compute worktree hash for {}",
+            worktree_path.display()
         ));
-        let mut cmd = std::process::Command::new(&python);
-        cmd.arg(&runner)
-            .arg("--action")
-            .arg(action)
-            .arg("--repo-hash")
-            .arg(repo_hash.as_str())
-            .arg("--worktree-hash")
-            .arg(wt_hash.as_str())
-            .arg("--project-root")
-            .arg(project_root)
-            .arg("--mode")
-            .arg("incremental")
-            .arg("--scope")
-            .arg(scope);
-        if let Some(file) = log_file.as_ref().and_then(|f| f.try_clone().ok()) {
-            cmd.stdout(file);
-        } else {
-            cmd.stdout(std::process::Stdio::null());
-        }
-        if let Some(file) = log_file.and_then(|f| f.try_clone().ok()) {
-            cmd.stderr(file);
-        } else {
-            cmd.stderr(std::process::Stdio::null());
-        }
-        cmd.stdin(std::process::Stdio::null());
-        let _ = cmd.spawn()?;
-    }
-    Ok(())
+        return;
+    };
+    log_event(&format!(
+        "kick_initial_build: queueing integrity build for wt_hash={}",
+        wt_hash
+    ));
+    schedule_incremental_index(repo_hash, wt_hash, worktree_path.to_path_buf());
 }
 
 // =====================================================================
