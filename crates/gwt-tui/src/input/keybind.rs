@@ -74,29 +74,6 @@ pub struct KeybindRegistry {
 /// Window for double-tap Ctrl+C detection.
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);
 
-pub(crate) fn is_terminal_ime_protected_key(key: KeyEvent) -> bool {
-    let blocked_modifiers = KeyModifiers::CONTROL
-        | KeyModifiers::ALT
-        | KeyModifiers::SUPER
-        | KeyModifiers::HYPER
-        | KeyModifiers::META;
-    if key.modifiers.intersects(blocked_modifiers) {
-        return false;
-    }
-
-    matches!(
-        key.code,
-        KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::Tab
-            | KeyCode::BackTab
-            | KeyCode::Enter
-            | KeyCode::Esc
-    )
-}
-
 impl Default for KeybindRegistry {
     fn default() -> Self {
         Self::new()
@@ -154,11 +131,6 @@ impl KeybindRegistry {
             Keybinding {
                 keys: "Ctrl+G, v".into(),
                 description: "Start voice input".into(),
-                category: KeybindingCategory::Input,
-            },
-            Keybinding {
-                keys: "Ctrl+G, y".into(),
-                description: "Toggle terminal IME mode".into(),
                 category: KeybindingCategory::Input,
             },
             Keybinding {
@@ -221,29 +193,9 @@ impl KeybindRegistry {
         key: KeyEvent,
         terminal_focused: bool,
     ) -> Option<Message> {
-        self.process_key_with_context(key, terminal_focused, false)
-    }
-
-    /// Process a key event with terminal context such as IME-safe mode.
-    pub fn process_key_with_context(
-        &mut self,
-        key: KeyEvent,
-        terminal_focused: bool,
-        terminal_ime_mode: bool,
-    ) -> Option<Message> {
         // Check for timeout
         if self.prefix_state.is_expired() {
             self.prefix_state = PrefixState::Idle;
-        }
-
-        if terminal_focused
-            && terminal_ime_mode
-            && matches!(self.prefix_state, PrefixState::Active { .. })
-            && is_terminal_ime_protected_key(key)
-        {
-            self.prefix_state = PrefixState::Idle;
-            self.last_ctrl_c = None;
-            return None;
         }
 
         // Ctrl+C double-tap quit — disabled when terminal has focus so that
@@ -292,7 +244,6 @@ impl KeybindRegistry {
                     KeyCode::Char('c') => Some(Message::NewShell),
                     KeyCode::Char('x') => Some(Message::CloseSession),
                     KeyCode::Char('q') => Some(Message::Quit),
-                    KeyCode::Char('y') => Some(Message::ToggleTerminalImeMode),
                     KeyCode::Char(n) if n.is_ascii_digit() && n != '0' => {
                         let idx = (n as usize) - ('1' as usize);
                         Some(Message::SwitchSession(idx))
@@ -519,21 +470,11 @@ mod tests {
     }
 
     #[test]
-    fn prefix_y_toggles_terminal_ime_mode() {
+    fn prefix_y_is_unbound() {
         let mut reg = KeybindRegistry::new();
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert!(matches!(result, Some(Message::ToggleTerminalImeMode)));
-    }
-
-    #[test]
-    fn prefix_tab_does_not_cycle_focus_when_terminal_ime_mode_is_active() {
-        let mut reg = KeybindRegistry::new();
-        reg.process_key_with_context(key(KeyCode::Char('g'), KeyModifiers::CONTROL), true, true);
-        let result =
-            reg.process_key_with_context(key(KeyCode::Tab, KeyModifiers::NONE), true, true);
         assert!(result.is_none());
-        assert!(matches!(reg.prefix_state, PrefixState::Idle));
     }
 
     #[test]
@@ -549,7 +490,6 @@ mod tests {
             "Ctrl+G, g",
             "Ctrl+G, c",
             "Ctrl+G, ?",
-            "Ctrl+G, y",
             "Ctrl+G, 1-9",
             "Ctrl+C, Ctrl+C",
         ] {
@@ -568,6 +508,7 @@ mod tests {
             .iter()
             .map(|binding| binding.keys.as_str())
             .collect();
+        assert!(!registered.contains(&"Ctrl+G, y"));
         assert!(!registered.contains(&"Ctrl+G, p"));
     }
 }

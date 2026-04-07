@@ -7,6 +7,7 @@ pub mod app;
 pub(crate) mod custom_agents;
 pub mod event;
 pub mod input;
+pub mod input_trace;
 pub mod message;
 pub mod model;
 pub mod notification_router;

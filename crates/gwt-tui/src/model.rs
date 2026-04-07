@@ -550,8 +550,6 @@ pub struct Model {
     pub management_tab: ManagementTab,
     /// Whether the help overlay is visible.
     pub(crate) help_visible: bool,
-    /// Whether terminal input should protect IME candidate-navigation keys.
-    pub(crate) terminal_ime_mode_enabled: bool,
     /// Error queue (shown as overlays).
     pub(crate) error_queue: VecDeque<Notification>,
     /// Whether the app should quit.
@@ -651,7 +649,6 @@ impl Model {
             session_layout: SessionLayout::Tab,
             management_tab: ManagementTab::Branches,
             help_visible: false,
-            terminal_ime_mode_enabled: false,
             error_queue: VecDeque::new(),
             quit: false,
             repo_path,
@@ -744,11 +741,6 @@ impl Model {
     /// Current terminal size `(cols, rows)`.
     pub fn terminal_size(&self) -> (u16, u16) {
         self.terminal_size
-    }
-
-    /// Whether explicit terminal IME-safe routing is enabled.
-    pub fn terminal_ime_mode_enabled(&self) -> bool {
-        self.terminal_ime_mode_enabled
     }
 
     /// Drain PTY output from background reader threads.

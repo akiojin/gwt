@@ -26,6 +26,7 @@ use gwt_notification::{Notification, Severity};
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
+    input_trace,
     message::Message,
     model::{ActiveLayer, Model},
 };
@@ -238,13 +239,9 @@ fn run_app(
                 Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
                     let terminal_focused =
                         model.active_focus == gwt_tui::model::FocusPane::Terminal;
-                    keybinds
-                        .process_key_with_context(
-                            key,
-                            terminal_focused,
-                            model.terminal_ime_mode_enabled(),
-                        )
-                        .unwrap_or(Message::KeyInput(key))
+                    let routed = keybinds.process_key_with_focus(key, terminal_focused);
+                    input_trace::trace_keybind_decision(key, terminal_focused, routed.as_ref());
+                    routed.unwrap_or(Message::KeyInput(key))
                 }
                 other => other,
             };

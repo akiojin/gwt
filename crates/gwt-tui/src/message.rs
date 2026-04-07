@@ -103,8 +103,6 @@ pub enum Message {
     OpenSessionConversion,
     /// Toggle the keybinding help overlay.
     ToggleHelp,
-    /// Toggle explicit terminal IME-safe input mode.
-    ToggleTerminalImeMode,
     /// Open the wizard overlay with SPEC context for prefilling.
     OpenWizardWithSpec(SpecContext),
     /// Close the wizard overlay.
@@ -169,6 +167,5 @@ mod tests {
         let _ = Message::OpenSessionConversion;
         let _ = Message::OpenWizardWithSpec(SpecContext::new("SPEC-1", "Title", ""));
         let _ = Message::CloseWizard;
-        let _ = Message::ToggleTerminalImeMode;
     }
 }

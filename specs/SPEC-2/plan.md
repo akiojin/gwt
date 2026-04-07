@@ -750,29 +750,27 @@ recognizable at a glance without adding labels back into the row.
 - Add RED coverage for the Claude/Codex/Gemini spinner palette mapping.
 - Re-run focused and broad verification, then refresh SPEC-2 artifacts and execution tracking.
 
-### Phase 54: Terminal IME Candidate Safety (5 tasks)
-Protect Japanese IME candidate navigation in shell / agent terminals without
-depending on terminal-specific composition-state APIs that `crossterm` does not
-reliably expose on iTerm2 / Terminal.app.
+### Phase 54: Terminal Input Trace For IME Investigation (5 tasks)
+Replace the rejected explicit IME toggle with opt-in instrumentation so the
+real terminal input path can be observed in gwt without changing normal UX.
 
-54.1: Explicit terminal IME mode (2 tasks)
-- Add a global terminal IME mode flag with a `Ctrl+G,y` toggle surfaced through
-  the keybinding registry, help overlay, footer chrome, and English status
-  notifications.
-- Keep the scope limited to terminal input so management-list searches and
-  settings forms retain their current routing.
+54.1: Opt-in trace contract (2 tasks)
+- Remove the `Ctrl+G,y` terminal IME mode and any footer/help chrome tied to
+  that workaround so normal terminal input behavior returns to the pre-toggle
+  contract.
+- Add a `GWT_INPUT_TRACE_PATH`-driven JSONL trace contract that stays inactive
+  unless the environment variable is set.
 
-54.2: Protected terminal routing (2 tasks)
-- Consume plain candidate-navigation keys (`Left`, `Right`, `Up`, `Down`,
-  `Tab`, `Shift+Tab`, `Enter`, `Esc`) whenever terminal focus and terminal IME
-  mode are both active.
-- Preserve ordinary printable input and existing non-IME control input, and
-  cancel any pending `Ctrl+G` prefix completion when a protected key appears in
-  terminal IME mode.
+54.2: Input-path instrumentation (2 tasks)
+- Record raw `crossterm` key press events, post-prefix routing decisions, and
+  PTY-forwarded bytes so IME candidate-navigation behavior can be diagnosed in
+  the real app.
+- Keep the instrumentation fail-open and scoped to terminal input paths so
+  management behavior and ordinary sessions are unchanged when tracing is off.
 
 54.3: Verification and artifact sync (1 task)
-- Add focused RED coverage for IME-mode key swallowing, prefix behavior, and
-  footer/help visibility, then rerun focused and broad verification and refresh
+- Add focused RED coverage for the removed `Ctrl+G,y` binding and the new
+  trace-file records, then rerun focused and broad verification and refresh
   SPEC-2 artifacts and execution tracking.
 
 ## Dependencies

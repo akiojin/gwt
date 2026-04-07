@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEvent};
 
-use crate::message::Message;
+use crate::{input_trace, message::Message};
 
 /// Tick interval for the event loop.
 const TICK_RATE: Duration = Duration::from_millis(100);
@@ -35,7 +35,10 @@ pub fn poll_event_slice(deadline: Instant, max_wait: Duration) -> Option<Message
 
 fn translate_event(event: Event) -> Option<Message> {
     match event {
-        Event::Key(key) if key.kind == event::KeyEventKind::Press => Some(Message::KeyInput(key)),
+        Event::Key(key) if key.kind == event::KeyEventKind::Press => {
+            input_trace::trace_crossterm_key(key);
+            Some(Message::KeyInput(key))
+        }
         Event::Paste(text) => Some(Message::PasteInput(text)),
         Event::Mouse(mouse) => Some(Message::MouseInput(mouse)),
         Event::Resize(w, h) => Some(Message::Resize(w, h)),

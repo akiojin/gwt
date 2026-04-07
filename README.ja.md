@@ -73,13 +73,12 @@ TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用しま
 | `Ctrl+G`, `w` | Worktree 一覧 |
 | `Ctrl+G`, `s` | 設定 |
 | `Ctrl+G`, `?` | ヘルプ / キーバインド一覧 |
-| `Ctrl+G`, `y` | terminal IME mode の切替 |
 | `Ctrl+G`, `q` | 終了 |
 
-シェルやエージェント端末で日本語 IME の候補選択が矢印キー、`Tab`、
-`Enter` などで途中送信される場合は、入力前に `Ctrl+G`, `y` で
-terminal IME mode を有効化し、通常の端末ショートカットに戻るときに
-再度切り替えてください。
+シェルやエージェント端末で日本語 IME の候補選択を調査する場合は、
+`GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl` を付けて gwt を起動してください。
+JSONL トレースには、生の `crossterm` キーイベント、keybind 判定、PTY に
+転送したバイト列が記録され、実行中に入力モードを切り替える必要はありません。
 
 ## 必要環境変数と前提
 

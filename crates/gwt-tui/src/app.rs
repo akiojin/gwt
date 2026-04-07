@@ -35,7 +35,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 
 use crate::{
     custom_agents::load_custom_agents,
-    input::{keybind::is_terminal_ime_protected_key, voice::VoiceInputMessage},
+    input::voice::VoiceInputMessage,
+    input_trace,
     message::Message,
     model::{
         ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
@@ -476,15 +477,6 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::ToggleHelp => {
             model.help_visible = !model.help_visible;
         }
-        Message::ToggleTerminalImeMode => {
-            model.terminal_ime_mode_enabled = !model.terminal_ime_mode_enabled;
-            let message = if model.terminal_ime_mode_enabled {
-                "Terminal IME mode enabled"
-            } else {
-                "Terminal IME mode disabled"
-            };
-            apply_notification(model, Notification::new(Severity::Info, "input", message));
-        }
         Message::ShowNotification(notification) => match notification.severity {
             Severity::Info => {
                 model.current_notification = Some(notification);
@@ -525,10 +517,6 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::KeyInput(key) => {
             if route_overlay_key(model, key) {
-                return;
-            }
-
-            if should_consume_terminal_ime_key(model, key) {
                 return;
             }
 
@@ -1914,18 +1902,17 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
     }
 }
 
-fn should_consume_terminal_ime_key(model: &Model, key: crossterm::event::KeyEvent) -> bool {
-    model.active_layer != ActiveLayer::Initialization
-        && model.active_focus == FocusPane::Terminal
-        && model.terminal_ime_mode_enabled
-        && is_terminal_ime_protected_key(key)
-}
-
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
     let Some(bytes) = key_event_to_bytes(key) else {
         return;
     };
-    push_input_to_active_session(model, bytes);
+    let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
+        return;
+    };
+    input_trace::trace_pty_forward(key, &session_id, &bytes);
+    model
+        .pending_pty_inputs
+        .push_back(crate::model::PendingPtyInput { session_id, bytes });
 }
 
 fn apply_notification(model: &mut Model, notification: Notification) {
@@ -4921,6 +4908,7 @@ mod tests {
     use tempfile::TempDir;
 
     static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static INPUT_TRACE_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
@@ -11564,58 +11552,38 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn update_toggle_terminal_ime_mode_toggles_flag_and_status_notification() {
-        let mut model = test_model();
-
-        update(&mut model, Message::ToggleTerminalImeMode);
-
-        assert!(model.terminal_ime_mode_enabled);
-        let notification = model
-            .current_notification
-            .as_ref()
-            .expect("terminal ime notification");
-        assert_eq!(notification.source, "input");
-        assert_eq!(notification.message, "Terminal IME mode enabled");
-    }
-
-    #[test]
-    fn update_key_input_terminal_ime_mode_swallows_candidate_navigation_keys() {
+    fn update_key_input_terminal_tab_still_forwards_to_pty() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
-        model.terminal_ime_mode_enabled = true;
 
-        for key_event in [
-            key(KeyCode::Left, KeyModifiers::NONE),
-            key(KeyCode::Right, KeyModifiers::NONE),
-            key(KeyCode::Up, KeyModifiers::NONE),
-            key(KeyCode::Down, KeyModifiers::NONE),
-            key(KeyCode::Tab, KeyModifiers::NONE),
-            key(KeyCode::BackTab, KeyModifiers::SHIFT),
-            key(KeyCode::Enter, KeyModifiers::NONE),
-            key(KeyCode::Esc, KeyModifiers::NONE),
-        ] {
-            update(&mut model, Message::KeyInput(key_event));
-        }
-
-        assert!(model.pending_pty_inputs().is_empty());
-        assert_eq!(model.active_focus, FocusPane::Terminal);
-    }
-
-    #[test]
-    fn update_key_input_terminal_ime_mode_keeps_printable_input_flowing() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Main;
-        model.active_focus = FocusPane::Terminal;
-        model.terminal_ime_mode_enabled = true;
-
-        let key_event = key(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(!should_consume_terminal_ime_key(&model, key_event));
-        forward_key_to_active_session(&mut model, key_event);
+        forward_key_to_active_session(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
 
         let forwarded = model.pending_pty_inputs().back().unwrap();
         assert_eq!(forwarded.session_id, "shell-0");
-        assert_eq!(forwarded.bytes, b"a".to_vec());
+        assert_eq!(forwarded.bytes, b"\t".to_vec());
+    }
+
+    #[test]
+    fn forward_key_to_active_session_appends_opt_in_trace_record() {
+        let _guard = INPUT_TRACE_ENV_TEST_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input-trace.jsonl");
+        let previous = std::env::var_os(crate::input_trace::INPUT_TRACE_PATH_ENV);
+        std::env::set_var(crate::input_trace::INPUT_TRACE_PATH_ENV, &path);
+
+        let mut model = test_model();
+        forward_key_to_active_session(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        match previous {
+            Some(value) => std::env::set_var(crate::input_trace::INPUT_TRACE_PATH_ENV, value),
+            None => std::env::remove_var(crate::input_trace::INPUT_TRACE_PATH_ENV),
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read trace file");
+        assert!(text.contains("\"stage\":\"pty_forward\""));
+        assert!(text.contains("\"session_id\":\"shell-0\""));
+        assert!(text.contains("\"bytes_hex\":\"0d\""));
     }
 
     #[test]

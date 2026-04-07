@@ -120,11 +120,6 @@ pub fn render_with_notification_and_hints(
         spans.push(notification_span(notification));
     }
 
-    if model.terminal_ime_mode_enabled {
-        spans.push(theme::status_separator());
-        spans.push(Span::styled(" IME ", theme::style::warning_text()));
-    }
-
     if !compact_footer {
         spans.push(theme::status_separator());
         spans.push(Span::styled(
@@ -389,26 +384,5 @@ mod tests {
             .collect();
         assert!(text.contains("feature/agent-context"));
         assert!(text.contains("type: Codex"));
-    }
-
-    #[test]
-    fn render_status_bar_shows_terminal_ime_badge_when_enabled() {
-        let mut model = Model::new(PathBuf::from("/tmp/test"));
-        model.terminal_ime_mode_enabled = true;
-
-        let backend = TestBackend::new(120, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&model, f, area);
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer().clone();
-        let text: String = (0..buf.area.width)
-            .map(|x| buf[(x, 0)].symbol().to_string())
-            .collect();
-        assert!(text.contains("IME"));
     }
 }

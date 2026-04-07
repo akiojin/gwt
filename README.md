@@ -77,13 +77,12 @@ All TUI key bindings use the `Ctrl+G` prefix.
 | `Ctrl+G`, `w` | Worktree list |
 | `Ctrl+G`, `s` | Settings |
 | `Ctrl+G`, `?` | Help / key binding reference |
-| `Ctrl+G`, `y` | Toggle terminal IME mode |
 | `Ctrl+G`, `q` | Quit |
 
-If Japanese IME candidate selection in a shell or agent terminal gets
-interrupted by arrow keys, `Tab`, or `Enter`, enable terminal IME mode with
-`Ctrl+G`, `y` before composing text and toggle it off again when you return to
-normal terminal shortcuts.
+To investigate Japanese IME candidate selection in a shell or agent terminal,
+launch gwt with `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl`. The JSONL
+trace records raw `crossterm` key events, keybind decisions, and forwarded PTY
+bytes without adding a runtime input-mode toggle.
 
 ## Environment and requirements
 

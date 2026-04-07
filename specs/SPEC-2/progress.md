@@ -76,7 +76,7 @@
 - Codex launch configs now add the current `~/.gwt/sessions/runtime/<pid>` namespace as an extra writable root, so Codex hooks can persist live spinner sidecars even under `workspace-write` sandboxing.
 - Materialized Codex launches now append that writable root after the real persisted session id is allocated, so the spawned PTY args finally match the runtime sidecar path injected into the environment.
 - Interactive Codex launches now also bootstrap a PID-scoped `Running` runtime sidecar immediately after PTY spawn succeeds, covering the product gap where interactive Codex does not emit `SessionStart` before the first prompt. Hook events still overwrite that bootstrap state as soon as they arrive.
-- Terminal sessions now support an explicit `Ctrl+G,y` IME-safe mode: candidate-navigation keys are swallowed while terminal focus is active, the help registry documents the toggle, and the footer shows an `IME` badge while the mode is enabled.
+- Terminal IME investigation now uses an opt-in `GWT_INPUT_TRACE_PATH` JSONL trace instead of a runtime mode toggle. The trace captures raw `crossterm` key presses, keybind routing decisions, and PTY-forwarded bytes without changing normal terminal UX.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.
