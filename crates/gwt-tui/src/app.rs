@@ -2846,18 +2846,22 @@ fn materialize_pending_launch_with(
     }
 
     // Prepare hook assets before the agent process starts so the first turn
-    // can emit runtime state immediately.
-    let worktree = config.working_dir.as_deref().unwrap_or(&model.repo_path);
-    if let Err(e) = distribute_to_worktree(worktree) {
+    // can emit runtime state immediately. Take an owned PathBuf so the borrow
+    // does not outlive the immutable borrow of `model`.
+    let worktree: std::path::PathBuf = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| model.repo_path.clone());
+    if let Err(e) = distribute_to_worktree(&worktree) {
         tracing::warn!("skill distribution failed: {e}");
     }
-    if let Err(e) = update_git_exclude(worktree) {
+    if let Err(e) = update_git_exclude(&worktree) {
         tracing::warn!("git exclude update failed: {e}");
     }
-    if let Err(e) = generate_settings_local(worktree) {
+    if let Err(e) = generate_settings_local(&worktree) {
         tracing::warn!("settings.local.json generation failed: {e}");
     }
-    if let Err(e) = generate_codex_hooks(worktree) {
+    if let Err(e) = generate_codex_hooks(&worktree) {
         tracing::warn!("hooks.json generation failed: {e}");
     }
 
@@ -2872,6 +2876,7 @@ fn materialize_pending_launch_with(
         env: pty_env,
         cwd: config.working_dir.clone(),
     };
+    let repo_path_for_watcher = model.repo_path.clone();
     if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
         apply_notification(
             model,
@@ -2883,6 +2888,9 @@ fn materialize_pending_launch_with(
         );
     } else {
         bootstrap_agent_session_running(sessions_dir, &session.id);
+        // Phase 8: ensure a watcher is running for this Worktree so live
+        // SPEC/file edits feed the incremental indexer.
+        crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
     }
 
     refresh_branch_live_session_summaries_with(model, sessions_dir);
@@ -3245,6 +3253,10 @@ fn handle_confirm_message_with(
         });
         model.branches.pending_delete_worktree = false;
         if let Some((branch_name, path)) = worktree_target {
+            // Phase 8: shutdown the watcher and remove the index dir BEFORE
+            // git removes the worktree, so the path is still resolvable.
+            let _ = crate::index_worker::shutdown_and_remove(&model.repo_path, &path);
+
             let manager = gwt_git::worktree::WorktreeManager::new(&model.repo_path);
             match manager.remove(&path) {
                 Ok(()) => {

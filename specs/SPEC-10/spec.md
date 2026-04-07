@@ -89,6 +89,19 @@ As a project maintainer, I want develop to be protected from accidental direct c
 - **FR-014**: Runtime bootstrap validates Windows launcher candidates by execution instead of path heuristics, accepting any candidate that successfully reports a supported Python 3.9+ runtime.
 - **FR-015**: Warning notifications for runtime bootstrap failure include stable project-index classification plus user-facing detail; installation guidance is reserved for true no-candidate cases.
 - **FR-016**: Runtime bootstrap discovers versioned `python3.x` executables beyond a fixed baked-in list so future Python minors remain eligible when present on PATH.
+- **FR-017**: All vector index data is consolidated under `~/.gwt/index/<repo-hash>/`. The legacy `$WORKTREE/.gwt/index/` location is abolished and removed automatically when detected.
+- **FR-018**: `repo-hash` is computed as the SHA256[:16] of the normalized origin URL obtained via `git remote get-url origin`. Normalization strips `.git` suffix, lowercases the host and path, and unifies HTTPS / SSH forms (`https://github.com/akiojin/gwt.git` and `git@github.com:akiojin/gwt.git` produce the same hash).
+- **FR-019**: The Issue index lives at `~/.gwt/index/<repo-hash>/issues/` and is Worktree-independent. gwt TUI startup kicks an asynchronous background refresh subject to a fixed 15-minute TTL; startup completion never blocks on the refresh.
+- **FR-020**: SPEC and File indexes live at `~/.gwt/index/<repo-hash>/worktrees/<wt-hash>/{specs,files}/` and are scoped per Worktree. `wt-hash` is the SHA256[:16] of the canonicalized absolute Worktree path.
+- **FR-021**: gwt TUI maintains a resident `notify` watcher (tokio task) per open Worktree. Filesystem events are debounced for 2 seconds and batched up to 100 paths before incremental re-embedding is triggered. `.gitignore` rules are honored when filtering events.
+- **FR-022**: When an agent pane spawns for a Worktree whose watcher is not yet running, the watcher is started and an integrity check compares `manifest.json` (`(path, mtime, size)` tuples) with the current state, re-embedding only the diff.
+- **FR-023**: The `chroma_index_runner.py` `search-*` actions automatically build the target index when it is missing, then perform the search. Build progress is emitted as NDJSON on stderr (`{"phase":"indexing","done":N,"total":M}`). The `--no-auto-build` flag suppresses this fallback (used by TUI-driven calls that have already arranged for explicit builds).
+- **FR-024**: Each index DB directory is protected by a `.lock` sentinel file. Writers acquire an exclusive lock; readers acquire a shared lock. Python uses `portalocker`, Rust uses `fs2`. Locks are released even on exception/panic.
+- **FR-025**: ChromaDB collections use `intfloat/multilingual-e5-base` as the embedding model. The runner transparently prepends `passage: ` when embedding documents and `query: ` when embedding queries; existing prefixes are detected to avoid double-application on re-index.
+- **FR-026**: At startup, gwt reconciles `~/.gwt/index/<repo-hash>/worktrees/` with `git worktree list` and removes orphan directories. When the user removes a Worktree via gwt TUI, the corresponding index directory is deleted immediately.
+- **FR-027**: At startup, any legacy `$WORKTREE/.gwt/index/` directories are detected and removed silently. No data migration is performed; rebuilds are cheap.
+- **FR-028**: When gwt launches an agent pane, the environment variables `GWT_REPO_HASH` and `GWT_WORKTREE_HASH` are exported to the pane so that skill-driven runner calls can reconstruct the DB path without re-deriving from `git remote`.
+- **FR-029**: Auto-indexing is always ON. No opt-out configuration is provided.
 
 ## Implementation Details
 
@@ -157,6 +170,74 @@ branch name itself as the relative directory hierarchy:
 - On Windows, bootstrap guidance references `python` and `py -3` because either may be the working entrypoint after installation.
 - Startup and clone completion continue even when runtime repair fails; the user sees a warning instead of an app crash.
 
+### Index Storage Layout
+
+```
+~/.gwt/
+└── index/
+    └── <repo-hash>/                       # SHA256(normalized origin URL)[:16]
+        ├── meta.json                      # { repo_url, schema_version, created_at }
+        ├── issues/                        # Worktree-independent
+        │   ├── chroma.sqlite3
+        │   ├── .lock                      # flock sentinel
+        │   └── meta.json                  # { last_full_refresh, ttl_minutes }
+        └── worktrees/
+            └── <wt-hash>/                 # SHA256(absolute worktree path)[:16]
+                ├── meta.json              # { worktree_path, branch, schema_version }
+                ├── manifest.json          # [(rel_path, mtime, size)]
+                ├── .lock
+                ├── specs/
+                │   └── chroma.sqlite3
+                └── files/
+                    └── chroma.sqlite3     # files_code + files_docs collections
+```
+
+The legacy `$WORKTREE/.gwt/index/` location is no longer used. `.gitignore` entries pointing at it remain harmless and are not actively pruned.
+
+### Watcher Lifecycle
+
+```
+TUI startup
+  ├─ load_initial_data()
+  ├─ spawn tokio: reconcile_repo(repo_root)
+  │     ├─ remove legacy $WORKTREE/.gwt/index/
+  │     └─ GC orphan ~/.gwt/index/<repo>/worktrees/<wt>/
+  ├─ spawn tokio: refresh_issues_if_stale(repo_hash, ttl=15min)
+  │     └─ if stale: spawn runner index-issues, update meta.json
+  └─ for each open worktree: spawn tokio: start_watcher(repo_hash, wt_hash, path)
+
+Pane launch (spawn_pty_for_session)
+  ├─ if watcher_for(wt_hash) absent: start_watcher(...)
+  └─ spawn tokio: integrity_check(manifest.json vs current fs)
+        └─ if diff: runner index-files --mode incremental
+
+Worktree remove (via TUI)
+  └─ remove_worktree_index(repo_hash, wt_hash) → rm -rf ~/.gwt/index/<repo>/worktrees/<wt>/
+```
+
+### Search Fallback Contract
+
+`chroma_index_runner.py search-*` checks for the existence of the target ChromaDB sqlite file. If absent (and `--no-auto-build` is not set), the runner:
+
+1. Acquires the `.lock` sentinel.
+2. Emits `{"phase":"indexing","done":0,"total":N}` NDJSON to stderr.
+3. Runs the corresponding `index-*` action in-process (full mode).
+4. Streams progress lines as embeddings complete.
+5. Releases the lock and re-runs the search.
+6. Returns the normal `{"ok":true,"results":[...]}` JSON on stdout.
+
+LLM/skill clients see no difference from a normal successful search except for elapsed time. The first call after a `gwt-search` cold start may take tens of seconds.
+
+### Embedding Model
+
+- Model: `intfloat/multilingual-e5-base` (via `sentence-transformers`).
+- The model weights are downloaded on first use to `~/.cache/huggingface/` (~440 MB). Subsequent runs reuse the cache.
+- The runner injects a custom Chroma `EmbeddingFunction` that:
+  - In `embed_documents()`, prepends `"passage: "` to each input.
+  - In `embed_query()`, prepends `"query: "` to each input.
+  - Detects existing prefixes to avoid double-application when re-indexing.
+- This is mandatory for e5: omitting prefixes degrades retrieval quality severely.
+
 ### Skill Embedding Lifecycle (per SPEC-1438)
 
 Skills are embedded on **every agent launch**, NOT during workspace initialization:
@@ -207,3 +288,9 @@ fi
 - **SC-008**: Runtime bootstrap accepts a working Windows Store / launcher Python entrypoint when it successfully reports Python 3.9+.
 - **SC-009**: When only unusable or too-old Python candidates exist, startup or clone completion continues and the warning reports the runtime problem without masquerading it as “Python not installed”.
 - **SC-010**: When no executable Python 3.9+ candidate exists, startup or clone completion continues and the warning explains how to install Python and verify `python` or `py -3`.
+- **SC-011**: Launching gwt-tui in a repo that has the legacy `$WORKTREE/.gwt/index/` directories causes them to be deleted automatically without user prompts.
+- **SC-012**: Running `chroma_index_runner.py --action search-files --repo-hash ... --worktree-hash ...` from a fresh shell (TUI not running) succeeds even when no index exists, by auto-building the index inline.
+- **SC-013**: Editing a SPEC file in an open Worktree causes the next `gwt-spec-search` query to return the new content within 3 seconds (via watcher debounce + incremental re-embed).
+- **SC-014**: Removing a Worktree through gwt TUI causes `~/.gwt/index/<repo-hash>/worktrees/<wt-hash>/` to be deleted before the next event loop tick.
+- **SC-015**: gwt TUI startup launches the Issue index refresh as an asynchronous background job; `load_initial_data` and the first interactive frame are not blocked by `gh issue list` latency.
+- **SC-016**: Two concurrent runner processes attempting to write the same index DB serialize via flock without producing `crashed-*` directories.
