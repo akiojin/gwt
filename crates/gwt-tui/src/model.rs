@@ -591,6 +591,7 @@ fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
 
 fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
     const CLEAR_HOME: &[u8] = b"\x1b[2J\x1b[H";
+    const HOME: &[u8] = b"\x1b[H";
 
     if bytes.is_empty() {
         return Vec::new();
@@ -598,18 +599,26 @@ fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
 
     let mut starts = vec![0usize];
     let mut search_index = 0usize;
-    while search_index + CLEAR_HOME.len() <= bytes.len() {
-        let Some(relative) = bytes[search_index..]
-            .windows(CLEAR_HOME.len())
-            .position(|window| window == CLEAR_HOME)
-        else {
-            break;
-        };
-        let absolute = search_index + relative;
-        if absolute != 0 {
-            starts.push(absolute);
+    while search_index < bytes.len() {
+        if bytes[search_index..].starts_with(CLEAR_HOME) {
+            if search_index != 0 {
+                starts.push(search_index);
+            }
+            search_index = search_index.saturating_add(CLEAR_HOME.len());
+            continue;
         }
-        search_index = absolute.saturating_add(CLEAR_HOME.len());
+
+        if bytes[search_index..].starts_with(HOME)
+            && segment_starts_full_home_repaint(&bytes[search_index..])
+        {
+            if search_index != 0 {
+                starts.push(search_index);
+            }
+            search_index = search_index.saturating_add(HOME.len());
+            continue;
+        }
+
+        search_index += 1;
     }
 
     starts.sort_unstable();
@@ -623,6 +632,18 @@ fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
         }
     }
     segments
+}
+
+fn segment_starts_full_home_repaint(bytes: &[u8]) -> bool {
+    const HOME_REPAINT_SCAN_LIMIT: usize = 512;
+    const HOME_REPAINT_MIN_TOP_ROWS: usize = 3;
+
+    let scan = &bytes[..bytes.len().min(HOME_REPAINT_SCAN_LIMIT)];
+    (1..=HOME_REPAINT_MIN_TOP_ROWS).all(|row| {
+        let needle = format!("\x1b[{row};1H");
+        scan.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    })
 }
 
 fn segment_contains_clear_home(bytes: &[u8]) -> bool {
@@ -2084,6 +2105,27 @@ mod tests {
     }
 
     #[test]
+    fn split_agent_snapshot_segments_splits_coalesced_home_repaints() {
+        let bytes = [
+            home_repaint_frame(&[
+                "header", "line-2", "line-3", "progress", "line-5", "line-6", "footer",
+            ]),
+            home_repaint_frame(&[
+                "header", "line-3", "progress", "progress", "line-6", "line-7", "footer",
+            ]),
+        ]
+        .concat();
+
+        let segments = split_agent_snapshot_segments(&bytes);
+
+        assert_eq!(
+            segments.len(),
+            2,
+            "agent redraw payloads that contain back-to-back full home repaints should be segmented so Codex-like row shifts can be derived from each frame"
+        );
+    }
+
+    #[test]
     fn filter_scrollback_bytes_strips_split_alt_screen_sequence() {
         let mut pending = Vec::new();
 
@@ -2507,6 +2549,43 @@ mod tests {
         let contents = vt.visible_screen_parser().screen().contents();
         assert!(contents.contains("line-1"));
         assert!(!contents.contains("line-6"));
+    }
+
+    #[test]
+    fn agent_scrollback_strategy_derives_row_history_from_coalesced_home_repaints() {
+        let mut vt = VtState::new(7, 24);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(&full_screen_frame(&[
+            "header", "line-1", "line-2", "line-3", "line-4", "line-5", "footer",
+        ]));
+        vt.process(
+            &[
+                home_repaint_frame(&[
+                    "header", "line-2", "line-3", "progress", "line-5", "line-6", "footer",
+                ]),
+                home_repaint_frame(&[
+                    "header", "line-3", "progress", "progress", "line-6", "line-7", "footer",
+                ]),
+            ]
+            .concat(),
+        );
+
+        assert_eq!(
+            vt.max_scrollback(),
+            2,
+            "coalesced home-repaint payloads should materialize each intermediate vertical shift so Codex-like panes keep line-granular history"
+        );
+        assert!(
+            !vt.uses_snapshot_scrollback(),
+            "once coalesced home repaints are segmented, the pane should stay in row history instead of page-sized snapshot stepping"
+        );
+
+        assert!(vt.scroll_viewport_lines(2));
+        let contents = vt.visible_screen_parser().screen().contents();
+        assert!(contents.contains("line-1"));
+        assert!(contents.contains("line-2"));
+        assert!(!contents.contains("line-7"));
     }
 
     #[test]
