@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `79/79` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T10:10:00Z`
+- Task progress: `82/82` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T11:05:00Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -34,8 +34,9 @@
 - Agent panes whose full-screen redraws never advance vt100 row scrollback now fall back to the same in-memory snapshot cache, restoring scrollback without reintroducing session-log/transcript sources.
 - PTY-bound key input now exits row/snapshot history and returns the viewport to live-follow before forwarding bytes, so typing never continues against a stale historical viewport.
 - Agent panes that enable SGR mouse reporting now receive wheel and Terminal.app right-drag scroll input through the PTY, so gwt stops competing with agent-owned redraw and scroll state when the embedded agent can handle scrolling itself.
-- Agent scroll ownership is now capability-driven: panes that explicitly negotiate PTY mouse scrolling use the PTY-owned path and hide the stale local scrollbar overlay, while panes without that capability continue to use gwt-local scrollback.
-- Agent-pane snapshot capture now preserves intermediate clear+redraw frames even when one coalesced PTY payload contains multiple full-screen redraws, restoring Codex local scrollback depth without falling back to PTY-owned scrolling.
+- Agent scroll ownership is now capability-driven across both PTY paths: SGR mouse-enabled panes use PTY wheel events, alternate-screen panes without SGR mouse use repeated cursor up/down PTY input, and only non-alternate-screen panes remain on gwt-local scrollback.
+- While any PTY-owned agent scrolling path is active, gwt hides its local scrollbar overlay so the pane no longer shows a stale thumb against agent-controlled viewport state.
+- Agent-pane snapshot capture now preserves intermediate clear+redraw frames even when one coalesced PTY payload contains multiple full-screen redraws, keeping the remaining local-fallback path reviewable without transcript/session-log sources.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.

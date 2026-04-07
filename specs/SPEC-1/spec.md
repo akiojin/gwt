@@ -49,6 +49,8 @@ As a developer, I want to scroll through terminal history so that I can review p
 25. Given a Claude/Codex agent pane redraws full-screen frames in-place and vt100 row scrollback stays at zero, when the user scrolls recent history, then gwt falls back to the same pane-local in-memory frame cache instead of losing scrollback entirely.
 26. Given a Claude/Codex agent pane closes or gwt restarts, when the pane is opened again, then prior scrollback is not restored from session logs and history starts from fresh PTY output.
 27. Given I am viewing older terminal history, when I press any key that is forwarded to the PTY, then gwt returns the viewport to live before sending that input.
+28. Given an agent pane is in alternate screen and has not negotiated SGR mouse reporting, when the user scrolls with mouse wheel or Terminal.app right-drag fallback, then gwt forwards repeated cursor up/down input to the PTY instead of stepping pane-local snapshot history.
+29. Given an alternate-screen agent pane is using PTY-owned keyboard scrolling, when the session pane renders, then gwt hides its local scrollbar overlay because local snapshot metrics no longer represent the visible viewport.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -130,6 +132,8 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005m**: Agent panes that explicitly negotiate PTY mouse scrolling receive wheel / trackpad scroll input through the PTY instead of gwt-local scrollback so the agent remains the source of truth for redraw and scroll state.
 - **FR-005n**: While an agent pane is using PTY-owned scrolling, gwt suppresses its local scrollbar overlay rather than showing a stale thumb derived from unrelated local snapshot history.
 - **FR-005o**: Even when one coalesced PTY payload contains multiple full-screen clear+redraw frames, agent-pane in-memory snapshot history preserves each distinct frame so local Codex-style scrollback does not collapse to only the final visible frame.
+- **FR-005p**: Agent panes that are in alternate screen but do not negotiate SGR mouse reporting receive wheel / Terminal.app right-drag scroll as repeated cursor up/down PTY input, preserving agent-owned line-granular scroll semantics instead of gwt-local snapshot stepping.
+- **FR-005q**: Agent panes that are not in alternate screen and do not negotiate PTY-owned scroll continue to use gwt-local row/snapshot scrollback.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
@@ -182,3 +186,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-025**: When an agent pane explicitly negotiates PTY-owned scrolling, mouse-wheel and Terminal.app right-drag fallback input are forwarded to the PTY as SGR wheel events, and gwt does not try to reinterpret that interaction as local scrollback.
 - **SC-026**: While PTY-owned scrolling is active, the gwt scrollbar overlay is hidden so the pane no longer shows a misleading thumb that does not track the agent-controlled viewport.
 - **SC-027**: If an agent redraws multiple full-screen frames inside one coalesced PTY payload, wheel-driven local scrollback can still step back through those intermediate distinct frames instead of exposing only the last frame in the payload.
+- **SC-028**: Alternate-screen agent panes that do not negotiate SGR mouse reporting still receive line-granular wheel / Terminal.app right-drag scrolling through repeated cursor up/down PTY input, while non-alternate-screen panes without PTY-owned scroll remain on gwt-local history.

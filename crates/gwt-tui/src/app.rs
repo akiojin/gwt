@@ -4218,20 +4218,16 @@ where
     }
 
     match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            if active_session_prefers_pty_mouse_scroll(model) {
-                Ok(queue_active_session_mouse_scroll(model, mouse, 1))
-            } else {
-                Ok(scroll_active_session_by_rows(model, 1))
-            }
-        }
-        MouseEventKind::ScrollDown => {
-            if active_session_prefers_pty_mouse_scroll(model) {
-                Ok(queue_active_session_mouse_scroll(model, mouse, -1))
-            } else {
-                Ok(scroll_active_session_by_rows(model, -1))
-            }
-        }
+        MouseEventKind::ScrollUp => match active_session_scroll_routing(model) {
+            ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, 1)),
+            ScrollInputRouting::PtyMouse => Ok(queue_active_session_mouse_scroll(model, mouse, 1)),
+            ScrollInputRouting::PtyKeyboard => Ok(queue_active_session_keyboard_scroll(model, 1)),
+        },
+        MouseEventKind::ScrollDown => match active_session_scroll_routing(model) {
+            ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, -1)),
+            ScrollInputRouting::PtyMouse => Ok(queue_active_session_mouse_scroll(model, mouse, -1)),
+            ScrollInputRouting::PtyKeyboard => Ok(queue_active_session_keyboard_scroll(model, -1)),
+        },
         MouseEventKind::Down(MouseButton::Right) => {
             model.terminal_trackpad_scroll_row = Some(mouse.row);
             Ok(false)
@@ -4245,10 +4241,16 @@ where
                 return Ok(false);
             }
             let delta_rows = delta_rows.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-            if active_session_prefers_pty_mouse_scroll(model) {
-                Ok(queue_active_session_mouse_scroll(model, mouse, delta_rows))
-            } else {
-                Ok(scroll_active_session_by_rows(model, delta_rows))
+            match active_session_scroll_routing(model) {
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_active_session_by_rows(model, delta_rows))
+                }
+                ScrollInputRouting::PtyMouse => {
+                    Ok(queue_active_session_mouse_scroll(model, mouse, delta_rows))
+                }
+                ScrollInputRouting::PtyKeyboard => {
+                    Ok(queue_active_session_keyboard_scroll(model, delta_rows))
+                }
             }
         }
         MouseEventKind::Up(MouseButton::Right) => {
@@ -4357,16 +4359,34 @@ fn clamped_mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<Termi
     })
 }
 
-fn active_session_prefers_pty_mouse_scroll(model: &Model) -> bool {
-    let Some(session) = model.active_session_tab() else {
-        return false;
-    };
-    session_prefers_pty_mouse_scroll(session)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollInputRouting {
+    LocalViewport,
+    PtyMouse,
+    PtyKeyboard,
 }
 
-fn session_prefers_pty_mouse_scroll(session: &crate::model::SessionTab) -> bool {
-    matches!(session.tab_type, SessionTabType::Agent { .. })
-        && session.vt.accepts_mouse_scroll_input()
+fn active_session_scroll_routing(model: &Model) -> ScrollInputRouting {
+    let Some(session) = model.active_session_tab() else {
+        return ScrollInputRouting::LocalViewport;
+    };
+    session_scroll_routing(session)
+}
+
+fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRouting {
+    if !matches!(session.tab_type, SessionTabType::Agent { .. }) {
+        return ScrollInputRouting::LocalViewport;
+    }
+
+    if session.vt.accepts_mouse_scroll_input() {
+        return ScrollInputRouting::PtyMouse;
+    }
+
+    if session.vt.screen().alternate_screen() {
+        return ScrollInputRouting::PtyKeyboard;
+    }
+
+    ScrollInputRouting::LocalViewport
 }
 
 fn queue_active_session_mouse_scroll(
@@ -4396,6 +4416,22 @@ fn queue_active_session_mouse_scroll(
             .as_bytes(),
         );
     }
+    push_input_to_active_session(model, bytes);
+    true
+}
+
+fn queue_active_session_keyboard_scroll(model: &mut Model, delta_rows: i16) -> bool {
+    if delta_rows == 0 {
+        return false;
+    }
+
+    reset_active_session_scrollback_for_input(model);
+    let steps = usize::from(delta_rows.unsigned_abs());
+    let bytes = if delta_rows > 0 {
+        b"\x1b[A".repeat(steps)
+    } else {
+        b"\x1b[B".repeat(steps)
+    };
     push_input_to_active_session(model, bytes);
     true
 }
@@ -4506,7 +4542,10 @@ fn session_scrollbar_area(session: &crate::model::SessionTab, area: Rect) -> Opt
 }
 
 fn session_has_scrollbar(session: &crate::model::SessionTab) -> bool {
-    !session_prefers_pty_mouse_scroll(session) && session.vt.has_viewport_scrollback()
+    matches!(
+        session_scroll_routing(session),
+        ScrollInputRouting::LocalViewport
+    ) && session.vt.has_viewport_scrollback()
 }
 
 fn session_scrollbar_metrics(
@@ -6660,16 +6699,12 @@ mod tests {
             &["frame-2", "line-3", "line-4", "line-5", "line-6"],
         );
 
-        let area = active_session_text_area(&model).expect("active session text area");
-        update(
-            &mut model,
-            Message::MouseInput(MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: area.x,
-                row: area.y,
-                modifiers: KeyModifiers::NONE,
-            }),
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(
+            session.vt.has_snapshot_scrollback(),
+            "full-screen redraw agents should still capture in-memory snapshots even when wheel input is PTY-owned"
         );
+        assert!(session.vt.scroll_snapshot_up(1));
 
         let frozen = render_model_text(&model, 24, 8);
         assert!(frozen.contains("frame-1"));
@@ -6705,16 +6740,12 @@ mod tests {
             ),
         );
 
-        let area = active_session_text_area(&model).expect("active session text area");
-        update(
-            &mut model,
-            Message::MouseInput(MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: area.x,
-                row: area.y,
-                modifiers: KeyModifiers::NONE,
-            }),
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(
+            session.vt.has_snapshot_scrollback(),
+            "coalesced redraw capture should still populate snapshot history even when wheel routing is PTY-owned"
         );
+        assert!(session.vt.scroll_snapshot_up(1));
 
         let frozen = render_model_text(&model, 24, 8);
         assert!(frozen.contains("frame-1"));
@@ -6816,7 +6847,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_without_mouse_reporting_uses_local_scrollback() {
+    fn alternate_screen_agent_without_mouse_reporting_forwards_keyboard_scroll_to_pty() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -6854,23 +6885,76 @@ mod tests {
         .expect("mouse input should succeed");
 
         assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued keyboard scroll");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[A".to_vec());
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session_has_scrollbar(session),
+            "alternate-screen agents that own scroll input should not render a local scrollbar overlay"
+        );
+        assert!(
+            session.vt.follow_live(),
+            "PTY keyboard scrolling should keep the local viewport pinned to live output"
+        );
+    }
+
+    #[test]
+    fn non_alternate_screen_agent_without_mouse_reporting_uses_local_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                (1..=40)
+                    .map(|line| format!("line-{line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into_bytes(),
+            ),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
         assert!(
             model.pending_pty_inputs().is_empty(),
-            "Codex panes without explicit mouse-reporting capability should stay on local scrollback"
+            "non alternate-screen agents should keep using local scrollback when no PTY scroll capability was negotiated"
         );
 
         let session = model.active_session_tab().expect("active session");
         assert!(
-            session.vt.has_viewport_scrollback(),
-            "precondition: local snapshot history still exists for Codex redraw panes"
-        );
-        assert!(
             session_has_scrollbar(session),
-            "Codex panes should keep the local scrollbar when scrolling is handled by gwt-local history"
+            "local scrollback panes should keep the local scrollbar overlay"
         );
         assert!(
             session.vt.viewing_history(),
-            "wheel input should move Codex panes into local history when no PTY mouse capability was negotiated"
+            "wheel input should move non alternate-screen panes into local history"
         );
     }
 
@@ -6927,6 +7011,61 @@ mod tests {
             .expect("queued wheel input");
         assert_eq!(forwarded.session_id, "agent-0");
         assert_eq!(forwarded.bytes, b"\x1b[<64;1;3M\x1b[<64;1;3M".to_vec());
+    }
+
+    #[test]
+    fn alternate_screen_agent_trackpad_drag_forwards_repeated_keyboard_scroll_steps_to_pty() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1049h\x1b[2J\x1b[Hframe-1".to_vec(),
+            ),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: area.x,
+                row: area.y.saturating_add(3),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right drag should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued keyboard scroll input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[A\x1b[A\x1b[A".to_vec());
     }
 
     #[test]

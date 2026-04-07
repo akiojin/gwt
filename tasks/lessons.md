@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: alternate-screen agent の local snapshot fallback は line scroll semantics を満たさない
+
+### 事象
+
+Claude Code は行単位で自然にスクロールするのに、
+Codex は gwt の local snapshot history を 1 frame ずつ辿り、
+画面単位のような不自然な scroll になった。
+
+### 原因
+
+- scroll ownership を `SGR mouse reporting あり -> PTY / なし -> local` の二択で見ていた。
+- そのため alternate-screen 上で動く agent が mouse reporting を出さない場合、
+  gwt-local snapshot fallback に落ちていた。
+- snapshot scrollback の 1 step は 1 visible frame であって、embedded agent が持つ
+  line-granular scroll semantics の代用品にはならない。
+
+### 再発防止策
+
+1. agent pane の scroll ownership は `PTY mouse / PTY keyboard / local` の 3 分類で考える。
+2. alternate-screen agent が mouse reporting を出さない場合は、wheel / right-drag を repeated cursor up/down として PTY へ返す。
+3. local scrollback fallback は non-alternate-screen pane に限定し、alternate-screen agent の line scroll 代替として使わない。
+
 ## 2026-04-07 — fix: coalesced PTY payloads can hide intermediate agent redraw frames
 
 ### 事象
@@ -61,7 +83,7 @@ Codex だけまったくスクロールしなくなった。
 
 1. scroll ownership は capability-driven に保ち、agent type 固有の特例を入れない。
 2. PTY-owned scroll のときだけ local scrollbar overlay を抑止し、local-scroll pane では従来どおり local history を使う。
-3. explicit mouse reporting がない Codex pane は local scrollback に残る回帰テストを固定する。
+3. explicit mouse reporting がない pane でも alternate-screen agent なら PTY keyboard scroll を検討し、local fallback 可否を alternate-screen 状態まで含めて判断する。
 
 ## 2026-04-07 — fix: PTY-bound key input must exit history mode before forwarding
 

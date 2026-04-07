@@ -62,9 +62,10 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 12. Do not hydrate agent-pane runtime scrollback from session `jsonl` or session-log files; agent-side PTY re-output is the only restoration mechanism.
 13. When the user presses a key that is forwarded to the active PTY while browsing history, reset the viewport to live-follow before queueing the input bytes.
 14. When an agent pane enables SGR mouse reporting, forward wheel / trackpad scroll gestures to the PTY instead of applying gwt-local scrollback so the agent owns redraw semantics.
-15. Keep the decision capability-driven: panes without explicit PTY mouse-scroll negotiation continue to use gwt-local scrollback.
-16. When an agent pane uses PTY-owned scrolling, suppress the gwt local scrollbar overlay because local snapshot metrics no longer represent the visible viewport position.
-17. For agent panes that stay on local snapshot scrollback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so Codex-style redraw bursts do not collapse history to a single final frame.
+15. When an agent pane remains in alternate screen without SGR mouse reporting, translate wheel / Terminal.app right-drag scroll into repeated cursor up/down PTY input so the full-screen agent keeps line-granular scroll ownership.
+16. Keep the decision capability-driven: panes outside alternate screen and without explicit PTY mouse-scroll negotiation continue to use gwt-local scrollback.
+17. When an agent pane uses PTY-owned scrolling, suppress the gwt local scrollbar overlay because local snapshot metrics no longer represent the visible viewport position.
+18. For agent panes that stay on local snapshot scrollback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so fallback history does not collapse to a single final frame.
 
 ## Dependencies
 
