@@ -101,7 +101,13 @@ pub fn update(state: &mut CleanupProgressState, msg: CleanupProgressMessage) {
             message,
         }),
         CleanupProgressMessage::Completed => state.finish(),
-        CleanupProgressMessage::Dismiss => state.hide(),
+        // FR-018g: `Dismiss` must be ignored while the run is in progress so
+        // a stray key or caller mistake cannot close the modal mid-run.
+        CleanupProgressMessage::Dismiss => {
+            if state.phase() == CleanupRunPhase::Done {
+                state.hide();
+            }
+        }
     }
 }
 
@@ -327,6 +333,10 @@ mod tests {
     fn dismiss_hides_modal_only_when_done() {
         let mut state = CleanupProgressState::default();
         state.show(1, false);
+        // Dismiss while Running must be ignored (FR-018g).
+        update(&mut state, CleanupProgressMessage::Dismiss);
+        assert!(state.visible, "dismiss must be ignored while running");
+        assert!(state.is_running());
         update(&mut state, CleanupProgressMessage::Completed);
         update(&mut state, CleanupProgressMessage::Dismiss);
         assert!(!state.visible);

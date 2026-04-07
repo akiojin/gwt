@@ -1301,13 +1301,9 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
         return true;
     }
 
-    // Branch Cleanup confirm modal — `r` toggles remote, Enter confirms,
-    // Esc cancels (FR-018e).
+    // Branch Cleanup confirm modal — Enter confirms, Esc cancels (FR-018e).
     if model.cleanup_confirm.visible {
         let msg = match key.code {
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                Some(screens::cleanup_confirm::CleanupConfirmMessage::ToggleRemote)
-            }
             KeyCode::Enter => Some(screens::cleanup_confirm::CleanupConfirmMessage::Confirm),
             KeyCode::Esc => Some(screens::cleanup_confirm::CleanupConfirmMessage::Cancel),
             _ => None,
@@ -1509,6 +1505,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 }
                 KeyCode::Char('r') => {
                     refresh_branches(model);
+                    return;
+                }
+                // FR-018c: Esc clears the cleanup selection when one exists
+                // before falling through to the generic Terminal-focus
+                // escape. This wires up the `Esc:clear` footer hint.
+                KeyCode::Esc if model.branches.cleanup_selection_count() > 0 => {
+                    model.branches.clear_selection_after_cleanup();
                     return;
                 }
                 _ => None,
@@ -2364,7 +2367,18 @@ fn drain_merge_state_events(model: &mut Model) {
 
 /// Refresh the set of branches that have at least one running session pane
 /// bound to them. Used by the Branch Cleanup protection guards (FR-018b).
+///
+/// For agent sessions the branch name is read from the persisted
+/// [`gwt_agent::AgentSession`] metadata rather than guessed from the tab
+/// title, because launched agent tabs are created with the agent's display
+/// name and do not carry the branch name in `SessionTab::name`. Callers
+/// should invoke this any time `model.sessions` changes so the guard cannot
+/// go stale between branch reloads.
 fn refresh_active_session_branches(model: &mut Model) {
+    refresh_active_session_branches_with(model, &gwt_sessions_dir());
+}
+
+fn refresh_active_session_branches_with(model: &mut Model, sessions_dir: &Path) {
     use std::collections::HashSet;
 
     let mut active: HashSet<String> = HashSet::new();
@@ -2376,10 +2390,13 @@ fn refresh_active_session_branches(model: &mut Model) {
                 }
             }
             SessionTabType::Agent { .. } => {
-                // Agent panes track their branch via the persisted session
-                // metadata. We approximate it from the tab name when it
-                // matches the `<agent>: <branch>` shape.
-                if let Some((_, branch)) = session.name.split_once(": ") {
+                let path = sessions_dir.join(format!("{}.toml", session.id));
+                if let Ok(persisted) = AgentSession::load(&path) {
+                    active.insert(persisted.branch.clone());
+                } else if let Some((_, branch)) = session.name.split_once(": ") {
+                    // Fall back to the tab title only when no persisted
+                    // metadata exists (e.g., freshly spawned session before
+                    // the sidecar write lands).
                     active.insert(branch.to_string());
                 }
             }
@@ -2603,6 +2620,8 @@ fn route_paste_input(model: &mut Model, text: String) {
         || !model.error_queue.is_empty()
         || model.service_select.is_some()
         || model.confirm.visible
+        || model.cleanup_confirm.visible
+        || model.cleanup_progress.visible
         || model
             .docker_progress
             .as_ref()
@@ -3496,10 +3515,14 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
     use screens::branches::MergeState;
     use screens::cleanup_confirm::CleanupConfirmRow;
 
+    // FR-018c: the selection set persists across view-mode / sort / search
+    // changes, so the confirm modal must walk the full branch list — not
+    // `filtered_branches()` — or previously selected branches that are
+    // currently hidden by a filter would be silently dropped from the run.
     let mut rows: Vec<CleanupConfirmRow> = model
         .branches
-        .filtered_branches()
-        .into_iter()
+        .branches
+        .iter()
         .filter_map(|branch| {
             if !model.branches.is_cleanup_selected(&branch.name) {
                 return None;
@@ -3527,8 +3550,7 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
         return;
     }
 
-    let delete_remote = model.branches.cleanup_settings.delete_remote;
-    model.cleanup_confirm.show(rows, delete_remote);
+    model.cleanup_confirm.show(rows);
 }
 
 fn handle_cleanup_confirm_message(
@@ -3541,9 +3563,8 @@ fn handle_cleanup_confirm_message(
     match outcome {
         CleanupConfirmOutcome::Pending => {}
         CleanupConfirmOutcome::Cancelled => {}
-        CleanupConfirmOutcome::Confirmed { delete_remote } => {
-            model.branches.cleanup_settings.delete_remote = delete_remote;
-            start_cleanup_run(model, delete_remote);
+        CleanupConfirmOutcome::Confirmed => {
+            start_cleanup_run(model);
         }
     }
 }
@@ -3592,7 +3613,7 @@ fn handle_cleanup_progress_message(
     }
 }
 
-fn start_cleanup_run(model: &mut Model, delete_remote: bool) {
+fn start_cleanup_run(model: &mut Model) {
     use std::sync::{Arc, Mutex};
 
     let branches: Vec<String> = model
@@ -3605,7 +3626,7 @@ fn start_cleanup_run(model: &mut Model, delete_remote: bool) {
         return;
     }
 
-    model.cleanup_progress.show(branches.len(), delete_remote);
+    model.cleanup_progress.show(branches.len(), false);
 
     let queue: crate::model::CleanupEventQueue =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -4161,6 +4182,12 @@ fn is_in_text_input_mode(model: &Model) -> bool {
 }
 
 fn handle_mouse_input(model: &mut Model, mouse: MouseEvent) {
+    // FR-018g: cleanup modals capture all input, including mouse events —
+    // swallow here so clicks cannot fall through to the panes behind a
+    // blocking cleanup dialog.
+    if model.cleanup_confirm.visible || model.cleanup_progress.visible {
+        return;
+    }
     if let Err(err) = handle_mouse_input_with_tools(model, mouse, open_url, |text| {
         gwt_clipboard::ClipboardText::set_text(text).map_err(|err| err.to_string())
     }) {
