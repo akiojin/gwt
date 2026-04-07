@@ -3677,14 +3677,20 @@ fn start_cleanup_run(model: &mut Model) {
             let (success, message) = if let Some(reason) = blocked_reason {
                 (false, Some(reason))
             } else {
-                // Phase 8: shut down the per-worktree index watcher and drop
-                // the on-disk index dir BEFORE git removes the worktree, so
-                // the path is still resolvable.
-                if let Some(path) = worktree_paths.get(&branch) {
-                    let _ = crate::index_worker::shutdown_and_remove(&repo_path, path);
-                }
                 match manager.cleanup_branch(&branch) {
-                    Ok(()) => (true, None),
+                    Ok(()) => {
+                        // Phase 8: shut the per-worktree index watcher down
+                        // and drop the on-disk index dir ONLY after git has
+                        // confirmed the worktree was removed. If we tore it
+                        // down beforehand and `cleanup_branch` later failed
+                        // (dirty worktree, git error, ...), the surviving
+                        // worktree would stop being indexed until something
+                        // explicitly recreated the watcher.
+                        if let Some(path) = worktree_paths.get(&branch) {
+                            let _ = crate::index_worker::shutdown_and_remove(&repo_path, path);
+                        }
+                        (true, None)
+                    }
                     Err(err) => (false, Some(err.to_string())),
                 }
             };
