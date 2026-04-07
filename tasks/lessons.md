@@ -1,5 +1,23 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot だけでは agent 会話ログ全量の scrollback を満たせない
+
+### 事象
+
+スクロール入力自体は動作していても、`max_scrollback=0` + `snapshot_count` が少数固定の pane では
+「全ログを遡れない」状態が継続した。
+
+### 原因
+
+- full-screen redraw 主体の agent pane では、distinct frame を積んでも history が数件に留まるケースがある。
+- gwt 側 scrollback が PTY 可視フレーム由来の cache に限定され、agent 本体の session `jsonl` 履歴を参照していなかった。
+
+### 再発防止策
+
+1. `snapshot_count` と `max_scrollback` を debug log で先に確認し、「入力経路不具合」と「保持母数不足」を分離する。
+2. Claude/Codex pane では session `jsonl` を in-memory transcript scrollback に同期し、viewport API（描画/scrollbar/scroll）を同一経路で扱う。
+3. 「snapshot が少数でも transcript で遡れる」回帰テストを固定する。
+
 ## 2026-04-07 — fix: 画面描画とスクロール指標は同一の可視サーフェスを参照させる
 
 ### 事象

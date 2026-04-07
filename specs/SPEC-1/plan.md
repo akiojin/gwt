@@ -55,7 +55,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 5. During outer-terminal initialization, explicitly disable alternate-scroll mode so Terminal.app does not translate trackpad gestures into cursor-key input while gwt owns the alternate screen.
 6. Add a Terminal.app-specific fallback that maps `Down/Drag/Up(Right)` gesture sequences into vertical scrollback deltas because crossterm may not emit `ScrollUp/ScrollDown` for trackpad motion there.
 7. For panes whose visible screen has `max_scrollback == 0`, capture distinct live screen states into a pane-local in-memory ring buffer and route wheel scrolling through snapshot history instead of vt100 row scrollback.
-8. Keep snapshot history ephemeral: selection, URL hit testing, and scrollbar rendering must operate on the currently visible live or snapshot surface without preloading external transcript/session files.
+8. Keep pane history ephemeral in memory, but allow Claude/Codex agent panes to hydrate that cache from their session `jsonl` files when available so scrollback can extend beyond sparse snapshot history.
 
 ## Dependencies
 

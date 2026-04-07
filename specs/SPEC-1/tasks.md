@@ -70,3 +70,6 @@
 - [x] T057 Consolidate session viewport behavior behind `VtState` (`visible_screen_parser`, `scroll_viewport_lines`, `scrollbar_metrics`) so app-level mode branching is removed.
 - [x] T058 Route render, URL hit-testing, and selection copy in `app.rs` through the same `VtState` visible-surface API.
 - [x] T059 [P] Verify unified viewport path with focused + full `gwt-tui` tests, ensuring scrollbar movement and rendered surface stay synchronized.
+- [x] T060 [P] Write RED tests: active Claude/Codex panes can hydrate scrollback from session `jsonl` history and navigate older transcript lines through the same viewport APIs.
+- [x] T061 Implement transcript-backed scrollback mode in `model.rs` + `app.rs`, including source resolution (`~/.claude/projects`, `~/.codex/sessions`) and in-memory cache synchronization for active agent panes.
+- [x] T062 Re-run focused scrollback regression suite (`cargo test -p gwt-tui scrollback -- --nocapture`) to verify transcript-backed history does not regress snapshot/row behavior.

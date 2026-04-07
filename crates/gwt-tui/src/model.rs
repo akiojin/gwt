@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use gwt_config::VoiceConfig;
@@ -433,6 +433,7 @@ fn slice_contains_non_blank_content(lines: &[String]) -> bool {
 }
 
 const SNAPSHOT_HISTORY_CAPACITY: usize = 2048;
+const TRANSCRIPT_SCROLLBACK_LINE_CAPACITY: usize = 50_000;
 
 pub struct VtState {
     parser: vt100::Parser,
@@ -443,6 +444,10 @@ pub struct VtState {
     selection: Option<TerminalSelection>,
     snapshots: VecDeque<ScreenSnapshot>,
     snapshot_cursor: Option<usize>,
+    transcript_lines: Vec<String>,
+    transcript_cursor: Option<usize>,
+    transcript_source_path: Option<PathBuf>,
+    transcript_source_modified: Option<SystemTime>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -471,6 +476,10 @@ impl Clone for VtState {
             selection: self.selection,
             snapshots: self.snapshots.clone(),
             snapshot_cursor: self.snapshot_cursor,
+            transcript_lines: self.transcript_lines.clone(),
+            transcript_cursor: self.transcript_cursor,
+            transcript_source_path: self.transcript_source_path.clone(),
+            transcript_source_modified: self.transcript_source_modified,
         }
     }
 }
@@ -486,6 +495,10 @@ impl VtState {
             selection: None,
             snapshots: VecDeque::new(),
             snapshot_cursor: None,
+            transcript_lines: Vec::new(),
+            transcript_cursor: None,
+            transcript_source_path: None,
+            transcript_source_modified: None,
         };
         state.refresh_scrollback_metrics();
         state
@@ -546,8 +559,14 @@ impl VtState {
         self.max_scrollback == 0 || self.parser.screen().alternate_screen()
     }
 
+    pub fn uses_transcript_scrollback(&self) -> bool {
+        self.has_transcript_scrollback()
+    }
+
     pub fn has_viewport_scrollback(&self) -> bool {
-        if self.uses_snapshot_scrollback() {
+        if self.has_transcript_scrollback() {
+            true
+        } else if self.uses_snapshot_scrollback() {
             self.has_snapshot_scrollback()
         } else {
             self.max_scrollback > 0
@@ -567,6 +586,7 @@ impl VtState {
         if follow_live {
             self.parser.set_scrollback(0);
             self.snapshot_cursor = None;
+            self.transcript_cursor = None;
         }
     }
 
@@ -595,6 +615,10 @@ impl VtState {
     }
 
     pub fn visible_screen_parser(&self) -> vt100::Parser {
+        if self.transcript_cursor.is_some() {
+            return self.transcript_visible_parser();
+        }
+
         if let Some(snapshot) = self.active_snapshot() {
             let mut parser = vt100::Parser::new(snapshot.rows(), snapshot.cols(), 0);
             parser.process(snapshot.state());
@@ -609,7 +633,7 @@ impl VtState {
     }
 
     pub fn viewing_history(&self) -> bool {
-        self.active_snapshot().is_some()
+        self.transcript_cursor.is_some() || self.active_snapshot().is_some()
     }
 
     pub fn scroll_snapshot_up(&mut self, rows: usize) -> bool {
@@ -650,6 +674,13 @@ impl VtState {
             return false;
         }
 
+        if self.has_transcript_scrollback() {
+            if delta_rows > 0 {
+                return self.scroll_transcript_up(delta_rows as usize);
+            }
+            return self.scroll_transcript_down(delta_rows.unsigned_abs() as usize);
+        }
+
         if self.uses_snapshot_scrollback() {
             if delta_rows > 0 {
                 return self.scroll_snapshot_up(delta_rows as usize);
@@ -676,6 +707,20 @@ impl VtState {
     }
 
     pub fn scrollbar_metrics(&self, viewport_height: usize) -> Option<(usize, usize, usize)> {
+        if self.has_transcript_scrollback() {
+            let visible_viewport = viewport_height.max(1);
+            let content_length = self
+                .transcript_lines
+                .len()
+                .max(visible_viewport)
+                .max(self.rows as usize);
+            return Some((
+                content_length,
+                self.transcript_position_for_viewport(viewport_height),
+                visible_viewport,
+            ));
+        }
+
         if self.uses_snapshot_scrollback() {
             if !self.has_snapshot_scrollback() {
                 return None;
@@ -721,6 +766,69 @@ impl VtState {
         self.selection = None;
     }
 
+    pub fn transcript_source_matches(
+        &self,
+        source_path: &Path,
+        source_modified: Option<SystemTime>,
+    ) -> bool {
+        self.transcript_source_path.as_deref() == Some(source_path)
+            && self.transcript_source_modified == source_modified
+    }
+
+    pub fn transcript_source_path(&self) -> Option<&Path> {
+        self.transcript_source_path.as_deref()
+    }
+
+    pub fn set_transcript_lines_from_source(
+        &mut self,
+        source_path: PathBuf,
+        source_modified: Option<SystemTime>,
+        mut lines: Vec<String>,
+    ) {
+        if lines.len() > TRANSCRIPT_SCROLLBACK_LINE_CAPACITY {
+            let keep_from = lines
+                .len()
+                .saturating_sub(TRANSCRIPT_SCROLLBACK_LINE_CAPACITY);
+            lines.drain(..keep_from);
+        }
+
+        let previous_live_start = self.transcript_live_start();
+        let previous_cursor = self.transcript_cursor;
+        let previous_source = self.transcript_source_path.clone();
+
+        self.transcript_lines = lines;
+        self.transcript_source_path = Some(source_path);
+        self.transcript_source_modified = source_modified;
+
+        if self.follow_live {
+            self.transcript_cursor = None;
+            return;
+        }
+
+        let new_live_start = self.transcript_live_start();
+        self.transcript_cursor = previous_cursor.map(|cursor| {
+            if self.transcript_lines.is_empty() {
+                return 0;
+            }
+
+            // Keep the user's relative distance from the live edge while
+            // transcript lines append in the background.
+            let previous_distance_from_live = previous_live_start.saturating_sub(cursor);
+            new_live_start.saturating_sub(previous_distance_from_live)
+        });
+
+        if previous_source != self.transcript_source_path {
+            self.transcript_cursor = Some(new_live_start);
+        }
+    }
+
+    pub fn clear_transcript_lines(&mut self) {
+        self.transcript_lines.clear();
+        self.transcript_cursor = None;
+        self.transcript_source_path = None;
+        self.transcript_source_modified = None;
+    }
+
     fn refresh_scrollback_metrics(&mut self) {
         let current_scrollback = self.parser.screen().scrollback();
         self.parser.set_scrollback(usize::MAX);
@@ -730,11 +838,90 @@ impl VtState {
     }
 
     fn active_snapshot(&self) -> Option<&ScreenSnapshot> {
-        if !self.uses_snapshot_scrollback() {
+        if self.transcript_cursor.is_some() || !self.uses_snapshot_scrollback() {
             return None;
         }
         self.snapshot_cursor
             .and_then(|index| self.snapshots.get(index))
+    }
+
+    fn has_transcript_lines(&self) -> bool {
+        !self.transcript_lines.is_empty()
+    }
+
+    fn has_transcript_scrollback(&self) -> bool {
+        self.has_transcript_lines() && self.transcript_lines.len() > self.rows as usize
+    }
+
+    fn transcript_live_start(&self) -> usize {
+        self.transcript_lines
+            .len()
+            .saturating_sub(self.rows as usize)
+    }
+
+    fn transcript_position_for_viewport(&self, viewport_height: usize) -> usize {
+        if self.transcript_lines.is_empty() {
+            return 0;
+        }
+        let visible_viewport = viewport_height.max(1);
+        let live_start = self
+            .transcript_lines
+            .len()
+            .saturating_sub(visible_viewport.min(self.transcript_lines.len()));
+        self.transcript_cursor.unwrap_or(live_start).min(live_start)
+    }
+
+    fn scroll_transcript_up(&mut self, rows: usize) -> bool {
+        if rows == 0 || !self.has_transcript_scrollback() {
+            return false;
+        }
+        let live_start = self.transcript_live_start();
+        let current = self.transcript_cursor.unwrap_or(live_start);
+        let next = current.saturating_sub(rows);
+        self.transcript_cursor = Some(next);
+        self.follow_live = false;
+        true
+    }
+
+    fn scroll_transcript_down(&mut self, rows: usize) -> bool {
+        if rows == 0 || !self.has_transcript_scrollback() {
+            return false;
+        }
+        let live_start = self.transcript_live_start();
+        let current = self.transcript_cursor.unwrap_or(live_start);
+        let next = current.saturating_add(rows).min(live_start);
+        if next >= live_start {
+            self.transcript_cursor = None;
+            self.follow_live = true;
+        } else {
+            self.transcript_cursor = Some(next);
+            self.follow_live = false;
+        }
+        true
+    }
+
+    fn transcript_visible_parser(&self) -> vt100::Parser {
+        let mut parser = vt100::Parser::new(self.rows, self.cols, 0);
+        if self.transcript_lines.is_empty() {
+            return parser;
+        }
+
+        let start = self
+            .transcript_cursor
+            .unwrap_or_else(|| self.transcript_live_start());
+        let end = start
+            .saturating_add(self.rows as usize)
+            .min(self.transcript_lines.len());
+        let mut rendered = String::new();
+        for (index, line) in self.transcript_lines[start..end].iter().enumerate() {
+            if index > 0 {
+                rendered.push_str("\r\n");
+            }
+            let truncated: String = line.chars().take(self.cols as usize).collect();
+            rendered.push_str(&truncated);
+        }
+        parser.process(rendered.as_bytes());
+        parser
     }
 
     fn capture_snapshot(&mut self) {
@@ -1442,6 +1629,56 @@ mod tests {
             "first upward step from live should land on the immediately previous snapshot"
         );
         assert!(!vt.follow_live);
+    }
+
+    #[test]
+    fn transcript_scrollback_supports_full_history_navigation() {
+        let mut vt = VtState::new(4, 32);
+        let lines: Vec<String> = (1..=12).map(|index| format!("line-{index}")).collect();
+        vt.set_transcript_lines_from_source(PathBuf::from("/tmp/transcript.jsonl"), None, lines);
+
+        assert!(vt.has_viewport_scrollback());
+        assert!(vt.scroll_viewport_lines(100));
+        assert!(vt.viewing_history());
+
+        let top = vt.visible_screen_parser();
+        let top_contents = top.screen().contents();
+        assert!(top_contents.contains("user: line-1") || top_contents.contains("line-1"));
+        assert!(top_contents.contains("line-4"));
+        assert!(!top_contents.contains("line-12"));
+
+        assert!(vt.scroll_viewport_lines(-100));
+        assert!(vt.follow_live());
+        assert!(!vt.viewing_history());
+    }
+
+    #[test]
+    fn transcript_scrollbar_metrics_follow_line_count_and_viewport() {
+        let mut vt = VtState::new(3, 32);
+        let lines: Vec<String> = (1..=10).map(|index| format!("line-{index}")).collect();
+        vt.set_transcript_lines_from_source(PathBuf::from("/tmp/transcript.jsonl"), None, lines);
+
+        assert_eq!(vt.scrollbar_metrics(3), Some((10, 7, 3)));
+    }
+
+    #[test]
+    fn transcript_cursor_preserves_relative_distance_from_live_edge() {
+        let mut vt = VtState::new(3, 32);
+        let initial: Vec<String> = (1..=10).map(|index| format!("line-{index}")).collect();
+        vt.set_transcript_lines_from_source(PathBuf::from("/tmp/transcript.jsonl"), None, initial);
+
+        assert!(vt.scroll_viewport_lines(2));
+        let before = vt.transcript_cursor.expect("cursor should be active");
+        assert_eq!(before, 5);
+
+        let updated: Vec<String> = (1..=12).map(|index| format!("line-{index}")).collect();
+        vt.set_transcript_lines_from_source(PathBuf::from("/tmp/transcript.jsonl"), None, updated);
+        let after = vt.transcript_cursor.expect("cursor should stay active");
+
+        assert_eq!(
+            after, 7,
+            "adding lines while browsing history should keep distance from live edge"
+        );
     }
 
     // ---- SessionState tests ----

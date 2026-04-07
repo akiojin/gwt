@@ -1,12 +1,14 @@
 //! App — Update and View functions for the Elm Architecture.
 
 use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gwt_agent::{
     custom::CustomAgentType, persist_session_status, runtime_state_path, AgentDetector, AgentId,
@@ -28,6 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
+use serde_json::Value;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -146,6 +149,356 @@ fn sync_session_viewports(model: &mut Model) {
             session.vt.max_scrollback(),
             session.vt.follow_live(),
         ));
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AgentTranscriptSource {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+}
+
+fn sync_active_agent_transcript_scrollback(model: &mut Model) {
+    let sessions_dir = gwt_sessions_dir();
+    let Some(home_dir) = sessions_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(PathBuf::from)
+    else {
+        return;
+    };
+    let claude_projects_root = home_dir.join(".claude/projects");
+    let codex_sessions_root = home_dir.join(".codex/sessions");
+    sync_active_agent_transcript_scrollback_with(
+        model,
+        &sessions_dir,
+        &claude_projects_root,
+        &codex_sessions_root,
+    );
+}
+
+fn sync_active_agent_transcript_scrollback_with(
+    model: &mut Model,
+    sessions_dir: &Path,
+    claude_projects_root: &Path,
+    codex_sessions_root: &Path,
+) {
+    let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
+        return;
+    };
+    let Some(tab_type) = model
+        .active_session_tab()
+        .map(|session| session.tab_type.clone())
+    else {
+        return;
+    };
+    if !matches!(tab_type, SessionTabType::Agent { .. }) {
+        if let Some(session) = model.session_tab_mut(&session_id) {
+            session.vt.clear_transcript_lines();
+        }
+        return;
+    }
+
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let Ok(persisted) = AgentSession::load(&session_path) else {
+        if let Some(session) = model.session_tab_mut(&session_id) {
+            session.vt.clear_transcript_lines();
+        }
+        return;
+    };
+    if !matches!(persisted.agent_id, AgentId::ClaudeCode | AgentId::Codex) {
+        if let Some(session) = model.session_tab_mut(&session_id) {
+            session.vt.clear_transcript_lines();
+        }
+        return;
+    }
+
+    let Some(session) = model.session_tab_mut(&session_id) else {
+        return;
+    };
+
+    if let Some(cached_path) = session.vt.transcript_source_path().map(PathBuf::from) {
+        if let Some(cached_modified) = file_modified_time(&cached_path) {
+            let cached_source = AgentTranscriptSource {
+                path: cached_path.clone(),
+                modified: Some(cached_modified),
+            };
+            if session
+                .vt
+                .transcript_source_matches(&cached_source.path, cached_source.modified)
+            {
+                return;
+            }
+            if let Some(lines) = read_transcript_lines_for_agent(&persisted.agent_id, &cached_path)
+            {
+                session.vt.set_transcript_lines_from_source(
+                    cached_source.path,
+                    cached_source.modified,
+                    lines,
+                );
+            }
+            return;
+        }
+
+        session.vt.clear_transcript_lines();
+    }
+
+    let source = match persisted.agent_id {
+        AgentId::ClaudeCode => {
+            resolve_claude_transcript_source(&persisted.worktree_path, claude_projects_root)
+        }
+        AgentId::Codex => {
+            resolve_codex_transcript_source(&persisted.worktree_path, codex_sessions_root)
+        }
+        _ => None,
+    };
+    let Some(source) = source else {
+        return;
+    };
+    if session
+        .vt
+        .transcript_source_matches(&source.path, source.modified)
+    {
+        return;
+    }
+
+    if let Some(lines) = read_transcript_lines_for_agent(&persisted.agent_id, &source.path) {
+        session
+            .vt
+            .set_transcript_lines_from_source(source.path, source.modified, lines);
+    }
+}
+
+fn file_modified_time(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+fn resolve_claude_transcript_source(
+    worktree_path: &Path,
+    claude_projects_root: &Path,
+) -> Option<AgentTranscriptSource> {
+    let encoded_worktree = worktree_path.to_string_lossy().replace('/', "-");
+    latest_jsonl_file_in_dir(&claude_projects_root.join(encoded_worktree))
+}
+
+fn resolve_codex_transcript_source(
+    worktree_path: &Path,
+    codex_sessions_root: &Path,
+) -> Option<AgentTranscriptSource> {
+    let mut latest: Option<AgentTranscriptSource> = None;
+    for candidate in collect_jsonl_files(codex_sessions_root) {
+        let Some(candidate_cwd) = codex_session_meta_cwd(&candidate) else {
+            continue;
+        };
+        if candidate_cwd != worktree_path {
+            continue;
+        }
+        let modified = file_modified_time(&candidate);
+        if modified.is_none() {
+            continue;
+        }
+        let candidate_source = AgentTranscriptSource {
+            path: candidate,
+            modified,
+        };
+        if latest
+            .as_ref()
+            .is_none_or(|current| transcript_source_newer_than(&candidate_source, current))
+        {
+            latest = Some(candidate_source);
+        }
+    }
+    latest
+}
+
+fn transcript_source_newer_than(
+    candidate: &AgentTranscriptSource,
+    current: &AgentTranscriptSource,
+) -> bool {
+    let candidate_modified = candidate.modified.unwrap_or(UNIX_EPOCH);
+    let current_modified = current.modified.unwrap_or(UNIX_EPOCH);
+    candidate_modified > current_modified
+}
+
+fn latest_jsonl_file_in_dir(dir: &Path) -> Option<AgentTranscriptSource> {
+    let mut latest: Option<AgentTranscriptSource> = None;
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let modified = file_modified_time(&path);
+        if modified.is_none() {
+            continue;
+        }
+        let source = AgentTranscriptSource { path, modified };
+        if latest
+            .as_ref()
+            .is_none_or(|current| transcript_source_newer_than(&source, current))
+        {
+            latest = Some(source);
+        }
+    }
+    latest
+}
+
+fn collect_jsonl_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_jsonl_files_recursive(root, 0, 4, &mut files);
+    files
+}
+
+fn collect_jsonl_files_recursive(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_files_recursive(&path, depth + 1, max_depth, out);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+fn codex_session_meta_cwd(path: &Path) -> Option<PathBuf> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = String::new();
+    if reader.read_line(&mut first_line).ok()? == 0 {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(first_line.trim_end()).ok()?;
+    if payload.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    payload
+        .get("payload")
+        .and_then(|inner| inner.get("cwd"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+}
+
+fn read_transcript_lines_for_agent(agent_id: &AgentId, path: &Path) -> Option<Vec<String>> {
+    match agent_id {
+        AgentId::ClaudeCode => read_claude_transcript_lines(path),
+        AgentId::Codex => read_codex_transcript_lines(path),
+        _ => None,
+    }
+}
+
+fn read_codex_transcript_lines(path: &Path) -> Option<Vec<String>> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for raw in reader.lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = event.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(role) = payload.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(role, "user" | "assistant") {
+            continue;
+        }
+        let Some(content) = payload.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut merged = Vec::new();
+        for item in content {
+            let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            if !matches!(item_type, "input_text" | "output_text" | "text") {
+                continue;
+            }
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                merged.push(text);
+            }
+        }
+        let text = merged.join("\n").trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        append_transcript_message_lines(&mut lines, role, &text);
+    }
+    Some(lines)
+}
+
+fn read_claude_transcript_lines(path: &Path) -> Option<Vec<String>> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for raw in reader.lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(role) = event.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(role, "user" | "assistant") {
+            continue;
+        }
+        let text = extract_claude_message_text(&event)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            continue;
+        }
+        append_transcript_message_lines(&mut lines, role, &text);
+    }
+    Some(lines)
+}
+
+fn extract_claude_message_text(event: &Value) -> Option<String> {
+    let message = event.get("message")?;
+    let content = message.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let items = content.as_array()?;
+    let mut merged = Vec::new();
+    for item in items {
+        if let Some(text) = item.get("text").and_then(Value::as_str) {
+            merged.push(text.to_string());
+        }
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged.join("\n"))
+    }
+}
+
+fn append_transcript_message_lines(lines: &mut Vec<String>, role: &str, text: &str) {
+    for (index, raw_line) in text.lines().enumerate() {
+        if index == 0 {
+            lines.push(format!("{role}: {raw_line}"));
+        } else {
+            lines.push(format!("  {raw_line}"));
+        }
     }
 }
 
@@ -396,6 +749,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 .is_some_and(|session| session.id == pane_id)
             {
                 sync_session_viewports(model);
+                sync_active_agent_transcript_scrollback(model);
             }
         }
         Message::PushError(err) => {
@@ -436,6 +790,7 @@ pub fn update(model: &mut Model, msg: Message) {
             drain_branch_detail_events(model);
             tick_notification(model);
             check_pty_exits(model);
+            sync_active_agent_transcript_scrollback(model);
             model.branches.session_animation_tick =
                 model.branches.session_animation_tick.wrapping_add(1);
             refresh_branch_live_session_summaries(model);
@@ -3835,7 +4190,9 @@ fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
     let previous_snapshot_position = session.vt.snapshot_position();
     let previous_snapshot_count = session.vt.snapshot_count();
     let previous_follow_live = session.vt.follow_live();
-    let mode = if session.vt.uses_snapshot_scrollback() {
+    let mode = if session.vt.uses_transcript_scrollback() {
+        "transcript"
+    } else if session.vt.uses_snapshot_scrollback() {
         "snapshot"
     } else {
         "row"
@@ -5190,6 +5547,180 @@ mod tests {
         }
 
         panic!("timed out waiting for ticks: {context}");
+    }
+
+    #[test]
+    fn sync_active_agent_transcript_scrollback_with_loads_codex_jsonl_history() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let claude_projects_root = temp.path().join("claude/projects");
+        let codex_sessions_root = temp.path().join("codex/sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&claude_projects_root).expect("claude projects dir");
+        fs::create_dir_all(codex_sessions_root.join("2026/04/07")).expect("codex day dir");
+
+        let worktree = temp.path().join("wt-codex");
+        fs::create_dir_all(&worktree).expect("worktree");
+
+        let session_id = "agent-codex-test";
+        let mut persisted = AgentSession::new(&worktree, "feature/transcript", AgentId::Codex);
+        persisted.id = session_id.to_string();
+        persisted
+            .save(&sessions_dir)
+            .expect("persist codex session");
+
+        let transcript_path = codex_sessions_root
+            .join("2026/04/07")
+            .join("rollout-test.jsonl");
+        let transcript_lines = vec![
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": { "cwd": worktree.to_string_lossy() }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "prompt-1" }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "answer-1" }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "prompt-2" }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "answer-2" }]
+                }
+            })
+            .to_string(),
+        ];
+        fs::write(&transcript_path, transcript_lines.join("\n")).expect("write codex transcript");
+
+        let mut model = Model::new(worktree.clone());
+        model.sessions = vec![crate::model::SessionTab {
+            id: session_id.to_string(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(3, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        sync_active_agent_transcript_scrollback_with(
+            &mut model,
+            &sessions_dir,
+            &claude_projects_root,
+            &codex_sessions_root,
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(session.vt.has_viewport_scrollback());
+        assert!(session.vt.scroll_viewport_lines(1));
+        let parser = session.vt.visible_screen_parser();
+        let text = parser.screen().contents();
+        assert!(text.contains("user: prompt-1"));
+        assert!(text.contains("assistant: answer-1"));
+    }
+
+    #[test]
+    fn sync_active_agent_transcript_scrollback_with_loads_claude_jsonl_history() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let claude_projects_root = temp.path().join("claude/projects");
+        let codex_sessions_root = temp.path().join("codex/sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&claude_projects_root).expect("claude projects dir");
+        fs::create_dir_all(&codex_sessions_root).expect("codex root");
+
+        let worktree = temp.path().join("wt-claude");
+        fs::create_dir_all(&worktree).expect("worktree");
+
+        let session_id = "agent-claude-test";
+        let mut persisted = AgentSession::new(&worktree, "feature/transcript", AgentId::ClaudeCode);
+        persisted.id = session_id.to_string();
+        persisted
+            .save(&sessions_dir)
+            .expect("persist claude session");
+
+        let encoded_worktree = worktree.to_string_lossy().replace('/', "-");
+        let claude_dir = claude_projects_root.join(encoded_worktree);
+        fs::create_dir_all(&claude_dir).expect("claude worktree dir");
+        let transcript_path = claude_dir.join("session.jsonl");
+        let transcript_lines = vec![
+            serde_json::json!({
+                "type": "user",
+                "message": { "content": "prompt-1" }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "content": [ { "type": "text", "text": "answer-1" } ] }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "user",
+                "message": { "content": "prompt-2" }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "content": [ { "type": "text", "text": "answer-2" } ] }
+            })
+            .to_string(),
+        ];
+        fs::write(&transcript_path, transcript_lines.join("\n")).expect("write claude transcript");
+
+        let mut model = Model::new(worktree.clone());
+        model.sessions = vec![crate::model::SessionTab {
+            id: session_id.to_string(),
+            name: "Claude".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "claude".to_string(),
+                color: crate::model::AgentColor::Yellow,
+            },
+            vt: crate::model::VtState::new(3, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        sync_active_agent_transcript_scrollback_with(
+            &mut model,
+            &sessions_dir,
+            &claude_projects_root,
+            &codex_sessions_root,
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(session.vt.has_viewport_scrollback());
+        assert!(session.vt.scroll_viewport_lines(1));
+        let parser = session.vt.visible_screen_parser();
+        let text = parser.screen().contents();
+        assert!(text.contains("user: prompt-1"));
+        assert!(text.contains("assistant: answer-1"));
     }
 
     #[test]

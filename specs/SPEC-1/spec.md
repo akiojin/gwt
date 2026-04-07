@@ -95,7 +95,8 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-002**: `renderer.rs` converts vt100 cells to ratatui `Buffer` with color mapping: Named to Named, Indexed to Indexed, RGB to Rgb.
 - **FR-003**: Scrollback buffer stores up to 10,000 lines per pane, configurable via settings.
 - **FR-003a**: When a pane's visible screen does not expose vt100 row scrollback, gwt keeps a pane-local in-memory ring buffer of recent visible viewport states for the lifetime of that pane.
-- **FR-003b**: Snapshot scrollback is ephemeral only: gwt does not preload Codex / Claude transcript files for this feature, and the cache is discarded when the pane closes.
+- **FR-003b**: Agent-pane scrollback cache remains ephemeral in memory and is discarded when the pane closes.
+- **FR-003c**: For Claude/Codex agent panes, gwt may hydrate in-memory transcript scrollback from the corresponding session `jsonl` file so users can review full session history even when vt100 row scrollback and snapshot history are sparse.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
