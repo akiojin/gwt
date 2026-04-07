@@ -426,77 +426,6 @@ fn slice_contains_non_blank_content(lines: &[String]) -> bool {
     lines.iter().any(|line| !line.trim().is_empty())
 }
 
-fn snapshots_capture_viewport_shift(previous: &ScreenSnapshot, current: &ScreenSnapshot) -> bool {
-    if previous.rows != current.rows
-        || previous.cols != current.cols
-        || previous.visible_lines.len() != current.visible_lines.len()
-    {
-        return false;
-    }
-
-    let line_count = previous.visible_lines.len();
-    if line_count < 2 {
-        return false;
-    }
-
-    for shift in 1..line_count {
-        let overlap = line_count - shift;
-
-        let previous_suffix = &previous.visible_lines[shift..];
-        let current_prefix = &current.visible_lines[..overlap];
-        if overlap_looks_like_viewport_shift(previous_suffix, current_prefix) {
-            return true;
-        }
-
-        let previous_prefix = &previous.visible_lines[..overlap];
-        let current_suffix = &current.visible_lines[shift..];
-        if overlap_looks_like_viewport_shift(previous_prefix, current_suffix) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn overlap_looks_like_viewport_shift(previous_slice: &[String], current_slice: &[String]) -> bool {
-    if previous_slice.len() != current_slice.len() || previous_slice.len() < 2 {
-        return false;
-    }
-
-    if previous_slice == current_slice {
-        return true;
-    }
-
-    let overlap = previous_slice.len();
-    let mut total_matches = 0usize;
-    let mut longest_run = 0usize;
-    let mut current_run = 0usize;
-    let mut has_non_blank_match = false;
-
-    for (previous_line, current_line) in previous_slice.iter().zip(current_slice.iter()) {
-        if previous_line == current_line {
-            total_matches += 1;
-            current_run += 1;
-            longest_run = longest_run.max(current_run);
-            if !previous_line.trim().is_empty() {
-                has_non_blank_match = true;
-            }
-        } else {
-            current_run = 0;
-        }
-    }
-
-    // Accept partial overlap when most rows still align contiguously.
-    let mostly_aligned = total_matches * 100 >= overlap * 60 && longest_run >= 2;
-    if !mostly_aligned {
-        return false;
-    }
-
-    has_non_blank_match
-        || (!slice_contains_non_blank_content(previous_slice)
-            && !slice_contains_non_blank_content(current_slice))
-}
-
 const SNAPSHOT_HISTORY_CAPACITY: usize = 256;
 
 pub struct VtState {
@@ -731,14 +660,6 @@ impl VtState {
             .is_some_and(|existing| *existing == snapshot)
         {
             return;
-        }
-
-        if let Some(existing) = self.snapshots.back_mut() {
-            if !snapshots_capture_viewport_shift(existing, &snapshot) {
-                *existing = snapshot;
-                self.prune_leading_blank_snapshots();
-                return;
-            }
         }
 
         self.snapshots.push_back(snapshot);
@@ -1255,134 +1176,52 @@ mod tests {
         assert_eq!(vt.cols(), 120);
     }
 
-    #[test]
-    fn viewport_shift_detection_allows_blank_only_overlap() {
-        let previous = ScreenSnapshot {
-            rows: 5,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec!["".to_string(); 5],
-        };
-        let current = ScreenSnapshot {
-            rows: 5,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec![
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
-                "tail-frame".to_string(),
-            ],
-        };
-
-        assert!(
-            snapshots_capture_viewport_shift(&previous, &current),
-            "blank overlap should still count as viewport shift so full-screen frame history can progress"
-        );
+    fn full_screen_frame(lines: &[&str]) -> Vec<u8> {
+        let mut sequence = String::from("\u{1b}[2J\u{1b}[H");
+        for (index, line) in lines.iter().enumerate() {
+            sequence.push_str(&format!("\u{1b}[{};1H{}", index + 1, line));
+        }
+        sequence.into_bytes()
     }
 
     #[test]
-    fn viewport_shift_detection_accepts_non_blank_overlap() {
-        let previous = ScreenSnapshot {
-            rows: 5,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec![
-                "line-1".to_string(),
-                "line-2".to_string(),
-                "line-3".to_string(),
-                "line-4".to_string(),
-                "line-5".to_string(),
-            ],
-        };
-        let current = ScreenSnapshot {
-            rows: 5,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec![
-                "line-2".to_string(),
-                "line-3".to_string(),
-                "line-4".to_string(),
-                "line-5".to_string(),
-                "line-6".to_string(),
-            ],
-        };
+    fn capture_snapshot_skips_identical_consecutive_frames() {
+        let mut vt = VtState::new(5, 20);
+        let frame = full_screen_frame(&["line-1", "line-2", "line-3", "line-4", "line-5"]);
 
-        assert!(
-            snapshots_capture_viewport_shift(&previous, &current),
-            "non-blank overlapping rows should still be treated as a viewport shift"
-        );
+        vt.process(&frame);
+        vt.process(&frame);
+
+        assert_eq!(vt.max_scrollback(), 0);
+        assert_eq!(vt.snapshot_count(), 1);
+        assert!(!vt.has_snapshot_scrollback());
     }
 
     #[test]
-    fn viewport_shift_detection_tolerates_partial_overlap_row_churn() {
-        let previous = ScreenSnapshot {
-            rows: 6,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec![
-                "header".to_string(),
-                "line-1".to_string(),
-                "line-2".to_string(),
-                "line-3".to_string(),
-                "line-4".to_string(),
-                "line-5".to_string(),
-            ],
-        };
-        let current = ScreenSnapshot {
-            rows: 6,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec![
-                "line-1 *".to_string(),
-                "line-2".to_string(),
-                "line-3".to_string(),
-                "line-4".to_string(),
-                "line-5".to_string(),
-                "line-6".to_string(),
-            ],
-        };
+    fn capture_snapshot_keeps_distinct_full_screen_redraw_frames() {
+        let mut vt = VtState::new(5, 20);
+        vt.process(&full_screen_frame(&[
+            "line-1", "line-2", "line-3", "line-4", "line-5",
+        ]));
+        vt.process(&full_screen_frame(&[
+            "line-2", "line-3", "line-4", "line-5", "line-6",
+        ]));
 
-        assert!(
-            snapshots_capture_viewport_shift(&previous, &current),
-            "minor overlap churn should not block viewport-shift history progression"
-        );
-    }
+        assert_eq!(vt.max_scrollback(), 0);
+        assert_eq!(vt.snapshot_count(), 2);
+        assert!(vt.has_snapshot_scrollback());
 
-    #[test]
-    fn viewport_shift_detection_rejects_low_similarity_rewrites() {
-        let previous = ScreenSnapshot {
-            rows: 6,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec![
-                "alpha".to_string(),
-                "bravo".to_string(),
-                "charlie".to_string(),
-                "delta".to_string(),
-                "echo".to_string(),
-                "foxtrot".to_string(),
-            ],
-        };
-        let current = ScreenSnapshot {
-            rows: 6,
-            cols: 20,
-            state: Vec::new(),
-            visible_lines: vec![
-                "xray".to_string(),
-                "bravo".to_string(),
-                "yankee".to_string(),
-                "delta".to_string(),
-                "zulu".to_string(),
-                "omega".to_string(),
-            ],
-        };
+        assert!(vt.scroll_snapshot_up(1));
+        let snapshot = vt
+            .snapshot_parser()
+            .expect("snapshot parser should exist when viewing history");
+        let contents = snapshot.screen().contents();
+        assert!(contents.contains("line-1"));
+        assert!(!contents.contains("line-6"));
 
-        assert!(
-            !snapshots_capture_viewport_shift(&previous, &current),
-            "low-similarity in-place redraws should replace, not append, snapshot history"
-        );
+        assert!(vt.scroll_snapshot_down(1));
+        assert!(vt.follow_live());
+        assert!(vt.snapshot_parser().is_none());
     }
 
     #[test]

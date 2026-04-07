@@ -4,7 +4,7 @@
 - Status: `done`
 - Phase: `Done`
 - Task progress: `54/54` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T00:59:30Z`
+- Artifact refresh: `2026-04-07T01:11:59Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -24,13 +24,13 @@
 - Consecutive wheel events are now drained as a bounded burst before redraw, so Terminal.app trackpad floods no longer force one full frame render per raw scroll event.
 - Snapshot-backed scrollbar metrics now use the pane viewport height as the thumb baseline, so short frame histories render a legible scrollbar length instead of a single-cell indicator.
 - PTY output chunks are now coalesced per session within each event-loop drain before `Message::PtyOutput` dispatch, so snapshot-backed scrollback tracks drawn frames instead of reader-chunk intermediate states.
-- Full-screen cache history now advances only when the visible viewport shifts vertically; overwrite-or-clear redraws replace the latest cached viewport in place so stale cleared lines no longer leak into scrollback.
-- Snapshot viewport-shift progression remains overlap-based for sparse full-screen redraws, while blank history prefixes are pruned so topmost snapshot scrollback no longer produces a blank screen.
+- Full-screen cache history now records every distinct VT-interpreted frame (including overwrite / clear redraws) while deduplicating consecutive identical frames, so the visible frame always matches terminal semantics and prior distinct frames remain reviewable.
+- Snapshot progression no longer depends on viewport-shift overlap heuristics; blank history prefixes are still pruned so topmost snapshot scrollback never produces a phantom blank screen.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.
 - SGR leak normalization now runs regardless of terminal-focus state, so leaked wheel sequences can still recover into mouse scrolling when focus handoff has not happened yet.
-- Snapshot viewport-shift detection now accepts majority contiguous overlap under partial row churn while still rejecting low-similarity rewrites, preventing history starvation on dynamic full-screen panes.
+- Snapshot capture now tolerates redraw churn by preserving any distinct visible frame, preventing history starvation on dynamic full-screen panes without overlap-score tuning.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

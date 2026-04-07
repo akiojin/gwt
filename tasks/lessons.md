@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot cache は viewport-shift 推定ではなく VT確定フレーム履歴で扱う
+
+### 事象
+
+full-screen pane で上書き・clear 後の再描画が続くと、
+scrollback 復元時に「消えたはずの行」や「取りこぼしたフレーム」が発生した。
+
+### 原因
+
+- cache 追加条件を viewport-shift の overlap 推定に依存していた。
+- そのため、TTY 的には有効な redraw でも heuristic の判定次第で
+  履歴に残ったり残らなかったりして、復元一貫性が崩れた。
+
+### 再発防止策
+
+1. snapshot cache は「VT 解釈後の最終 visible frame」を単位にし、distinct frame は履歴へ追加する。
+2. 連続同一フレームだけを dedupe し、overlap ベースの shift 推定を履歴条件に使わない。
+3. `model.rs` と `app.rs` の focused test で「distinct frame 追加」「blank prefix 剪定」「live↔history遷移」を固定する。
+
 ## 2026-04-07 — fix: snapshot viewport shift 判定は「全行一致」だと実運用で取りこぼす
 
 ### 事象

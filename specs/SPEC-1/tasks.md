@@ -51,10 +51,10 @@
 - [x] T038 Adjust snapshot scrollbar metrics in `app.rs` so thumb length tracks the pane viewport while row scrollback behavior stays unchanged.
 - [x] T039 [P] Write RED test: PTY output chunks drained in one event-loop pass are coalesced per session so snapshot-backed scrollback does not expose intermediate chunk states.
 - [x] T040 Coalesce per-session PTY output in `main.rs` before dispatching `Message::PtyOutput`, keeping snapshot capture aligned with rendered frame boundaries.
-- [x] T041 [P] Write RED tests: in-place full-screen redraws replace the latest cached viewport, while vertical viewport shifts still extend snapshot-backed history.
-- [x] T042 Adjust the full-screen cache model in `model.rs` / `app.rs` so overwrite-or-clear redraws mutate the latest cached viewport instead of leaking stale cleared lines into scrollback.
+- [x] T041 [P] Write RED tests: full-screen snapshot cache keeps distinct redraw frames while deduplicating consecutive identical frames.
+- [x] T042 Adjust the full-screen cache model in `model.rs` / `app.rs` so any distinct VT-interpreted frame is appended to history without relying on viewport-shift-only progression.
 - [x] T043 [P] Write RED tests: blank-to-bottom-aligned frame transitions keep snapshot history usable while topmost scrollback never lands on a phantom empty frame.
-- [x] T044 Keep overlap-based snapshot viewport-shift progression in `model.rs` and pair it with blank-prefix pruning so sparse full-screen redraws remain scrollable without empty-top regressions.
+- [x] T044 Remove overlap-based viewport-shift heuristics and keep snapshot history stable via distinct-frame capture plus blank-prefix pruning.
 - [x] T045 [P] Write RED test: leading blank snapshots are pruned once newer non-blank frames exist so topmost scrollback never lands on an empty phantom frame.
 - [x] T046 Prune leading blank snapshot prefixes in `model.rs` and preserve snapshot cursor clamping while keeping non-blank history intact.
 - [x] T047 [P] Write RED test: first upward snapshot scroll from live-follow lands on the immediately previous snapshot and does not skip one frame.
@@ -63,5 +63,5 @@
 - [x] T050 Switch SGR leak timeout handling in `event.rs` to inter-character inactivity semantics so delayed fragments do not leak literal `[<...M` text.
 - [x] T051 [P] Write RED test: leaked SGR wheel reports are still normalized when terminal pane is not focused.
 - [x] T052 Apply SGR leak normalization regardless of terminal focus state and keep timeout tuned for practical trackpad sequence jitter.
-- [x] T053 [P] Write RED tests: snapshot viewport-shift detection accepts majority overlap with partial row churn and still rejects low-similarity rewrites.
-- [x] T054 Replace strict full-overlap shift detection in `model.rs` with majority contiguous-overlap scoring so snapshot progression survives realistic full-screen redraw jitter.
+- [x] T053 [P] Write RED tests: overlap-row churn and in-place redraws still remain reviewable as long as the resulting VT frame is distinct.
+- [x] T054 Finalize snapshot capture in `model.rs`/`app.rs` around distinct-frame history semantics and update focused regression expectations.

@@ -5215,7 +5215,7 @@ mod tests {
     }
 
     #[test]
-    fn in_place_full_screen_redraw_replaces_latest_snapshot_cache() {
+    fn in_place_full_screen_redraw_keeps_previous_snapshot_history() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -5224,8 +5224,8 @@ mod tests {
         replace_alt_screen_text(&mut model, "shell-0", "frame-2");
 
         let session = model.active_session_tab().expect("active session");
-        assert_eq!(session.vt.snapshot_count(), 1);
-        assert!(!session.vt.has_snapshot_scrollback());
+        assert_eq!(session.vt.snapshot_count(), 2);
+        assert!(session.vt.has_snapshot_scrollback());
 
         let area = active_session_text_area(&model).expect("active session text area");
         update(
@@ -5238,8 +5238,8 @@ mod tests {
             }),
         );
         let after = render_model_text(&model, 24, 8);
-        assert!(after.contains("frame-2"));
-        assert!(!after.contains("frame-1"));
+        assert!(after.contains("frame-1"));
+        assert!(!after.contains("frame-2"));
     }
 
     #[test]
