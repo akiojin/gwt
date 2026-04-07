@@ -750,6 +750,28 @@ recognizable at a glance without adding labels back into the row.
 - Add RED coverage for the Claude/Codex/Gemini spinner palette mapping.
 - Re-run focused and broad verification, then refresh SPEC-2 artifacts and execution tracking.
 
+### Phase 59: Branch Cleanup Multi-Select Flow (FR-018, US-9)
+
+Port the merged-branch bulk cleanup workflow that lived in the old TUI/GUI `CleanupModal` (`crates/gwt-tauri/src/commands/cleanup.rs`, `gwt-gui/src/lib/components/CleanupModal.svelte`) into the rewritten `gwt-tui` Branches surface, and remove the old per-branch `Ctrl+C` delete-worktree shortcut that has been carrying single-branch deletion in the meantime.
+
+59.1: gwt-git layer
+- Add `is_protected_branch`, `is_branch_merged_into` (`git cherry`-based), `detect_cleanable_target` (multi-base + gone), `list_gone_branches`, `delete_local_branch`, `WorktreeManager::remove_force`, and `WorktreeManager::cleanup_branch` (worktree force-remove + branch force-delete, idempotent against missing artifacts). Test-first against tempdir bare repo + worktree to cover squash merge, rebase merge, true merge, gone-upstream, and protected names.
+
+59.2: gwt-tui state
+- Extend `BranchesState` with `cleanup_selected: HashSet<String>`, `merged_state: HashMap<String, MergeState>`, `cleanup_settings: CleanupSettings`, and `cleanup_run: Option<CleanupRunState>`, plus a Braille spinner tick counter. Selection toggle is a no-op for protected/computing/unmerged branches, `select_all_visible_cleanable` only picks `Cleanable` rows, selection persists across view-mode/sort/search/tab changes and clears only on cleanup completion.
+
+59.3: Modals
+- Add `screens/cleanup_confirm.rs` (lists selected branches with merge target, `r` toggles `Also delete remote`, `Enter` confirms, `Esc` cancels) and `screens/cleanup_progress.rs` (determinate progress bar plus per-branch outcome list, blocks all input while `phase == Running`, accepts `Enter`/`Esc` only after `phase == Done`).
+
+59.4: app.rs integration
+- Wire `Space` / `Shift+C` / `a` on the Branches list. Remove the `Ctrl+C` → `DeleteWorktree` route on both `route_key_to_branch_list` and `route_key_to_branch_detail`, drop `pending_delete_worktree` plumbing, and update the `confirm` consumer. Run merge detection as a background worker that drains at most a few events per tick so the `Computing` spinner stays visible on small repos. Run cleanup as a background thread that revalidates protections per branch, invokes `index_worker::shutdown_and_remove` on the per-worktree index watcher before `cleanup_branch` removes the worktree, and emits `CleanupProgress` / `CleanupCompleted` messages. Update the footer hints and differentiate the cleanup gutter glyphs (`●` / `✔` / spinner / `·` / `–` / blank) so the reason a branch is not cleanable is visible at a glance.
+
+59.5: Verification
+- `cargo test -p gwt-core -p gwt-git -p gwt-tui`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo fmt`
+- Manual: in a repo with merged + unmerged + protected + gone branches, open Branches, watch the spinner reveal row-by-row, multi-select with `Space`/`a`, run `Shift+C`, confirm, observe progress modal, dismiss, verify selection cleared and list refreshed.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

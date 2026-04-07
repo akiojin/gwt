@@ -71,6 +71,24 @@ As a developer, I want my session layout to be restored when I restart gwt so th
 2. Given I was in split mode when I quit, when I restart, then split mode is restored.
 3. Given a session's working directory no longer exists, when restoring, then that session falls back to the home directory with a warning.
 
+### US-9: Bulk-clean merged branches and worktrees (P1)
+
+As a developer who creates one feature branch per task and accumulates dozens of finished worktrees per week, I want to multi-select merged branches in the Branches list and clean them all up in one confirmed operation so that the list stays focused on active work without me having to drop into a shell to run `git worktree remove` and `git branch -D` for each branch.
+
+**Acceptance Scenarios**
+
+1. Given the Branches tab is open, when background merge detection has finished, then every branch whose commits are all reachable from `origin/main` or `origin/develop` shows a `✔` in the leftmost gutter. Protected branches (`main`, `master`, `develop`, `development`, `release`), the current `HEAD`, and branches with a running session render a `–` gutter glyph instead; feature branches that merely have their own worktree remain cleanup candidates because removing the worktree is the whole point of the flow.
+2. Given a cleanable branch is focused, when I press `Space`, then the row is added to the cleanup selection set, the row gains a `[x]` marker on the right, and the footer shows the running selection count.
+3. Given I press `Space` on a non-cleanable row (protected, not yet computed, or unmerged), then nothing happens and the footer flashes a hint explaining why.
+4. Given I press `a` while merge detection is complete, then every currently visible cleanable branch (filter- and search-aware) is added to the selection set; pressing `a` a second time is a no-op for already-selected branches.
+5. Given the selection set is non-empty, when I press `Shift+C`, then a Cleanup Confirm modal opens listing every selected branch with its merge target (`merged → main`, `merged → develop`, or `gone`) and accepts `Enter` to confirm or `Esc` to cancel. The modal does **not** expose an `Also delete remote` toggle in this initial port; remote deletion is deferred until `gwt-git` grows the corresponding helper (see FR-018e).
+6. Given the Cleanup Confirm modal is visible, when I press `Enter`, then a Cleanup Progress modal replaces it, the selected branches are deleted sequentially via `git worktree remove --force` followed by `git branch -D`, and per-branch outcomes appear inline as the run progresses.
+7. Given the Cleanup Progress modal is running, when I press `Esc` or `Ctrl+C`, then nothing happens — input is fully blocked until the run completes.
+8. Given the run finishes, when the modal flips to summary mode, then it lists every result (`✓` succeeded, `✗ <reason>` failed), `Enter` / `Esc` dismisses it, the selection set is cleared, the Branches list reloads with refreshed merge state, and the status bar shows a transient `Cleaned N, failed M` summary.
+9. Given a selected branch becomes the current `HEAD` or gains a running session between selection and execution, when the run reaches that branch, then it is skipped with an explicit failure entry rather than being force-deleted.
+10. Given I switch the view mode (`m`), sort (`s`), or search (`/`) with selections active, then the selection set is preserved; only an actual cleanup run clears it.
+11. Given I press `Ctrl+C` on the Branches list outside the cleanup flow, then nothing happens — single-branch `Ctrl+C` delete-worktree has been removed in favor of FR-018.
+
 ### US-7: Navigate Keybindings with Ctrl+G Prefix (P0) -- IMPLEMENTED
 
 As a developer, I want all navigation keybindings to use a consistent Ctrl+G prefix so that they do not conflict with terminal applications running inside sessions.
@@ -161,7 +179,7 @@ This capability has regressed multiple times because "hooks are configured" is n
   - **Git Status**: Staged/unstaged/untracked files, recent commits
   - **Sessions**: Active agent/shell sessions on this branch, rendered as a typed session list with an active-session marker and a current selection marker
   - In the Sessions section, Up/Down cycles branch-scoped session rows and Enter focuses the selected session in the terminal pane
-  - Outside the Sessions section, old-TUI direct branch actions remain available from the detail pane only when the selected branch has a worktree: Shift+Enter opens a shell on the selected worktree branch and Ctrl+C opens the delete-worktree confirmation
+  - Outside the Sessions section, the old-TUI direct branch action remains available from the detail pane only when the selected branch has a worktree: Shift+Enter opens a shell on the selected worktree branch. (The old per-branch `Ctrl+C` delete-worktree shortcut has been removed in favor of the multi-select Branch Cleanup flow described in FR-018.)
   - Old-TUI local mnemonics remain available from the detail pane as well: `m` toggles the Branches view mode, `v` jumps to Git View, `f` starts Branches search and returns focus to the list, and `?` / `h` opens the help overlay
   - The Branch Detail pane title keeps the selected branch name visible alongside the section tabs so context is preserved after focus moves off the top list
   - Esc in Branch Detail returns focus to the branch list without clearing the selected branch, active section, or session-row selection
@@ -171,7 +189,7 @@ This capability has regressed multiple times because "hooks are configured" is n
   - PR creation and branch deletion are NOT included (use CLI).
 - **FR-006b**: Branch line display: name + worktree icon (U+25CF/U+25CB) + HEAD indicator. No category headers.
 - **FR-006c**: Management chrome: there is no standalone header banner above the management panes. Context is carried by the pane titles themselves so the management pane keeps its full vertical space for list/detail content.
-- **FR-006d**: Branch list: Enter=Wizard, Shift+Enter=Shell, Space=select, Ctrl+C=delete
+- **FR-006d**: Branch list: Enter=Wizard, Shift+Enter=Shell, Space=toggle Cleanup selection (FR-018), Shift+C=run Cleanup (FR-018), `a`=select all cleanable. Single-branch `Ctrl+C` delete-worktree is removed; deletion is performed through the multi-select Cleanup flow only.
 - **FR-006h**: When the management pane is too narrow to fit the full tab strip in the pane title, the title keeps the active management tab plus its nearest visible neighbors instead of collapsing to the active tab only. Hidden tabs are indicated with ellipsis so the current position in the strip stays legible without showing a truncated strip.
 - **FR-006i**: Branch list cursor movement is non-cyclic: `Up` on the first visible branch keeps the selection on the first row, and `Down` on the last visible branch keeps the selection on the last row.
 - **FR-006j**: In `Branches` view mode `All`, local branches are listed before remote branches. The active sort mode still applies within the local and remote groups.
@@ -216,6 +234,16 @@ This capability has regressed multiple times because "hooks are configured" is n
 - **FR-015a**: The prefixed focus shortcuts remain available even when a session PTY owns `Tab`. When the management panel is hidden, `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab` first reveal it and then land on the next logical focus target.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
+- **FR-018**: Branch Cleanup — multi-select bulk deletion of merged local branches and their worktrees, ported from the old TUI/GUI `CleanupModal` flow. Owns the canonical branch removal surface for `Branches` and replaces the single-branch `Ctrl+C` delete-worktree shortcut.
+  - **FR-018a (merge detection)**: A branch is *cleanable* when **every** commit reachable from its tip is already reachable from `origin/main` **or** `origin/develop`, computed via `git cherry <base> <branch>` (squash- and rebase-merge tolerant). Bases that do not exist in the repository are skipped. Local branches whose upstream is `[gone]` are also marked cleanable, since the remote tracking ref no longer exists. Remote-tracking branches (`origin/*`) are never cleanup candidates and are pruned via `git fetch --prune` separately.
+  - **FR-018b (protection)**: A cleanable branch becomes **non-selectable** when any of the following hold: (1) name matches a protected branch — `main`, `master`, `develop`, `development`, `release`; (2) the branch is the current `HEAD` of the gwt-tui process; (3) at least one running agent or shell pane is bound to the branch. Protected branches never participate in selection regardless of merge state. Feature branches whose only "checked out" status comes from owning their own worktree are **still** candidates — removing the worktree alongside the branch is the whole point of the cleanup flow in a gwt `1 branch = 1 worktree` workflow.
+  - **FR-018c (selection)**: Branches list owns an *implicit* multi-select mode. `Space` toggles the selection of the focused branch when it is cleanable; selection is a no-op for non-cleanable rows. The leftmost gutter column shows `⋯` while merge detection is still computing, `✔` when the row is cleanable, and a blank when the row is protected or unmerged. Selected rows show a `[x]` marker on the right side of the row in addition to the cyan highlight. `a` selects every currently visible cleanable branch (filter- and search-aware). Selection persists across view-mode toggle (`m`), sort (`s`), search (`/`), tab focus changes, and Branches tab re-entry, and is cleared **only** after a Cleanup run completes (success or failure).
+  - **FR-018d (merge detection lifecycle)**: Merge detection runs in the background as part of the existing branch-detail preload pipeline (FR-006a/l/m/n). It is triggered when the Branches tab is opened, when `r` is pressed, and when `git fetch` returns (if the existing pipeline already triggers a refresh). Until the first result lands for a branch, that row's gutter renders the `⋯` spinner glyph. Cancellation is by supersession (newer preload cancels older).
+  - **FR-018e (trigger and confirm modal)**: `Shift+C` on the Branches list opens the **Cleanup Confirm** modal when at least one branch is selected; pressing `Shift+C` with zero selection is a no-op (footer flashes a hint). The modal lists every selected branch with its merge target (`merged → main`, `merged → develop`, or `gone`), accepts `Enter` to confirm and `Esc` to cancel. The modal is rendered through the existing `Confirm` overlay surface and captures all input (FR-017). (The old GUI's `Also delete remote (r)` toggle is intentionally omitted from the initial TUI port because `gwt-git` has no remote-delete helper yet; a follow-up will re-introduce the toggle together with the backend.)
+  - **FR-018f (force delete semantics)**: Confirming the modal force-deletes each selected branch's worktree (`git worktree remove --force`) followed by the branch itself (`git branch -D`). The user has explicitly opted in to this destructiveness — uncommitted work, untracked files, and unpushed commits are **not** rechecked at execution time; FR-018b protections still hold and are revalidated at execution time (a branch that becomes the current HEAD or gains a session between selection and execution is skipped with an error). Remote deletion is not performed by this initial port and will land together with the toggle described in FR-018e.
+  - **FR-018g (progress modal and cancellation)**: Execution opens the **Cleanup Progress** modal which renders a determinate progress bar (`processed / total`) plus an inline list of per-branch outcomes — `→ Removing <branch>…` for the in-flight branch, `✓ <branch>` on success, and `✗ <branch>: <reason>` on failure. The modal captures all input and **blocks cancellation**: `Esc`, `Ctrl+C`, and other keys are ignored until the run completes, so the operation cannot be left in a partial-without-status state. On failure of any branch the run continues with the remaining branches.
+  - **FR-018h (completion and summary)**: When the run completes the same modal flips to a static summary (`Cleaned N, failed M`) listing every result, with `Enter` / `Esc` dismissing the modal. After dismissal: the selection set is cleared, the Branches list is refreshed (FR-018d re-runs merge detection), and the status bar shows a transient one-line summary that mirrors the modal counts.
+  - **FR-018i (footer hints)**: When at least one branch is selected, the Branches footer hint replaces the `Ctrl+C:delete` advertisement with `Space:select(N)  Shift+C:cleanup  a:all  Esc:clear`. With zero selection the footer advertises `Space:select  a:all-merged  Shift+C:cleanup`. The compact (`<=80 col`) footer keeps `Space:sel  ⇧C:clean` visible so the trigger key stays consistent with the full footer and with FR-018e.
 
 ## Non-Functional Requirements
 
@@ -290,6 +318,9 @@ Management tabs are displayed in the Block title of the management panel area. T
 | `/` | Start search (Branches, Issues) |
 | `r` | Refresh data |
 | `s` | Toggle sort mode (Branches only) |
+| `Space` | Branches: toggle Cleanup selection on the focused branch (FR-018c). Settings: toggle boolean. |
+| `Shift+C` | Branches: open Cleanup Confirm modal for the current selection (FR-018e) |
+| `a` | Branches: select every visible cleanable branch (FR-018c) |
 | `n` | New / Add (Profiles only) |
 | `e` | Edit (Profiles only) |
 | `d` | Delete (Profiles only) |
@@ -304,7 +335,6 @@ Management tabs are displayed in the Block title of the management panel area. T
 | `↑` / `↓` | Navigate within section (Actions list) |
 | `Enter` | Launch agent for the selected branch, or focus the selected session inside `Sessions` |
 | `Shift+Enter` | Open shell for the selected branch when it has a worktree (outside `Sessions`) |
-| `Ctrl+C` | Open delete-worktree confirmation when the selected branch has a worktree (outside `Sessions`) |
 | `m` | Toggle the Branches view mode without leaving Branch Detail |
 | `v` | Jump directly to Git View |
 | `f` | Start Branches search and return focus to the list |
