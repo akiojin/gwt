@@ -631,7 +631,65 @@ fn detect_vertical_redraw_shift(
         }
     }
 
-    best_match.map(|(window_start, shift, _)| (window_start, shift))
+    if let Some((window_start, shift, _)) = best_match {
+        return Some((window_start, shift));
+    }
+
+    detect_sparse_vertical_redraw_shift(previous, current)
+}
+
+fn detect_sparse_vertical_redraw_shift(
+    previous: &ScreenSnapshot,
+    current: &ScreenSnapshot,
+) -> Option<(usize, usize)> {
+    let row_count = previous
+        .visible_lines
+        .len()
+        .min(current.visible_lines.len());
+    if row_count < 2 {
+        return None;
+    }
+
+    let minimum_matches = if row_count <= 4 { 1 } else { 2 };
+    let mut best_match: Option<(usize, usize, usize, usize)> = None;
+    for shift in 1..row_count {
+        let mut matches = Vec::new();
+        for current_index in 0..row_count.saturating_sub(shift) {
+            let previous_line = &previous.visible_lines[current_index + shift];
+            let current_line = &current.visible_lines[current_index];
+            if previous_line == current_line && !current_line.trim().is_empty() {
+                matches.push(current_index);
+            }
+        }
+
+        if matches.len() < minimum_matches {
+            continue;
+        }
+
+        let window_start = matches[0];
+        let shifted_off_contains_non_blank = previous.visible_lines
+            [window_start..window_start.saturating_add(shift)]
+            .iter()
+            .any(|line| !line.trim().is_empty());
+        if !shifted_off_contains_non_blank {
+            continue;
+        }
+
+        let span = matches.last().copied().unwrap_or(window_start) - window_start + 1;
+        let candidate = (matches.len(), window_start, span, shift);
+        if best_match.is_none_or(|best| {
+            candidate.0 > best.0
+                || (candidate.0 == best.0
+                    && (candidate.1 < best.1
+                        || (candidate.1 == best.1
+                            && (candidate.2 > best.2
+                                || (candidate.2 == best.2 && candidate.3 < best.3)))))
+        }) {
+            best_match = Some(candidate);
+        }
+    }
+
+    best_match.map(|(_, window_start, _, shift)| (window_start, shift))
 }
 
 fn preview_visible_line(line: &str) -> String {
@@ -2355,6 +2413,34 @@ mod tests {
         assert!(contents.contains("line-1"));
         assert!(!contents.contains("status-a"));
         assert!(!contents.contains("line-5"));
+    }
+
+    #[test]
+    fn agent_scrollback_strategy_derives_row_history_from_sparse_shift_matches() {
+        let mut vt = VtState::new(6, 24);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(&full_screen_frame(&[
+            "status-a", "line-1", "line-2", "line-3", "line-4", "line-5",
+        ]));
+        vt.process(&home_repaint_frame(&[
+            "status-b", "line-2", "progress", "line-4", "spinner", "line-6",
+        ]));
+
+        assert_eq!(
+            vt.max_scrollback(),
+            1,
+            "Codex-like redraws should still derive one line of row history when the vertical shift is visible through sparse same-offset matches"
+        );
+        assert!(
+            !vt.uses_snapshot_scrollback(),
+            "sparse overlap should not force the pane back into page-sized snapshot stepping"
+        );
+
+        assert!(vt.scroll_viewport_lines(1));
+        let contents = vt.visible_screen_parser().screen().contents();
+        assert!(contents.contains("line-1"));
+        assert!(!contents.contains("line-6"));
     }
 
     #[test]

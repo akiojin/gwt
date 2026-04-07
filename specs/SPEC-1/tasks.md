@@ -99,3 +99,5 @@
 - [x] T086 Remove the terminal scrollbar overlay and keep session text width equal to pane width for all local and PTY-owned scroll paths.
 - [x] T087 [P] Write RED test: while an agent pane is browsing snapshot history, incoming PTY redraws that create row history do not replace the currently selected snapshot.
 - [x] T088 Keep snapshot-backed history locked to the selected frame until live-follow resumes, even if new PTY output promotes fresh row history in the background.
+- [x] T089 [P] Write RED test: Codex-style sparse same-offset redraw matches still derive local row history instead of falling back to page-sized snapshot scrolling.
+- [x] T090 Extend redraw-shift detection to accept sparse same-offset matches when contiguous overlap is interrupted by progress/spinner churn.

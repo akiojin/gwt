@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: Codex redraw shift detection must survive sparse overlap churn
+
+### 事象
+
+ループ感は消えても、Codex pane が 다시 page-sized snapshot scroll に落ち、
+行単位ではなく画面単位のようなスクロールに戻るケースが残った。
+
+### 原因
+
+- `detect_vertical_redraw_shift()` が contiguous exact overlap を主条件にしていた。
+- Codex の redraw では vertical shift 自体は残っていても、その間に progress や spinner の更新が挟まり、
+  一致行が same-offset に疎に散るだけで contiguous overlap が壊れる。
+- その結果、実際には line scroll 相当の shift があるのに `max_scrollback == 0` のままとなり、
+  snapshot fallback の 1 step = 1 frame へ戻っていた。
+
+### 再発防止策
+
+1. redraw-shift 検出は contiguous overlap を優先しつつ、取れない場合は sparse same-offset match を fallback として使う。
+2. scrollback に積む対象は「先頭から消えた row」であり、progress/spinner churn で overlap が分断されても page scroll へ戻さない。
+3. 「sparse same-offset match しか残らない Codex redraw」RED テストを model で固定する。
+
 ## 2026-04-07 — fix: snapshot-backed history source must stay locked while the user is reviewing it
 
 ### 事象
