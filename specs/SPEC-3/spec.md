@@ -33,11 +33,13 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
    mirrors that branch hierarchy (for example `feature/aaa` ->
    `../feature/aaa`) before spawning the agent PTY.
 6. Given the new-branch flow starts from a selected branch, when launch
-   materialization runs, then that selected branch is used as the base branch
-   instead of always falling back to the repo root checkout.
+   materialization runs, then gwt resolves `origin/<selected-branch>` as the
+   base branch, creates the remote target branch first, and only then
+   materializes the local worktree.
 7. Given the new-branch flow starts from SPEC or Issue context without a
-   selected base branch, when launch materialization runs, then `develop` is
-   used as the default base branch.
+   selected base branch, when launch materialization runs, then
+   `origin/develop` is used as the default base branch and launch fails if it
+   does not exist.
 8. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
 
 ### US-7: Restore Old-TUI Wizard Step Machine (P0) -- IMPLEMENTED
@@ -121,6 +123,7 @@ As a developer, I want to quickly re-launch a previous agent session configurati
 3. Given Quick Start history is empty, when I launch from an existing branch, then the wizard skips Quick Start and starts at `BranchAction`.
 4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own compact action rows, `Resume`, `Start new`, and a final `Choose different` row in the old-TUI layout.
 5. Given the selected history entry has a persisted resume session ID, when I choose `Resume`, then launch configuration restores `Resume` mode with that session ID. When no resume session ID exists, the wizard falls back to `Continue`.
+6. Given the selected Quick Start entry is Claude and persisted `skip_permissions=true`, when I select that entry, then the wizard resets skip permissions to `No` by default and launch args do not auto-append Claude bypass flags unless re-selected explicitly.
 
 ### US-4: Manage Custom Agents (P1) -- IMPLEMENTED
 
@@ -299,12 +302,18 @@ As a developer, I want to convert an existing session to a different agent type 
   sibling git worktree before PTY spawn, rather than running the agent from
   the repository root.
 - **FR-043**: When the new-branch flow starts from Branches,
-  `BranchAction -> Create new from selected` preserves the selected branch as
-  the base branch for worktree creation; when no selected base branch exists,
-  Launch Agent defaults that base branch to `develop`.
+  `BranchAction -> Create new from selected` resolves the selected branch to
+  `origin/<selected>` as the remote base branch, creates `origin/<new-branch>`
+  first, and then materializes the local worktree from that remote branch.
+  When no selected base branch exists, Launch Agent uses `origin/develop`; if
+  the required remote base branch does not exist, launch must fail before PTY
+  spawn.
 - **FR-044**: After launch materialization, `GWT_PROJECT_ROOT` and persisted
   session metadata use the actual launched worktree path, and any
   materialization error aborts launch before PTY spawn.
+- **FR-045**: Quick Start restores persisted `skip_permissions` for all built-in agents, including Claude.
+- **FR-046**: Claude launch sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` so Agent Teams capability is always available without an explicit pre-launch toggle.
+- **FR-047**: Every agent launch appends a structured audit line to `~/.gwt/logs/agent-launch.jsonl` including command/args/cwd/env for the spawned PTY config, with sensitive env values redacted.
 
 ## Non-Functional Requirements
 
@@ -361,7 +370,6 @@ As a developer, I want to convert an existing session to a different agent type 
 | `--print` | Non-interactive mode (SDK mode) |
 | `--dangerously-skip-permissions` | Skip permission prompts (legacy behavior) |
 | `--permission-mode bypassPermissions` | Bypass all permission checks (alternate permission-mode form) |
-| `--enable-auto-mode` | Unlock auto mode in Shift+Tab cycle |
 | `--model <model>` | Model selection (alias: `sonnet`, `opus`, or full name) |
 | `--allowedTools <tools>` | Tools that execute without prompting (pattern matching supported) |
 | `--disallowedTools <tools>` | Tools removed from context entirely |

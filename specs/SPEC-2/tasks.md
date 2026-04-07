@@ -492,62 +492,123 @@ banner in favor of pane-title chrome.
 - [x] T314 Update the keybind registry and app update path so prefixed focus-cycle commands work consistently from Shell and Agent panes.
 - [x] T315 Refresh `SPEC-2` artifacts and focused verification evidence for the prefixed focus-escape contract.
 
-## Phase 50: Make Agent Session Titles Branch-First And Color-Stable
+## Phase 50: Restore Hook-Derived Branch Session Discovery
 
-- [x] T316 [P] Write RED test: full-width agent session titles prefer persisted branch names over agent display names.
-- [x] T317 [P] Write RED test: compact agent session titles keep `n/N` context while showing the active persisted branch name.
-- [x] T318 [P] Write RED test: agent identity colors stay fixed while active-state emphasis comes from modifiers instead of a shared active-yellow foreground.
-- [x] T319 Update `app.rs` and `gwt-agent` color defaults so agent session titles render branch-first and keep Claude/Codex/Gemini as Yellow/Cyan/Magenta.
-- [x] T320 Refresh `SPEC-2` artifacts, launch/conversion expectations, and verification evidence for the branch-first agent-title contract.
+- [x] T316 [P] Write RED test: hook runtime sidecar maps `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
+- [x] T317 [P] Write RED test: Branches session-summary extraction prefers `Running` over `WaitingInput` when multiple live agent sessions belong to the same branch.
+- [x] T318 [P] Write RED test: launched agent PTYs receive stable gwt hook-runtime environment pointing at the correct session runtime record.
+- [x] T319 [P] Write RED test: PTY exit and explicit session close persist `Stopped` for agent sessions.
+- [x] T320 [P] Write RED test: wide Branches rows render a right-aligned running summary without regressing the left-side branch line.
+- [x] T321 [P] Write RED test: waiting rows render a distinct waiting summary.
+- [x] T322 [P] Write RED test: narrow Branches rows shorten or omit the live summary before the branch label and core icons disappear.
+- [x] T323 Implement hook runtime sidecar persistence, launch env injection, and `Stopped` cleanup updates in `gwt-agent` / `app.rs`.
+- [x] T324 Implement branch-scoped live session summary extraction and right-aligned Branches row rendering in `app.rs` / `branches.rs`.
+- [x] T325 Refresh `SPEC-2` artifacts and run focused plus broad verification for hook-derived Branches session visibility.
 
-## Phase 51: Branch Cleanup Multi-Select Flow (FR-018, US-8)
+## Phase 51: Normalize Claude Hook Settings Materialization
 
-### 51.1 gwt-git layer
+- [x] T326 [P] Write RED test: `.claude/settings.local.json` regeneration emits Claude's native `hooks` schema and removes the obsolete `managed_hooks` / `user_hooks` keys.
+- [x] T327 [P] Write RED test: Claude settings regeneration preserves non-gwt user hooks while replacing stale gwt-managed commands.
+- [x] T328 Update `gwt-skills` / `app.rs` launch materialization to generate Claude hook settings through a typed Claude-schema merge instead of the internal hooks-merge schema.
+- [x] T329 [P] Write RED test and fix: managed hook assets/settings are written before agent PTY spawn so the first launch turn can emit runtime state.
 
-- [ ] T321 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `is_protected_branch` returns true for `main`/`master`/`develop`/`development`/`release` and false for `feature/*`/`bugfix/*`/`hotfix/*`.
-- [ ] T322 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `is_branch_merged_into(repo, branch, base)` returns true when every commit on `branch` is reachable from `base` via `git cherry`, including squash- and rebase-merged branches, and false when at least one commit is missing.
-- [ ] T323 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `detect_cleanable_target` walks `[origin/main, origin/develop]`, returns the first matching `MergeTarget` (`Main` / `Develop` / `Gone`) or `None`, and gracefully skips bases that do not exist.
-- [ ] T324 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `list_gone_branches` parses `[gone]` upstream tracking from `for-each-ref` output and returns the matching local branch names.
-- [ ] T325 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `delete_local_branch` runs `git branch -D` when `force == true`, surfaces the underlying error on real failures, and is a no-op when the branch does not exist.
-- [ ] T326 [P] Write RED test in `crates/gwt-git/src/worktree.rs`: `WorktreeManager::remove_force` calls `git worktree remove --force` and succeeds even when the worktree contains uncommitted/untracked files.
-- [ ] T327 [P] Write RED test in `crates/gwt-git/src/worktree.rs`: `WorktreeManager::cleanup_branch(name)` removes the worktree (force) when one exists, then deletes the local branch (force), is idempotent against missing worktrees, missing branches, and orphaned worktree metadata, and surfaces the underlying Git error on real failures.
-- [ ] T328 Implement `is_protected_branch`, `is_branch_merged_into`, `detect_cleanable_target`, `list_gone_branches`, and `delete_local_branch` in `crates/gwt-git/src/branch.rs`, then re-export through `crates/gwt-git/src/lib.rs`.
-- [ ] T329 Implement `WorktreeManager::remove_force` and `WorktreeManager::cleanup_branch` in `crates/gwt-git/src/worktree.rs`, mirroring the old `gwt-tauri` cleanup semantics with the `is_missing_worktree_error` fallback.
-- [ ] T330 Run `cargo test -p gwt-git` and confirm Phase 51.1 RED tests turn green.
+## Phase 52: PID-Scoped Runtime State And No-Node Hook Commands
 
-### 51.2 gwt-tui state
+- [x] T330 [P] Write RED test: runtime sidecar paths are scoped under the current gwt PID namespace.
+- [x] T331 [P] Write RED test: startup/runtime reset clears only the current PID namespace and preserves sibling gwt runtime directories.
+- [x] T332 [P] Write RED test: generated Claude and Codex runtime hooks contain no Node-based live-state forward command, include `SessionStart`, and skip `Notification`.
+- [x] T333 [P] Write RED test: generated `.codex/hooks.json` preserves user hooks for untracked files and skips tracked `.codex/hooks.json`.
+- [x] T334 [P] Write RED test: POSIX runtime hook command writes a runtime sidecar via `GWT_SESSION_RUNTIME_PATH`.
+- [x] T335 Implement PID-scoped runtime path/reset helpers in `gwt-agent` and call startup reset from `gwt-tui/src/main.rs`.
+- [x] T336 Implement shared Claude/Codex runtime hook generation, `.codex/hooks.json` materialization, and launch-time wiring in `gwt-skills` / `app.rs`.
+- [x] T337 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for PID-scoped no-Node hook live-state updates.
 
-- [ ] T331 [P] Write RED test in `crates/gwt-tui/src/screens/branches.rs`: `BranchesState::toggle_selection(name)` only adds the branch when its `merged_state` is `Cleanable(_)` and the branch is not protected; other rows are no-ops.
-- [ ] T332 [P] Write RED test: `BranchesState::select_all_visible_cleanable(visible_branches)` adds every visible `Cleanable(_)` branch and skips `Computing` / `NotMerged` / protected entries.
-- [ ] T333 [P] Write RED test: changing view mode (`set_view_mode`), sort (`set_sort_mode`), search query, or active management tab does not clear `selected`; only `clear_selection_after_cleanup()` does.
-- [ ] T334 [P] Write RED test: `BranchesState::is_selectable(branch)` returns false for protected branches, the current HEAD, branches checked out in any worktree, and branches with an active session bound (using injected helpers to keep the test pure).
-- [ ] T335 Implement `selected: HashSet<String>`, `merged_state: HashMap<String, MergeState>`, `cleanup_settings: CleanupSettings`, `cleanup_run: Option<CleanupRunState>`, and the helpers above on `BranchesState`. Persist `cleanup_settings` to `.gwt/cleanup_settings.json` via the existing `paths` helper.
-- [ ] T336 Run `cargo test -p gwt-tui --lib screens::branches` and confirm Phase 51.2 RED tests turn green.
+## Phase 53: Multi-Agent Branch Spinner Strips
 
-### 51.3 Modals
+- [x] T338 [P] Write RED test: branch live-session extraction keeps multiple live agent indicators for the same branch instead of collapsing to one summary.
+- [x] T339 [P] Write RED test: wide Branches rows render spinner-only indicators without `run ...` / `wait ...` labels.
+- [x] T340 [P] Write RED test: branch spinner indicators use the originating agent colors so Claude Code and Codex stay visually distinct.
+- [x] T341 Implement multi-indicator branch aggregation and spinner-strip rendering in `app.rs` / `branches.rs`.
+- [x] T342 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for multi-agent spinner-strip Branches rendering.
 
-- [ ] T337 [P] Write RED test in `crates/gwt-tui/src/screens/cleanup_confirm.rs`: the confirm modal lists every selected branch with its `MergeTarget` rendered as `merged → main` / `merged → develop` / `gone`, and `[ ] Also delete remote (r)` reflects the current `delete_remote` flag.
-- [ ] T338 [P] Write RED test: `CleanupConfirmMessage::ToggleRemote` flips `delete_remote`, `CleanupConfirmMessage::Confirm` returns the run plan, and `CleanupConfirmMessage::Cancel` aborts.
-- [ ] T339 [P] Write RED test in `crates/gwt-tui/src/screens/cleanup_progress.rs`: while `phase == Running` the modal renders the progress bar and inline outcome list and ignores `Esc` / `Ctrl+C` / `Enter`; when `phase == Done` only `Enter` and `Esc` dismiss the modal and other keys remain ignored.
-- [ ] T340 Implement `screens/cleanup_confirm.rs` and `screens/cleanup_progress.rs` and re-export through `crates/gwt-tui/src/screens/mod.rs`.
-- [ ] T341 Run `cargo test -p gwt-tui --lib screens::cleanup_confirm screens::cleanup_progress` and confirm Phase 51.3 RED tests turn green.
+## Phase 54: Branch Spinner Palette Parity
 
-### 51.4 app.rs integration
+- [x] T343 [P] Write RED test: Claude and Codex branch spinners use `Yellow` and `Cyan` instead of the session-tab palette.
+- [x] T344 [P] Write RED test: Gemini branch spinner uses `Magenta` in the Branches strip.
+- [x] T345 Implement branch-only built-in agent palette mapping in `app.rs` / `branches.rs` with fallback for custom agents.
+- [x] T346 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for the Branches spinner palette mapping.
 
-- [ ] T342 [P] Write RED test in `crates/gwt-tui/src/app.rs`: `Space` on the Branches list dispatches `BranchesMessage::ToggleCleanupSelection(branch)` for the focused branch and is a no-op when the focused row is not selectable.
-- [ ] T343 [P] Write RED test: `Shift+C` on the Branches list with at least one selection opens the Cleanup Confirm modal; `Shift+C` with zero selection is a no-op (no modal opens, footer hint flashes).
-- [ ] T344 [P] Write RED test: `a` on the Branches list adds every visible cleanable branch to `selected`.
-- [ ] T345 [P] Write RED test: `Ctrl+C` on the Branches list and on the Branch Detail no longer dispatches `BranchesMessage::DeleteWorktree`. Update existing snapshot `branches_action_modal.snap` to drop the `Ctrl+C:delete` advertisement.
-- [ ] T346 [P] Write RED test: dispatching `CleanupCompletedMessage` clears `selected`, dismisses the progress modal, refreshes the branch list, and emits a `Cleaned N, failed M` toast.
-- [ ] T347 Remove the `Ctrl+C` → `BranchesMessage::DeleteWorktree` routes (`route_key_to_branch_list`, `route_key_to_branch_detail`), `BranchesMessage::DeleteWorktree`, `pending_delete_worktree`, the `confirm` consumer that handled it, and the `Ctrl+C:delete` footer hints.
-- [ ] T348 Wire the new keybindings (`Space`, `Shift+C`, `a`), open the confirm modal, run cleanup as a `spawn_blocking` job that revalidates protections per branch and emits `CleanupProgress` / `CleanupCompleted` messages over the existing app event channel.
-- [ ] T349 Wire merge-state preload events into `BranchesState::merged_state` from the existing branch-detail preload pipeline (FR-006a/l/m/n).
-- [ ] T350 Update Branches footer hints to advertise the new selection and cleanup affordances at full and `<= 80 col` widths.
-- [ ] T351 Run `cargo test -p gwt-tui` and confirm Phase 51.4 RED tests turn green.
+## Phase 55: Codex Runtime Namespace Sandboxing
 
-### 51.5 Verification
+- [x] T347 [P] Write RED test: Codex launch adds the `GWT_SESSION_RUNTIME_PATH` parent directory as a writable root.
+- [x] T348 Implement Codex runtime namespace writable-root injection in `crates/gwt-agent/src/launch.rs`.
+- [x] T349 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for Codex runtime sidecar writes.
 
-- [ ] T352 `cargo test -p gwt-core -p gwt-git -p gwt-tui`
-- [ ] T353 `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] T354 `cargo fmt --all`
-- [ ] T355 Refresh `specs/SPEC-2/progress.md` with the Phase 51 implementation summary and verification log.
+## Phase 56: Materialized Codex Runtime Namespace Wiring
+
+- [x] T350 [P] Write RED test: materialized Codex launches append the runtime namespace writable root after the persisted session id is known.
+- [x] T351 Implement materialized Codex runtime namespace augmentation in `crates/gwt-tui/src/app.rs`.
+- [x] T352 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for the materialized Codex runtime writable-root path.
+
+## Phase 57: Tracked Legacy Codex Hook Migration
+
+- [x] T353 [P] Write RED test: materialized Codex launches migrate tracked legacy `.codex/hooks.json` runtime hooks to the no-Node form before the session starts.
+- [x] T354 Implement tracked legacy Codex runtime-hook migration in `crates/gwt-skills/src/settings_local.rs` and launch materialization coverage in `crates/gwt-tui/src/app.rs`.
+- [x] T355 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for tracked legacy Codex runtime-hook migration.
+
+## Phase 58: Interactive Codex Launch Bootstrap
+
+- [x] T356 [P] Write RED test: successful materialized Codex launches bootstrap a PID-scoped `Running` runtime sidecar before the first interactive hook event arrives.
+- [x] T357 Implement launch-time runtime-state bootstrap in `crates/gwt-tui/src/app.rs` and keep failed launches sidecar-free.
+
+## Phase 59: Branch Cleanup Multi-Select Flow (FR-018, US-9)
+
+### 59.1 gwt-git layer
+
+- [x] T358 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `is_protected_branch` returns true for `main`/`master`/`develop`/`development`/`release` and false for `feature/*`/`bugfix/*`/`hotfix/*`.
+- [x] T359 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `is_branch_merged_into(repo, branch, base)` returns true when every commit on `branch` is reachable from `base` via `git cherry`, including squash- and rebase-merged branches, and false when at least one commit is missing.
+- [x] T360 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `detect_cleanable_target` walks `[origin/main, origin/develop]`, returns the first matching `MergeTarget` (`Main` / `Develop` / `Gone`) or `None`, and gracefully skips bases that do not exist.
+- [x] T361 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `list_gone_branches` parses `[gone]` upstream tracking from `for-each-ref` output and returns the matching local branch names.
+- [x] T362 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `delete_local_branch` runs `git branch -D` when `force == true`, surfaces the underlying error on real failures, and is a no-op when the branch does not exist.
+- [x] T363 [P] Write RED test in `crates/gwt-git/src/worktree.rs`: `WorktreeManager::remove_force` calls `git worktree remove --force` and succeeds even when the worktree contains uncommitted/untracked files.
+- [x] T364 [P] Write RED test in `crates/gwt-git/src/worktree.rs`: `WorktreeManager::cleanup_branch(name)` removes the worktree (force) when one exists, then deletes the local branch (force), is idempotent against missing worktrees, missing branches, and orphaned worktree metadata, and surfaces the underlying Git error on real failures.
+- [x] T365 Implement `is_protected_branch`, `is_branch_merged_into`, `detect_cleanable_target`, `list_gone_branches`, and `delete_local_branch` in `crates/gwt-git/src/branch.rs`, then re-export through `crates/gwt-git/src/lib.rs`.
+- [x] T366 Implement `WorktreeManager::remove_force` and `WorktreeManager::cleanup_branch` in `crates/gwt-git/src/worktree.rs`, mirroring the old `gwt-tauri` cleanup semantics with the `is_missing_worktree_error` fallback.
+- [x] T367 Run `cargo test -p gwt-git` and confirm Phase 59.1 RED tests turn green.
+
+### 59.2 gwt-tui state
+
+- [x] T368 [P] Write RED test in `crates/gwt-tui/src/screens/branches.rs`: `BranchesState::toggle_cleanup_selection(name)` only adds the branch when its `merged_state` is `Cleanable(_)` and the branch is cleanup-selectable; other rows are no-ops.
+- [x] T369 [P] Write RED test: `BranchesState::select_all_visible_cleanable(visible_branches)` adds every visible `Cleanable(_)` branch and skips `Computing` / `NotMerged` / protected entries.
+- [x] T370 [P] Write RED test: changing view mode (`set_view_mode`), sort (`set_sort_mode`), search query, or active management tab does not clear `cleanup_selected`; only `clear_selection_after_cleanup()` does.
+- [x] T371 [P] Write RED test: `BranchesState::is_cleanable_candidate(branch)` returns false for protected branches, the current HEAD, and branches with an active session bound. Worktree-bound feature branches remain candidates because removing the worktree is the whole point of the flow.
+- [x] T372 Implement `cleanup_selected: HashSet<String>`, `merged_state: HashMap<String, MergeState>`, `cleanup_settings: CleanupSettings`, `cleanup_run: Option<CleanupRunState>`, `merge_spinner_tick`, and the helpers above on `BranchesState`.
+- [x] T373 Run `cargo test -p gwt-tui --lib screens::branches` and confirm Phase 59.2 RED tests turn green.
+
+### 59.3 Modals
+
+- [x] T374 [P] Write RED test in `crates/gwt-tui/src/screens/cleanup_confirm.rs`: the confirm modal lists every selected branch with its `MergeTarget` rendered as `merged → main` / `merged → develop` / `gone`, and `[ ] Also delete remote (r)` reflects the current `delete_remote` flag.
+- [x] T375 [P] Write RED test: `CleanupConfirmMessage::ToggleRemote` flips `delete_remote`, `CleanupConfirmMessage::Confirm` returns the run plan, and `CleanupConfirmMessage::Cancel` aborts.
+- [x] T376 [P] Write RED test in `crates/gwt-tui/src/screens/cleanup_progress.rs`: while `phase == Running` the modal renders the progress bar and inline outcome list and ignores `Esc` / `Ctrl+C` / `Enter`; when `phase == Done` only `Enter` and `Esc` dismiss the modal and other keys remain ignored.
+- [x] T377 Implement `screens/cleanup_confirm.rs` and `screens/cleanup_progress.rs` and re-export through `crates/gwt-tui/src/screens/mod.rs`.
+- [x] T378 Run `cargo test -p gwt-tui --lib screens::cleanup_confirm screens::cleanup_progress` and confirm Phase 59.3 RED tests turn green.
+
+### 59.4 app.rs integration
+
+- [x] T379 [P] Write RED test in `crates/gwt-tui/src/app.rs`: `Space` on the Branches list dispatches cleanup-selection toggle for the focused branch and is a no-op when the focused row is not selectable.
+- [x] T380 [P] Write RED test: `Shift+C` on the Branches list with at least one selection opens the Cleanup Confirm modal; `Shift+C` with zero selection is a no-op.
+- [x] T381 [P] Write RED test: `a` on the Branches list adds every visible cleanable branch to `cleanup_selected`.
+- [x] T382 [P] Write RED test: `Ctrl+C` on the Branches list and on the Branch Detail no longer dispatches `BranchesMessage::DeleteWorktree`. Update existing snapshot `branches_action_modal.snap` to drop the `Ctrl+C:delete` advertisement.
+- [x] T383 [P] Write RED test: dispatching `CleanupProgressMessage::Completed` records the final `Cleaned N, failed M` summary and `Dismiss` clears the selection, refreshes branches, and drops the progress modal.
+- [x] T384 Remove the `Ctrl+C` → `BranchesMessage::DeleteWorktree` routes (`route_key_to_branch_list`, `route_key_to_branch_detail`), `BranchesMessage::DeleteWorktree`, `pending_delete_worktree`, the `confirm` consumer that handled it, and the `Ctrl+C:delete` footer hints.
+- [x] T385 Wire the new keybindings (`Space`, `Shift+C`, `a`), open the confirm modal, run cleanup as a background job that revalidates protections per branch and emits `CleanupProgress` / `CleanupCompleted` messages over the existing app event channel.
+- [x] T386 Spawn merge-state detection as a background worker and drain it at most `MERGE_STATE_DRAIN_PER_TICK` events per tick so the Computing spinner stays visible on small repos.
+- [x] T387 Update Branches footer hints to advertise the new selection and cleanup affordances at full and `<= 80 col` widths, and differentiate the cleanup gutter glyphs (`●` / `✔` / spinner / `·` / `–` / blank).
+- [x] T388 Run `cargo test -p gwt-tui` and confirm Phase 59.4 RED tests turn green.
+
+### 59.5 Verification
+
+- [x] T389 `cargo test -p gwt-core -p gwt-git -p gwt-tui`
+- [x] T390 `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] T391 `cargo fmt --all`
+- [x] T392 Refresh `specs/SPEC-2/progress.md` with the Phase 59 implementation summary and verification log.

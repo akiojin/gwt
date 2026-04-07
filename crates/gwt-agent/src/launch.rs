@@ -1,9 +1,46 @@
 //! Agent launch builder: construct launch configurations for coding agents.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
 use crate::types::{AgentColor, AgentId, SessionMode};
+
+/// Resolve the gwt repo hash for the directory by shelling out to
+/// `git remote get-url origin`. Returns `None` when no origin is configured.
+fn detect_repo_hash_for_dir(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("remote")
+        .arg("get-url")
+        .arg("origin")
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        return None;
+    }
+    Some(
+        gwt_core::repo_hash::compute_repo_hash(&url)
+            .as_str()
+            .to_string(),
+    )
+}
+
+/// Resolve the gwt worktree hash for the directory.
+fn compute_worktree_hash_for_dir(dir: &Path) -> Option<String> {
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    gwt_core::worktree_hash::compute_worktree_hash(&abs)
+        .ok()
+        .map(|h| h.as_str().to_string())
+}
 
 /// Resolved runner command for agent execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +258,16 @@ impl AgentLaunchBuilder {
         env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
         if let Some(ref dir) = self.working_dir {
             env_vars.insert("GWT_PROJECT_ROOT".to_string(), dir.display().to_string());
+
+            // Phase 8 / SPEC-10 FR-028: export repo & worktree hashes so the
+            // skill-driven runner calls can reconstruct the DB path without
+            // re-deriving via `git remote` on every invocation.
+            if let Some(repo_hash) = detect_repo_hash_for_dir(dir) {
+                env_vars.insert("GWT_REPO_HASH".to_string(), repo_hash);
+            }
+            if let Some(wt_hash) = compute_worktree_hash_for_dir(dir) {
+                env_vars.insert("GWT_WORKTREE_HASH".to_string(), wt_hash);
+            }
         }
 
         // Resolve runner (installed binary vs bunx/npx)
@@ -351,11 +398,6 @@ impl AgentLaunchBuilder {
     }
 
     fn build_codex_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
-        env_vars.insert(
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
-            "1".to_string(),
-        );
-
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());
@@ -411,6 +453,8 @@ impl AgentLaunchBuilder {
                 args.push("web_search_request".to_string());
             }
         }
+        args.push("--enable".to_string());
+        args.push("codex_hooks".to_string());
 
         // Sandbox & shell env policies
         args.push("--sandbox".to_string());
@@ -423,6 +467,20 @@ impl AgentLaunchBuilder {
         args.push("shell_environment_policy.ignore_default_excludes=true".to_string());
         args.push("-c".to_string());
         args.push("shell_environment_policy.experimental_use_profile=true".to_string());
+
+        if let Some(runtime_dir) = self.codex_runtime_writable_root(env_vars) {
+            args.push("--add-dir".to_string());
+            args.push(runtime_dir);
+        }
+    }
+
+    fn codex_runtime_writable_root(&self, env_vars: &HashMap<String, String>) -> Option<String> {
+        self.env_overrides
+            .get(GWT_SESSION_RUNTIME_PATH_ENV)
+            .or_else(|| env_vars.get(GWT_SESSION_RUNTIME_PATH_ENV))
+            .map(PathBuf::from)
+            .and_then(|runtime_path| runtime_path.parent().map(|dir| dir.to_path_buf()))
+            .map(|dir| dir.to_string_lossy().into_owned())
     }
 
     fn build_gemini_args(&self, args: &mut Vec<String>) {
@@ -670,6 +728,30 @@ mod tests {
             .build();
 
         assert!(config.args.contains(&"web_search_request".to_string()));
+    }
+
+    #[test]
+    fn build_codex_enables_hooks_feature_flag() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
+    }
+
+    #[test]
+    fn build_codex_adds_runtime_namespace_as_writable_root() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .env(
+                "GWT_SESSION_RUNTIME_PATH",
+                "/Users/akiojin/.gwt/sessions/runtime/36610/session-123.json",
+            )
+            .build();
+
+        assert!(config.args.windows(2).any(|pair| {
+            pair[0] == "--add-dir" && pair[1] == "/Users/akiojin/.gwt/sessions/runtime/36610"
+        }));
     }
 
     #[test]

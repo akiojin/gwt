@@ -31,6 +31,33 @@ pub fn gwt_logs_dir() -> PathBuf {
     gwt_home().join("logs")
 }
 
+/// Return the shared runtime directory (`~/.gwt/runtime/`).
+pub fn gwt_runtime_dir() -> PathBuf {
+    gwt_runtime_dir_from(&gwt_home())
+}
+
+/// Return the project index runner path under the shared runtime directory.
+pub fn gwt_runtime_runner_path() -> PathBuf {
+    gwt_runtime_runner_path_from(&gwt_home())
+}
+
+/// Return the managed project-index virtualenv directory.
+pub fn gwt_project_index_venv_dir() -> PathBuf {
+    gwt_project_index_venv_dir_from(&gwt_home())
+}
+
+pub(crate) fn gwt_runtime_dir_from(gwt_home: &Path) -> PathBuf {
+    gwt_home.join("runtime")
+}
+
+pub(crate) fn gwt_runtime_runner_path_from(gwt_home: &Path) -> PathBuf {
+    gwt_runtime_dir_from(gwt_home).join("chroma_index_runner.py")
+}
+
+pub(crate) fn gwt_project_index_venv_dir_from(gwt_home: &Path) -> PathBuf {
+    gwt_runtime_dir_from(gwt_home).join("chroma-venv")
+}
+
 /// Ensure that the directory at `path` exists, creating it recursively if
 /// necessary.
 pub fn ensure_dir(path: &Path) -> Result<()> {
@@ -74,6 +101,27 @@ mod tests {
         let p = gwt_logs_dir();
         assert!(p.starts_with(gwt_home()));
         assert!(p.ends_with("logs"));
+    }
+
+    #[test]
+    fn gwt_runtime_dir_is_under_home() {
+        let p = gwt_runtime_dir();
+        assert!(p.starts_with(gwt_home()));
+        assert!(p.ends_with("runtime"));
+    }
+
+    #[test]
+    fn gwt_runtime_runner_path_is_under_runtime_dir() {
+        let p = gwt_runtime_runner_path();
+        assert!(p.starts_with(gwt_runtime_dir()));
+        assert_eq!(p.file_name().unwrap(), "chroma_index_runner.py");
+    }
+
+    #[test]
+    fn gwt_project_index_venv_dir_is_under_runtime_dir() {
+        let p = gwt_project_index_venv_dir();
+        assert!(p.starts_with(gwt_runtime_dir()));
+        assert_eq!(p.file_name().unwrap(), "chroma-venv");
     }
 
     #[test]

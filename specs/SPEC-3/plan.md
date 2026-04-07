@@ -117,7 +117,7 @@ falls back to the repository root checkout.
 
 1. Extend launch configuration so the wizard can carry a selected base branch
    for new-branch launches, while SPEC/Issue-prefilled launches default to
-   `develop`.
+   `origin/develop`.
 2. Materialize a sibling git worktree before PTY spawn whenever Launch Agent
    targets a new branch without an existing worktree.
 3. Persist the actual launched worktree path into session metadata and

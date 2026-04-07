@@ -5,7 +5,11 @@
 //! (gwt-git, gwt-agent, etc.) build on top of these primitives.
 
 pub mod error;
+pub mod index;
 pub mod paths;
 pub mod process;
+pub mod repo_hash;
+pub mod runtime;
+pub mod worktree_hash;
 
 pub use error::{GwtError, Result};
