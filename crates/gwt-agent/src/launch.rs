@@ -398,11 +398,6 @@ impl AgentLaunchBuilder {
     }
 
     fn build_codex_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
-        env_vars.insert(
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
-            "1".to_string(),
-        );
-
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());

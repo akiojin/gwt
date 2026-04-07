@@ -2627,6 +2627,33 @@ mod tests {
     }
 
     #[test]
+    fn select_on_quick_start_claude_restores_skip_permissions() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.detected_agents = sample_agents();
+        state.quick_start_entries = vec![QuickStartEntry {
+            agent_id: "claude".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: None,
+            version: Some("latest".to_string()),
+            resume_session_id: Some("sess-claude".to_string()),
+            skip_permissions: true,
+            codex_fast_mode: false,
+        }];
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+        assert_eq!(state.agent_id, "claude");
+        assert_eq!(state.mode, "resume");
+        assert_eq!(state.resume_session_id.as_deref(), Some("sess-claude"));
+        assert!(state.skip_perms);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
     fn back_from_branch_action_returns_to_quick_start_when_history_exists() {
         let mut state = WizardState::default();
         state.step = WizardStep::BranchAction;

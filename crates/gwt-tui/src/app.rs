@@ -1,6 +1,8 @@
 //! App — Update and View functions for the Elm Architecture.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +18,7 @@ use gwt_agent::{
 };
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings, VoiceConfig};
-use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
+use gwt_core::paths::{gwt_cache_dir, gwt_logs_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
@@ -52,6 +54,8 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
+const AGENT_LAUNCH_LOG_FILENAME: &str = "agent-launch.jsonl";
+const REDACTED_ENV_VALUE: &str = "<redacted>";
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -85,6 +89,13 @@ pub fn spawn_pty_for_session(
     session_id: &str,
     config: gwt_terminal::pty::SpawnConfig,
 ) -> Result<(), String> {
+    if let Err(err) = append_agent_launch_log(model.repo_path(), session_id, &config) {
+        tracing::warn!(
+            session_id = session_id,
+            error = %err,
+            "Failed to append agent launch audit log"
+        );
+    }
     tracing::info!(
         session_id = session_id,
         command = %config.command,
@@ -103,6 +114,83 @@ pub fn spawn_pty_for_session(
     model.pty_handles.insert(session_id.to_string(), pty);
     tracing::info!(session_id = session_id, "PTY spawned successfully");
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct AgentLaunchAuditRecord {
+    timestamp: String,
+    repo_path: String,
+    session_id: String,
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: BTreeMap<String, String>,
+}
+
+fn append_agent_launch_log(
+    repo_path: &Path,
+    session_id: &str,
+    config: &gwt_terminal::pty::SpawnConfig,
+) -> std::io::Result<()> {
+    append_agent_launch_log_with(&gwt_logs_dir(), repo_path, session_id, config)
+}
+
+fn append_agent_launch_log_with(
+    logs_dir: &Path,
+    repo_path: &Path,
+    session_id: &str,
+    config: &gwt_terminal::pty::SpawnConfig,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(logs_dir)?;
+    let log_path = logs_dir.join(AGENT_LAUNCH_LOG_FILENAME);
+
+    let record = AgentLaunchAuditRecord {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        repo_path: repo_path.display().to_string(),
+        session_id: session_id.to_string(),
+        command: config.command.clone(),
+        args: config.args.clone(),
+        cwd: config.cwd.as_ref().map(|path| path.display().to_string()),
+        env: redact_env_for_log(&config.env),
+    };
+    let json = serde_json::to_string(&record)
+        .map_err(|err| std::io::Error::other(format!("serialize audit record: {err}")))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    writeln!(file, "{json}")?;
+    Ok(())
+}
+
+fn redact_env_for_log(env: &HashMap<String, String>) -> BTreeMap<String, String> {
+    env.iter()
+        .map(|(key, value)| {
+            let logged_value = if is_sensitive_env_key(key) {
+                REDACTED_ENV_VALUE.to_string()
+            } else {
+                value.clone()
+            };
+            (key.clone(), logged_value)
+        })
+        .collect()
+}
+
+fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    [
+        "API_KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASS",
+        "AUTH",
+        "COOKIE",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle))
 }
 
 /// Compute the session pane content size `(cols, rows)` for PTY/VtState
@@ -8145,6 +8233,93 @@ CUSTOM_ENV = "enabled"
         assert!(config
             .args
             .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_without_skip_permissions_omits_dangerous_flag() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            skip_perms: false,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(!config.skip_permissions);
+        assert!(!config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn append_agent_launch_log_with_writes_record_and_redacts_sensitive_env() {
+        let dir = tempfile::tempdir().expect("temp log dir");
+        let repo_path = PathBuf::from("/tmp/repo");
+        let mut env = HashMap::new();
+        env.insert(
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
+            "1".to_string(),
+        );
+        env.insert("OPENAI_API_KEY".to_string(), "sk-test-secret".to_string());
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        let config = gwt_terminal::pty::SpawnConfig {
+            command: "claude".to_string(),
+            args: vec!["--dangerously-skip-permissions".to_string()],
+            cols: 80,
+            rows: 24,
+            env,
+            cwd: Some(PathBuf::from("/tmp/repo/feature/demo")),
+        };
+
+        append_agent_launch_log_with(dir.path(), &repo_path, "sess-123", &config)
+            .expect("append launch log");
+
+        let path = dir.path().join(AGENT_LAUNCH_LOG_FILENAME);
+        let content = fs::read_to_string(path).expect("read launch log");
+        let line = content.lines().next().expect("one launch log line");
+        let value: serde_json::Value = serde_json::from_str(line).expect("parse launch log json");
+
+        assert_eq!(value["repo_path"], "/tmp/repo");
+        assert_eq!(value["session_id"], "sess-123");
+        assert_eq!(value["command"], "claude");
+        assert_eq!(
+            value["args"],
+            serde_json::json!(["--dangerously-skip-permissions"])
+        );
+        assert_eq!(value["cwd"], "/tmp/repo/feature/demo");
+        assert_eq!(value["env"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"], "1");
+        assert_eq!(value["env"]["OPENAI_API_KEY"], REDACTED_ENV_VALUE);
+        assert_eq!(value["env"]["PATH"], "/usr/bin");
+        assert!(value["timestamp"].as_str().is_some());
+    }
+
+    #[test]
+    fn append_agent_launch_log_with_appends_multiple_records() {
+        let dir = tempfile::tempdir().expect("temp log dir");
+        let repo_path = PathBuf::from("/tmp/repo");
+        let config = gwt_terminal::pty::SpawnConfig {
+            command: "claude".to_string(),
+            args: vec!["--dangerously-skip-permissions".to_string()],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            cwd: Some(PathBuf::from("/tmp/repo")),
+        };
+
+        append_agent_launch_log_with(dir.path(), &repo_path, "sess-1", &config)
+            .expect("append first");
+        append_agent_launch_log_with(dir.path(), &repo_path, "sess-2", &config)
+            .expect("append second");
+
+        let path = dir.path().join(AGENT_LAUNCH_LOG_FILENAME);
+        let content = fs::read_to_string(path).expect("read launch log");
+        let lines = content.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("parse first");
+        let second: serde_json::Value = serde_json::from_str(lines[1]).expect("parse second");
+        assert_eq!(first["session_id"], "sess-1");
+        assert_eq!(second["session_id"], "sess-2");
     }
 
     #[test]

@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: Claude auto-mode系エラーは skip 復元抑止ではなく gwt 固有launch差分を先に疑う
+
+### 事象
+
+`Auto mode is unavailable for your plan` の報告に対し、Quick Start の
+`skip_permissions` 復元そのものを無効化する修正を先行してしまい、実際の
+症状（gwt経由のみ再現）と原因候補の切り分けがずれた。
+
+### 原因
+
+- 「直接 `bunx @anthropic-ai/claude-code` では再現しない」という強い事実より
+  前に、保存済みフラグ復元を主因と仮定した。
+- gwt固有の launch 差分（追加 env / 追加 args）の比較を先に固定しなかった。
+
+### 再発防止策
+
+1. CLIラッパー経由でのみ再現する不具合は、まず「直接CLIとの差分（env/args/runner）」を最優先で比較する。
+2. ユーザーが「フラグ自体ではない」と明示した場合、フラグ復元ロジックを触る前に launch 組み立て層の証跡（実際の引数・環境）を確定する。
+3. 既存UXを弱める回避策（復元OFFなど）は、根本原因を確定するまで入れない。
+
 ## 2026-04-07 — fix: semantic file search は collection 設計でノイズを消す
 
 ### 事象
