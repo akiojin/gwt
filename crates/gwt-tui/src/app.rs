@@ -4361,8 +4361,16 @@ fn active_session_prefers_pty_mouse_scroll(model: &Model) -> bool {
     let Some(session) = model.active_session_tab() else {
         return false;
     };
-    matches!(session.tab_type, SessionTabType::Agent { .. })
-        && session.vt.accepts_mouse_scroll_input()
+    session_prefers_pty_mouse_scroll(session)
+}
+
+fn session_prefers_pty_mouse_scroll(session: &crate::model::SessionTab) -> bool {
+    match &session.tab_type {
+        SessionTabType::Agent { agent_id, .. } => {
+            agent_id == "codex" || session.vt.accepts_mouse_scroll_input()
+        }
+        SessionTabType::Shell => false,
+    }
 }
 
 fn queue_active_session_mouse_scroll(
@@ -4502,7 +4510,7 @@ fn session_scrollbar_area(session: &crate::model::SessionTab, area: Rect) -> Opt
 }
 
 fn session_has_scrollbar(session: &crate::model::SessionTab) -> bool {
-    session.vt.has_viewport_scrollback()
+    !session_prefers_pty_mouse_scroll(session) && session.vt.has_viewport_scrollback()
 }
 
 fn session_scrollbar_metrics(
@@ -6728,6 +6736,106 @@ mod tests {
                 .vt
                 .follow_live(),
             "PTY-driven agent scrolling should keep the local viewport pinned to live output"
+        );
+    }
+
+    #[test]
+    fn agent_mouse_reporting_hides_local_scrollbar_overlay() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1000h\x1b[?1006h\x1b[?1049h\x1b[2J\x1b[Hframe-1".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"\x1b[2J\x1b[Hframe-2".to_vec()),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            session.vt.has_viewport_scrollback(),
+            "precondition: local snapshot history still exists even though wheel handling is delegated to PTY"
+        );
+        assert!(
+            !session_has_scrollbar(session),
+            "gwt local scrollbar should be suppressed while the agent owns wheel scrolling"
+        );
+
+        let content = active_session_content_area(&model).expect("content area");
+        let text = active_session_text_area(&model).expect("text area");
+        assert_eq!(
+            text.width, content.width,
+            "suppressing the local scrollbar should return the full pane width to terminal rendering"
+        );
+    }
+
+    #[test]
+    fn codex_mouse_wheel_forwards_to_pty_without_explicit_mouse_reporting() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1049h\x1b[2J\x1b[Hframe-1".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"\x1b[2J\x1b[Hframe-2".to_vec()),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued codex mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[<64;1;1M".to_vec());
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            session.vt.has_viewport_scrollback(),
+            "precondition: local snapshot history still exists for Codex redraw panes"
+        );
+        assert!(
+            !session_has_scrollbar(session),
+            "Codex panes should suppress the local scrollbar while PTY-owned scrolling is active"
         );
     }
 
