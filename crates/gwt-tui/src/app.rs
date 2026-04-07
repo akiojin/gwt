@@ -5619,7 +5619,7 @@ mod tests {
         let transcript_path = codex_sessions_root
             .join("2026/04/07")
             .join("rollout-test.jsonl");
-        let transcript_lines = vec![
+        let transcript_lines = [
             serde_json::json!({
                 "type": "session_meta",
                 "payload": { "cwd": worktree.to_string_lossy() }
@@ -5717,7 +5717,7 @@ mod tests {
         let claude_dir = claude_projects_root.join(encoded_worktree);
         fs::create_dir_all(&claude_dir).expect("claude worktree dir");
         let transcript_path = claude_dir.join("session.jsonl");
-        let transcript_lines = vec![
+        let transcript_lines = [
             serde_json::json!({
                 "type": "user",
                 "message": { "content": "prompt-1" }
