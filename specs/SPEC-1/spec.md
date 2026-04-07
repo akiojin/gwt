@@ -2,7 +2,7 @@
 
 ## Background
 
-`renderer.rs` and related tests cover low-level vt100 cell rendering, URL underline detection, and alt-screen verification, but the current `gwt-tui` session pane still lacks the remaining interaction layer needed for smooth scrollback review, range selection, and scrollbar visibility. This SPEC therefore covers both the renderer-level work already in place and the still-missing session-surface behavior needed for URL opening, scrollback interaction, selection, and scrollbar rendering.
+`renderer.rs` and related tests cover low-level vt100 cell rendering, URL underline detection, and alt-screen verification, but the current `gwt-tui` session pane still lacks the remaining interaction layer needed for smooth scrollback review and range selection. This SPEC therefore covers both the renderer-level work already in place and the still-missing session-surface behavior needed for URL opening, scrollback interaction, and selection.
 
 ## User Stories
 
@@ -25,14 +25,14 @@ As a developer, I want to scroll through terminal history so that I can review p
 1. Given a session with more than one screen of output, when I scroll up with mouse wheel, then earlier output becomes visible.
 2. Given a scrollback buffer at maximum capacity (10,000 lines), when new output arrives, then the oldest lines are evicted first.
 3. Given I have scrolled up, when new output arrives, then the viewport stays at my scroll position (no auto-jump).
-4. Given the session has more history than fits on screen, when the terminal pane renders, then a vertical scrollbar appears on the right edge and its thumb tracks the visible scroll position.
+4. Given the session has more history than fits on screen, when the terminal pane renders, then no vertical scrollbar or gutter appears and terminal content keeps the full pane width while scroll position still updates.
 5. Given the host terminal is Terminal.app, when gwt enters the alternate screen and the user scrolls over the session pane with a trackpad, then the gesture reaches gwt as scroll input rather than being translated into cursor keys by the host terminal.
 6. Given Terminal.app reports a two-finger gesture as right-button drag events instead of wheel events, when the drag moves vertically over the session pane, then gwt maps that movement into scrollback navigation.
 7. Given a pane redraws a full-screen UI without accumulating vt100 row scrollback, when the visible viewport advances vertically across multiple frames and I scroll up, then recent earlier viewports become visible from gwt's pane-local in-memory cache.
 8. Given I am viewing an older in-memory snapshot, when new output arrives, then the viewport stays on that older frame until I scroll back to the newest frame.
 9. Given Terminal.app leaks an SGR mouse report instead of a parsed mouse event, when that sequence reaches gwt, then it is consumed as mouse input and never rendered into the session pane as literal `[<...M` text.
 10. Given the host terminal emits a burst of consecutive wheel events for one trackpad gesture, when the burst arrives over the session pane, then gwt applies the whole burst before the next redraw so scrolling stays responsive and boundary non-scroll input is preserved.
-11. Given a pane is using snapshot-backed scrollback, when the scrollbar renders, then the thumb length reflects the visible terminal viewport height instead of collapsing to a single-cell frame indicator.
+11. Given a pane is using snapshot-backed scrollback, when the terminal pane renders, then no scrollbar chrome appears and the visible terminal content still uses the full pane width.
 12. Given a full-screen pane redraw arrives as multiple PTY reader chunks inside one event-loop drain, when gwt records snapshot-backed scrollback, then it keeps only the final drained frame for that pass instead of exposing partially painted intermediate states during scrollback review.
 13. Given a full-screen pane redraw overwrites or clears the same visible rows without advancing the viewport, when gwt updates its in-memory cache, then the new VT-interpreted frame is preserved as distinct history (when different) and stale cleared lines are not shown in the visible frame.
 14. Given the previous full-screen frame is visually blank and the next frame only introduces content near the bottom rows, when gwt updates snapshot history, then leading blank history is pruned so scrolling to the oldest frame never shows an empty phantom screen.
@@ -92,7 +92,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - URL containing special characters (parentheses, query strings, fragments).
 - URL at the very end of scrollback buffer about to be evicted.
 - Mouse selection across a region containing wide (CJK) characters.
-- Scrollbar gutter on narrow terminals should not corrupt wrapped text layout or cursor placement.
+- Removing scrollbar chrome on narrow terminals should not corrupt wrapped text layout or cursor placement.
 - Selection starting in visible history and ending after additional scroll movement should still copy the intended region.
 - Alt-screen app sends output after gwt session is backgrounded.
 - Pane closes while snapshot history exists; reopening the pane should start from live output only.
@@ -113,15 +113,15 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
-- **FR-004a**: A vertical scrollbar is rendered on the right edge only when row scrollback or snapshot history exceeds the visible terminal height / frame count.
+- **FR-004a**: No vertical scrollbar or right-edge gutter is rendered for terminal history; the visible terminal content always uses the full pane width.
 - **FR-004d**: If the outer terminal leaks an SGR mouse report as an escape-key sequence, gwt normalizes it back into mouse input (or swallows it) before PTY forwarding so literal mouse-report text is never echoed inside the pane.
 - **FR-004e**: Consecutive wheel events that are already waiting in the outer-terminal queue are drained as a bounded burst before the next render pass so one gesture does not force one full redraw per raw wheel event.
 - **FR-004f**: SGR mouse leak normalization uses inter-character inactivity timeout semantics so moderately delayed sequence fragments are still reconstructed as one mouse event instead of leaking partial literal text.
 - **FR-004g**: SGR leak normalization is applied independent of current terminal-focus state so leaked wheel reports can still recover into mouse events that trigger session focus handoff and scrolling.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
-- **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.
+- **FR-005a**: Viewport movement remains correct without relying on any rendered scrollbar thumb or gutter.
 - **FR-005b**: While the user is viewing an older snapshot-backed frame, new output appends to the history cache without forcing the viewport back to live until the user scrolls down to the newest frame.
-- **FR-005c**: Snapshot-backed scrollbar metrics use the visible viewport height plus the number of extra historical frames so the thumb length stays proportional to the pane instead of shrinking to a single cell.
+- **FR-005c**: Snapshot-backed history does not reserve any scrollbar gutter; the full pane width remains available for terminal content while viewport navigation continues to work.
 - **FR-005d**: PTY output chunks drained in the same event-loop pass are coalesced per session before they enter the app update path so snapshot-backed scrollback tracks rendered frames rather than PTY reader chunk boundaries.
 - **FR-005e**: Snapshot-backed history stores every distinct VT-interpreted visible frame; in-place redraws and clear+redraw updates append as historical frames when the resulting frame differs from the latest cached one.
 - **FR-005f**: Snapshot append decisions are based on final VT screen state (not raw PTY chunk boundaries or overlap heuristics), with consecutive identical frames deduplicated.
@@ -130,7 +130,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005k**: Session viewport operations are routed through one cache-backed visible-surface API, and renderer / URL detection / selection copy all consume that same surface.
 - **FR-005l**: Any key input forwarded to the active PTY returns the session viewport to live-follow first, so command input never stays attached to a stale historical viewport.
 - **FR-005m**: Agent panes that explicitly negotiate PTY mouse scrolling receive wheel / trackpad scroll input through the PTY instead of gwt-local scrollback so the agent remains the source of truth for redraw and scroll state.
-- **FR-005n**: While an agent pane is using PTY-owned scrolling, gwt suppresses its local scrollbar overlay rather than showing a stale thumb derived from unrelated local snapshot history.
+- **FR-005n**: gwt never renders a local scrollbar overlay for terminal or agent panes, including PTY-owned scrolling paths.
 - **FR-005o**: Even when one coalesced PTY payload contains multiple full-screen clear+redraw frames, agent-pane in-memory snapshot history preserves each distinct frame so local Codex-style scrollback does not collapse to only the final visible frame.
 - **FR-005p**: Agent panes that do not negotiate SGR mouse reporting keep wheel / Terminal.app right-drag scroll on gwt-local history; gwt never synthesizes cursor up/down PTY input as a substitute for scrolling.
 - **FR-005r**: When consecutive full-screen redraw frames have a vertical overlap shift, gwt promotes the scrolled-off rows into the pane-local row history so Codex-style redraw panes can scroll line-by-line before falling back to snapshot history.
@@ -166,11 +166,11 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-004**: Alt-screen buffer activation/deactivation preserves main scrollback integrity.
 - **SC-005**: Color mapping tests cover Named, Indexed, and RGB color spaces.
 - **SC-006**: Scrollback eviction at 10,000-line boundary works without data corruption.
-- **SC-007**: Scrollbar chrome appears only for overflowing history or snapshot caches and the thumb position changes when the user scrolls.
+- **SC-007**: No scrollbar chrome or gutter appears for terminal history in any pane state.
 - **SC-008**: Drag selection across single-line and multi-line scrollback copies the expected plain-text payload to the clipboard.
 - **SC-009**: A full-screen pane with `max_scrollback == 0` still exposes recent frames through in-memory snapshot scrollback, and live-follow resumes only after the user returns to the newest frame.
 - **SC-010**: Consecutive wheel events are batched before redraw, preserving the first non-scroll message after the burst so trackpad scrolling remains responsive under Terminal.app event floods.
-- **SC-011**: Snapshot-backed scrollbars keep a viewport-sized thumb baseline, so short frame histories render a legible scrollbar length instead of a one-cell marker.
+- **SC-011**: Snapshot-backed history remains scrollable without rendering any scrollbar thumb or gutter.
 - **SC-012**: Snapshot-backed scrollback no longer reveals partially painted intermediate states that existed only between PTY reader chunks within the same drain pass.
 - **SC-013**: In-place redraws that clear or overwrite the same visible rows render correctly in the newest cached frame, while older distinct frames remain reviewable via snapshot scrollback.
 - **SC-014**: Scrolling to the oldest snapshot no longer yields an empty phantom frame after a blank-to-bottom-aligned first draw transition.
@@ -179,12 +179,12 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-017**: Leaked SGR wheel reports remain normalized even when characters arrive with short gaps; literal `[<...M` artifacts no longer surface in pane output.
 - **SC-018**: Even when Terminal pane was not focused before scrolling, leaked SGR wheel sequences are recovered as mouse scroll input and do not leak into pane text.
 - **SC-019**: Snapshot history advances for any distinct full-screen frame even under overlap-row churn, preventing practical scrollback starvation on dynamic panes.
-- **SC-020**: Alternate-screen panes remain scrollable through snapshot history even when legacy main-screen row scrollback exists; scrollbar and visible frame stay in sync.
-- **SC-021**: Viewport movement updates scrollbar, rendered text, URL hit-tests, and copy selection consistently from one visible cache surface, with no source mismatch between features.
+- **SC-020**: Alternate-screen panes remain scrollable through snapshot history even when legacy main-screen row scrollback exists, without any scrollbar indicator.
+- **SC-021**: Viewport movement updates rendered text, URL hit-tests, and copy selection consistently from one visible cache surface, with no source mismatch between features.
 - **SC-022**: Agent-pane scrollback preserves VT-derived color and text attributes throughout in-memory history navigation without switching to transcript/session-log fallback.
 - **SC-023**: Agent panes whose output redraws full-screen frames without producing vt100 row scrollback still remain scrollable through pane-local in-memory snapshot history; row-only regressions are prevented.
 - **SC-024**: While browsing row or snapshot history, any PTY-bound key input returns the viewport to the live screen before the input is forwarded.
 - **SC-025**: When an agent pane explicitly negotiates PTY-owned scrolling, mouse-wheel and Terminal.app right-drag fallback input are forwarded to the PTY as SGR wheel events, and gwt does not try to reinterpret that interaction as local scrollback.
-- **SC-026**: While PTY-owned scrolling is active, the gwt scrollbar overlay is hidden so the pane no longer shows a misleading thumb that does not track the agent-controlled viewport.
+- **SC-026**: PTY-owned and local scrolling paths both render without any gwt scrollbar overlay, so no misleading thumb appears in agent panes.
 - **SC-027**: If an agent redraws multiple full-screen frames inside one coalesced PTY payload, wheel-driven local scrollback can still step back through those intermediate distinct frames instead of exposing only the last frame in the payload.
 - **SC-028**: Agent panes that do not negotiate SGR mouse reporting keep wheel / Terminal.app right-drag scrolling on gwt-local history, and Codex-style redraw panes derive line-granular row history from vertical redraw shifts instead of injecting cursor-key PTY input.

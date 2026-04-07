@@ -46,12 +46,12 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 3. Verify cursor position and screen content after alt-screen exit.
 4. Document any vt100 crate limitations in edge cases.
 
-### Phase 3: Viewport Interaction, Selection, And Scrollbar
+### Phase 3: Viewport Interaction And Selection
 
 1. Extend session terminal state with viewport/follow-live state and the minimum selection state needed to map mouse drag coordinates back into the visible scrollback.
 2. Route mouse wheel input into `vt100::Parser::set_scrollback()` and keep new PTY output from snapping the viewport back to live while the user is reviewing history.
 3. Use `vt100::Screen::contents_between()` for copy extraction so wrapped rows and wide characters are copied from the rendered viewport contract instead of from ad-hoc transcript slicing.
-4. Reserve a right-side gutter only when history overflows the visible pane and render a scrollbar whose thumb matches the current viewport position.
+4. Keep the terminal pane at full width even while history overflows; do not render any right-side scrollbar gutter or thumb.
 5. During outer-terminal initialization, explicitly disable alternate-scroll mode so Terminal.app does not translate trackpad gestures into cursor-key input while gwt owns the alternate screen.
 6. Add a Terminal.app-specific fallback that maps `Down/Drag/Up(Right)` gesture sequences into vertical scrollback deltas because crossterm may not emit `ScrollUp/ScrollDown` for trackpad motion there.
 7. For panes whose visible screen has `max_scrollback == 0`, capture distinct live screen states into a pane-local in-memory ring buffer and route wheel scrolling through snapshot history instead of vt100 row scrollback.
@@ -64,7 +64,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 14. When an agent pane enables SGR mouse reporting, forward wheel / trackpad scroll gestures to the PTY instead of applying gwt-local scrollback so the agent owns redraw semantics.
 15. When an agent pane does not negotiate SGR mouse reporting, keep wheel / Terminal.app right-drag input on gwt-local scrollback instead of synthesizing cursor-key PTY input.
 16. For full-screen redraw agent panes, detect vertical overlap shifts between consecutive frames and promote the scrolled-off rows into a pane-local row cache before falling back to snapshot stepping, so fixed headers / status rows do not force page-sized scrolling even when the repaint used `home + repaint` instead of `clear+home`.
-17. Keep the decision capability-driven: only PTY-mouse-enabled panes use PTY-owned scrolling; all other panes remain on local scrollback and keep their local scrollbar overlay.
+17. Keep the decision capability-driven: only PTY-mouse-enabled panes use PTY-owned scrolling; all other panes remain on local scrollback, and no pane renders a local scrollbar overlay.
 18. For agent panes that still require local snapshot fallback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so fallback history does not collapse to a single final frame.
 
 ## Dependencies

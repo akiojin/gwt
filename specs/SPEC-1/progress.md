@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `84/84` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T14:35:00Z`
+- Task progress: `86/86` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T12:05:00Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -12,31 +12,30 @@
 - `PtyOutput` now feeds a per-session vt100 surface and the session pane renders live terminal content instead of a placeholder.
 - `Ctrl+click` URL open now resolves visible URL regions from the active session pane and invokes the platform opener with the full URL.
 - Wrapped URLs are now detected across soft-wrapped terminal rows and remain underlined/clickable across every visible segment.
-- Terminal sessions now keep viewport-local scrollback state, expose overflow-only scrollbar chrome, and restore the cursor against the text area even when the gutter is present.
+- Terminal sessions now keep viewport-local scrollback state and restore the cursor against the full-width text area without reserving any scrollbar gutter.
 - Mouse-wheel scrolling now freezes live follow against vt100 scrollback, and drag selection copies from the visible scrollback viewport through `contents_between()`.
 - Session-pane mouse interactions now re-focus the terminal before scrollback routing, so wheel scrolling works from the default management-focus state instead of dropping the first event.
 - Terminal startup now disables alternate-scroll mode so Terminal.app trackpad gestures are not rewritten into cursor keys while gwt owns the alternate screen.
 - Terminal.app-specific `Drag(Right)` gesture sequences now fall back to scrollback motion, matching the observed crossterm event stream when wheel events are absent.
-- Full-screen panes that keep `max_scrollback == 0` now maintain a pane-local in-memory snapshot history, render scrollbar chrome against that cache, and keep selection/copy aligned with the visible historical frame.
+- Full-screen panes that keep `max_scrollback == 0` now maintain a pane-local in-memory snapshot history and keep selection/copy aligned with the visible historical frame without rendering scrollbar chrome.
 - Snapshot-backed scrollback stays frozen on the chosen historical frame while new output arrives and only returns to live-follow when the user scrolls back to the newest frame.
 - Terminal-focus input is now normalized so leaked SGR wheel reports are converted back into mouse input instead of being echoed into the pane as literal `[<...M` text.
 - Hover-only `Moved` floods are now dropped at the event layer, reducing redraw pressure during Terminal.app trackpad gestures.
 - Consecutive wheel events are now drained as a bounded burst before redraw, so Terminal.app trackpad floods no longer force one full frame render per raw scroll event.
-- Snapshot-backed scrollbar metrics now use the pane viewport height as the thumb baseline, so short frame histories render a legible scrollbar length instead of a single-cell indicator.
 - PTY output chunks are now coalesced per session within each event-loop drain before `Message::PtyOutput` dispatch, so snapshot-backed scrollback tracks drawn frames instead of reader-chunk intermediate states.
 - Full-screen cache history now records every distinct VT-interpreted frame (including overwrite / clear redraws) while deduplicating consecutive identical frames, so the visible frame always matches terminal semantics and prior distinct frames remain reviewable.
 - Snapshot progression no longer depends on viewport-shift overlap heuristics; blank history prefixes are still pruned so topmost snapshot scrollback never produces a phantom blank screen.
-- Alternate-screen panes now prefer snapshot-backed scrolling and scrollbar metrics even when main-screen row scrollback metadata is non-zero, so thumb movement always matches visible frame changes.
-- Session viewport handling is now unified under `VtState`: rendering, scrollbar metrics, URL hit-testing, and selection copy all consume the same visible cache surface API.
+- Alternate-screen panes now prefer snapshot-backed scrolling even when main-screen row scrollback metadata is non-zero.
+- Session viewport handling is now unified under `VtState`: rendering, URL hit-testing, and selection copy all consume the same visible cache surface API.
 - Claude/Codex agent panes now prefer runtime scrollback from a normalized row-buffer parser, so launch/blank/status redraws do not appear as separate history entries when vt100 row history exists.
 - Agent-pane runtime scrollback is now memory-only: PTY-derived VT cache is the canonical source while the pane is alive, and gwt no longer hydrates scrollback from session `jsonl` or session-log files.
 - Agent-pane row history now uses a larger bounded in-memory budget than standard terminal panes, preserving styled PTY output for longer review windows without transcript fallback.
 - Agent panes whose full-screen redraws never advance vt100 row scrollback now fall back to the same in-memory snapshot cache, restoring scrollback without reintroducing session-log/transcript sources.
 - PTY-bound key input now exits row/snapshot history and returns the viewport to live-follow before forwarding bytes, so typing never continues against a stale historical viewport.
 - Agent panes that enable SGR mouse reporting now receive wheel and Terminal.app right-drag scroll input through the PTY, so gwt stops competing with agent-owned redraw and scroll state when the embedded agent can handle scrolling itself.
-- Agent scroll ownership is now capability-driven with one PTY path: only SGR mouse-enabled panes use PTY-owned scroll, while Codex-style panes without that capability stay on gwt-local scrollback and keep a truthful local scrollbar overlay.
+- Agent scroll ownership is now capability-driven with one PTY path: only SGR mouse-enabled panes use PTY-owned scroll, while Codex-style panes without that capability stay on gwt-local scrollback.
 - Codex-style full-screen redraw panes now promote vertical redraw shifts into a pane-local row cache even when the repaint keeps fixed header / status rows or omits `clear+home`, so wheel / trackpad scrolling stays line-granular without synthesizing cursor-key PTY input.
-- While the PTY-owned mouse path is active, gwt hides its local scrollbar overlay so the pane no longer shows a stale thumb against agent-controlled viewport state.
+- Terminal panes no longer render any scrollbar overlay, so Claude Code and Codex use the same full-width terminal surface regardless of whether scrolling is local or PTY-owned.
 - Agent-pane snapshot capture now preserves intermediate clear+redraw frames even when one coalesced PTY payload contains multiple full-screen redraws, keeping the remaining local-fallback path reviewable without transcript/session-log sources.
 - Scroll-route diagnostics now record whether each wheel / right-drag gesture took the local, PTY mouse, or PTY keyboard path together with snapshot/alternate-screen state, so live debugging can distinguish routing bugs from agent-side scroll behavior.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.

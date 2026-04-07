@@ -34,7 +34,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 #[cfg(test)]
@@ -4533,38 +4533,14 @@ fn active_session_text_area(model: &Model) -> Option<Rect> {
 }
 
 fn session_text_area(session: &crate::model::SessionTab, area: Rect) -> Rect {
-    if session_has_scrollbar(session) && area.width > 1 {
-        Rect::new(area.x, area.y, area.width - 1, area.height)
-    } else {
-        area
-    }
+    let _ = session;
+    area
 }
 
-fn session_scrollbar_area(session: &crate::model::SessionTab, area: Rect) -> Option<Rect> {
-    if session_has_scrollbar(session) && area.width > 1 {
-        Some(Rect::new(
-            area.right().saturating_sub(1),
-            area.y,
-            1,
-            area.height,
-        ))
-    } else {
-        None
-    }
-}
-
+#[cfg(test)]
 fn session_has_scrollbar(session: &crate::model::SessionTab) -> bool {
-    matches!(
-        session_scroll_routing(session),
-        ScrollInputRouting::LocalViewport
-    ) && session.vt.has_viewport_scrollback()
-}
-
-fn session_scrollbar_metrics(
-    session: &crate::model::SessionTab,
-    viewport_height: usize,
-) -> Option<(usize, usize, usize)> {
-    session.vt.scrollbar_metrics(viewport_height)
+    let _ = session;
+    false
 }
 
 fn management_split(area: Rect) -> [Rect; 2] {
@@ -4735,22 +4711,6 @@ fn render_session_surface(
             text_area,
             session.vt.selection(),
         );
-        if let Some(scrollbar_area) = session_scrollbar_area(session, area) {
-            if let Some((content_length, position, viewport_content_length)) =
-                session_scrollbar_metrics(session, text_area.height as usize)
-            {
-                let mut scrollbar_state = ScrollbarState::new(content_length)
-                    .position(position)
-                    .viewport_content_length(viewport_content_length);
-                frame.render_stateful_widget(
-                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                        .begin_symbol(None)
-                        .end_symbol(None),
-                    scrollbar_area,
-                    &mut scrollbar_state,
-                );
-            }
-        }
     }
 
     // Show the vt100 cursor when this session has terminal focus.
@@ -6115,7 +6075,7 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_terminal_overflow_draws_scrollbar_only_when_needed() {
+    fn render_model_text_terminal_history_never_reserves_scrollbar_chrome() {
         let mut overflow_model = test_model();
         overflow_model.active_layer = ActiveLayer::Main;
         overflow_model.active_focus = FocusPane::Terminal;
@@ -6133,8 +6093,8 @@ mod tests {
                 .is_empty()
         });
         assert!(
-            overflow_has_scrollbar,
-            "overflowing history should render scrollbar chrome on the right edge"
+            !overflow_has_scrollbar,
+            "overflowing history should no longer reserve scrollbar chrome on the right edge"
         );
 
         let mut non_overflow_model = test_model();
@@ -6154,7 +6114,7 @@ mod tests {
             });
         assert!(
             !non_overflow_has_scrollbar,
-            "non-overflowing history should not reserve scrollbar chrome"
+            "non-overflowing history should also stay free of scrollbar chrome"
         );
     }
 
@@ -6475,7 +6435,7 @@ mod tests {
     }
 
     #[test]
-    fn full_screen_snapshot_history_renders_scrollbar_when_row_scrollback_is_zero() {
+    fn full_screen_snapshot_history_does_not_render_scrollbar_when_row_scrollback_is_zero() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -6497,13 +6457,13 @@ mod tests {
             .any(|y| !buffer[(area.right() - 1, y)].symbol().trim().is_empty());
 
         assert!(
-            has_scrollbar,
-            "snapshot history should reserve scrollbar chrome even without vt100 row scrollback"
+            !has_scrollbar,
+            "snapshot history should no longer reserve scrollbar chrome even without vt100 row scrollback"
         );
     }
 
     #[test]
-    fn snapshot_scrollbar_metrics_use_viewport_height_for_thumb_length() {
+    fn snapshot_history_keeps_full_terminal_width_without_scrollbar_gutter() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -6519,21 +6479,12 @@ mod tests {
             &["line-2", "line-3", "line-4", "line-5", "line-6"],
         );
 
-        let session = model.active_session_tab().expect("active session");
-        let viewport_height = active_session_text_area(&model)
-            .expect("active session text area")
-            .height as usize;
-        let metrics =
-            session_scrollbar_metrics(session, viewport_height).expect("snapshot metrics");
+        let content = active_session_content_area(&model).expect("content area");
+        let text = active_session_text_area(&model).expect("text area");
 
         assert_eq!(
-            metrics,
-            (
-                session.vt.snapshot_count().saturating_sub(1) + viewport_height,
-                session.vt.snapshot_position(),
-                viewport_height,
-            ),
-            "snapshot scrollbar thumb should reflect the visible viewport height instead of a single-cell frame indicator"
+            text.width, content.width,
+            "snapshot-backed history should keep the full terminal width once scrollbar chrome is removed"
         );
     }
 
@@ -6872,7 +6823,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_mouse_reporting_hides_local_scrollbar_overlay() {
+    fn agent_sessions_keep_full_terminal_width_without_scrollbar_overlay() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -6903,14 +6854,14 @@ mod tests {
         );
         assert!(
             !session_has_scrollbar(session),
-            "gwt local scrollbar should be suppressed while the agent owns wheel scrolling"
+            "gwt should never expose a local scrollbar overlay for agent panes"
         );
 
         let content = active_session_content_area(&model).expect("content area");
         let text = active_session_text_area(&model).expect("text area");
         assert_eq!(
             text.width, content.width,
-            "suppressing the local scrollbar should return the full pane width to terminal rendering"
+            "removing scrollbar chrome should keep the full pane width for terminal rendering"
         );
     }
 
@@ -6963,8 +6914,8 @@ mod tests {
 
         let session = model.active_session_tab().expect("active session");
         assert!(
-            session_has_scrollbar(session),
-            "local viewport scrolling should keep the scrollbar overlay visible"
+            !session_has_scrollbar(session),
+            "local viewport scrolling should still render without any scrollbar overlay"
         );
         assert!(
             session.vt.viewing_history(),
@@ -7018,8 +6969,8 @@ mod tests {
 
         let session = model.active_session_tab().expect("active session");
         assert!(
-            session_has_scrollbar(session),
-            "local scrollback panes should keep the local scrollbar overlay"
+            !session_has_scrollbar(session),
+            "local scrollback panes should also stay free of scrollbar overlay"
         );
         assert!(
             session.vt.viewing_history(),
@@ -7082,8 +7033,8 @@ mod tests {
 
         let session = model.active_session_tab().expect("active session");
         assert!(
-            session_has_scrollbar(session),
-            "once redraw shifts are promoted into row history, the local scrollbar should stay visible"
+            !session_has_scrollbar(session),
+            "even row-based local history should not reintroduce a scrollbar overlay"
         );
         assert!(
             session.vt.viewing_history(),

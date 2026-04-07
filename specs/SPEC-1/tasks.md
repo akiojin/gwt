@@ -95,3 +95,5 @@
 - [x] T082 Refresh SPEC-1 artifacts, lessons learned, and focused/full verification for the corrected non-PTY agent scroll ownership model.
 - [x] T083 [P] Write RED tests: Codex-style full-screen redraw panes promote vertical redraw shifts into local row history while preserving snapshot fallback when rows still cannot be derived.
 - [x] T084 Implement redraw-shift row-cache normalization in `model.rs` and keep scroll-route diagnostics for local vs PTY-mouse ownership, including home-only repaint redraws and fixed-header status churn that do not emit `\x1b[2J\x1b[H`.
+- [x] T085 [P] Write RED tests: terminal, snapshot, and agent panes render without any scrollbar gutter even when local history overflows.
+- [x] T086 Remove the terminal scrollbar overlay and keep session text width equal to pane width for all local and PTY-owned scroll paths.

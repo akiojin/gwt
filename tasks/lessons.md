@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: scrollbar affordance must not diverge by agent type
+
+### 事象
+
+Claude Code pane では scrollbar が出ず、Codex pane では出る状態が残り、
+同じ terminal surface なのに agent ごとに UI affordance が食い違っていた。
+
+### 原因
+
+- scrollbar 表示可否が viewport history の実装詳細に結び付いており、
+  PTY-owned / local scrollback / snapshot fallback の経路差がそのまま UI 差分になっていた。
+- そのため scroll semantics の修正を繰り返すたびに、scrollbar overlay の有無まで agent 別に揺れていた。
+
+### 再発防止策
+
+1. terminal pane の visual chrome は scrollback 実装詳細から切り離し、必要なら一括で on/off できるようにする。
+2. Claude Code と Codex の両方で、overflow 時でも terminal width が変わらない回帰テストを持つ。
+3. scroll behavior を直す変更では「入力経路」と「視覚 affordance」を分けて検証する。
+
 ## 2026-04-07 — fix: full-viewport vt100 scrollback cannot represent partial redraw scroll regions
 
 ### 事象
