@@ -51,6 +51,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 27. Given I am viewing older terminal history, when I press any key that is forwarded to the PTY, then gwt returns the viewport to live before sending that input.
 28. Given an agent pane has not negotiated SGR mouse reporting, when the user scrolls with mouse wheel or Terminal.app right-drag fallback, then gwt keeps the gesture on pane-local scrollback instead of synthesizing cursor-key PTY input.
 29. Given a Codex-style agent pane redraws the full screen with a vertical one-line shift but vt100 row scrollback still stays at zero, when gwt updates the pane-local cache, then it promotes that redraw shift into local row history so scrolling stays line-granular without PTY keyboard injection.
+30. Given I am browsing an older snapshot-backed agent frame, when new PTY output arrives and that redraw now produces row-history entries, then gwt keeps showing the selected snapshot until I explicitly return to live-follow.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -135,6 +136,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005p**: Agent panes that do not negotiate SGR mouse reporting keep wheel / Terminal.app right-drag scroll on gwt-local history; gwt never synthesizes cursor up/down PTY input as a substitute for scrolling.
 - **FR-005r**: When consecutive full-screen redraw frames have a vertical overlap shift, gwt promotes the scrolled-off rows into the pane-local row history so Codex-style redraw panes can scroll line-by-line before falling back to snapshot history.
 - **FR-005q**: Agent panes that do not negotiate PTY-owned scroll and remain on row-based local history continue to use gwt-local row scrollback.
+- **FR-005s**: If the user is currently browsing snapshot-backed history, newly promoted row-history entries do not replace that selected snapshot; snapshot view remains locked until the user returns to live-follow.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
@@ -188,3 +190,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-026**: PTY-owned and local scrolling paths both render without any gwt scrollbar overlay, so no misleading thumb appears in agent panes.
 - **SC-027**: If an agent redraws multiple full-screen frames inside one coalesced PTY payload, wheel-driven local scrollback can still step back through those intermediate distinct frames instead of exposing only the last frame in the payload.
 - **SC-028**: Agent panes that do not negotiate SGR mouse reporting keep wheel / Terminal.app right-drag scrolling on gwt-local history, and Codex-style redraw panes derive line-granular row history from vertical redraw shifts instead of injecting cursor-key PTY input.
+- **SC-029**: While the user is viewing snapshot-backed agent history, incoming PTY redraws that start producing row-history entries do not replace the selected snapshot or force the visible source away from snapshot mode until live-follow is restored.

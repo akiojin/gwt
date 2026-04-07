@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot-backed history source must stay locked while the user is reviewing it
+
+### 事象
+
+PTY 出力が続いている最中に local snapshot history を見ていると、
+scroll 中の viewport が row history へ切り替わり、同じ付近を往復するような
+loop/jitter に見える状態が発生した。
+
+### 原因
+
+- `AgentMemoryBacked` は `max_scrollback == 0` の間だけ snapshot mode を使っていた。
+- そのため、ユーザーが snapshot history を見ている最中に新しい redraw から
+  row history が 1 行でも導出されると、`process()` が `snapshot_cursor` を捨てて
+  表示ソースを snapshot から row history へ動的に切り替えていた。
+- 問題は scroll input ではなく、「scroll 中の history source が PTY 更新で勝手に変わる」
+  という state machine の破綻だった。
+
+### 再発防止策
+
+1. snapshot-backed history は `max_scrollback == 0` の副作用ではなく、`snapshot_cursor` が示す明示的な閲覧状態として扱う。
+2. PTY 更新で新しい row history が生えても、ユーザーが live-follow に戻るまで visible source を切り替えない。
+3. 「snapshot 閲覧中に row history が後から発生しても表示ソースが変わらない」RED テストを model で固定する。
+
 ## 2026-04-07 — fix: scrollbar affordance must not diverge by agent type
 
 ### 事象

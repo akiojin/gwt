@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `86/86` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T12:05:00Z`
+- Task progress: `88/88` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T12:09:28Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -31,6 +31,7 @@
 - Agent-pane runtime scrollback is now memory-only: PTY-derived VT cache is the canonical source while the pane is alive, and gwt no longer hydrates scrollback from session `jsonl` or session-log files.
 - Agent-pane row history now uses a larger bounded in-memory budget than standard terminal panes, preserving styled PTY output for longer review windows without transcript fallback.
 - Agent panes whose full-screen redraws never advance vt100 row scrollback now fall back to the same in-memory snapshot cache, restoring scrollback without reintroducing session-log/transcript sources.
+- Snapshot-backed agent history now stays locked to the selected frame while new PTY redraws promote fresh row history in the background, preventing scrollback from looping or switching history sources mid-review.
 - PTY-bound key input now exits row/snapshot history and returns the viewport to live-follow before forwarding bytes, so typing never continues against a stale historical viewport.
 - Agent panes that enable SGR mouse reporting now receive wheel and Terminal.app right-drag scroll input through the PTY, so gwt stops competing with agent-owned redraw and scroll state when the embedded agent can handle scrolling itself.
 - Agent scroll ownership is now capability-driven with one PTY path: only SGR mouse-enabled panes use PTY-owned scroll, while Codex-style panes without that capability stay on gwt-local scrollback.

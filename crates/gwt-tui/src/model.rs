@@ -820,7 +820,7 @@ impl VtState {
             }
         }
         self.refresh_scrollback_metrics();
-        if self.max_scrollback > 0 {
+        if self.max_scrollback > 0 && self.follow_live {
             self.snapshot_cursor = None;
         }
         if self.follow_live {
@@ -966,6 +966,10 @@ impl VtState {
     }
 
     pub fn uses_snapshot_scrollback(&self) -> bool {
+        if self.snapshot_history_locked() {
+            return true;
+        }
+
         match self.scrollback_strategy {
             ScrollbackStrategy::AgentMemoryBacked => self.max_scrollback == 0,
             ScrollbackStrategy::Standard => {
@@ -1015,7 +1019,7 @@ impl VtState {
     }
 
     pub fn has_snapshot_scrollback(&self) -> bool {
-        self.uses_snapshot_scrollback() && self.snapshots.len() > 1
+        self.snapshots.len() > 1 && self.uses_snapshot_scrollback()
     }
 
     pub fn snapshot_count(&self) -> usize {
@@ -1179,6 +1183,10 @@ impl VtState {
         ) && !self.agent_row_history.is_empty()
     }
 
+    fn snapshot_history_locked(&self) -> bool {
+        self.snapshot_cursor.is_some()
+    }
+
     fn append_agent_row_history(&mut self, rows: &[Vec<u8>]) {
         if !matches!(
             self.scrollback_strategy,
@@ -1228,11 +1236,13 @@ impl VtState {
     }
 
     fn active_snapshot(&self) -> Option<&ScreenSnapshot> {
-        if !self.uses_snapshot_scrollback() {
-            return None;
+        if self.snapshot_history_locked() {
+            return self
+                .snapshot_cursor
+                .and_then(|index| self.snapshots.get(index));
         }
-        self.snapshot_cursor
-            .and_then(|index| self.snapshots.get(index))
+
+        None
     }
 
     fn has_local_cache_scrollback(&self) -> bool {
@@ -2345,6 +2355,48 @@ mod tests {
         assert!(contents.contains("line-1"));
         assert!(!contents.contains("status-a"));
         assert!(!contents.contains("line-5"));
+    }
+
+    #[test]
+    fn agent_snapshot_history_stays_frozen_while_new_row_history_arrives() {
+        let mut vt = VtState::new(5, 20);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(&full_screen_frame(&[
+            "alpha-1", "alpha-2", "alpha-3", "alpha-4", "alpha-5",
+        ]));
+        vt.process(&full_screen_frame(&[
+            "beta-1", "beta-2", "beta-3", "beta-4", "beta-5",
+        ]));
+
+        assert!(vt.uses_snapshot_scrollback());
+        assert!(vt.scroll_viewport_lines(1));
+        assert_eq!(vt.snapshot_position(), 0);
+
+        vt.process(&full_screen_frame(&[
+            "beta-2", "beta-3", "beta-4", "beta-5", "gamma-6",
+        ]));
+
+        assert_eq!(
+            vt.max_scrollback(),
+            1,
+            "incoming PTY redraws should still be normalized into row history in the background"
+        );
+        assert_eq!(
+            vt.snapshot_position(),
+            0,
+            "while browsing snapshot history, the cursor should stay anchored to the same frame"
+        );
+
+        let contents = vt.visible_screen_parser().screen().contents();
+        assert!(
+            contents.contains("alpha-1"),
+            "new row history must not replace the snapshot the user is currently viewing"
+        );
+        assert!(
+            !contents.contains("gamma-6"),
+            "live redraws should stay hidden until the user explicitly returns to live"
+        );
     }
 
     #[test]

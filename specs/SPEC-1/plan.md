@@ -66,6 +66,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 16. For full-screen redraw agent panes, detect vertical overlap shifts between consecutive frames and promote the scrolled-off rows into a pane-local row cache before falling back to snapshot stepping, so fixed headers / status rows do not force page-sized scrolling even when the repaint used `home + repaint` instead of `clear+home`.
 17. Keep the decision capability-driven: only PTY-mouse-enabled panes use PTY-owned scrolling; all other panes remain on local scrollback, and no pane renders a local scrollbar overlay.
 18. For agent panes that still require local snapshot fallback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so fallback history does not collapse to a single final frame.
+19. While the user is actively browsing snapshot-backed history, keep that snapshot source locked even if new PTY redraws promote fresh row history in the background; only switch back to row/live rendering when the user explicitly returns to live-follow.
 
 ## Dependencies
 

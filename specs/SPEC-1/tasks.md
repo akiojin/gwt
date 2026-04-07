@@ -97,3 +97,5 @@
 - [x] T084 Implement redraw-shift row-cache normalization in `model.rs` and keep scroll-route diagnostics for local vs PTY-mouse ownership, including home-only repaint redraws and fixed-header status churn that do not emit `\x1b[2J\x1b[H`.
 - [x] T085 [P] Write RED tests: terminal, snapshot, and agent panes render without any scrollbar gutter even when local history overflows.
 - [x] T086 Remove the terminal scrollbar overlay and keep session text width equal to pane width for all local and PTY-owned scroll paths.
+- [x] T087 [P] Write RED test: while an agent pane is browsing snapshot history, incoming PTY redraws that create row history do not replace the currently selected snapshot.
+- [x] T088 Keep snapshot-backed history locked to the selected frame until live-follow resumes, even if new PTY output promotes fresh row history in the background.
