@@ -28,12 +28,13 @@ use gwt_core::error::Result;
 use gwt_core::index::paths::gwt_index_root;
 use gwt_core::index::runtime::{
     reconcile_repo, refresh_issues_if_stale, remove_worktree_index, PythonRunnerSpawner,
-    ReconcileOptions, RefreshIssuesOptions,
+    ReconcileOptions, RefreshDecision, RefreshIssuesOptions,
 };
 use gwt_core::index::watcher::{start_watcher, WatcherConfig};
 use gwt_core::paths::{gwt_logs_dir, gwt_project_index_venv_dir, gwt_runtime_runner_path};
 use gwt_core::repo_hash::{compute_repo_hash, RepoHash};
 use gwt_core::worktree_hash::{compute_worktree_hash, WorktreeHash};
+use gwt_notification::{Notification, NotificationBus, Severity};
 use tokio::runtime::Runtime;
 
 const ISSUE_REFRESH_TTL_MINUTES: u64 = 15;
@@ -59,8 +60,23 @@ fn index_log_path() -> PathBuf {
     gwt_logs_dir().join("index.log")
 }
 
-/// Append a single timestamped line to `~/.gwt/logs/index.log`. Failures are
-/// silently ignored — logging must never block index lifecycle work.
+/// Process-global notification bus handle so the index worker can publish
+/// lifecycle events into the TUI Logs tab.
+fn notification_bus() -> &'static OnceLock<NotificationBus> {
+    static BUS: OnceLock<NotificationBus> = OnceLock::new();
+    &BUS
+}
+
+/// Initialize the worker's notification bus handle. Called once from
+/// `main.rs` after the Model is created. Subsequent calls are ignored.
+pub fn init_notification_bus(bus: NotificationBus) {
+    let _ = notification_bus().set(bus);
+}
+
+/// Append a single timestamped line to `~/.gwt/logs/index.log` and publish
+/// a `Severity::Debug` notification (source `"index"`) so the entry shows
+/// up in the TUI Logs tab. Failures are silently ignored — logging must
+/// never block index lifecycle work.
 pub fn log_event(message: &str) {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
     let line = format!("[{ts}] {message}\n");
@@ -73,6 +89,14 @@ pub fn log_event(message: &str) {
         .open(index_log_path())
     {
         let _ = f.write_all(line.as_bytes());
+    }
+
+    if let Some(bus) = notification_bus().get() {
+        let _ = bus.send(Notification::new(
+            Severity::Debug,
+            "index",
+            message.to_string(),
+        ));
     }
 }
 
@@ -173,7 +197,15 @@ pub fn bootstrap(repo_root: &Path, active_worktrees: &[PathBuf]) {
         };
         let spawner = LoggingRunnerSpawner::wrap(make_runner_spawner());
         match refresh_issues_if_stale(&opts, &spawner).await {
-            Ok(()) => log_event("issue refresh evaluation completed"),
+            Ok(RefreshDecision::Spawned) => {
+                log_event("issue refresh: runner spawned (TTL expired or meta missing)");
+            }
+            Ok(RefreshDecision::SkippedWithinTtl { remaining_seconds }) => {
+                log_event(&format!(
+                    "issue refresh: skipped (TTL valid, {}s remaining)",
+                    remaining_seconds
+                ));
+            }
             Err(e) => log_event(&format!("issue refresh evaluation failed: {e}")),
         }
     });

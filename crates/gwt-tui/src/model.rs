@@ -762,8 +762,9 @@ impl Model {
     }
 
     /// Cloneable handle for sending notifications into the TUI.
-    #[allow(dead_code)]
-    pub(crate) fn notification_bus_handle(&self) -> NotificationBus {
+    /// Public clone of the notification bus sender. Used by `index_worker`
+    /// to publish lifecycle events into the Logs tab.
+    pub fn notification_bus_handle(&self) -> NotificationBus {
         self._notification_bus.clone()
     }
 
