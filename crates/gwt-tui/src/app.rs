@@ -3287,15 +3287,16 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         return Ok(());
     }
 
-    let current_branch = match current_git_branch(repo_path) {
-        Ok(branch) => branch,
-        Err(_) if config.base_branch.is_none() => return Ok(()),
-        Err(_) => config
-            .base_branch
-            .clone()
-            .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
-    };
-    if current_branch == branch_name {
+    let current_branch = current_git_branch(repo_path);
+    if current_branch.is_err() && config.base_branch.is_none() {
+        // Keep best-effort behavior for non-repo tests and ad-hoc launches that
+        // don't provide an explicit base branch.
+        return Ok(());
+    }
+    if current_branch
+        .as_ref()
+        .is_ok_and(|current| current == &branch_name)
+    {
         config.working_dir = Some(repo_path.to_path_buf());
         config.env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
@@ -3314,16 +3315,52 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         );
         return Ok(());
     }
-    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+
+    let base_branch = config
+        .base_branch
+        .clone()
+        .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
+    let remote_base_ref = origin_remote_ref(&base_branch);
+    let remote_branch_ref = origin_remote_ref(&branch_name);
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+
+    manager
+        .fetch_origin()
+        .map_err(|err| format!("failed to fetch origin: {err}"))?;
+
+    if !manager
+        .remote_branch_exists(&remote_base_ref)
+        .map_err(|err| format!("failed to verify remote base branch {remote_base_ref}: {err}"))?
+    {
+        return Err(format!(
+            "remote base branch does not exist: {remote_base_ref}"
+        ));
+    }
+
+    if !manager
+        .remote_branch_exists(&remote_branch_ref)
+        .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
+    {
+        manager
+            .create_remote_branch_from_base(&remote_base_ref, &branch_name)
+            .map_err(|err| {
+                format!(
+                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
+                )
+            })?;
+        manager
+            .fetch_origin()
+            .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
+    }
+
+    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
     if local_branch_exists(&main_repo_path, &branch_name)? {
         manager
             .create(&branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
     } else {
-        let base_branch = config.base_branch.clone().unwrap_or(current_branch);
         manager
-            .create_from_base(&base_branch, &branch_name, &worktree_path)
+            .create_from_remote(&remote_branch_ref, &branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
     }
 
@@ -3333,6 +3370,16 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         worktree_path.display().to_string(),
     );
     Ok(())
+}
+
+fn origin_remote_ref(branch_name: &str) -> String {
+    if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
+        ref_name.to_string()
+    } else if branch_name.starts_with("origin/") {
+        branch_name.to_string()
+    } else {
+        format!("origin/{branch_name}")
+    }
 }
 
 fn existing_worktree_for_branch(
@@ -7403,6 +7450,19 @@ mod tests {
         );
     }
 
+    fn git_add_remote(path: &std::path::Path, name: &str, remote: &std::path::Path) {
+        let output = std::process::Command::new("git")
+            .args(["remote", "add", name, remote.to_str().expect("remote path")])
+            .current_dir(path)
+            .output()
+            .expect("add git remote");
+        assert!(
+            output.status.success(),
+            "git remote add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn git_push_branch(path: &std::path::Path, name: &str) {
         let output = std::process::Command::new("git")
             .args(["push", "-u", "origin", name])
@@ -9726,11 +9786,15 @@ CUSTOM_ENV = "enabled"
     fn materialize_pending_launch_with_new_branch_creates_worktree_and_persists_actual_path() {
         let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
         let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
         std::fs::create_dir_all(&repo_path).expect("create repo dir");
         init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
         git_commit_allow_empty(&repo_path, "initial commit");
         git_checkout_branch_or_create(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
 
         let mut model = Model::new(repo_path.clone());
         model.pending_launch_config = Some(LaunchConfig {
@@ -9779,6 +9843,23 @@ CUSTOM_ENV = "enabled"
             "feature/alpha/beta"
         );
 
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/alpha/beta",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            remote_output.status.success(),
+            "remote branch must exist: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
+
         let session_entry = fs::read_dir(sessions_dir.path())
             .expect("read sessions dir")
             .map(|entry| entry.expect("dir entry").path())
@@ -9793,11 +9874,15 @@ CUSTOM_ENV = "enabled"
     fn materialize_pending_launch_with_new_branch_from_selected_branch_creates_new_worktree() {
         let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
         let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
         std::fs::create_dir_all(&repo_path).expect("create repo dir");
         init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
         git_commit_allow_empty(&repo_path, "initial commit");
         git_checkout_branch_or_create(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
 
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -9808,7 +9893,7 @@ CUSTOM_ENV = "enabled"
             ..Default::default()
         };
 
-        let mut model = Model::new(repo_path);
+        let mut model = Model::new(repo_path.clone());
         model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
 
         materialize_pending_launch_with(&mut model, sessions_dir.path())
@@ -9837,6 +9922,23 @@ CUSTOM_ENV = "enabled"
             "feature/launch-from-selected"
         );
 
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/launch-from-selected",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            remote_output.status.success(),
+            "remote branch must exist: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
+
         let session_entry = fs::read_dir(sessions_dir.path())
             .expect("read sessions dir")
             .map(|entry| entry.expect("dir entry").path())
@@ -9851,9 +9953,12 @@ CUSTOM_ENV = "enabled"
     fn materialize_pending_launch_with_linked_worktree_uses_main_repo_branch_layout() {
         let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
         let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
         std::fs::create_dir_all(&repo_path).expect("create repo dir");
         init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
         git_commit_allow_empty(&repo_path, "initial commit");
 
         let develop_worktree = workspace_dir.path().join("develop");
@@ -9873,6 +9978,7 @@ CUSTOM_ENV = "enabled"
             "git worktree add -b failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        git_push_branch(&repo_path, "develop");
 
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -9950,6 +10056,7 @@ CUSTOM_ENV = "enabled"
         git_checkout_branch_or_create(&bootstrap_path, "develop");
         git_commit_allow_empty(&bootstrap_path, "initial commit");
         git_push_branch(&bootstrap_path, "develop");
+        git_add_remote(&bare_repo_path, "origin", &bare_repo_path);
 
         let develop_worktree = workspace_dir.path().join("develop");
         let output = std::process::Command::new("git")
@@ -10080,6 +10187,44 @@ CUSTOM_ENV = "enabled"
         let persisted = AgentSession::load(&session_entry).expect("load persisted session");
         assert_eq!(persisted.branch, "feature/test");
         assert_eq!(persisted.worktree_path, stale_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_missing_remote_base_branch_returns_error() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_branch_or_create(&repo_path, "main");
+        git_push_branch(&repo_path, "main");
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "feature/needs-base".to_string(),
+            worktree_path: Some(repo_path.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(repo_path);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        let result = materialize_pending_launch_with(&mut model, sessions_dir.path());
+        assert!(
+            result.is_err(),
+            "launch should fail when origin/develop is missing"
+        );
+        let err = result.expect_err("error");
+        assert!(
+            err.contains("remote base branch does not exist: origin/develop"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
