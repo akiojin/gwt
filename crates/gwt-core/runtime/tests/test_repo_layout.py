@@ -20,7 +20,8 @@ class ResolveDbPathTests(unittest.TestCase):
             worktree_hash=None,
             scope="issues",
         )
-        self.assertTrue(str(path).endswith("/.gwt/index/abc1234567890def/issues"))
+        expected = (".gwt", "index", "abc1234567890def", "issues")
+        self.assertEqual(path.parts[-len(expected) :], expected)
 
     def test_specs_scope_includes_worktree_hash(self):
         path = runner.resolve_db_path(
@@ -28,11 +29,15 @@ class ResolveDbPathTests(unittest.TestCase):
             worktree_hash="111122223333ffff",
             scope="specs",
         )
-        self.assertTrue(
-            str(path).endswith(
-                "/.gwt/index/abc1234567890def/worktrees/111122223333ffff/specs"
-            )
+        expected = (
+            ".gwt",
+            "index",
+            "abc1234567890def",
+            "worktrees",
+            "111122223333ffff",
+            "specs",
         )
+        self.assertEqual(path.parts[-len(expected) :], expected)
 
     def test_files_scope_includes_worktree_hash(self):
         path = runner.resolve_db_path(
@@ -40,11 +45,15 @@ class ResolveDbPathTests(unittest.TestCase):
             worktree_hash="111122223333ffff",
             scope="files",
         )
-        self.assertTrue(
-            str(path).endswith(
-                "/.gwt/index/abc1234567890def/worktrees/111122223333ffff/files"
-            )
+        expected = (
+            ".gwt",
+            "index",
+            "abc1234567890def",
+            "worktrees",
+            "111122223333ffff",
+            "files",
         )
+        self.assertEqual(path.parts[-len(expected) :], expected)
 
     def test_files_docs_scope(self):
         path = runner.resolve_db_path(
@@ -52,11 +61,15 @@ class ResolveDbPathTests(unittest.TestCase):
             worktree_hash="111122223333ffff",
             scope="files-docs",
         )
-        self.assertTrue(
-            str(path).endswith(
-                "/.gwt/index/abc1234567890def/worktrees/111122223333ffff/files-docs"
-            )
+        expected = (
+            ".gwt",
+            "index",
+            "abc1234567890def",
+            "worktrees",
+            "111122223333ffff",
+            "files-docs",
         )
+        self.assertEqual(path.parts[-len(expected) :], expected)
 
     def test_specs_scope_without_worktree_hash_raises(self):
         with self.assertRaises(ValueError):

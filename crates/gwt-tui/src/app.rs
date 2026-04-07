@@ -3346,13 +3346,18 @@ fn handle_confirm_message_with(
         });
         model.branches.pending_delete_worktree = false;
         if let Some((branch_name, path)) = worktree_target {
-            // Phase 8: shutdown the watcher and remove the index dir BEFORE
-            // git removes the worktree, so the path is still resolvable.
-            let _ = crate::index_worker::shutdown_and_remove(&model.repo_path, &path);
-
+            // Phase 8: remove the git worktree first; only on success do we
+            // tear down the watcher and delete the on-disk index. If the git
+            // removal fails (dirty worktree, lock, etc.) the live index
+            // lifecycle remains intact so the user can retry.
             let manager = gwt_git::worktree::WorktreeManager::new(&model.repo_path);
             match manager.remove(&path) {
                 Ok(()) => {
+                    if let Err(e) =
+                        crate::index_worker::shutdown_and_remove(&model.repo_path, &path)
+                    {
+                        tracing::warn!("index shutdown_and_remove failed after git remove: {e}");
+                    }
                     load_initial_data(model);
                     apply_notification(
                         model,

@@ -33,7 +33,7 @@
 
 ### IndexManifest
 - Role: Source of truth for incremental indexing of SPEC and File scopes.
-- File: `~/.gwt/index/<repo-hash>/worktrees/<wt-hash>/manifest.json`
+- File: `~/.gwt/index/<repo-hash>/worktrees/<wt-hash>/manifest-<scope>.json` (one per scope: `files`, `files-docs`, `specs`)
 - Schema:
   ```json
   {

@@ -13,9 +13,20 @@ These steps assume the Phase 8 implementation is in place (`bugfix/not-work-inde
 ### 1. Cold-start runner auto-build (TUI-less)
 
 ```bash
-# From a fresh shell, with no ~/.gwt/index/<repo-hash>/ present
-REPO_HASH=$(printf '%s' "github.com/akiojin/gwt" | sha256sum | cut -c1-16)
-WT_HASH=$(printf '%s' "$(pwd)" | sha256sum | cut -c1-16)
+# From a fresh shell, with no ~/.gwt/index/<repo-hash>/ present.
+# Use a cross-platform SHA256 helper (`shasum -a 256` on macOS, `sha256sum`
+# elsewhere) and canonicalize the worktree path to match the Rust helper,
+# which calls `dunce::canonicalize` and resolves symlinks.
+sha256hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -c1-16
+  else
+    shasum -a 256 | cut -c1-16
+  fi
+}
+REPO_HASH=$(printf '%s' "github.com/akiojin/gwt" | sha256hex)
+WT_CANONICAL=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$(pwd)")
+WT_HASH=$(printf '%s' "$WT_CANONICAL" | sha256hex)
 
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action search-files \
