@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `46/46` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T18:09:48Z`
+- Task progress: `50/50` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T00:19:23Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -27,6 +27,8 @@
 - Full-screen cache history now advances only when the visible viewport shifts vertically; overwrite-or-clear redraws replace the latest cached viewport in place so stale cleared lines no longer leak into scrollback.
 - Snapshot viewport-shift progression remains overlap-based for sparse full-screen redraws, while blank history prefixes are pruned so topmost snapshot scrollback no longer produces a blank screen.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
+- Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
+- SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

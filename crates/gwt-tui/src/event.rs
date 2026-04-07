@@ -9,7 +9,7 @@ use crate::message::Message;
 
 /// Tick interval for the event loop.
 const TICK_RATE: Duration = Duration::from_millis(100);
-const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(12);
+const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(40);
 
 /// Poll for the next message. Returns `None` on timeout with no events.
 pub fn poll_event(deadline: Instant) -> Option<Message> {
@@ -86,8 +86,8 @@ impl InputNormalizer {
             return Some(Message::KeyInput(key));
         }
 
-        if let Some((started_at, buffer)) = self.sgr_mouse_prefix.as_mut() {
-            if now.duration_since(*started_at) > ESCAPE_SEQUENCE_TIMEOUT {
+        if let Some((last_seen_at, buffer)) = self.sgr_mouse_prefix.as_mut() {
+            if now.duration_since(*last_seen_at) > ESCAPE_SEQUENCE_TIMEOUT {
                 self.flush_all();
                 return Some(Message::KeyInput(key));
             }
@@ -95,6 +95,7 @@ impl InputNormalizer {
             match key.code {
                 KeyCode::Char(ch) => {
                     buffer.push(ch);
+                    *last_seen_at = now;
                     if let Some(mouse) = parse_sgr_mouse_report(buffer) {
                         self.sgr_mouse_prefix = None;
                         return Some(Message::MouseInput(mouse));
@@ -122,8 +123,8 @@ impl InputNormalizer {
         if self
             .sgr_mouse_prefix
             .as_ref()
-            .is_some_and(|(started_at, _)| {
-                now.duration_since(*started_at) > ESCAPE_SEQUENCE_TIMEOUT
+            .is_some_and(|(last_seen_at, _)| {
+                now.duration_since(*last_seen_at) > ESCAPE_SEQUENCE_TIMEOUT
             })
         {
             self.flush_all();
@@ -352,6 +353,53 @@ mod tests {
                 code: KeyCode::Esc,
                 ..
             }))
+        ));
+    }
+
+    #[test]
+    fn input_normalizer_keeps_parsing_when_inter_char_gaps_stay_within_timeout() {
+        let mut normalizer = InputNormalizer::default();
+        let now = Instant::now();
+
+        assert!(normalizer
+            .normalize(Message::KeyInput(key(KeyCode::Esc)), now, true)
+            .is_none());
+
+        for (offset_ms, ch) in [
+            (10, '['),
+            (20, '<'),
+            (30, '6'),
+            (40, '4'),
+            (50, ';'),
+            (60, '1'),
+            (70, '7'),
+            (80, '5'),
+            (90, ';'),
+            (100, '4'),
+            (110, '3'),
+        ] {
+            assert!(normalizer
+                .normalize(
+                    Message::KeyInput(key(KeyCode::Char(ch))),
+                    now + Duration::from_millis(offset_ms),
+                    true,
+                )
+                .is_none());
+        }
+
+        let msg = normalizer.normalize(
+            Message::KeyInput(key(KeyCode::Char('M'))),
+            now + Duration::from_millis(120),
+            true,
+        );
+        assert!(matches!(
+            msg,
+            Some(Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 174,
+                row: 42,
+                modifiers
+            })) if modifiers == KeyModifiers::NONE
         ));
     }
 }

@@ -1,5 +1,42 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: SGR mouse leak のタイムアウト基準は「開始時刻」ではなく「無入力時間」
+
+### 事象
+
+トラックパッドスクロール時に `"[<64;...M"` のような文字列が pane に混入し、
+スクロール反応も不安定になった。
+
+### 原因
+
+- SGR 正規化のタイムアウトを「ESC を受け取った時刻からの経過時間」で判定していた。
+- 文字列全体の到着時間が閾値を超えると途中で正規化が崩れ、後続断片が通常キー入力として漏れていた。
+
+### 再発防止策
+
+1. タイムアウト判定を「最後の文字受信からの無入力時間」に変更する。
+2. 文字間隔が許容内で総受信時間が長いケースの回帰テストを追加する。
+3. `"[<...M"` 漏れを再現したら、まず timeout 基準（start vs idle）を確認する。
+
+## 2026-04-07 — fix: live から最初の snapshot scroll で frame を飛ばさない
+
+### 事象
+
+snapshot-backed pane で live 状態から最初に上スクロールすると、
+1段ではなく2段ぶん古いフレームへ飛ぶ挙動が発生していた。
+
+### 原因
+
+- `scroll_snapshot_up()` が `snapshot_cursor == None`（live）時に
+  `last_past_snapshot` を基点にしてから `rows` を減算していた。
+- このため `rows=1` でも `latest-2` へ移動し、オフバイワンで1フレーム飛ばしていた。
+
+### 再発防止策
+
+1. live 時の基点は `latest`（末尾）を使い、そこから `rows` 分だけ戻す。
+2. 最初の上スクロールが `latest-1` に着地する focused test を固定する。
+3. scroll position ログで `previous_position` と `next_position` の差分が `rows` に一致するかを確認する。
+
 ## 2026-04-07 — fix: snapshot 先頭の blank prefix は自動で間引く
 
 ### 事象

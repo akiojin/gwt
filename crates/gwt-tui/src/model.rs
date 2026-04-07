@@ -611,12 +611,10 @@ impl VtState {
             return false;
         }
 
-        let last_past_snapshot = self.snapshots.len().saturating_sub(2);
-        self.snapshot_cursor = Some(
-            self.snapshot_cursor
-                .unwrap_or(last_past_snapshot)
-                .saturating_sub(rows),
-        );
+        let newest_snapshot = self.snapshots.len().saturating_sub(1);
+        let oldest_past_snapshot = self.snapshots.len().saturating_sub(2);
+        let base = self.snapshot_cursor.unwrap_or(newest_snapshot);
+        self.snapshot_cursor = Some(base.saturating_sub(rows).min(oldest_past_snapshot));
         self.follow_live = false;
         true
     }
@@ -1325,6 +1323,43 @@ mod tests {
             Some(0),
             "cursor should stay clamped to the oldest remaining meaningful frame"
         );
+    }
+
+    #[test]
+    fn scroll_snapshot_up_from_live_moves_exactly_one_snapshot() {
+        let mut vt = VtState::new(5, 20);
+        vt.max_scrollback = 0;
+        vt.follow_live = true;
+        vt.snapshots = VecDeque::from(vec![
+            ScreenSnapshot {
+                rows: 5,
+                cols: 20,
+                state: vec![1],
+                visible_lines: vec!["frame-1".to_string(); 5],
+            },
+            ScreenSnapshot {
+                rows: 5,
+                cols: 20,
+                state: vec![2],
+                visible_lines: vec!["frame-2".to_string(); 5],
+            },
+            ScreenSnapshot {
+                rows: 5,
+                cols: 20,
+                state: vec![3],
+                visible_lines: vec!["frame-3".to_string(); 5],
+            },
+        ]);
+
+        let changed = vt.scroll_snapshot_up(1);
+
+        assert!(changed);
+        assert_eq!(
+            vt.snapshot_cursor,
+            Some(1),
+            "first upward step from live should land on the immediately previous snapshot"
+        );
+        assert!(!vt.follow_live);
     }
 
     // ---- SessionState tests ----

@@ -37,6 +37,8 @@ As a developer, I want to scroll through terminal history so that I can review p
 13. Given a full-screen pane redraw overwrites or clears the same visible rows without advancing the viewport, when gwt updates its in-memory cache, then the latest cached viewport is replaced in place and stale cleared lines are not exposed by scrollback review.
 14. Given the previous full-screen frame is visually blank and the next frame only introduces content near the bottom rows, when gwt evaluates viewport-shift history, then frame progression remains available and any leading blank history is pruned so scrolling to the oldest frame never shows an empty phantom screen.
 15. Given historical snapshots already include an old blank frame and newer frames contain visible text, when gwt updates the snapshot history, then it prunes the leading blank frame so scrolling to the oldest position still shows meaningful content.
+16. Given snapshot-backed scrollback is at live-follow and I scroll one step upward, when gwt enters history mode, then it lands on the immediately previous snapshot (one-step movement) instead of skipping older frames.
+17. Given a leaked SGR wheel sequence arrives with small per-character delays, when gwt normalizes that input, then the entire sequence is consumed as mouse input and never appears as literal `[<...M` text.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -96,6 +98,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-004a**: A vertical scrollbar is rendered on the right edge only when row scrollback or snapshot history exceeds the visible terminal height / frame count.
 - **FR-004d**: If the outer terminal leaks an SGR mouse report as an escape-key sequence, gwt normalizes it back into mouse input (or swallows it) before PTY forwarding so literal mouse-report text is never echoed inside the pane.
 - **FR-004e**: Consecutive wheel events that are already waiting in the outer-terminal queue are drained as a bounded burst before the next render pass so one gesture does not force one full redraw per raw wheel event.
+- **FR-004f**: SGR mouse leak normalization uses inter-character inactivity timeout semantics so moderately delayed sequence fragments are still reconstructed as one mouse event instead of leaking partial literal text.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
 - **FR-005a**: The scrollbar thumb position and size are derived from the current viewport height and scrollback position so the indicator matches the visible slice.
 - **FR-005b**: While the user is viewing an older snapshot-backed frame, new output appends to the history cache without forcing the viewport back to live until the user scrolls down to the newest frame.
@@ -104,6 +107,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005e**: Full-screen redraws that overwrite or clear the same visible viewport replace the latest cached viewport in place; only vertical viewport advances extend the in-memory history.
 - **FR-005f**: Viewport-shift detection for snapshot-backed history remains overlap-based so full-screen frame history can progress even when updates are sparse across mostly blank rows.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
+- **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
 - **FR-006a**: Selection coordinates are tracked in viewport cell space and resolved against the active scrollback offset so copied text matches the currently visible history.
 - **FR-007**: Copy selected text to system clipboard via platform-native clipboard integration.
@@ -142,3 +146,5 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-013**: In-place redraws that clear or overwrite the same visible rows no longer leak stale cleared lines into snapshot-backed scrollback.
 - **SC-014**: Scrolling to the oldest snapshot no longer yields an empty phantom frame after a blank-to-bottom-aligned first draw transition.
 - **SC-015**: Even if a blank frame was previously captured, subsequent non-blank frames cause the blank history prefix to be pruned, so scrolling to the top still renders visible content.
+- **SC-016**: First upward scroll from live snapshot mode moves exactly one snapshot backward; frame skipping on live-to-history transition is eliminated.
+- **SC-017**: Leaked SGR wheel reports remain normalized even when characters arrive with short gaps; literal `[<...M` artifacts no longer surface in pane output.

@@ -57,3 +57,7 @@
 - [x] T044 Keep overlap-based snapshot viewport-shift progression in `model.rs` and pair it with blank-prefix pruning so sparse full-screen redraws remain scrollable without empty-top regressions.
 - [x] T045 [P] Write RED test: leading blank snapshots are pruned once newer non-blank frames exist so topmost scrollback never lands on an empty phantom frame.
 - [x] T046 Prune leading blank snapshot prefixes in `model.rs` and preserve snapshot cursor clamping while keeping non-blank history intact.
+- [x] T047 [P] Write RED test: first upward snapshot scroll from live-follow lands on the immediately previous snapshot and does not skip one frame.
+- [x] T048 Fix snapshot scroll-up cursor calculation in `model.rs` so live-to-history transition applies exact one-step deltas.
+- [x] T049 [P] Write RED test: leaked SGR wheel reports with short inter-character delays are still normalized as mouse input.
+- [x] T050 Switch SGR leak timeout handling in `event.rs` to inter-character inactivity semantics so delayed fragments do not leak literal `[<...M` text.
