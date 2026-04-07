@@ -357,6 +357,11 @@ impl AgentLaunchBuilder {
             "1".to_string(),
         );
 
+        // Keep Codex out of the alternate screen so the PTY emits normal scrollback
+        // instead of redraw-only fullscreen frames. This matches the CLI's documented
+        // inline mode for preserving terminal history.
+        args.push("--no-alt-screen".to_string());
+
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());
@@ -697,6 +702,17 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
+    }
+
+    #[test]
+    fn build_codex_disables_alternate_screen() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert!(
+            config.args.contains(&"--no-alt-screen".to_string()),
+            "Codex should run inline so the PTY emits row scrollback instead of full-screen redraw-only history: {:?}",
+            config.args
+        );
     }
 
     #[test]

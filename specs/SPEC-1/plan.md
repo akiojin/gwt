@@ -68,6 +68,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 18. For agent panes that still require local snapshot fallback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so fallback history does not collapse to a single final frame.
 19. While the user is actively browsing snapshot-backed history, keep that snapshot source locked even if new PTY redraws promote fresh row history in the background; only switch back to row/live rendering when the user explicitly returns to live-follow.
 20. When Codex-style redraws expose the vertical shift only through sparse same-offset line matches, treat that as row-history evidence before falling back to page-sized snapshot stepping.
+21. Prefer Codex's documented inline mode over gwt-side redraw reconstruction by launching Codex with `--no-alt-screen`, so the PTY preserves normal row scrollback semantics before any local fallback is needed.
 
 ## Dependencies
 

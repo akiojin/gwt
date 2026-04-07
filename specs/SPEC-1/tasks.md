@@ -101,3 +101,5 @@
 - [x] T088 Keep snapshot-backed history locked to the selected frame until live-follow resumes, even if new PTY output promotes fresh row history in the background.
 - [x] T089 [P] Write RED test: Codex-style sparse same-offset redraw matches still derive local row history instead of falling back to page-sized snapshot scrolling.
 - [x] T090 Extend redraw-shift detection to accept sparse same-offset matches when contiguous overlap is interrupted by progress/spinner churn.
+- [x] T091 [P] Write RED tests: Codex launch configs include `--no-alt-screen` both in the shared launch builder and the wizard-built launch path.
+- [x] T092 Prefer Codex inline mode by adding `--no-alt-screen` to Codex launch args so PTY output preserves scrollback without relying on fullscreen redraw reconstruction.

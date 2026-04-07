@@ -53,6 +53,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 29. Given a Codex-style agent pane redraws the full screen with a vertical one-line shift but vt100 row scrollback still stays at zero, when gwt updates the pane-local cache, then it promotes that redraw shift into local row history so scrolling stays line-granular without PTY keyboard injection.
 30. Given I am browsing an older snapshot-backed agent frame, when new PTY output arrives and that redraw now produces row-history entries, then gwt keeps showing the selected snapshot until I explicitly return to live-follow.
 31. Given a Codex-style redraw keeps the same vertical shift but progress or spinner churn breaks contiguous overlap between frames, when sparse same-offset matches still show the shift, then gwt derives local row history instead of stepping whole snapshots.
+32. Given gwt launches a Codex agent session, when the Codex CLI starts, then it runs in the CLI's inline scrollback-preserving mode instead of the alternate screen so PTY output retains normal row scrollback semantics.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -112,6 +113,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-003f**: When a Claude/Codex agent pane redraws full-screen content without advancing vt100 row scrollback, gwt falls back to the same pane-local in-memory snapshot history instead of session logs or transcript reconstruction.
 - **FR-003g**: Agent-pane row scrollback capacity is larger than the standard terminal row-history limit while remaining ephemeral in memory for the lifetime of that pane.
 - **FR-003h**: When an agent pane closes or gwt restarts, prior scrollback is discarded and is not reconstructed from persisted session artifacts.
+- **FR-003i**: Codex launches must request the CLI's inline scrollback-preserving mode (`--no-alt-screen`) so gwt receives normal PTY row scrollback instead of fullscreen alternate-screen redraw-only output.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
@@ -194,3 +196,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-028**: Agent panes that do not negotiate SGR mouse reporting keep wheel / Terminal.app right-drag scrolling on gwt-local history, and Codex-style redraw panes derive line-granular row history from vertical redraw shifts instead of injecting cursor-key PTY input.
 - **SC-029**: While the user is viewing snapshot-backed agent history, incoming PTY redraws that start producing row-history entries do not replace the selected snapshot or force the visible source away from snapshot mode until live-follow is restored.
 - **SC-030**: Codex-style redraws whose overlap is sparse rather than contiguous still avoid page-sized snapshot scrolling when same-offset matches are sufficient to prove a vertical shift.
+- **SC-031**: Codex launch configs always include `--no-alt-screen`, and wizard-built Codex sessions inherit that flag so runtime PTY output stays scrollback-friendly before any gwt-local fallback logic is needed.

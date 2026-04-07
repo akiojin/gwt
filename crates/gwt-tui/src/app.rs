@@ -9855,6 +9855,24 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_codex_disables_alternate_screen() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(
+            config.args.contains(&"--no-alt-screen".to_string()),
+            "Codex launches should prefer inline mode so gwt can rely on PTY row scrollback instead of reconstructing page-sized snapshots: {:?}",
+            config.args
+        );
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_falls_back_to_continue_without_resume_session_id() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),

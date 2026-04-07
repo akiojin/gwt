@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: prefer Codex's official inline mode over terminal-side redraw reconstruction
+
+### 事象
+
+Codex pane だけが実機で `max_scrollback == 0` のまま `snapshot` mode に落ち続け、
+テストで redraw-shift 正規化を積み増しても、実際の PTY では page-sized scroll が残った。
+
+### 原因
+
+- 問題の中心は gwt の scroll math ではなく、Codex が alternate screen の full-screen redraw を出していたことだった。
+- その状態で gwt が redraw 差分から line history を再構成し続けると、agent 実装に依存した推測ロジックが増え、
+  実ログとテストの乖離が大きくなる。
+- Codex CLI 自体が `--no-alt-screen` を提供しており、scrollback preservation は agent 側 capability として既に解かれていた。
+
+### 再発防止策
+
+1. agent が公式に scrollback-preserving / inline mode を持つ場合は、まずそれを使い、gwt 側の heuristic 再構築を増やさない。
+2. 実ログで `max_scrollback == 0` と `mode=snapshot` が続くときは、gwt の viewport ロジックより先に agent launch mode を疑う。
+3. launch config のような責務境界の解決策がある場合は、renderer / scrollback reconstruction の修正より優先する。
+
 ## 2026-04-07 — fix: Codex redraw shift detection must survive sparse overlap churn
 
 ### 事象
