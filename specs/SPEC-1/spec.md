@@ -160,7 +160,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 
 - **NFR-001**: Rendering latency under 16ms per frame to maintain 60fps visual smoothness.
 - **NFR-002**: Memory usage proportional to scrollback size; 10,000 lines should consume under 50MB per pane.
-- **NFR-002a**: Snapshot-backed scrollback uses a fixed-size in-memory ring buffer (256 frames) so full-screen panes remain bounded without transcript persistence.
+- **NFR-002a**: Snapshot-backed scrollback uses a fixed-size in-memory ring buffer (2048 frames) so full-screen panes remain bounded without transcript persistence.
 - **NFR-003**: Cross-platform support via crossterm backend (macOS, Linux, Windows).
 - **NFR-004**: No visible flicker during rapid output (smooth rendering pipeline).
 - **NFR-004a**: Hover-only mouse-move floods do not trigger session redraw work because gwt does not use pointer-move hover semantics in the terminal pane.
