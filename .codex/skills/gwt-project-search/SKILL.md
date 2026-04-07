@@ -5,7 +5,7 @@ description: "Semantic search over project source files using vector embeddings.
 
 # Project Search
 
-gwt maintains a vector search index of project source files using ChromaDB embeddings.
+gwt maintains a vector search index of project implementation files using ChromaDB embeddings.
 The index is automatically updated when source files change (via file system watcher).
 
 ## File search command
@@ -47,6 +47,8 @@ JSON object with ranked results:
 ## Notes
 
 - Project file index is automatically maintained by the file system watcher (changes trigger re-indexing)
+- `search-files` is implementation-focused and excludes embedded skill assets, local/archived SPEC trees, local task logs, and snapshot files
+- Project docs are indexed separately and can be searched with `search-files-docs`
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - Canonical standalone skill name: `gwt-project-search`

@@ -5,7 +5,7 @@ description: Compatibility-oriented reference for the project file index. Prefer
 
 # Project Structure Index
 
-gwt maintains a vector search index of all project files using ChromaDB embeddings.
+gwt maintains a vector search index of project implementation files plus a separate docs collection using ChromaDB embeddings.
 
 ## File search command
 
@@ -46,6 +46,8 @@ JSON object with ranked results:
 ## Notes
 
 - File index is auto-generated when the project is opened in gwt
+- `search-files` targets the implementation-file collection; embedded skill assets, SPEC trees, local task logs, and snapshots are excluded from that collection
+- Project docs are indexed separately and can be searched with `search-files-docs`
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - Canonical standalone file-search skill: `gwt-project-search`

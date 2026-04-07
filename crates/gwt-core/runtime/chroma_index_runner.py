@@ -67,6 +67,33 @@ BINARY_EXTENSIONS = {
 }
 
 MAX_FILE_SIZE = 1_048_576  # 1 MiB
+CODE_COLLECTION = "files_code"
+DOC_COLLECTION = "files_docs"
+LEGACY_FILE_COLLECTION = "files"
+
+SKIP_FILE_EXTENSIONS = {
+    ".snap",
+}
+
+SKIP_ROOT_DIRECTORIES = {
+    ".claude",
+    ".codex",
+    "specs",
+    "specs-archive",
+    "tasks",
+}
+
+DOC_FILE_EXTENSIONS = {
+    ".md",
+    ".mdx",
+    ".rst",
+    ".adoc",
+    ".txt",
+}
+
+DOC_ROOT_DIRECTORIES = {
+    "docs",
+}
 
 
 def load_gitignore_patterns(project_root: Path) -> List[str]:
@@ -120,6 +147,30 @@ def should_ignore(rel_path: str, compiled_patterns: List[re.Pattern]) -> bool:
 def is_binary_file(path: Path) -> bool:
     """Check if a file is likely binary."""
     return path.suffix.lower() in BINARY_EXTENSIONS
+
+
+def classify_file_bucket(rel_path: str) -> str:
+    """Classify a collected file into code/docs buckets or skip it entirely."""
+    rel = Path(rel_path)
+    parts = rel.parts
+    suffix = rel.suffix.lower()
+
+    if suffix in SKIP_FILE_EXTENSIONS:
+        return "skip"
+
+    if parts and parts[0] in SKIP_ROOT_DIRECTORIES:
+        return "skip"
+
+    if rel.name.lower().startswith("readme"):
+        return "docs"
+
+    if suffix in DOC_FILE_EXTENSIONS:
+        return "docs"
+
+    if parts and parts[0] in DOC_ROOT_DIRECTORIES:
+        return "docs"
+
+    return "code"
 
 
 def collect_files(project_root: Path) -> List[Path]:
@@ -296,62 +347,119 @@ def action_index(project_root: str, db_path: str) -> dict:
     start = time.monotonic()
 
     client = chromadb.PersistentClient(path=str(db))
-    collection = client.get_or_create_collection(
-        name="files",
+    code_collection = client.get_or_create_collection(
+        name=CODE_COLLECTION,
+        metadata={"hnsw:space": "cosine"},
+    )
+    doc_collection = client.get_or_create_collection(
+        name=DOC_COLLECTION,
         metadata={"hnsw:space": "cosine"},
     )
 
     files = collect_files(root)
-    current_ids = {str(f.relative_to(root)) for f in files}
+    current_code_ids = set()
+    current_doc_ids = set()
 
     batch_size = 100
-    total_indexed = 0
+    total_code_indexed = 0
+    total_doc_indexed = 0
 
     if files:
         for i in range(0, len(files), batch_size):
             batch = files[i : i + batch_size]
-            ids = []
-            documents = []
-            metadatas = []
+            code_ids = []
+            code_documents = []
+            code_metadatas = []
+            doc_ids = []
+            doc_documents = []
+            doc_metadatas = []
 
             for fpath in batch:
                 rel = str(fpath.relative_to(root))
+                bucket = classify_file_bucket(rel)
+                if bucket == "skip":
+                    continue
                 desc = extract_description(fpath)
                 try:
                     size = fpath.stat().st_size
                 except OSError:
                     size = 0
 
-                ids.append(rel)
-                documents.append(f"{rel}: {desc}")
-                metadatas.append({
+                payload = {
                     "path": rel,
                     "description": desc,
                     "file_type": fpath.suffix.lstrip(".") or "unknown",
                     "size": size,
-                })
+                    "bucket": bucket,
+                }
 
-            collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
-            total_indexed += len(batch)
+                if bucket == "docs":
+                    current_doc_ids.add(rel)
+                    doc_ids.append(rel)
+                    doc_documents.append(f"{rel}: {desc}")
+                    doc_metadatas.append(payload)
+                else:
+                    current_code_ids.add(rel)
+                    code_ids.append(rel)
+                    code_documents.append(f"{rel}: {desc}")
+                    code_metadatas.append(payload)
+
+            if code_ids:
+                code_collection.upsert(
+                    ids=code_ids,
+                    documents=code_documents,
+                    metadatas=code_metadatas,
+                )
+                total_code_indexed += len(code_ids)
+
+            if doc_ids:
+                doc_collection.upsert(
+                    ids=doc_ids,
+                    documents=doc_documents,
+                    metadatas=doc_metadatas,
+                )
+                total_doc_indexed += len(doc_ids)
 
     try:
-        existing = collection.get()
-        stale = [eid for eid in existing["ids"] if eid not in current_ids]
-        if stale:
-            collection.delete(ids=stale)
+        existing_code = code_collection.get()
+        stale_code = [eid for eid in existing_code["ids"] if eid not in current_code_ids]
+        if stale_code:
+            code_collection.delete(ids=stale_code)
+
+        existing_docs = doc_collection.get()
+        stale_docs = [eid for eid in existing_docs["ids"] if eid not in current_doc_ids]
+        if stale_docs:
+            doc_collection.delete(ids=stale_docs)
     except Exception as exc:
         print(f"Warning: stale entry cleanup failed: {exc}", file=sys.stderr)
+
+    try:
+        client.delete_collection(LEGACY_FILE_COLLECTION)
+    except Exception:
+        pass
 
     elapsed = int((time.monotonic() - start) * 1000)
     return {
         "ok": True,
-        "filesIndexed": total_indexed,
+        "filesIndexed": total_code_indexed + total_doc_indexed,
+        "codeFilesIndexed": total_code_indexed,
+        "docFilesIndexed": total_doc_indexed,
         "durationMs": elapsed,
     }
 
 
-def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search the project index."""
+def _load_file_collection(client, name: str):
+    """Load a file collection, falling back to the legacy collection for code search."""
+    try:
+        return client.get_collection(name)
+    except Exception:
+        if name == CODE_COLLECTION:
+            return client.get_collection(LEGACY_FILE_COLLECTION)
+        raise
+
+
+def _search_file_collection(db_path: str, query: str, n_results: int, collection_name: str, missing_message: str) -> dict:
+    """Search one of the file-oriented collections."""
     import chromadb  # type: ignore
 
     db = Path(db_path).resolve()
@@ -360,9 +468,9 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
 
     client = chromadb.PersistentClient(path=str(db))
     try:
-        collection = client.get_collection("files")
+        collection = _load_file_collection(client, collection_name)
     except Exception:
-        return {"ok": False, "error": "Collection 'files' not found. Run index-files first."}
+        return {"ok": False, "error": missing_message}
 
     count = collection.count()
     if count == 0:
@@ -388,6 +496,28 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
         items = fallback_substring_search(collection, query, actual_n)
 
     return {"ok": True, "results": items}
+
+
+def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
+    """Search implementation-focused project files."""
+    return _search_file_collection(
+        db_path,
+        query,
+        n_results,
+        CODE_COLLECTION,
+        "Collection 'files_code' not found. Run index-files first.",
+    )
+
+
+def action_search_docs(db_path: str, query: str, n_results: int = 10) -> dict:
+    """Search project docs kept separate from implementation files."""
+    return _search_file_collection(
+        db_path,
+        query,
+        n_results,
+        DOC_COLLECTION,
+        "Collection 'files_docs' not found. Run index-files first.",
+    )
 
 
 def fallback_substring_search(collection, query: str, n_results: int) -> List[dict]:
@@ -680,18 +810,33 @@ def action_status(db_path: str) -> dict:
         return {"ok": True, "indexed": False, "totalFiles": 0}
 
     client = chromadb.PersistentClient(path=str(db))
+    total_code = 0
+    total_docs = 0
+    indexed = False
+
     try:
-        collection = client.get_collection("files")
-        total = collection.count()
+        total_code = _load_file_collection(client, CODE_COLLECTION).count()
+        indexed = indexed or total_code > 0
     except Exception:
-        return {"ok": True, "indexed": False, "totalFiles": 0}
+        total_code = 0
+
+    try:
+        total_docs = client.get_collection(DOC_COLLECTION).count()
+        indexed = indexed or total_docs > 0
+    except Exception:
+        total_docs = 0
+
+    if not indexed:
+        return {"ok": True, "indexed": False, "totalFiles": 0, "totalCodeFiles": 0, "totalDocFiles": 0}
 
     db_size = sum(f.stat().st_size for f in db.rglob("*") if f.is_file())
 
     return {
         "ok": True,
         "indexed": True,
-        "totalFiles": total,
+        "totalFiles": total_code + total_docs,
+        "totalCodeFiles": total_code,
+        "totalDocFiles": total_docs,
         "dbSizeBytes": db_size,
     }
 
@@ -705,6 +850,7 @@ def parse_args() -> argparse.Namespace:
             "probe",
             "index-files",
             "search-files",
+            "search-files-docs",
             "index",
             "search",
             "status",
@@ -752,6 +898,16 @@ def main() -> int:
                 emit({"ok": False, "error": "--query is required for search-files"})
                 return 2
             emit(action_search(args.db_path, args.query, args.n_results))
+            return 0
+
+        if action == "search-files-docs":
+            if not args.db_path:
+                emit({"ok": False, "error": "--db-path is required for search-files-docs"})
+                return 2
+            if not args.query:
+                emit({"ok": False, "error": "--query is required for search-files-docs"})
+                return 2
+            emit(action_search_docs(args.db_path, args.query, args.n_results))
             return 0
 
         if action == "status":
