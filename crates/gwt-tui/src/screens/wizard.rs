@@ -436,6 +436,7 @@ impl WizardState {
             self.resume_session_id = None;
             return;
         };
+        let restores_skip_permissions = quick_start_restores_skip_permissions(&entry.agent_id);
 
         self.agent_id = entry.agent_id.clone();
         if let Some(agent_index) = self
@@ -456,7 +457,7 @@ impl WizardState {
         if let Some(version) = entry.version {
             self.version = version;
         }
-        self.skip_perms = entry.skip_permissions;
+        self.skip_perms = entry.skip_permissions && restores_skip_permissions;
         self.codex_fast_mode = entry.codex_fast_mode;
         if !self.agent_is_codex() {
             self.codex_fast_mode = false;
@@ -733,6 +734,10 @@ impl WizardState {
             .as_ref()
             .and_then(SpecContext::branch_seed)
     }
+}
+
+fn quick_start_restores_skip_permissions(agent_id: &str) -> bool {
+    agent_id != "claude"
 }
 
 fn derive_spec_branch_seed(spec_id: &str, title: &str) -> String {
@@ -2624,6 +2629,33 @@ mod tests {
         assert!(state.resume_session_id.is_none());
         assert!(!state.skip_perms);
         assert!(!state.codex_fast_mode);
+    }
+
+    #[test]
+    fn select_on_quick_start_claude_forces_skip_permissions_off() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.detected_agents = sample_agents();
+        state.quick_start_entries = vec![QuickStartEntry {
+            agent_id: "claude".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: None,
+            version: Some("latest".to_string()),
+            resume_session_id: Some("sess-claude".to_string()),
+            skip_permissions: true,
+            codex_fast_mode: false,
+        }];
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+        assert_eq!(state.agent_id, "claude");
+        assert_eq!(state.mode, "resume");
+        assert_eq!(state.resume_session_id.as_deref(), Some("sess-claude"));
+        assert!(!state.skip_perms);
+        assert_eq!(state.selected, 1);
     }
 
     #[test]

@@ -121,6 +121,7 @@ As a developer, I want to quickly re-launch a previous agent session configurati
 3. Given Quick Start history is empty, when I launch from an existing branch, then the wizard skips Quick Start and starts at `BranchAction`.
 4. Given Quick Start history exists for multiple agents, when the list renders, then each agent shows its own compact action rows, `Resume`, `Start new`, and a final `Choose different` row in the old-TUI layout.
 5. Given the selected history entry has a persisted resume session ID, when I choose `Resume`, then launch configuration restores `Resume` mode with that session ID. When no resume session ID exists, the wizard falls back to `Continue`.
+6. Given the selected Quick Start entry is Claude and persisted `skip_permissions=true`, when I select that entry, then the wizard resets skip permissions to `No` by default and launch args do not auto-append Claude bypass flags unless re-selected explicitly.
 
 ### US-4: Manage Custom Agents (P1) -- IMPLEMENTED
 
@@ -305,6 +306,7 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-044**: After launch materialization, `GWT_PROJECT_ROOT` and persisted
   session metadata use the actual launched worktree path, and any
   materialization error aborts launch before PTY spawn.
+- **FR-045**: Quick Start restores `skip_permissions` for non-Claude agents only; for Claude entries, wizard restoration forces `SkipPermissions=No` until the user explicitly selects `Yes` in the current launch flow.
 
 ## Non-Functional Requirements
 

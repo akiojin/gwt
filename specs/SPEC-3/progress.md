@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `185/185` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T01:45:00Z`
+- Artifact refresh: `2026-04-07T00:57:37Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -33,6 +33,10 @@
   agent sessions, render the old-TUI grouped history layout, and restore
   `Resume` / `Start new` semantics including the resume-ID fallback to
   `Continue`.
+- Quick Start restore now treats Claude as an explicit opt-in path for
+  skip-permissions: persisted Claude history no longer auto-restores
+  `skip_permissions=true`, and the wizard defaults Claude back to `No` unless
+  re-selected during the current launch.
 - Persisted agent session metadata now stores Quick Start restore fields
   (`reasoning_level`, `skip_permissions`, resume session ID) so future
   launches can replay the previous configuration instead of showing a static

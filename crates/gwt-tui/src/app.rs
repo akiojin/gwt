@@ -7626,6 +7626,22 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_claude_without_skip_permissions_omits_dangerous_flag() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            skip_perms: false,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(!config.skip_permissions);
+        assert!(!config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
     fn materialize_pending_launch_with_creates_agent_session_and_persists_metadata() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut model = test_model();
