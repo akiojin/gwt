@@ -589,6 +589,7 @@ impl VtState {
         }
         self.refresh_scrollback_metrics();
         self.set_scrollback(0);
+        self.capture_snapshot();
     }
 
     pub fn rows(&self) -> u16 {
@@ -660,7 +661,7 @@ impl VtState {
 
     pub fn uses_snapshot_scrollback(&self) -> bool {
         match self.scrollback_strategy {
-            ScrollbackStrategy::AgentMemoryBacked => false,
+            ScrollbackStrategy::AgentMemoryBacked => self.max_scrollback == 0,
             ScrollbackStrategy::Standard => {
                 self.max_scrollback == 0 || self.parser.screen().alternate_screen()
             }
@@ -947,7 +948,11 @@ impl VtState {
     }
 
     fn capture_snapshot(&mut self) {
-        if !self.uses_snapshot_scrollback() {
+        let should_capture = match self.scrollback_strategy {
+            ScrollbackStrategy::Standard => self.uses_snapshot_scrollback(),
+            ScrollbackStrategy::AgentMemoryBacked => true,
+        };
+        if !should_capture {
             return;
         }
 
@@ -1587,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_scrollback_strategy_uses_normalized_row_history_not_snapshots() {
+    fn agent_scrollback_strategy_prefers_normalized_row_history_when_available() {
         let mut vt = VtState::new(4, 20);
         vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
 
@@ -1595,11 +1600,6 @@ mod tests {
         vt.process(b"\x1b[2J\x1b[H");
         vt.process(b"line-1\r\nline-2\r\nline-3\r\nline-4\r\nline-5\r\nline-6");
 
-        assert_eq!(
-            vt.snapshot_count(),
-            0,
-            "agent scrollback should not retain full-screen snapshot frames"
-        );
         assert!(vt.max_scrollback() > 0);
         assert!(!vt.uses_snapshot_scrollback());
 
@@ -1608,6 +1608,24 @@ mod tests {
         assert!(contents.contains("line-1"));
         assert!(contents.contains("line-4"));
         assert!(!contents.contains("launch"));
+    }
+
+    #[test]
+    fn agent_scrollback_strategy_falls_back_to_snapshot_history_when_rows_do_not_advance() {
+        let mut vt = VtState::new(5, 20);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(b"\x1b[?1049h\x1b[2J\x1b[Hframe-1");
+        vt.process(b"\x1b[2J\x1b[Hframe-2");
+
+        assert_eq!(vt.max_scrollback(), 0);
+        assert!(vt.has_snapshot_scrollback());
+        assert!(vt.uses_snapshot_scrollback());
+
+        assert!(vt.scroll_viewport_lines(1));
+        let contents = vt.visible_screen_parser().screen().contents();
+        assert!(contents.contains("frame-1"));
+        assert!(!contents.contains("frame-2"));
     }
 
     #[test]

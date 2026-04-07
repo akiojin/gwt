@@ -45,8 +45,9 @@ As a developer, I want to scroll through terminal history so that I can review p
 21. Given scrollback interaction, URL hit-testing, selection copy, and terminal rendering happen in one pane, when the viewport moves, then all of them resolve against the same cached visible surface instead of mixing separate live/snapshot sources.
 22. Given a Claude/Codex agent pane is running and has more than one screen of PTY output, when the user scrolls upward through recent history, then gwt reads only the VT-derived in-memory cache and does not switch to session-log-derived text.
 23. Given a Claude/Codex agent pane outputs ANSI-styled text, when the user scrolls through its in-memory history, then colors and text attributes remain visible throughout the reachable cache.
-24. Given a Claude/Codex agent pane redraws launch, blank, or status frames in-place, when the user scrolls the pane history, then gwt uses a terminal-like row scrollback cache instead of frame snapshots so overwritten transient screens do not appear as separate history entries.
-25. Given a Claude/Codex agent pane closes or gwt restarts, when the pane is opened again, then prior scrollback is not restored from session logs and history starts from fresh PTY output.
+24. Given a Claude/Codex agent pane redraws launch, blank, or status frames in-place, when vt100 row scrollback exists, then gwt prefers the terminal-like row scrollback cache so overwritten transient screens do not appear as separate history entries.
+25. Given a Claude/Codex agent pane redraws full-screen frames in-place and vt100 row scrollback stays at zero, when the user scrolls recent history, then gwt falls back to the same pane-local in-memory frame cache instead of losing scrollback entirely.
+26. Given a Claude/Codex agent pane closes or gwt restarts, when the pane is opened again, then prior scrollback is not restored from session logs and history starts from fresh PTY output.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -102,9 +103,10 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-003b**: Agent-pane scrollback cache remains ephemeral in memory and is discarded when the pane closes.
 - **FR-003c**: For Claude/Codex agent panes, gwt does not hydrate runtime scrollback from session `jsonl` or session-log files; the only scrollback source is live PTY-derived in-memory cache.
 - **FR-003d**: Agent-pane scrollback preserves VT-derived color and text attributes throughout the reachable in-memory history.
-- **FR-003e**: For Claude/Codex agent panes, gwt maintains recent scrollback from a normalized row-based terminal buffer instead of full-screen snapshot frames, so clear/redraw/launch screens that overwrite the viewport do not surface as separate scrollback entries.
-- **FR-003f**: Agent-pane row scrollback capacity is larger than the standard terminal row-history limit while remaining ephemeral in memory for the lifetime of that pane.
-- **FR-003g**: When an agent pane closes or gwt restarts, prior scrollback is discarded and is not reconstructed from persisted session artifacts.
+- **FR-003e**: For Claude/Codex agent panes, gwt prefers recent scrollback from a normalized row-based terminal buffer, so clear/redraw/launch screens that overwrite the viewport do not surface as separate scrollback entries when row history exists.
+- **FR-003f**: When a Claude/Codex agent pane redraws full-screen content without advancing vt100 row scrollback, gwt falls back to the same pane-local in-memory snapshot history instead of session logs or transcript reconstruction.
+- **FR-003g**: Agent-pane row scrollback capacity is larger than the standard terminal row-history limit while remaining ephemeral in memory for the lifetime of that pane.
+- **FR-003h**: When an agent pane closes or gwt restarts, prior scrollback is discarded and is not reconstructed from persisted session artifacts.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
@@ -170,3 +172,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-020**: Alternate-screen panes remain scrollable through snapshot history even when legacy main-screen row scrollback exists; scrollbar and visible frame stay in sync.
 - **SC-021**: Viewport movement updates scrollbar, rendered text, URL hit-tests, and copy selection consistently from one visible cache surface, with no source mismatch between features.
 - **SC-022**: Agent-pane scrollback preserves VT-derived color and text attributes throughout in-memory history navigation without switching to transcript/session-log fallback.
+- **SC-023**: Agent panes whose output redraws full-screen frames without producing vt100 row scrollback still remain scrollable through pane-local in-memory snapshot history; row-only regressions are prevented.

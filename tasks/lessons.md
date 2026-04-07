@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: agent memory-only scrollback still needs frame fallback when row history stays zero
+
+### 事象
+
+Agent pane を `memory-only normalized row scrollback` に寄せた後、
+full-screen redraw 型の agent で `max_scrollback=0` のままになり、
+スクロール自体ができなくなった。
+
+### 原因
+
+- `session log` / transcript を外したこと自体は正しかったが、
+  その代わりを `row history only` に狭めすぎた。
+- Claude/Codex のような full-screen redraw 型 pane では、VT 的には
+  visible frame が更新されても row scrollback が増えないケースがある。
+- その結果、memory-only 設計でも in-memory frame cache を併用しないと
+  「PTY は正しく更新されているのに遡れない」回帰が起きた。
+
+### 再発防止策
+
+1. agent pane の runtime scrollback source は引き続き PTY-derived memory only に限定する。
+2. ただし agent scrollback は `row-first` とし、`max_scrollback == 0` の full-screen redraw では同じ memory cache 内の snapshot/frame history を fallback に使う。
+3. 「agent pane full-screen redraw + row history zero でも scroll できる」回帰テストを model/app の両方で固定する。
+
 ## 2026-04-07 — fix: agent scrollback source must stay PTY-derived and memory-only
 
 ### 事象

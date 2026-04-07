@@ -84,5 +84,5 @@
 - [x] T071 Replace agent-pane snapshot frame scrollback with normalized row scrollback, and select Claude/Codex transcript files by session metadata instead of worktree-global recency.
 - [x] T072 [P] Write RED tests: agent panes ignore session-log hydration at runtime, preserve ANSI styles in in-memory history, and keep a larger row-scrollback budget than standard terminal panes.
 - [x] T073 Remove transcript-backed runtime scrollback wiring from `app.rs` so PTY output is the only source of agent-pane history while the pane is alive.
-- [x] T074 Simplify `VtState` agent scrollback to `AgentMemoryBacked` normalized row history with a larger bounded capacity and no transcript fallback.
+- [x] T074 Simplify `VtState` agent scrollback to `AgentMemoryBacked` memory-only history that prefers normalized row scrollback, falls back to in-memory snapshots when rows never advance, and never uses transcript fallback.
 - [x] T075 Refresh SPEC-1 artifacts, lessons learned, and focused/full verification for the memory-only agent scrollback design.

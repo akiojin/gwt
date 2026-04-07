@@ -56,9 +56,10 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 6. Add a Terminal.app-specific fallback that maps `Down/Drag/Up(Right)` gesture sequences into vertical scrollback deltas because crossterm may not emit `ScrollUp/ScrollDown` for trackpad motion there.
 7. For panes whose visible screen has `max_scrollback == 0`, capture distinct live screen states into a pane-local in-memory ring buffer and route wheel scrolling through snapshot history instead of vt100 row scrollback.
 8. Keep pane history ephemeral in memory and treat PTY-derived VT state as the only runtime scrollback source for Claude/Codex agent panes.
-9. For Claude/Codex agent panes, replace snapshot-frame-based recent scrollback with a normalized row-scrollback parser that strips alternate-screen toggles so launch/blank/status redraws do not become separate history entries.
-10. Increase the agent-pane row scrollback capacity above the standard terminal default while keeping it bounded in memory and discarded when the pane closes.
-11. Do not hydrate agent-pane runtime scrollback from session `jsonl` or session-log files; agent-side PTY re-output is the only restoration mechanism.
+9. For Claude/Codex agent panes, prefer a normalized row-scrollback parser that strips alternate-screen toggles so launch/blank/status redraws do not become separate history entries when row history exists.
+10. When an agent pane redraws full-screen frames without accumulating vt100 row scrollback, fall back to the same pane-local in-memory snapshot history instead of transcript/session-log hydration.
+11. Increase the agent-pane row scrollback capacity above the standard terminal default while keeping it bounded in memory and discarded when the pane closes.
+12. Do not hydrate agent-pane runtime scrollback from session `jsonl` or session-log files; agent-side PTY re-output is the only restoration mechanism.
 
 ## Dependencies
 

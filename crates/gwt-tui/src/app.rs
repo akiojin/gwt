@@ -5515,6 +5515,8 @@ mod tests {
         agent_id: &str,
         color: crate::model::AgentColor,
     ) -> crate::model::SessionTab {
+        let mut vt = crate::model::VtState::new(30, 100);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
         crate::model::SessionTab {
             id: "agent-0".to_string(),
             name: name.to_string(),
@@ -5522,7 +5524,7 @@ mod tests {
                 agent_id: agent_id.to_string(),
                 color,
             },
-            vt: crate::model::VtState::new(30, 100),
+            vt,
             created_at: std::time::Instant::now(),
         }
     }
@@ -6549,6 +6551,54 @@ mod tests {
                 .vt
                 .follow_live(),
             "returning to the newest snapshot should restore live-follow mode"
+        );
+    }
+
+    #[test]
+    fn agent_memory_scrollback_uses_in_memory_snapshots_when_rows_do_not_advance() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &["frame-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "agent-0",
+            &["frame-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("frame-1"));
+        assert!(!frozen.contains("frame-2"));
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .viewing_history(),
+            "full-screen redraw agents should enter history view even when row scrollback stays empty"
         );
     }
 

@@ -28,9 +28,10 @@
 - Snapshot progression no longer depends on viewport-shift overlap heuristics; blank history prefixes are still pruned so topmost snapshot scrollback never produces a phantom blank screen.
 - Alternate-screen panes now prefer snapshot-backed scrolling and scrollbar metrics even when main-screen row scrollback metadata is non-zero, so thumb movement always matches visible frame changes.
 - Session viewport handling is now unified under `VtState`: rendering, scrollbar metrics, URL hit-testing, and selection copy all consume the same visible cache surface API.
-- Claude/Codex agent panes now build runtime scrollback from a normalized row-buffer parser instead of full-screen snapshot frames, so launch/blank/status redraws do not appear as separate history entries.
+- Claude/Codex agent panes now prefer runtime scrollback from a normalized row-buffer parser, so launch/blank/status redraws do not appear as separate history entries when vt100 row history exists.
 - Agent-pane runtime scrollback is now memory-only: PTY-derived VT cache is the canonical source while the pane is alive, and gwt no longer hydrates scrollback from session `jsonl` or session-log files.
 - Agent-pane row history now uses a larger bounded in-memory budget than standard terminal panes, preserving styled PTY output for longer review windows without transcript fallback.
+- Agent panes whose full-screen redraws never advance vt100 row scrollback now fall back to the same in-memory snapshot cache, restoring scrollback without reintroducing session-log/transcript sources.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.
