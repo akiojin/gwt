@@ -1277,6 +1277,16 @@ def action_index_files_v2(
     paths = _scan_files(root, bucket_filter=bucket)
     new_entries = _build_manifest_entries(root, paths)
 
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": scope,
+            "mode": mode,
+            "done": 0,
+            "total": len(new_entries),
+        }
+    )
+
     with acquire_lock(db_path, exclusive=True):
         client, collection = _make_chroma_collection(
             db_path,
@@ -1292,6 +1302,15 @@ def action_index_files_v2(
             embedded_paths = [root / rel for rel in to_embed]
             count = embed_documents_for_paths(embedded_paths, root, collection)
             _delete_paths_from_collection(collection, to_delete)
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": scope,
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
         else:
             # full mode
             try:
@@ -1305,6 +1324,15 @@ def action_index_files_v2(
 
         write_manifest(db_path, scope=scope, entries=new_entries)
 
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": scope,
+            "mode": mode,
+            "indexed": count,
+            "total": len(new_entries),
+        }
+    )
     return {
         "ok": True,
         "scope": scope,
@@ -1377,6 +1405,16 @@ def action_index_specs_v2(
 
     new_entries.sort(key=lambda e: e["path"])
 
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "specs",
+            "mode": mode,
+            "done": 0,
+            "total": len(spec_records),
+        }
+    )
+
     with acquire_lock(db_path, exclusive=True):
         client, collection = _make_chroma_collection(db_path, V2_SPECS_COLLECTION)
 
@@ -1402,6 +1440,15 @@ def action_index_specs_v2(
 
         write_manifest(db_path, scope="specs", entries=new_entries)
 
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "specs",
+            "mode": mode,
+            "indexed": len(spec_records),
+            "total": len(spec_records),
+        }
+    )
     return {"ok": True, "scope": "specs", "indexed": len(spec_records)}
 
 
@@ -1453,12 +1500,29 @@ def action_index_issues_v2(
             if last is not None:
                 age = (_now_utc() - last).total_seconds()
                 if age < ttl_minutes * 60:
+                    emit_progress(
+                        {
+                            "phase": "skipped",
+                            "scope": "issues",
+                            "reason": "ttl",
+                            "ttl_remaining_seconds": int(ttl_minutes * 60 - age),
+                        }
+                    )
                     return {
                         "ok": True,
                         "skipped": True,
                         "scope": "issues",
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age),
                     }
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "issues",
+            "done": 0,
+            "total": 0,
+        }
+    )
 
     with acquire_lock(db_path, exclusive=True):
         try:
@@ -1535,6 +1599,14 @@ def action_index_issues_v2(
             },
         )
 
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "issues",
+            "indexed": len(issues),
+            "total": len(issues),
+        }
+    )
     return {"ok": True, "scope": "issues", "indexed": len(issues)}
 
 

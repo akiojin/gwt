@@ -10,15 +10,19 @@
 //! - Refresh the Issue index according to a TTL window (background)
 //! - Spawn / track / shut down per-Worktree filesystem watchers
 //! - Trigger incremental index runs when watcher batches arrive
+//! - Capture every runner spawn into `~/.gwt/logs/index.log` so the user (and
+//!   any helper agent) can audit the lifecycle without console noise.
 //!
 //! Where ChromaDB writes happen: `crates/gwt-core/runtime/chroma_index_runner.py`.
 //! This module never touches sqlite directly.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gwt_core::error::Result;
 use gwt_core::index::paths::gwt_index_root;
@@ -27,7 +31,7 @@ use gwt_core::index::runtime::{
     ReconcileOptions, RefreshIssuesOptions,
 };
 use gwt_core::index::watcher::{start_watcher, WatcherConfig};
-use gwt_core::paths::{gwt_project_index_venv_dir, gwt_runtime_runner_path};
+use gwt_core::paths::{gwt_logs_dir, gwt_project_index_venv_dir, gwt_runtime_runner_path};
 use gwt_core::repo_hash::{compute_repo_hash, RepoHash};
 use gwt_core::worktree_hash::{compute_worktree_hash, WorktreeHash};
 use tokio::runtime::Runtime;
@@ -45,6 +49,42 @@ fn worker_runtime() -> &'static Runtime {
             .build()
             .expect("gwt index worker runtime")
     })
+}
+
+// =====================================================================
+// Logging — `~/.gwt/logs/index.log`
+// =====================================================================
+
+fn index_log_path() -> PathBuf {
+    gwt_logs_dir().join("index.log")
+}
+
+/// Append a single timestamped line to `~/.gwt/logs/index.log`. Failures are
+/// silently ignored — logging must never block index lifecycle work.
+pub fn log_event(message: &str) {
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let line = format!("[{ts}] {message}\n");
+    if let Some(parent) = index_log_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(index_log_path())
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn open_runner_log_file(action: &str) -> Option<std::fs::File> {
+    let logs_dir = gwt_logs_dir().join("index");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = logs_dir.join(format!("runner-{unix}-{action}.log"));
+    OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
 /// Tracks active watcher handles keyed by `worktree_hash`. Held inside the
@@ -94,10 +134,16 @@ pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
 /// Reconcile + start background Issue refresh + start watchers for the
 /// active worktrees of `repo_root`. Called once at TUI startup.
 pub fn bootstrap(repo_root: &Path, active_worktrees: &[PathBuf]) {
+    log_event(&format!(
+        "bootstrap start: repo_root={} active_worktrees={}",
+        repo_root.display(),
+        active_worktrees.len()
+    ));
     let Some(repo_hash) = detect_repo_hash(repo_root) else {
-        tracing::debug!("no origin remote configured; skipping index bootstrap");
+        log_event("bootstrap skipped: no origin remote configured");
         return;
     };
+    log_event(&format!("bootstrap repo_hash={}", repo_hash));
 
     // 1) Reconcile orphans + legacy directories — synchronous, fast.
     let opts = ReconcileOptions {
@@ -106,13 +152,18 @@ pub fn bootstrap(repo_root: &Path, active_worktrees: &[PathBuf]) {
         active_worktree_paths: active_worktrees.to_vec(),
         legacy_worktree_dirs: active_worktrees.to_vec(),
     };
-    if let Err(e) = reconcile_repo(&opts) {
-        tracing::warn!("index reconcile failed: {e}");
+    match reconcile_repo(&opts) {
+        Ok(()) => log_event("reconcile_repo done"),
+        Err(e) => log_event(&format!("reconcile_repo failed: {e}")),
     }
 
     // 2) Background Issue refresh.
     let project_root = repo_root.to_path_buf();
     let repo_hash_for_issues = repo_hash.clone();
+    log_event(&format!(
+        "spawning issue refresh task (ttl={}min)",
+        ISSUE_REFRESH_TTL_MINUTES
+    ));
     worker_runtime().spawn(async move {
         let opts = RefreshIssuesOptions {
             index_root: gwt_index_root(),
@@ -120,9 +171,10 @@ pub fn bootstrap(repo_root: &Path, active_worktrees: &[PathBuf]) {
             project_root,
             ttl: Duration::from_secs(ISSUE_REFRESH_TTL_MINUTES * 60),
         };
-        let spawner = make_runner_spawner();
-        if let Err(e) = refresh_issues_if_stale(&opts, &spawner).await {
-            tracing::warn!("issue refresh kick failed: {e}");
+        let spawner = LoggingRunnerSpawner::wrap(make_runner_spawner());
+        match refresh_issues_if_stale(&opts, &spawner).await {
+            Ok(()) => log_event("issue refresh evaluation completed"),
+            Err(e) => log_event(&format!("issue refresh evaluation failed: {e}")),
         }
     });
 
@@ -130,6 +182,10 @@ pub fn bootstrap(repo_root: &Path, active_worktrees: &[PathBuf]) {
     for wt in active_worktrees {
         ensure_watcher(repo_root, wt);
     }
+    log_event(&format!(
+        "bootstrap done: launched watchers for {} worktree(s)",
+        active_worktrees.len()
+    ));
 }
 
 /// Idempotently ensure that a watcher is running for the given Worktree.
@@ -138,6 +194,10 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
         return;
     };
     let Ok(wt_hash) = compute_worktree_hash(worktree_path) else {
+        log_event(&format!(
+            "ensure_watcher: failed to compute worktree hash for {}",
+            worktree_path.display()
+        ));
         return;
     };
     let key = wt_hash.as_str().to_string();
@@ -145,10 +205,19 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
     {
         let reg = registry().lock().unwrap();
         if reg.handles.contains_key(&key) {
+            log_event(&format!(
+                "ensure_watcher: already running for wt_hash={}",
+                wt_hash
+            ));
             return;
         }
     }
 
+    log_event(&format!(
+        "ensure_watcher: starting watcher for wt_hash={} path={}",
+        wt_hash,
+        worktree_path.display()
+    ));
     let worktree_path = worktree_path.to_path_buf();
     let repo_root = repo_root.to_path_buf();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -158,23 +227,36 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
         let mut watcher = match start_watcher(&worktree_path, cfg) {
             Ok(w) => w,
             Err(e) => {
-                tracing::warn!("watcher start failed for {}: {e}", worktree_path.display());
+                log_event(&format!(
+                    "watcher start failed for {}: {e}",
+                    worktree_path.display()
+                ));
                 return;
             }
         };
-        let spawner = make_runner_spawner();
+        log_event(&format!(
+            "watcher running for wt_hash={} path={}",
+            wt_hash,
+            worktree_path.display()
+        ));
         let mut shutdown_rx = rx;
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => break,
                 batch = watcher.recv_batch() => {
-                    let Some(_batch) = batch else { break };
-                    if let Err(e) = run_incremental_index(&spawner, &repo_hash, &wt_hash, &repo_root) {
-                        tracing::warn!("incremental index spawn failed: {e}");
+                    let Some(batch) = batch else { break };
+                    log_event(&format!(
+                        "watcher batch: wt_hash={} paths={}",
+                        wt_hash,
+                        batch.changed_paths.len()
+                    ));
+                    if let Err(e) = run_incremental_index(&repo_hash, &wt_hash, &repo_root) {
+                        log_event(&format!("incremental index spawn failed: {e}"));
                     }
                 }
             }
         }
+        log_event(&format!("watcher shutdown for wt_hash={}", wt_hash));
         watcher.shutdown().await;
     });
 
@@ -191,6 +273,12 @@ pub fn shutdown_and_remove(repo_root: &Path, worktree_path: &Path) -> Result<()>
     };
     let key = wt_hash.as_str().to_string();
 
+    log_event(&format!(
+        "shutdown_and_remove: wt_hash={} path={}",
+        wt_hash,
+        worktree_path.display()
+    ));
+
     {
         let mut reg = registry().lock().unwrap();
         if let Some(tx) = reg.shutdown.remove(&key) {
@@ -200,21 +288,20 @@ pub fn shutdown_and_remove(repo_root: &Path, worktree_path: &Path) -> Result<()>
     }
 
     if let Some(repo_hash) = detect_repo_hash(repo_root) {
-        remove_worktree_index(&gwt_index_root(), &repo_hash, wt_hash.as_str())?;
+        match remove_worktree_index(&gwt_index_root(), &repo_hash, wt_hash.as_str()) {
+            Ok(()) => log_event(&format!("removed index dir for wt_hash={}", wt_hash)),
+            Err(ref e) => log_event(&format!("remove_worktree_index failed: {e}")),
+        }
     }
 
     Ok(())
 }
 
 fn run_incremental_index(
-    _spawner: &PythonRunnerSpawner,
     repo_hash: &RepoHash,
     wt_hash: &WorktreeHash,
     project_root: &Path,
 ) -> std::io::Result<()> {
-    // We piggy-back on the same runner script with --action index-files
-    // --mode incremental. The spawner doesn't currently expose this so do
-    // a direct std::process::Command spawn here.
     let python = gwt_project_index_venv_dir().join(if cfg!(windows) {
         "Scripts/python.exe"
     } else {
@@ -222,6 +309,11 @@ fn run_incremental_index(
     });
     let runner = gwt_runtime_runner_path();
     if !python.exists() || !runner.exists() {
+        log_event(&format!(
+            "run_incremental_index: runtime missing (python={} runner={})",
+            python.display(),
+            runner.display()
+        ));
         return Ok(());
     }
 
@@ -231,8 +323,13 @@ fn run_incremental_index(
         } else {
             "index-files"
         };
-        let _ = std::process::Command::new(&python)
-            .arg(&runner)
+        let log_file = open_runner_log_file(&format!("{action}-{scope}-incremental"));
+        log_event(&format!(
+            "spawn runner: action={} scope={} repo_hash={} wt_hash={}",
+            action, scope, repo_hash, wt_hash
+        ));
+        let mut cmd = std::process::Command::new(&python);
+        cmd.arg(&runner)
             .arg("--action")
             .arg(action)
             .arg("--repo-hash")
@@ -244,8 +341,73 @@ fn run_incremental_index(
             .arg("--mode")
             .arg("incremental")
             .arg("--scope")
-            .arg(scope)
-            .spawn()?;
+            .arg(scope);
+        if let Some(file) = log_file.as_ref().and_then(|f| f.try_clone().ok()) {
+            cmd.stdout(file);
+        } else {
+            cmd.stdout(std::process::Stdio::null());
+        }
+        if let Some(file) = log_file.and_then(|f| f.try_clone().ok()) {
+            cmd.stderr(file);
+        } else {
+            cmd.stderr(std::process::Stdio::null());
+        }
+        cmd.stdin(std::process::Stdio::null());
+        let _ = cmd.spawn()?;
     }
     Ok(())
+}
+
+// =====================================================================
+// LoggingRunnerSpawner — wraps PythonRunnerSpawner to log + redirect stdio
+// =====================================================================
+
+struct LoggingRunnerSpawner {
+    inner: PythonRunnerSpawner,
+}
+
+impl LoggingRunnerSpawner {
+    fn wrap(inner: PythonRunnerSpawner) -> Self {
+        Self { inner }
+    }
+}
+
+impl gwt_core::index::runtime::RunnerSpawner for LoggingRunnerSpawner {
+    fn spawn_index_issues(
+        &self,
+        repo_hash: &str,
+        project_root: &Path,
+        respect_ttl: bool,
+    ) -> std::io::Result<()> {
+        log_event(&format!(
+            "spawn runner: action=index-issues repo_hash={} respect_ttl={} project_root={}",
+            repo_hash,
+            respect_ttl,
+            project_root.display()
+        ));
+        let log_file = open_runner_log_file("index-issues");
+        let mut cmd = std::process::Command::new(&self.inner.python_executable);
+        cmd.arg(&self.inner.runner_script)
+            .arg("--action")
+            .arg("index-issues")
+            .arg("--repo-hash")
+            .arg(repo_hash)
+            .arg("--project-root")
+            .arg(project_root);
+        if respect_ttl {
+            cmd.arg("--respect-ttl");
+        }
+        if let Some(file) = log_file.as_ref().and_then(|f| f.try_clone().ok()) {
+            cmd.stdout(file);
+        } else {
+            cmd.stdout(std::process::Stdio::null());
+        }
+        if let Some(file) = log_file.and_then(|f| f.try_clone().ok()) {
+            cmd.stderr(file);
+        } else {
+            cmd.stderr(std::process::Stdio::null());
+        }
+        cmd.stdin(std::process::Stdio::null());
+        cmd.spawn().map(|_| ())
+    }
 }
