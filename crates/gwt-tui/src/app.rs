@@ -6688,7 +6688,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_memory_scrollback_uses_in_memory_snapshots_when_rows_do_not_advance() {
+    fn agent_memory_scrollback_uses_in_memory_snapshots_when_frames_do_not_overlap() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -6703,32 +6703,88 @@ mod tests {
         enter_alt_screen_with_lines(
             &mut model,
             "agent-0",
-            &["frame-1", "line-2", "line-3", "line-4", "line-5"],
+            &["alpha-1", "alpha-2", "alpha-3", "alpha-4", "alpha-5"],
         );
         replace_alt_screen_lines(
             &mut model,
             "agent-0",
-            &["frame-2", "line-3", "line-4", "line-5", "line-6"],
+            &["beta-1", "beta-2", "beta-3", "beta-4", "beta-5"],
         );
 
         let session = model.active_session_tab_mut().expect("active session");
         assert!(
             session.vt.has_snapshot_scrollback(),
-            "full-screen redraw agents should still capture in-memory snapshots even when wheel input is PTY-owned"
+            "full-screen redraw agents should still keep snapshot history when consecutive frames do not share a vertical overlap that can be normalized into row scrollback"
         );
         assert!(session.vt.scroll_snapshot_up(1));
 
         let frozen = render_model_text(&model, 24, 8);
-        assert!(frozen.contains("frame-1"));
-        assert!(!frozen.contains("frame-2"));
+        assert!(frozen.contains("alpha-1"));
+        assert!(!frozen.contains("beta-1"));
         assert!(
             model
                 .active_session_tab()
                 .expect("active session")
                 .vt
                 .viewing_history(),
-            "full-screen redraw agents should enter history view even when row scrollback stays empty"
+            "full-screen redraw agents should still enter history view when they truly need snapshot fallback"
         );
+    }
+
+    #[test]
+    fn codex_status_churn_shift_uses_local_row_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &["status-a", "line-1", "line-2", "line-3", "line-4"],
+        );
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[H\x1b[1;1Hstatus-b\x1b[2;1Hline-2\x1b[3;1Hline-3\x1b[4;1Hline-4\x1b[5;1Hline-5".to_vec(),
+            ),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session.vt.uses_snapshot_scrollback(),
+            "Codex-like redraws with one changing status row should still derive local row history instead of falling back to page-sized snapshot scrolling"
+        );
+        assert!(
+            session.vt.max_scrollback() > 0,
+            "a vertical shift hidden by status churn should still contribute at least one local history row"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("line-1"));
+        assert!(!frozen.contains("status-a"));
+        assert!(!frozen.contains("line-5"));
     }
 
     #[test]

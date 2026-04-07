@@ -1,5 +1,48 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: full-viewport vt100 scrollback cannot represent partial redraw scroll regions
+
+### 事象
+
+Codex pane で fixed header / status を含む redraw を line scroll にしようとしても、
+synthetic row を `scrollback_parser` へ流し込む実装では header 行ばかりが scrollback に押し出され、
+本当に消えた本文行が戻ってこなかった。
+
+### 原因
+
+- `scrollback_parser` は terminal 全体の scrollback を表現するもので、部分スクロール領域を持つ redraw をそのまま再現できない。
+- その状態で synthetic row を最下段へ流すと、parser が押し出すのは viewport 最上段の row であり、
+  fixed header がある pane では消えた本文行ではなく header 行が履歴化される。
+- つまり問題は shift 検出だけではなく、`full-viewport scrollback parser` を
+  partial scroll region の history source に流用していた設計そのものだった。
+
+### 再発防止策
+
+1. agent pane の local line history は `vt100 scrollback` に無理やり注入せず、pane-local row cache として保持する。
+2. fixed header / status churn を含む vertical shift は「どの row が本当に画面外へ出たか」を RED テストで固定する。
+3. scrollback source と visible viewport source を一致させ、partial redraw の history だけ別 parser semantics に依存させない。
+
+## 2026-04-07 — fix: redraw-shift row-history promotion must not depend on `clear+home`
+
+### 事象
+
+Codex pane の scroll が依然として snapshot mode のままで、
+wheel / trackpad の 1 step が 1 frame になり、ページ単位のように見えた。
+
+### 原因
+
+- `detect_vertical_redraw_shift()` 自体は存在したが、`synthetic_scrollback_rows()` が
+  `\x1b[2J\x1b[H` を含む segment に限定していた。
+- そのため `home + repaint` や差分 redraw のように `clear+home` を出さない full-screen repaint では、
+  snapshot 間に明確な縦シフトがあっても local row history に昇格しなかった。
+- 結果として `max_scrollback == 0` が続き、Codex pane は snapshot fallback のまま page-like scroll になっていた。
+
+### 再発防止策
+
+1. agent pane の redraw-shift 正規化は特定の control sequence に縛らず、連続 snapshot の visible/formatted surface 差分そのものを基準にする。
+2. `clear+home` ありケースだけでなく、`home + repaint` ケースの RED 回帰テストを model で固定する。
+3. live debug 前には「見ている log が現行プロセスのものか」を PID と env で確認し、stale log を根拠にしない。
+
 ## 2026-04-07 — fix: snapshot-backed agent scroll を PTY keyboard input に変換してはいけない
 
 ### 事象

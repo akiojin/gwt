@@ -63,7 +63,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 13. When the user presses a key that is forwarded to the active PTY while browsing history, reset the viewport to live-follow before queueing the input bytes.
 14. When an agent pane enables SGR mouse reporting, forward wheel / trackpad scroll gestures to the PTY instead of applying gwt-local scrollback so the agent owns redraw semantics.
 15. When an agent pane does not negotiate SGR mouse reporting, keep wheel / Terminal.app right-drag input on gwt-local scrollback instead of synthesizing cursor-key PTY input.
-16. For full-screen redraw agent panes, detect vertical overlap shifts between consecutive frames and promote the scrolled-off rows into normalized local row history before falling back to snapshot stepping.
+16. For full-screen redraw agent panes, detect vertical overlap shifts between consecutive frames and promote the scrolled-off rows into a pane-local row cache before falling back to snapshot stepping, so fixed headers / status rows do not force page-sized scrolling even when the repaint used `home + repaint` instead of `clear+home`.
 17. Keep the decision capability-driven: only PTY-mouse-enabled panes use PTY-owned scrolling; all other panes remain on local scrollback and keep their local scrollbar overlay.
 18. For agent panes that still require local snapshot fallback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so fallback history does not collapse to a single final frame.
 
