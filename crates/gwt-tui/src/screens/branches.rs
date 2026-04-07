@@ -517,9 +517,13 @@ impl BranchesState {
     }
 
     /// Returns true when `branch` is allowed to participate in Branch Cleanup
-    /// selection (FR-018b). Protected names, the current HEAD, branches that
-    /// are checked out by another worktree, and branches with active session
-    /// panes are all rejected before any merge state is consulted.
+    /// selection (FR-018b).
+    ///
+    /// Protected names, the current HEAD, and branches with an active agent
+    /// or shell session are rejected. Feature branches that are checked out
+    /// by a worktree **are still candidates** — cleaning up the worktree is
+    /// the whole point of Branch Cleanup in a gwt workflow where every
+    /// branch normally has its own worktree.
     pub fn is_cleanable_candidate(&self, branch: &str) -> bool {
         if gwt_git::is_protected_branch(branch) {
             return false;
@@ -529,9 +533,6 @@ impl BranchesState {
             .as_deref()
             .is_some_and(|head| head == branch)
         {
-            return false;
-        }
-        if self.checked_out_branches.contains(branch) {
             return false;
         }
         if self.active_session_branches.contains(branch) {
@@ -1016,7 +1017,11 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             //   `✔` — branch is cleanable right now but not selected
             //   ` ` — protected, not merged, or otherwise non-selectable
             let spinner_glyph = state.merge_spinner_glyph();
-            let (gutter_glyph, gutter_color) = if state.is_cleanup_selected(&branch.name) {
+            // Remote-tracking branches never participate in Branch Cleanup
+            // so their gutter stays blank regardless of merge state.
+            let (gutter_glyph, gutter_color) = if !branch.is_local {
+                (" ", theme::color::TEXT_SECONDARY)
+            } else if state.is_cleanup_selected(&branch.name) {
                 ("\u{25CF}", theme::color::ACTIVE)
             } else if !state.is_cleanable_candidate(&branch.name) {
                 (" ", theme::color::TEXT_SECONDARY)
@@ -2317,14 +2322,17 @@ mod tests {
     }
 
     #[test]
-    fn toggle_cleanup_selection_rejects_branch_checked_out_elsewhere() {
+    fn toggle_cleanup_selection_allows_branch_with_worktree() {
+        // FR-018b (revised): feature branches that have their own worktree
+        // are still cleanup candidates — removing the worktree is the whole
+        // point of Branch Cleanup in a gwt workflow.
         let mut state = cleanup_state_with(vec![feature("feature/foo")]);
         state.checked_out_branches.insert("feature/foo".to_string());
         state.set_merge_state(
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert!(state.toggle_cleanup_selection("feature/foo"));
     }
 
     #[test]
