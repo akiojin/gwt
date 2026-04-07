@@ -1,5 +1,23 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: alt-screen では row scrollback ではなく snapshot を優先する
+
+### 事象
+
+スクロールバーは動くのに、実際の terminal 画面が切り替わらないケースがあった。
+
+### 原因
+
+- scroll path / scrollbar metrics が `max_scrollback > 0` を優先していた。
+- main-screen の row scrollback が残っている状態で alt-screen に入ると、
+  実際に見ているのは alt-screen なのに row scrollback 経路へ入り、表示と指標が乖離した。
+
+### 再発防止策
+
+1. `alternate_screen()` 中は snapshot-backed scrollback を優先する。
+2. scroll handler と scrollbar metrics で同じ判定（snapshot優先）を共有する。
+3. 「main output 後に alt-screen へ遷移しても snapshot scroll が効く」回帰テストを固定する。
+
 ## 2026-04-07 — fix: snapshot cache は viewport-shift 推定ではなく VT確定フレーム履歴で扱う
 
 ### 事象

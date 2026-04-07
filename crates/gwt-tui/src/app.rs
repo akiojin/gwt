@@ -3539,7 +3539,7 @@ fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
     };
 
     session.vt.clear_selection();
-    if session.vt.max_scrollback() == 0 {
+    if session.vt.uses_snapshot_scrollback() {
         let previous_position = session.vt.snapshot_position();
         let previous_follow_live = session.vt.follow_live();
         let changed = if delta_rows > 0 {
@@ -3667,23 +3667,21 @@ fn session_scrollbar_area(session: &crate::model::SessionTab, area: Rect) -> Opt
 }
 
 fn session_has_scrollbar(session: &crate::model::SessionTab) -> bool {
-    session.vt.max_scrollback() > 0 || session.vt.has_snapshot_scrollback()
+    if session.vt.uses_snapshot_scrollback() {
+        session.vt.has_snapshot_scrollback()
+    } else {
+        session.vt.max_scrollback() > 0
+    }
 }
 
 fn session_scrollbar_metrics(
     session: &crate::model::SessionTab,
     viewport_height: usize,
 ) -> Option<(usize, usize, usize)> {
-    if session.vt.max_scrollback() > 0 {
-        let content_length = session.vt.max_scrollback().saturating_add(viewport_height);
-        let position = session
-            .vt
-            .max_scrollback()
-            .saturating_sub(session.vt.scrollback());
-        return Some((content_length, position, viewport_height));
-    }
-
-    if session.vt.has_snapshot_scrollback() {
+    if session.vt.uses_snapshot_scrollback() {
+        if !session.vt.has_snapshot_scrollback() {
+            return None;
+        }
         let visible_viewport = viewport_height.max(1);
         return Some((
             session
@@ -3694,6 +3692,15 @@ fn session_scrollbar_metrics(
             session.vt.snapshot_position(),
             visible_viewport,
         ));
+    }
+
+    if session.vt.max_scrollback() > 0 {
+        let content_length = session.vt.max_scrollback().saturating_add(viewport_height);
+        let position = session
+            .vt
+            .max_scrollback()
+            .saturating_sub(session.vt.scrollback());
+        return Some((content_length, position, viewport_height));
     }
 
     None
@@ -5237,6 +5244,44 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }),
         );
+        let after = render_model_text(&model, 24, 8);
+        assert!(after.contains("frame-1"));
+        assert!(!after.contains("frame-2"));
+    }
+
+    #[test]
+    fn snapshot_scrollback_works_in_alt_screen_after_main_output() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+
+        for index in 0..20 {
+            append_session_line(&mut model, "shell-0", &format!("seed-{index}"));
+        }
+
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(session.vt.uses_snapshot_scrollback());
+        assert!(session.vt.has_snapshot_scrollback());
+
+        let before = render_model_text(&model, 24, 8);
+        assert!(before.contains("frame-2"));
+        assert!(!before.contains("frame-1"));
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
         let after = render_model_text(&model, 24, 8);
         assert!(after.contains("frame-1"));
         assert!(!after.contains("frame-2"));

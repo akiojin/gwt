@@ -65,3 +65,5 @@
 - [x] T052 Apply SGR leak normalization regardless of terminal focus state and keep timeout tuned for practical trackpad sequence jitter.
 - [x] T053 [P] Write RED tests: overlap-row churn and in-place redraws still remain reviewable as long as the resulting VT frame is distinct.
 - [x] T054 Finalize snapshot capture in `model.rs`/`app.rs` around distinct-frame history semantics and update focused regression expectations.
+- [x] T055 [P] Write RED tests: alternate-screen snapshot scrollback remains functional even when main-screen row scrollback already exists.
+- [x] T056 Prefer snapshot-backed scroll path and scrollbar metrics while alternate-screen is active, regardless of non-zero row scrollback.

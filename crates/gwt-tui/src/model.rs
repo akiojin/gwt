@@ -536,6 +536,10 @@ impl VtState {
         self.max_scrollback
     }
 
+    pub fn uses_snapshot_scrollback(&self) -> bool {
+        self.max_scrollback == 0 || self.parser.screen().alternate_screen()
+    }
+
     pub fn set_scrollback(&mut self, rows: usize) {
         self.parser.set_scrollback(rows.min(self.max_scrollback));
     }
@@ -553,7 +557,7 @@ impl VtState {
     }
 
     pub fn has_snapshot_scrollback(&self) -> bool {
-        self.max_scrollback == 0 && self.snapshots.len() > 1
+        self.uses_snapshot_scrollback() && self.snapshots.len() > 1
     }
 
     pub fn snapshot_count(&self) -> usize {
@@ -640,7 +644,7 @@ impl VtState {
     }
 
     fn active_snapshot(&self) -> Option<&ScreenSnapshot> {
-        if self.max_scrollback > 0 {
+        if !self.uses_snapshot_scrollback() {
             return None;
         }
         self.snapshot_cursor
@@ -648,7 +652,7 @@ impl VtState {
     }
 
     fn capture_snapshot(&mut self) {
-        if self.max_scrollback > 0 {
+        if !self.uses_snapshot_scrollback() {
             return;
         }
 
@@ -1222,6 +1226,32 @@ mod tests {
         assert!(vt.scroll_snapshot_down(1));
         assert!(vt.follow_live());
         assert!(vt.snapshot_parser().is_none());
+    }
+
+    #[test]
+    fn alternate_screen_uses_snapshot_history_even_with_existing_row_scrollback() {
+        let mut vt = VtState::new(5, 20);
+        for index in 0..12 {
+            vt.process(format!("seed-{index}\r\n").as_bytes());
+        }
+        assert!(vt.max_scrollback() > 0);
+        assert!(!vt.screen().alternate_screen());
+        assert!(!vt.uses_snapshot_scrollback());
+
+        vt.process(b"\x1b[?1049h\x1b[2J\x1b[Hframe-1");
+        vt.process(b"\x1b[2J\x1b[Hframe-2");
+
+        assert!(vt.screen().alternate_screen());
+        assert!(vt.uses_snapshot_scrollback());
+        assert!(vt.has_snapshot_scrollback());
+
+        assert!(vt.scroll_snapshot_up(1));
+        let snapshot = vt
+            .snapshot_parser()
+            .expect("snapshot parser should exist while browsing alternate-screen history");
+        let contents = snapshot.screen().contents();
+        assert!(contents.contains("frame-1"));
+        assert!(!contents.contains("frame-2"));
     }
 
     #[test]
