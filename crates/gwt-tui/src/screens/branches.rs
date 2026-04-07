@@ -1017,19 +1017,24 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             //   `✔` — branch is cleanable right now but not selected
             //   ` ` — protected, not merged, or otherwise non-selectable
             let spinner_glyph = state.merge_spinner_glyph();
-            // Remote-tracking branches never participate in Branch Cleanup
-            // so their gutter stays blank regardless of merge state.
+            // Branch Cleanup gutter glyphs:
+            //   `●` (cyan)   — selected for cleanup
+            //   `✔` (green)  — cleanable now (merged into main or develop)
+            //   spinner      — merge detection still running
+            //   `·` (gray)   — local feature branch with unmerged commits
+            //   `–` (dim)    — protected / current HEAD / active session
+            //   ` ` (blank)  — remote-tracking branch (never a candidate)
             let (gutter_glyph, gutter_color) = if !branch.is_local {
-                (" ", theme::color::TEXT_SECONDARY)
+                (" ", theme::color::TEXT_DISABLED)
             } else if state.is_cleanup_selected(&branch.name) {
                 ("\u{25CF}", theme::color::ACTIVE)
             } else if !state.is_cleanable_candidate(&branch.name) {
-                (" ", theme::color::TEXT_SECONDARY)
+                ("\u{2013}", theme::color::TEXT_DISABLED)
             } else {
                 match state.merge_state(&branch.name) {
                     MergeState::Computing => (spinner_glyph, theme::color::ACTIVE),
                     MergeState::Cleanable(_) => ("\u{2714}", theme::color::SUCCESS),
-                    MergeState::NotMerged => (" ", theme::color::TEXT_SECONDARY),
+                    MergeState::NotMerged => ("\u{00B7}", theme::color::TEXT_SECONDARY),
                 }
             };
 
