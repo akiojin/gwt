@@ -4365,12 +4365,8 @@ fn active_session_prefers_pty_mouse_scroll(model: &Model) -> bool {
 }
 
 fn session_prefers_pty_mouse_scroll(session: &crate::model::SessionTab) -> bool {
-    match &session.tab_type {
-        SessionTabType::Agent { agent_id, .. } => {
-            agent_id == "codex" || session.vt.accepts_mouse_scroll_input()
-        }
-        SessionTabType::Shell => false,
-    }
+    matches!(session.tab_type, SessionTabType::Agent { .. })
+        && session.vt.accepts_mouse_scroll_input()
 }
 
 fn queue_active_session_mouse_scroll(
@@ -6783,7 +6779,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_mouse_wheel_forwards_to_pty_without_explicit_mouse_reporting() {
+    fn codex_without_mouse_reporting_uses_local_scrollback() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -6821,12 +6817,10 @@ mod tests {
         .expect("mouse input should succeed");
 
         assert!(handled);
-        let forwarded = model
-            .pending_pty_inputs()
-            .back()
-            .expect("queued codex mouse input");
-        assert_eq!(forwarded.session_id, "agent-0");
-        assert_eq!(forwarded.bytes, b"\x1b[<64;1;1M".to_vec());
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "Codex panes without explicit mouse-reporting capability should stay on local scrollback"
+        );
 
         let session = model.active_session_tab().expect("active session");
         assert!(
@@ -6834,8 +6828,12 @@ mod tests {
             "precondition: local snapshot history still exists for Codex redraw panes"
         );
         assert!(
-            !session_has_scrollbar(session),
-            "Codex panes should suppress the local scrollbar while PTY-owned scrolling is active"
+            session_has_scrollbar(session),
+            "Codex panes should keep the local scrollbar when scrolling is handled by gwt-local history"
+        );
+        assert!(
+            session.vt.viewing_history(),
+            "wheel input should move Codex panes into local history when no PTY mouse capability was negotiated"
         );
     }
 
@@ -9829,8 +9827,10 @@ CUSTOM_ENV = "enabled"
         let mut observed = None;
         for _ in 0..50 {
             if let Ok(value) = fs::read_to_string(&marker) {
-                observed = Some(value);
-                break;
+                if !value.is_empty() {
+                    observed = Some(value);
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9875,8 +9875,10 @@ CUSTOM_ENV = "enabled"
         let mut observed = None;
         for _ in 0..50 {
             if let Ok(value) = fs::read_to_string(&marker) {
-                observed = Some(value);
-                break;
+                if !value.is_empty() {
+                    observed = Some(value);
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

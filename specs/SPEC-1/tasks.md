@@ -88,4 +88,4 @@
 - [x] T075 Refresh SPEC-1 artifacts, lessons learned, and focused/full verification for the memory-only agent scrollback design.
 - [x] T076 Write RED tests and implement `forward_key_to_active_session()` live-follow reset so PTY-bound key input exits row/snapshot history before forwarding bytes.
 - [x] T077 Write RED tests and implement agent-pane PTY mouse-scroll forwarding so SGR mouse-enabled agents receive wheel / right-drag scroll input directly instead of gwt-local scrollback.
-- [x] T078 Extend PTY-owned scroll handling to Codex panes and suppress the stale local scrollbar overlay whenever agent scrolling is delegated to the PTY.
+- [x] T078 Keep agent scroll ownership capability-driven: PTY-mouse-enabled panes use PTY scroll, panes without that capability stay on local scrollback, and stale local scrollbar overlays are suppressed only in the PTY-owned path.
