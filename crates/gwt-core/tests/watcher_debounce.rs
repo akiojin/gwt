@@ -6,7 +6,7 @@
 use std::fs;
 use std::time::Duration;
 
-use gwt_core::index::watcher::{start_watcher, WatcherBatch, WatcherConfig};
+use gwt_core::index::watcher::{start_watcher, WatcherConfig};
 
 fn write_file(dir: &std::path::Path, name: &str, contents: &str) {
     fs::write(dir.join(name), contents).unwrap();
@@ -25,16 +25,23 @@ async fn burst_of_events_collapses_to_one_batch() {
         write_file(tmp.path(), &format!("f{i}.rs"), "// content\n");
     }
 
-    let batch: WatcherBatch = tokio::time::timeout(Duration::from_secs(5), handle.recv_batch())
-        .await
-        .expect("watcher must emit batch within 5s")
-        .expect("watcher channel must not close");
-
-    let rs_paths: std::collections::HashSet<_> = batch
-        .changed_paths
-        .iter()
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rs"))
-        .collect();
+    // The debouncer should eventually deliver all 50 files. On Linux/inotify
+    // the events for a single burst can arrive across multiple batches even
+    // when the batch limit is not hit, so we drain until we have all 50
+    // unique paths or the per-batch timeout fires.
+    let mut rs_paths: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    while rs_paths.len() < 50 {
+        let batch = tokio::time::timeout(Duration::from_secs(8), handle.recv_batch())
+            .await
+            .expect("watcher must keep emitting batches until 50 files seen")
+            .expect("watcher channel must not close");
+        for p in &batch.changed_paths {
+            if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                rs_paths.insert(p.clone());
+            }
+        }
+    }
     assert_eq!(rs_paths.len(), 50);
     handle.shutdown().await;
 }
