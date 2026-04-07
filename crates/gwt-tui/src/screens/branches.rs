@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use gwt_agent::AgentStatus;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
@@ -133,6 +134,19 @@ pub struct DetailSessionSummary {
     pub active: bool,
 }
 
+/// Lightweight live session summary rendered directly in the branch list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchLiveSessionSummary {
+    pub indicators: Vec<BranchLiveSessionIndicator>,
+}
+
+/// Lightweight live session indicator rendered directly in the branch list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BranchLiveSessionIndicator {
+    pub status: AgentStatus,
+    pub color: crate::model::AgentColor,
+}
+
 /// Lifecycle action requested for a Docker container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockerLifecycleAction {
@@ -214,6 +228,10 @@ pub struct BranchesState {
     pub(crate) loading_branches: HashSet<String>,
     /// Monotonic generation used to discard stale async detail results.
     pub(crate) detail_generation: u64,
+    /// Hook-derived live session summaries keyed by branch name.
+    pub(crate) live_session_summaries: HashMap<String, BranchLiveSessionSummary>,
+    /// Tick-driven animation counter for branch-row running indicators.
+    pub(crate) session_animation_tick: usize,
 }
 
 impl BranchesState {
@@ -783,7 +801,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             } else {
                 ""
             };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 super::selection_prefix(idx == state.selected),
                 Span::styled(
                     &branch.name,
@@ -792,17 +810,86 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
                 Span::raw(" "),
                 Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
                 Span::styled(head_indicator, Style::default().fg(theme::color::SUCCESS)),
-            ]);
-            ListItem::new(line)
+            ];
+            let left_width = spans_width(&spans);
+            let available_summary_width = area.width as usize;
+            if let Some(summary_spans) =
+                state
+                    .live_session_summaries
+                    .get(&branch.name)
+                    .and_then(|summary| {
+                        build_branch_live_summary(
+                            summary,
+                            state.session_animation_tick,
+                            available_summary_width.saturating_sub(left_width.saturating_add(1)),
+                        )
+                    })
+            {
+                let summary_width = spans_width(&summary_spans);
+                let gap = available_summary_width
+                    .saturating_sub(left_width.saturating_add(summary_width))
+                    .max(1);
+                spans.push(Span::raw(" ".repeat(gap)));
+                spans.extend(summary_spans);
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
     let list = List::new(items)
         .block(Block::default())
-        .highlight_style(theme::style::active_item());
+        .highlight_style(Style::default());
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn build_branch_live_summary(
+    summary: &BranchLiveSessionSummary,
+    animation_tick: usize,
+    available_width: usize,
+) -> Option<Vec<Span<'static>>> {
+    if available_width == 0 {
+        return None;
+    }
+
+    let spinner = running_spinner_frame(animation_tick);
+    let visible_indicators = summary.indicators.iter().take(available_width);
+    let spans: Vec<Span<'static>> = visible_indicators
+        .map(|indicator| {
+            Span::styled(
+                spinner.to_string(),
+                Style::default().fg(branch_live_indicator_color(indicator.color)),
+            )
+        })
+        .collect();
+
+    if spans.is_empty() {
+        None
+    } else {
+        Some(spans)
+    }
+}
+
+fn running_spinner_frame(animation_tick: usize) -> char {
+    const FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
+    FRAMES[animation_tick % FRAMES.len()]
+}
+
+fn branch_live_indicator_color(color: crate::model::AgentColor) -> Color {
+    match color {
+        crate::model::AgentColor::Green => Color::Green,
+        crate::model::AgentColor::Blue => Color::Blue,
+        crate::model::AgentColor::Cyan => Color::Cyan,
+        crate::model::AgentColor::Yellow => Color::Yellow,
+        crate::model::AgentColor::Magenta => Color::Magenta,
+        crate::model::AgentColor::Gray => Color::Gray,
+    }
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.chars().count()).sum()
 }
 
 /// Overview section: branch name, HEAD indicator, category, worktree path.
@@ -1951,6 +2038,117 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("\u{258E} \u{25CF} Shell  Shell: develop")),
             "Sessions pane should show the selected-row marker on the current row"
+        );
+    }
+
+    #[test]
+    fn render_branch_list_shows_running_summary_on_wide_rows() {
+        let mut state = BranchesState::default();
+        state.branches = vec![BranchItem {
+            name: "feature/live".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-live")),
+        }];
+        state.live_session_summaries.insert(
+            "feature/live".to_string(),
+            BranchLiveSessionSummary {
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                }],
+            },
+        );
+        state.session_animation_tick = 0;
+
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_list(&state, f, f.area());
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("feature/live") && line.contains("◐") && !line.contains("run ")),
+            "wide rows should keep the old-TUI left side and add a right-aligned spinner-only indicator"
+        );
+    }
+
+    #[test]
+    fn render_branch_list_keeps_waiting_sessions_visible_with_spinner_indicator() {
+        let mut state = BranchesState::default();
+        state.branches = vec![BranchItem {
+            name: "feature/wait".to_string(),
+            is_head: false,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-wait")),
+        }];
+        state.live_session_summaries.insert(
+            "feature/wait".to_string(),
+            BranchLiveSessionSummary {
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Green,
+                }],
+            },
+        );
+        state.session_animation_tick = 0;
+
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_list(&state, f, f.area());
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("feature/wait"))
+                && lines.iter().any(|line| line.contains("◐"))
+                && !lines.iter().any(|line| line.contains(" wait ")),
+            "waiting rows should keep a spinner-only indicator instead of a textual wait label"
+        );
+    }
+
+    #[test]
+    fn render_branch_list_omits_live_summary_before_branch_label_on_narrow_rows() {
+        let mut state = BranchesState::default();
+        state.branches = vec![BranchItem {
+            name: "feature/narrow".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-narrow")),
+        }];
+        state.live_session_summaries.insert(
+            "feature/narrow".to_string(),
+            BranchLiveSessionSummary {
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                }],
+            },
+        );
+
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_list(&state, f, f.area());
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("feature/narrow")),
+            "narrow rows should preserve the branch label even if the spinner strip must disappear"
         );
     }
 

@@ -2,7 +2,7 @@
 
 ## Background
 
-gwt infrastructure covers four domains: build/distribution (GitHub Release + bunx/npx), Docker integration UI (detection, container lifecycle, port mapping), embedded skill management, and Codex hooks.json merge. Docker UI screens existed in the old TUI (v6.30.3) and need restoration to the current ratatui-based TUI. The hooks.json merge feature was 65% complete (20/31 tasks done) in the archived SPEC-1786 before it was consolidated into this SPEC. Embedded skill management also owns keeping the bundled `.claude/skills/gwt-*` assets aligned with the current local SPEC artifact model, including persisted `analysis.md`, and now covers the pre-SPEC intake entrypoint that interviews rough requests before any `spec.md` is drafted.
+gwt infrastructure covers four domains: build/distribution (GitHub Release + bunx/npx), Docker integration UI (detection, container lifecycle, port mapping), embedded skill management, and managed hook configuration for Claude Code / Codex. Docker UI screens existed in the old TUI (v6.30.3) and need restoration to the current ratatui-based TUI. The older archived hooks.json merge work from SPEC-1786 remains as a generic utility in `hooks.rs`, but the active Claude/Codex runtime-hook path is now a typed config generator that writes `.claude/settings.local.json` and `.codex/hooks.json`, preserves user hooks, preserves tracked Codex hook files by default, migrates tracked files that still contain legacy gwt-managed runtime forwarders, and emits no-Node live-state commands that write `GWT_SESSION_RUNTIME_PATH`. Embedded skill management also owns keeping the bundled `.claude/skills/gwt-*` assets aligned with the current local SPEC artifact model, including persisted `analysis.md`, and now covers the pre-SPEC intake entrypoint that interviews rough requests before any `spec.md` is drafted.
 
 ## User Stories
 
@@ -29,39 +29,46 @@ As a developer, I want gwt to detect Docker environments and launch agents insid
 5. Given a running container, when I use the container management UI, then I can start, stop, or restart the container.
 6. Given a .devcontainer/devcontainer.json exists, when gwt starts, then DevContainer detection is offered as an alternative.
 
-### US-3: Distribute Embedded Skills to Worktrees on Agent Launch (P1) -- NOT IMPLEMENTED
+### US-3: Distribute Embedded Skills to Worktrees on Agent Launch (P1) -- IMPLEMENTED
 
 As a developer, I want gwt to bundle all embedded skills, commands, and hooks into the binary and distribute them to the target worktree every time an agent is launched, so that agents always have up-to-date skill definitions without manual configuration.
 
 **Acceptance Scenarios**
 
-1. Given an agent is launched from gwt, when the launch completes, then `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.codex/skills/` are written to the target worktree with the bundled skill files.
+1. Given an agent is launched from gwt, when the launch completes, then `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.codex/skills/`, and `.codex/hooks/scripts/` are written to the target worktree with the bundled skill files.
 2. Given the target worktree already has older untracked gwt-managed skill files, when an agent is launched, then those generated files are overwritten with the latest bundled versions.
 3. Given the target worktree tracks `.claude/*` or `.codex/*` gwt asset paths in Git, when an agent is launched, then distribution preserves those tracked files and only writes untracked generated targets.
-4. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` is generated with gwt-managed hooks, preserving any existing user-defined hooks via merge logic.
-5. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.claude/settings.local.json`).
+4. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` and `.codex/hooks.json` for untracked worktrees or tracked worktrees that still carry legacy gwt-managed runtime forward hooks are generated or migrated with gwt-managed runtime hooks, preserving any existing user-defined hooks while replacing only gwt-managed runtime entries.
+5. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.codex/hooks/scripts/gwt-*`, `.claude/settings.local.json`, `.codex/hooks.json`).
 6. Given the gwt binary is built, when build.rs runs, then all SKILL.md files are validated for YAML frontmatter syntax errors, and the build fails with a clear error if any SKILL.md has malformed YAML.
 7. Given all skills are bundled, when the binary starts, then no runtime file I/O is needed to read skill definitions — skills are embedded in the binary via `include_dir`.
 
-### US-4: Merge hooks.json Preserving User Hooks (P1) -- PARTIALLY IMPLEMENTED
+### US-4: Generate Managed Claude/Codex Hook Configs Preserving User Hooks (P1) -- IMPLEMENTED
 
-As a developer, I want gwt to merge its managed hooks into hooks.json without overwriting my custom hooks so that both gwt automation and my personal hooks coexist.
+As a developer, I want gwt to generate managed Claude/Codex hook configs without overwriting my custom hooks so that both gwt automation and my personal hooks coexist.
 
 **Acceptance Scenarios**
 
-1. Given hooks.json contains user-defined hooks, when gwt updates its managed hooks, then user hooks are preserved.
-2. Given gwt-managed hooks are identified by a comment marker, when merging, then only gwt-managed entries are updated.
-3. Given hooks.json is corrupted, when gwt attempts to merge, then a backup is created and recovery is attempted.
-4. Given a Codex agent session is starting, when hooks need to be written, then a confirmation dialog is shown.
+1. Given `.claude/settings.local.json` or an untracked `.codex/hooks.json` contains user-defined hooks, when gwt updates its managed runtime hooks, then user hooks are preserved.
+2. Given a prior config contains stale gwt-managed runtime hooks, when gwt regenerates the file, then only the gwt-managed runtime entries are replaced.
+3. Given Codex runtime hooks are generated for an untracked worktree, when the file is written, then live-state hook commands update `GWT_SESSION_RUNTIME_PATH` directly without a Node-based forwarder.
+4. Given `.codex/hooks.json` is tracked by Git in the target worktree and contains no legacy gwt-managed runtime forward hooks, when an agent launches, then gwt does not rewrite that file and does not dirty tracked source files.
+5. Given `.codex/hooks.json` is tracked by Git in the target worktree and still contains legacy gwt-managed runtime forward hooks, when an agent launches, then gwt migrates only the gwt-managed runtime entries to the current no-Node form while preserving user hooks.
+6. Given gwt launches a Codex agent session, when the launch command is built, then Codex starts with the `codex_hooks` feature enabled so `hooks.json` actually executes.
+7. Given interactive Codex does not emit `SessionStart` before the first prompt, when gwt launches that session successfully, then downstream launch code may bootstrap a `Running` runtime sidecar until the first real hook event overwrites it.
 
 ## Edge Cases
 
 - Docker daemon not running when Docker workflow is selected.
 - docker-compose.yml references images that do not exist locally.
 - Port conflict on a privileged port (below 1024).
-- hooks.json contains syntax errors or is not valid JSON.
-- hooks.json is a symlink to a shared configuration.
-- Multiple gwt instances attempting concurrent hooks.json merge.
+- `.claude/settings.local.json` or `.codex/hooks.json` contains invalid JSON and must be treated as a recoverable empty-object input.
+- `.codex/hooks.json` is tracked by Git in the target worktree and contains no legacy gwt-managed runtime forward hooks; it must not be rewritten.
+- `.codex/hooks.json` is tracked by Git in the target worktree and still contains legacy gwt-managed runtime forward hooks; those gwt-managed runtime entries must be migrated without dropping user hooks.
+- `.codex/hooks.json` is tracked by Git in the target worktree and contains gwt-managed runtime commands for a non-host shell (for example, POSIX `sh -lc` on Windows); those managed entries must be normalized so runtime updates keep working.
+- Codex has `hooks.json` available but the `codex_hooks` feature flag is not enabled at launch.
+- Interactive Codex launches may not emit `SessionStart` before the first prompt, even though `hooks.json` is present and `codex_hooks` is enabled.
+- Multiple gwt instances are running simultaneously; runtime hook commands must use the injected `GWT_SESSION_RUNTIME_PATH` instead of recomputing shared global paths.
 - Target worktree is read-only or has insufficient disk space for skill distribution.
 - `.git/info/exclude` does not exist (must be created).
 - `.claude/settings.local.json` contains user-defined hooks that conflict with gwt-managed hooks.
@@ -70,6 +77,26 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - Target worktree tracks bundled `.claude/*` or `.codex/*` assets in Git; distribution must not dirty tracked source files.
 - npm postinstall script runs in an environment without internet access.
 - GitHub Release workflow runs but binary compilation fails on one platform.
+
+## Regression Guardrail: Claude/Codex Runtime Hooks
+
+Runtime-hook regressions repeatedly occurred when only one layer (config generation, launch args, or UI rendering) was validated in isolation. Hook reliability in this domain is defined by end-to-end sidecar observability, not by config file presence alone.
+
+### Recurring failure pattern to preserve
+
+1. `hooks.json` existed but Codex runtime hooks were inactive because launch omitted `--enable codex_hooks`.
+2. `GWT_SESSION_RUNTIME_PATH` pointed outside the worktree, but Codex sandbox writable roots did not include `~/.gwt/sessions/runtime/<gwt-pid>`.
+3. Tracked `.codex/hooks.json` files kept legacy Node forwarders and did not receive no-Node runtime-hook migration.
+4. Interactive Codex startup could delay `SessionStart`, so hook-only initialization left no early runtime sidecar.
+5. Hook asset/settings distribution happened too late for first-turn hook events.
+
+### Mandatory cross-layer checks for this SPEC scope
+
+- Launch contract: verify `--enable codex_hooks` and runtime writable-root injection on final materialized launch config.
+- Config contract: verify effective worktree hook files (`.claude/settings.local.json`, `.codex/hooks.json`) are current and no-Node.
+- Migration contract: verify tracked legacy `.codex/hooks.json` runtime entries are migrated while user hooks stay intact.
+- Runtime contract: verify PID-scoped sidecars are written/updated at `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`.
+- Startup contract: verify interactive Codex sessions are visible before first prompt via launch bootstrap, then overwritten by real hook events.
 
 ## Functional Requirements
 
@@ -89,7 +116,7 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 
 ### Embedded Skills — Build-Time Bundling
 
-- **FR-009**: All skill, command, and hook files under `.claude/skills/`, `.claude/commands/`, `.claude/hooks/scripts/` are embedded into the gwt binary at build time using `include_dir` crate. Embedded skill categories:
+- **FR-009**: All skill, command, and hook files under `.claude/skills/`, `.claude/commands/`, `.claude/hooks/scripts/`, and `.codex/hooks/scripts/` are embedded into the gwt binary at build time using `include_dir` crate. Embedded skill categories:
   - PR management: gwt-pr, gwt-pr-check, gwt-pr-fix
   - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-deepen, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
   - Issue management: gwt-issue-register, gwt-issue-resolve, gwt-issue-search
@@ -105,10 +132,12 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
   - `.claude/commands/gwt-*.md` — Claude Code slash commands
   - `.claude/hooks/scripts/gwt-*.mjs` — Claude Code hooks
   - `.codex/skills/gwt-*/` — Codex skill definitions (same content as Claude)
+  - `.codex/hooks/scripts/gwt-*.mjs` — Codex hook scripts
 - **FR-013**: Distribution overwrites untracked gwt-managed generated files on each agent launch.
-- **FR-013a**: Distribution must skip writes for gwt-managed asset paths that are already tracked by Git in the target worktree.
-- **FR-014**: `.claude/settings.local.json` is generated on each agent launch. gwt-managed hooks are merged using `hooks.rs` merge logic, preserving user-defined hooks.
-- **FR-015**: `.git/info/exclude` is updated on each agent launch to exclude gwt-managed asset paths. Existing user entries are preserved; gwt-managed entries are delimited by `# gwt-managed-begin` / `# gwt-managed-end` markers.
+- **FR-013a**: Distribution must skip writes for gwt-managed asset paths that are already tracked by Git in the target worktree, except `.claude/settings.local.json` (always regenerated) and tracked `.codex/hooks.json` files that require runtime-hook migration.
+- **FR-014**: `.claude/settings.local.json` is generated on each agent launch from a typed hook-config builder even when tracked, preserving non-gwt hooks and unrelated Claude settings while replacing only gwt-managed runtime hooks.
+- **FR-014a**: `.codex/hooks.json` is generated on each agent launch when the file is untracked in the target worktree. Existing user hooks are preserved, gwt-managed runtime hooks are replaced, and tracked `.codex/hooks.json` files are left untouched unless they still contain legacy gwt-managed runtime forward hooks or gwt-managed runtime commands for a non-host shell.
+- **FR-015**: `.git/info/exclude` is updated on each agent launch to exclude gwt-managed asset paths, including `.codex/hooks.json`. Existing user entries are preserved; gwt-managed entries are delimited by `# gwt-managed-begin` / `# gwt-managed-end` markers.
 
 ### Embedded Skills — Quality Standards (Anthropic Guidelines)
 
@@ -116,52 +145,55 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 - **FR-017**: All SKILL.md body content uses imperative/infinitive form, stays under 500 lines, and delegates detailed logic to `references/` subdirectories (Progressive Disclosure).
 - **FR-018**: All SKILL.md frontmatter actively uses `allowed-tools`, `argument-hint`, and other applicable fields as defined by the Claude Code skill specification.
 
-### Hooks Merge (carried over from archived SPEC-1786)
+### Managed Runtime Hook Generation
 
-- **FR-019**: `write_managed_codex_hooks()` uses merge mode: read existing hooks.json, update only gwt-managed entries, write back.
-- **FR-020**: Preserve user-defined hooks during gwt-managed hook updates; never delete or modify entries without the gwt marker.
-- **FR-021**: gwt-managed hooks identified by a `"_gwt_managed": true` field on each managed hook entry.
-- **FR-022**: Confirmation dialog displayed for Codex agent sessions only before writing hooks.
-- **FR-023**: JSON corruption recovery: on parse failure, create timestamped backup, attempt recovery from last known good state, and fall back to writing gwt-only hooks if recovery fails.
+- **FR-019**: Claude and Codex runtime hook configs are generated from a shared typed builder so both surfaces emit the same live-state event mapping and hook ordering.
+- **FR-020**: Preserve user-defined hooks during gwt-managed runtime hook updates; only gwt-managed runtime entries are replaced.
+- **FR-021**: gwt-managed runtime hooks are identified by a command marker (`GWT_MANAGED_HOOK`) and legacy forward-hook command patterns during config sanitization.
+- **FR-022**: Live-state runtime hooks write directly to `GWT_SESSION_RUNTIME_PATH` and do not spawn Node-based runtime forwarders or `gwt hook` subprocesses.
+- **FR-023**: If `.codex/hooks.json` is tracked by Git in the target worktree, gwt preserves the tracked file unchanged unless it still contains legacy gwt-managed runtime forward hooks or gwt-managed runtime commands for a non-host shell; in those cases, gwt migrates only the gwt-managed runtime entries to the current host-compatible no-Node form while preserving user hooks.
+- **FR-023a**: Codex launch configs generated by gwt enable the `codex_hooks` feature flag so repo/user `hooks.json` files execute during gwt-managed sessions.
+- **FR-023b**: When `GWT_SESSION_RUNTIME_PATH` targets `~/.gwt/sessions/runtime/<gwt-pid>/...`, Codex launch configs also add that PID namespace directory as a writable root so runtime hooks can persist sidecars under `workspace-write` sandboxing.
+- **FR-023c**: Embedded runtime-hook distribution must not assume interactive Codex emits `SessionStart` immediately on launch. Downstream launch/bootstrap logic may pre-seed a `Running` sidecar before the first interactive hook event arrives.
 
 ## Non-Functional Requirements
 
 - **NFR-001**: Docker detection completes within 2 seconds (check for docker CLI and project files).
-- **NFR-002**: Hooks merge preserves 100% of user-defined hooks in all scenarios including corruption recovery.
+- **NFR-002**: Managed Claude/Codex hook regeneration preserves 100% of user-defined hooks in supported regeneration scenarios while never dirtying tracked `.codex/hooks.json` files that are already on the current runtime-hook shape.
 - **NFR-003**: Skill distribution to a worktree completes within 1 second.
 - **NFR-004**: Binary download via postinstall completes within 60 seconds on a typical connection.
 - **NFR-005**: Docker Progress screen updates in real-time (at least 1 update per second during build).
 
 ## Implementation Details
 
-### hooks.json Schema
+### Managed Hook Config Schema
 
 ```json
 {
   "hooks": {
-    "PreToolUse": [
+    "SessionStart": [
       {
-        "matcher": "Bash|Write|Edit",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/gwt-hook pre-tool $TOOL_NAME",
-            "// gwt-managed": true
+            "command": "GWT_MANAGED_HOOK=runtime-state sh -lc '...write $GWT_SESSION_RUNTIME_PATH...'"
           }
         ]
       }
     ],
-    "PostToolUse": [...],
     "UserPromptSubmit": [...],
-    "Notification": [...],
+    "PreToolUse": [...],
+    "PostToolUse": [...],
     "Stop": [...]
   }
 }
 ```
 
-- gwt-managed hooks identified by `"// gwt-managed": true` comment field
-- Merge logic: preserve all user hooks (without gwt-managed marker), update gwt-managed hooks
-- On corruption: backup to `hooks.json.bak`, write fresh managed hooks
+- gwt-managed runtime hooks are identified by the `GWT_MANAGED_HOOK` command marker
+- Merge logic: preserve all user hooks, update only gwt-managed runtime hooks
+- Codex tracked-file rule: if `.codex/hooks.json` is tracked, generation is skipped unless the file still contains gwt's legacy runtime forward-hook commands
+- Interactive Codex caveat: `SessionStart` may not be emitted before the first prompt, so downstream launch code must tolerate a hook-silent startup window
 
 ### Hooks Events
 
@@ -169,8 +201,8 @@ As a developer, I want gwt to merge its managed hooks into hooks.json without ov
 |-------|-------------|
 | `PreToolUse` | Before agent executes a tool |
 | `PostToolUse` | After agent executes a tool |
+| `SessionStart` | When the agent session starts |
 | `UserPromptSubmit` | When user submits a prompt |
-| `Notification` | On notification event |
 | `Stop` | When agent session stops |
 
 ### npm/bunx Distribution
@@ -245,12 +277,14 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 - **SC-007**: After agent launch, all embedded skill files exist in `.claude/skills/` and `.codex/skills/` in the target worktree.
 - **SC-011**: build.rs rejects a SKILL.md with malformed YAML frontmatter and produces a clear error message.
 - **SC-012**: `.git/info/exclude` contains gwt-managed markers and excludes all distributed asset paths.
-- **SC-013**: `.claude/settings.local.json` is generated with gwt-managed hooks and preserves user hooks across consecutive agent launches.
+- **SC-013**: `.claude/settings.local.json`, untracked `.codex/hooks.json`, and tracked `.codex/hooks.json` files that still contain legacy gwt runtime forward hooks are materialized with gwt-managed runtime hooks and preserve user hooks across consecutive agent launches.
 - **SC-014**: All SKILL.md descriptions use third-person voice and include specific trigger phrases.
 - **SC-015**: All SKILL.md bodies stay under 500 lines with detailed logic in `references/` subdirectories.
-- **SC-008**: hooks.json merge preserves user hooks across 10 consecutive gwt-managed updates.
-- **SC-009**: hooks.json corruption recovery creates backup and restores functionality.
-- **SC-010**: All carried-over hooks merge tests from SPEC-1786 continue to pass.
+- **SC-008**: Untracked `.codex/hooks.json` regeneration preserves user hooks across consecutive gwt-managed updates.
+- **SC-009**: Tracked `.codex/hooks.json` without legacy gwt runtime forward hooks remains unchanged after agent launch.
+- **SC-010**: Generated Claude/Codex runtime hooks contain no Node-based live-state forward command and write runtime state through `GWT_SESSION_RUNTIME_PATH`.
+- **SC-022**: A gwt-managed Codex launch includes `--enable codex_hooks`, so Codex runtime hooks execute in both tracked and untracked worktrees.
+- **SC-021**: Tracked `.codex/hooks.json` files that still contain legacy gwt runtime forward hooks are migrated to the no-Node runtime-hook shape before the launched Codex session starts.
 - **SC-016**: `gwt-design` creates a SPEC with DDD domain model through the full intake-to-clarification flow.
 - **SC-017**: `gwt-build` runs TDD Red-Green-Refactor in standalone mode without a SPEC.
 - **SC-018**: All 8 skills are callable standalone and produce correct results.
