@@ -73,71 +73,71 @@
 
 ### Phase 8a: Failing tests (TDD RED)
 
-- [ ] T-IDX-001 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_e5_prefix.py` covering `passage:` / `query:` prefix application and double-application avoidance
-- [ ] T-IDX-002 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_auto_build_fallback.py` covering missing-index auto-build, `--no-auto-build`, and stderr NDJSON progress
-- [ ] T-IDX-003 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_manifest_diff.py` covering full→incremental, deleted files, mtime/size change detection
-- [ ] T-IDX-004 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_flock.py` covering writer serialization, reader-after-writer, lock release on exception
-- [ ] T-IDX-005 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_issue_ttl.py` covering `last_full_refresh` updates, `status` action TTL output, `--respect-ttl` skip
-- [ ] T-IDX-006 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_repo_layout.py` covering `--repo-hash`/`--worktree-hash`/`--scope` to DB path resolution
-- [ ] T-IDX-007 [P] Write RED Rust test: `crates/gwt-core/tests/repo_hash.rs` covering HTTPS/SSH normalization, case insensitivity, hash format
-- [ ] T-IDX-008 [P] Write RED Rust test: `crates/gwt-core/tests/worktree_hash.rs` covering symlink canonicalization and relative-path rejection
-- [ ] T-IDX-009 [P] Write RED Rust test: `crates/gwt-core/tests/index_paths.rs` covering Issue/SPEC/Files DB path construction
-- [ ] T-IDX-010 [P] Write RED Rust test: `crates/gwt-core/tests/watcher_debounce.rs` covering burst debounce, batch size split, gitignore filtering, shutdown
-- [ ] T-IDX-011 [P] Write RED Rust test: `crates/gwt-core/tests/worktree_gc.rs` covering orphan removal, existing-worktree preservation, legacy `.gwt/index` removal
-- [ ] T-IDX-012 [P] Write RED Rust test: `crates/gwt-core/tests/issue_refresh.rs` covering TTL-expired kick, TTL-skipped no-op, background non-blocking
-- [ ] T-IDX-013 Write RED Rust e2e test: `crates/gwt-core/tests/index_runner_spawn.rs` (`#[ignore]`) spawning real Python runner with real e5 model
-- [ ] T-IDX-014 Verify all Phase 8a tests are RED via `pytest -q` and `cargo test`
+- [x] T-IDX-001 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_e5_prefix.py` covering `passage:` / `query:` prefix application and double-application avoidance
+- [x] T-IDX-002 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_auto_build_fallback.py` covering missing-index auto-build, `--no-auto-build`, and stderr NDJSON progress
+- [x] T-IDX-003 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_manifest_diff.py` covering full→incremental, deleted files, mtime/size change detection
+- [x] T-IDX-004 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_flock.py` covering writer serialization, reader-after-writer, lock release on exception
+- [x] T-IDX-005 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_issue_ttl.py` covering `last_full_refresh` updates, `status` action TTL output, `--respect-ttl` skip
+- [x] T-IDX-006 [P] Write RED Python test: `crates/gwt-core/runtime/tests/test_repo_layout.py` covering `--repo-hash`/`--worktree-hash`/`--scope` to DB path resolution
+- [x] T-IDX-007 [P] Write RED Rust test: `crates/gwt-core/tests/repo_hash.rs` covering HTTPS/SSH normalization, case insensitivity, hash format
+- [x] T-IDX-008 [P] Write RED Rust test: `crates/gwt-core/tests/worktree_hash.rs` covering symlink canonicalization and relative-path rejection
+- [x] T-IDX-009 [P] Write RED Rust test: `crates/gwt-core/tests/index_paths.rs` covering Issue/SPEC/Files DB path construction
+- [x] T-IDX-010 [P] Write RED Rust test: `crates/gwt-core/tests/watcher_debounce.rs` covering burst debounce, batch size split, gitignore filtering, shutdown
+- [x] T-IDX-011 [P] Write RED Rust test: `crates/gwt-core/tests/worktree_gc.rs` covering orphan removal, existing-worktree preservation, legacy `.gwt/index` removal
+- [x] T-IDX-012 [P] Write RED Rust test: `crates/gwt-core/tests/issue_refresh.rs` covering TTL-expired kick, TTL-skipped no-op, background non-blocking
+- [x] T-IDX-013 Write RED Rust e2e test: `crates/gwt-core/tests/index_runner_spawn.rs` (`#[ignore]`) spawning real Python runner with real e5 model
+- [x] T-IDX-014 Verify all Phase 8a tests are RED via `pytest -q` and `cargo test`
 
 ### Phase 8b: Runner redesign (Python)
 
-- [ ] T-IDX-015 Update `crates/gwt-core/runtime/project_index_requirements.txt` to add `sentence-transformers`, `portalocker` [Test: T-IDX-001..006]
-- [ ] T-IDX-016 Rewrite `crates/gwt-core/runtime/chroma_index_runner.py` argparse: add `--repo-hash`, `--worktree-hash`, `--scope`, `--no-auto-build`, `--respect-ttl`, `--mode {full|incremental}` [Test: T-IDX-006]
-- [ ] T-IDX-017 Implement `resolve_db_path()` helper in runner (computes `~/.gwt/index/<repo>/...`) [Test: T-IDX-006]
-- [ ] T-IDX-018 Implement `E5EmbeddingFunction` class with prefix handling, inject into all `get_or_create_collection()` calls [Test: T-IDX-001]
-- [ ] T-IDX-019 Implement `acquire_lock(db_path, exclusive: bool)` context manager using `portalocker` [Test: T-IDX-004]
-- [ ] T-IDX-020 Implement search-* auto-build fallback: detect missing index, run index-* in-process, emit NDJSON progress on stderr [Test: T-IDX-002]
-- [ ] T-IDX-021 Implement manifest read/write helpers and incremental indexing for `index-files` and `index-specs` [Test: T-IDX-003]
-- [ ] T-IDX-022 Implement Issue TTL: write `last_full_refresh` in `meta.json`, expose via `status` action, honor `--respect-ttl` [Test: T-IDX-005]
-- [ ] T-IDX-023 Drive Phase 8a Python tests to GREEN; remove obsolete code paths [Test: T-IDX-001..006]
+- [x] T-IDX-015 Update `crates/gwt-core/runtime/project_index_requirements.txt` to add `sentence-transformers`, `portalocker` [Test: T-IDX-001..006]
+- [x] T-IDX-016 Rewrite `crates/gwt-core/runtime/chroma_index_runner.py` argparse: add `--repo-hash`, `--worktree-hash`, `--scope`, `--no-auto-build`, `--respect-ttl`, `--mode {full|incremental}` [Test: T-IDX-006]
+- [x] T-IDX-017 Implement `resolve_db_path()` helper in runner (computes `~/.gwt/index/<repo>/...`) [Test: T-IDX-006]
+- [x] T-IDX-018 Implement `E5EmbeddingFunction` class with prefix handling, inject into all `get_or_create_collection()` calls [Test: T-IDX-001]
+- [x] T-IDX-019 Implement `acquire_lock(db_path, exclusive: bool)` context manager using `portalocker` [Test: T-IDX-004]
+- [x] T-IDX-020 Implement search-* auto-build fallback: detect missing index, run index-* in-process, emit NDJSON progress on stderr [Test: T-IDX-002]
+- [x] T-IDX-021 Implement manifest read/write helpers and incremental indexing for `index-files` and `index-specs` [Test: T-IDX-003]
+- [x] T-IDX-022 Implement Issue TTL: write `last_full_refresh` in `meta.json`, expose via `status` action, honor `--respect-ttl` [Test: T-IDX-005]
+- [x] T-IDX-023 Drive Phase 8a Python tests to GREEN; remove obsolete code paths [Test: T-IDX-001..006]
 
 ### Phase 8c: Rust helpers
 
-- [ ] T-IDX-024 [P] Implement `crates/gwt-core/src/repo_hash.rs` with `normalize_origin_url()` + `compute_repo_hash()` [Test: T-IDX-007]
-- [ ] T-IDX-025 [P] Implement `crates/gwt-core/src/worktree_hash.rs` with `compute_worktree_hash()` [Test: T-IDX-008]
-- [ ] T-IDX-026 Add `crates/gwt-core/src/index/mod.rs` and `crates/gwt-core/src/index/paths.rs` exposing `gwt_index_db_path(repo, wt, Scope)` and `Scope` enum [Test: T-IDX-009]
-- [ ] T-IDX-027 Implement `crates/gwt-core/src/index/manifest.rs` for `manifest.json` read/write (also used by Rust integrity check)
-- [ ] T-IDX-028 Implement `crates/gwt-core/src/index/runtime.rs`: `IssueIndexJob`, `WorktreeIndexJob`, `WorktreeGcJob` with tokio task spawning helpers
-- [ ] T-IDX-029 Add `sha2`, `notify`, `notify-debouncer-mini`, `fs2` to `crates/gwt-core/Cargo.toml`
-- [ ] T-IDX-030 Drive Phase 8c Rust tests to GREEN [Test: T-IDX-007..009, T-IDX-011, T-IDX-012]
+- [x] T-IDX-024 [P] Implement `crates/gwt-core/src/repo_hash.rs` with `normalize_origin_url()` + `compute_repo_hash()` [Test: T-IDX-007]
+- [x] T-IDX-025 [P] Implement `crates/gwt-core/src/worktree_hash.rs` with `compute_worktree_hash()` [Test: T-IDX-008]
+- [x] T-IDX-026 Add `crates/gwt-core/src/index/mod.rs` and `crates/gwt-core/src/index/paths.rs` exposing `gwt_index_db_path(repo, wt, Scope)` and `Scope` enum [Test: T-IDX-009]
+- [x] T-IDX-027 Implement `crates/gwt-core/src/index/manifest.rs` for `manifest.json` read/write (also used by Rust integrity check)
+- [x] T-IDX-028 Implement `crates/gwt-core/src/index/runtime.rs`: `IssueIndexJob`, `WorktreeIndexJob`, `WorktreeGcJob` with tokio task spawning helpers
+- [x] T-IDX-029 Add `sha2`, `notify`, `notify-debouncer-mini`, `fs2` to `crates/gwt-core/Cargo.toml`
+- [x] T-IDX-030 Drive Phase 8c Rust tests to GREEN [Test: T-IDX-007..009, T-IDX-011, T-IDX-012]
 
 ### Phase 8d: Watcher
 
-- [ ] T-IDX-031 Implement `crates/gwt-core/src/index/watcher.rs` with `start_watcher(repo_hash, wt_hash, worktree_path) -> WatcherHandle` using `notify-debouncer-mini` (2s debounce)
-- [ ] T-IDX-032 Implement 100-file batch size limit and `.gitignore` filtering inside the watcher event loop
-- [ ] T-IDX-033 Implement `WatcherHandle::shutdown()` with proper resource release
-- [ ] T-IDX-034 Wire watcher batches to spawn `runner index-* --mode incremental` jobs
-- [ ] T-IDX-035 Drive `watcher_debounce.rs` to GREEN [Test: T-IDX-010]
+- [x] T-IDX-031 Implement `crates/gwt-core/src/index/watcher.rs` with `start_watcher(repo_hash, wt_hash, worktree_path) -> WatcherHandle` using `notify-debouncer-mini` (2s debounce)
+- [x] T-IDX-032 Implement 100-file batch size limit and `.gitignore` filtering inside the watcher event loop
+- [x] T-IDX-033 Implement `WatcherHandle::shutdown()` with proper resource release
+- [x] T-IDX-034 Wire watcher batches to spawn `runner index-* --mode incremental` jobs
+- [x] T-IDX-035 Drive `watcher_debounce.rs` to GREEN [Test: T-IDX-010]
 
 ### Phase 8e: TUI integration
 
-- [ ] T-IDX-036 Modify `crates/gwt-tui/src/main.rs` startup sequence around `load_initial_data` to spawn tokio tasks: `reconcile_repo`, `refresh_issues_if_stale(15min)`, per-worktree `start_watcher`
-- [ ] T-IDX-037 Modify `crates/gwt-tui/src/app.rs::spawn_pty_for_session` (≈line 2875) to ensure watcher exists for the spawned worktree and to kick an integrity check
-- [ ] T-IDX-038 Add `remove_worktree_index(repo_hash, wt_hash)` invocation to the Worktree remove handler in `crates/gwt-tui/src/app.rs`
-- [ ] T-IDX-039 Manual verification per quickstart additions
+- [x] T-IDX-036 Modify `crates/gwt-tui/src/main.rs` startup sequence around `load_initial_data` to spawn tokio tasks: `reconcile_repo`, `refresh_issues_if_stale(15min)`, per-worktree `start_watcher`
+- [x] T-IDX-037 Modify `crates/gwt-tui/src/app.rs::spawn_pty_for_session` (≈line 2875) to ensure watcher exists for the spawned worktree and to kick an integrity check
+- [x] T-IDX-038 Add `remove_worktree_index(repo_hash, wt_hash)` invocation to the Worktree remove handler in `crates/gwt-tui/src/app.rs`
+- [x] T-IDX-039 Manual verification per quickstart additions
 
 ### Phase 8f: Skill / launch.rs / docs
 
-- [ ] T-IDX-040 [P] Update `.claude/skills/gwt-search/SKILL.md` with `--repo-hash` / `--worktree-hash` / `--scope` and removal of "Index not found" guidance
-- [ ] T-IDX-041 [P] Update `.claude/skills/gwt-spec-search/SKILL.md` likewise
-- [ ] T-IDX-042 [P] Update `.claude/skills/gwt-issue-search/SKILL.md` likewise
-- [ ] T-IDX-043 [P] Update `.claude/skills/gwt-project-search/SKILL.md` likewise
-- [ ] T-IDX-044 Modify `crates/gwt-agent/src/launch.rs` to export `GWT_REPO_HASH` and `GWT_WORKTREE_HASH` to spawned panes
+- [x] T-IDX-040 [P] Update `.claude/skills/gwt-search/SKILL.md` with `--repo-hash` / `--worktree-hash` / `--scope` and removal of "Index not found" guidance
+- [x] T-IDX-041 [P] Update `.claude/skills/gwt-spec-search/SKILL.md` likewise
+- [x] T-IDX-042 [P] Update `.claude/skills/gwt-issue-search/SKILL.md` likewise
+- [x] T-IDX-043 [P] Update `.claude/skills/gwt-project-search/SKILL.md` likewise
+- [x] T-IDX-044 Modify `crates/gwt-agent/src/launch.rs` to export `GWT_REPO_HASH` and `GWT_WORKTREE_HASH` to spawned panes
 
 ### Phase 8g: Verification & PR
 
-- [ ] T-IDX-045 Run `cargo test -p gwt-core -p gwt-tui` and confirm all GREEN
-- [ ] T-IDX-046 Run `pytest -q crates/gwt-core/runtime/tests` and confirm all GREEN
-- [ ] T-IDX-047 Run `cargo clippy --all-targets --all-features -- -D warnings` and resolve any warnings
-- [ ] T-IDX-048 Run `cargo fmt` and commit any formatting changes
-- [ ] T-IDX-049 Manual e2e (5 scenarios from `specs/SPEC-10/quickstart.md` Phase 8 additions)
-- [ ] T-IDX-050 Open `bugfix/not-work-index → develop` PR with structured commit history per phase
+- [x] T-IDX-045 Run `cargo test -p gwt-core -p gwt-tui` and confirm all GREEN
+- [x] T-IDX-046 Run `pytest -q crates/gwt-core/runtime/tests` and confirm all GREEN
+- [x] T-IDX-047 Run `cargo clippy --all-targets --all-features -- -D warnings` and resolve any warnings
+- [x] T-IDX-048 Run `cargo fmt` and commit any formatting changes
+- [ ] T-IDX-049 Manual e2e (5 scenarios from `specs/SPEC-10/quickstart.md` Phase 8 additions) — pending user verification
+- [x] T-IDX-050 Open `bugfix/not-work-index → develop` PR with structured commit history per phase

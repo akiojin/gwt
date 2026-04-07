@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `46/96` checked in `tasks.md` (Phase 8 added: 50 new tasks)
-- Artifact refresh: `2026-04-07T13:30:00Z`
+- Task progress: `95/96` checked in `tasks.md` (Phase 8: 49/50; T-IDX-049 manual e2e pending user verification)
+- Artifact refresh: `2026-04-07T20:00:00Z`
 
 ## Done
 - The missing support artifacts for this near-complete SPEC are now present.
@@ -25,7 +25,23 @@ The gwt-search skill family was found to be unable to recover from a missing ind
 
 Phase 8 introduces FR-017 through FR-029 and SC-011 through SC-016. The DB physical layout moves from `$WORKTREE/.gwt/index/` to `~/.gwt/index/<repo-hash>/`, separating Worktree-independent Issue data from Worktree-scoped SPEC/Files data. The runner gains an auto-build fallback so non-TUI sessions remain functional. The TUI gains a resident `notify` watcher per open Worktree and a non-blocking 15-minute Issue refresh on startup. The embedding model is upgraded from `all-MiniLM-L6-v2` to `intfloat/multilingual-e5-base` to handle Japanese SPEC content.
 
+## Phase 8 Implementation Done (2026-04-07)
+
+Phase 8 implementation is complete. PR #1912 (`bugfix/not-work-index → develop`) carries
+the full change set. All Phase 8a–8g tasks except T-IDX-049 (manual user e2e) are GREEN:
+
+- `cargo build --workspace` ✅
+- `cargo test -p gwt-core` (100 tests) ✅
+- `cargo test -p gwt-tui` (48 tests) ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo fmt --all -- --check` ✅
+- `pytest crates/gwt-core/runtime/tests/` (40 tests) ✅
+- `bunx commitlint --from HEAD~1 --to HEAD` ✅
+
+Pre-existing PTY tests (`gwt-terminal::pty::*`) still fail under macOS sandbox; verified
+this is unrelated to Phase 8 by reproducing on `git stash`-clean main.
+
 ## Next
-- Drive Phase 8 RED → GREEN per `tasks.md` Phase 8 sub-phases (8a–8g).
-- Reconcile the acceptance checklist and final reviewer evidence before
-  changing SPEC status.
+- T-IDX-049: user-side manual e2e per `quickstart.md` Phase 8 reviewer flow.
+- Optional follow-up: enable `cargo test -- --ignored` in CI with HF model cache warm-up
+  so the e2e tests in `tests/index_runner_spawn.rs` execute on every PR.

@@ -92,6 +92,12 @@ TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用しま
   （起動時やリポジトリ初期化時など）には `PATH` 上に Python 3.9+ が必要です。
   gwt が `~/.gwt/runtime/chroma-venv` を自動作成し、その後は managed runtime を再利用します。
   Windows では Command Prompt / PowerShell で `python` または `py -3` が通る状態にしてください。
+- ベクトル索引データ (SPEC / Issue / ソースファイル) は `~/.gwt/index/<repo-hash>/` 配下に
+  保存されます。Issue はリポジトリ単位で共有、SPEC とソースファイルは Worktree 単位です。
+  TUI は Worktree ごとにファイルシステム watcher を常駐させ、Issue 索引は起動時に
+  15 分 TTL で非同期リフレッシュします。初回検索時に `intfloat/multilingual-e5-base`
+  埋め込みモデル (約 440MB) を `~/.cache/huggingface/` にダウンロードします。
+  詳細は [SPEC-10](specs/SPEC-10/spec.md) を参照してください。
 
 ### GitHub Token（PAT）要件
 
