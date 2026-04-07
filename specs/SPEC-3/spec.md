@@ -33,11 +33,13 @@ As a developer, I want to launch a coding agent through a guided wizard so that 
    mirrors that branch hierarchy (for example `feature/aaa` ->
    `../feature/aaa`) before spawning the agent PTY.
 6. Given the new-branch flow starts from a selected branch, when launch
-   materialization runs, then that selected branch is used as the base branch
-   instead of always falling back to the repo root checkout.
+   materialization runs, then gwt resolves `origin/<selected-branch>` as the
+   base branch, creates the remote target branch first, and only then
+   materializes the local worktree.
 7. Given the new-branch flow starts from SPEC or Issue context without a
-   selected base branch, when launch materialization runs, then `develop` is
-   used as the default base branch.
+   selected base branch, when launch materialization runs, then
+   `origin/develop` is used as the default base branch and launch fails if it
+   does not exist.
 8. Given I cancel at any wizard step, when I press Escape, then no session is created and I return to the previous view.
 
 ### US-7: Restore Old-TUI Wizard Step Machine (P0) -- IMPLEMENTED
@@ -299,9 +301,12 @@ As a developer, I want to convert an existing session to a different agent type 
   sibling git worktree before PTY spawn, rather than running the agent from
   the repository root.
 - **FR-043**: When the new-branch flow starts from Branches,
-  `BranchAction -> Create new from selected` preserves the selected branch as
-  the base branch for worktree creation; when no selected base branch exists,
-  Launch Agent defaults that base branch to `develop`.
+  `BranchAction -> Create new from selected` resolves the selected branch to
+  `origin/<selected>` as the remote base branch, creates `origin/<new-branch>`
+  first, and then materializes the local worktree from that remote branch.
+  When no selected base branch exists, Launch Agent uses `origin/develop`; if
+  the required remote base branch does not exist, launch must fail before PTY
+  spawn.
 - **FR-044**: After launch materialization, `GWT_PROJECT_ROOT` and persisted
   session metadata use the actual launched worktree path, and any
   materialization error aborts launch before PTY spawn.

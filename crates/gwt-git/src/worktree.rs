@@ -48,6 +48,45 @@ impl WorktreeManager {
         Ok(parse_porcelain_output(&stdout))
     }
 
+    /// Fetch latest refs from `origin`.
+    pub fn fetch_origin(&self) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["fetch", "origin", "--prune"])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("fetch origin: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(format!("fetch origin: {stderr}")));
+        }
+
+        Ok(())
+    }
+
+    /// Return whether a remote-tracking branch exists.
+    ///
+    /// Accepts `origin/<name>` or `refs/remotes/origin/<name>`.
+    pub fn remote_branch_exists(&self, remote_ref: &str) -> Result<bool> {
+        let tracking_ref = to_tracking_ref(remote_ref)
+            .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {remote_ref}")))?;
+
+        let output = std::process::Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &tracking_ref])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("show-ref {tracking_ref}: {e}")))?;
+
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                Err(GwtError::Git(format!("show-ref {tracking_ref}: {stderr}")))
+            }
+        }
+    }
+
     /// Create a new worktree at `path` for `branch`.
     pub fn create(&self, branch: &str, path: &Path) -> Result<()> {
         let output = std::process::Command::new("git")
@@ -94,6 +133,71 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Create `origin/<new_branch>` from a remote base reference.
+    ///
+    /// `base_remote_ref` must be `origin/<name>` or `refs/remotes/origin/<name>`.
+    pub fn create_remote_branch_from_base(
+        &self,
+        base_remote_ref: &str,
+        new_branch: &str,
+    ) -> Result<()> {
+        let base_ref = normalize_remote_ref(base_remote_ref);
+        let push_refspec = format!("{base_ref}:refs/heads/{new_branch}");
+        let output = std::process::Command::new("git")
+            .args(["push", "origin", &push_refspec])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("push origin {push_refspec}: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Create a local worktree branch from a remote-tracking branch.
+    ///
+    /// `remote_ref` must be `origin/<name>` or `refs/remotes/origin/<name>`.
+    pub fn create_from_remote(
+        &self,
+        remote_ref: &str,
+        local_branch: &str,
+        path: &Path,
+    ) -> Result<()> {
+        let remote_ref = normalize_remote_ref(remote_ref);
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                local_branch,
+                path.to_str().unwrap_or(""),
+                &remote_ref,
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("worktree add -b from remote: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        let output = std::process::Command::new("git")
+            .args(["branch", "--set-upstream-to", &remote_ref, local_branch])
+            .current_dir(path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("set-upstream-to {remote_ref}: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
     /// Remove the worktree at `path`.
     pub fn remove(&self, path: &Path) -> Result<()> {
         let output = std::process::Command::new("git")
@@ -108,6 +212,24 @@ impl WorktreeManager {
         }
 
         Ok(())
+    }
+}
+
+fn normalize_remote_ref(remote_ref: &str) -> String {
+    if let Some(stripped) = remote_ref.strip_prefix("refs/remotes/") {
+        stripped.to_string()
+    } else {
+        remote_ref.to_string()
+    }
+}
+
+fn to_tracking_ref(remote_ref: &str) -> Option<String> {
+    if remote_ref.starts_with("refs/remotes/") {
+        Some(remote_ref.to_string())
+    } else if remote_ref.contains('/') {
+        Some(format!("refs/remotes/{remote_ref}"))
+    } else {
+        None
     }
 }
 
@@ -490,6 +612,89 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
+    fn remote_branch_exists_checks_origin_tracking_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        let remote_path = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        manager.fetch_origin().unwrap();
+
+        assert!(manager.remote_branch_exists("origin/develop").unwrap());
+        assert!(!manager
+            .remote_branch_exists("origin/feature/missing")
+            .unwrap());
+    }
+
+    #[test]
+    fn create_remote_branch_from_base_then_create_from_remote_materializes_tracking_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        let remote_path = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        manager.fetch_origin().unwrap();
+        manager
+            .create_remote_branch_from_base("origin/develop", "feature/materialized")
+            .unwrap();
+        manager.fetch_origin().unwrap();
+        assert!(manager
+            .remote_branch_exists("origin/feature/materialized")
+            .unwrap());
+
+        let worktree_path = sibling_worktree_path(&repo_path, "feature/materialized");
+        manager
+            .create_from_remote(
+                "origin/feature/materialized",
+                "feature/materialized",
+                &worktree_path,
+            )
+            .unwrap();
+        assert!(worktree_path.exists());
+
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&worktree_path)
+            .output()
+            .expect("git branch --show-current");
+        assert!(branch_output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&branch_output.stdout).trim(),
+            "feature/materialized"
+        );
+
+        let upstream_output = std::process::Command::new("git")
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ])
+            .current_dir(&worktree_path)
+            .output()
+            .expect("git rev-parse @{upstream}");
+        assert!(upstream_output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&upstream_output.stdout).trim(),
+            "origin/feature/materialized"
+        );
+    }
+
+    #[test]
     fn list_worktrees_in_test_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
@@ -507,5 +712,18 @@ prunable gitdir file points to non-existent location
         let wts = mgr.list().unwrap();
         // At minimum the main worktree
         assert!(!wts.is_empty());
+    }
+
+    fn git_add_remote(path: &Path, name: &str, remote: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["remote", "add", name, remote.to_str().unwrap()])
+            .current_dir(path)
+            .output()
+            .expect("git remote add");
+        assert!(
+            output.status.success(),
+            "git remote add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
