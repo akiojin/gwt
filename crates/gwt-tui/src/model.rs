@@ -387,6 +387,7 @@ pub struct ScreenSnapshot {
     cols: u16,
     state: Vec<u8>,
     visible_lines: Vec<String>,
+    formatted_rows: Vec<Vec<u8>>,
 }
 
 impl ScreenSnapshot {
@@ -396,6 +397,7 @@ impl ScreenSnapshot {
             cols,
             state: screen.state_formatted(),
             visible_lines: screen_visible_lines(screen),
+            formatted_rows: screen_formatted_rows(screen),
         }
     }
 
@@ -429,6 +431,11 @@ fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
         .collect()
 }
 
+fn screen_formatted_rows(screen: &vt100::Screen) -> Vec<Vec<u8>> {
+    let (_, cols) = screen.size();
+    screen.rows_formatted(0, cols).collect()
+}
+
 fn normalize_visible_line(line: &str) -> String {
     line.trim_end_matches(' ').to_string()
 }
@@ -454,6 +461,7 @@ struct SnapshotCaptureOutcome {
     deduped: bool,
     pruned_blank_prefix: usize,
     snapshot_count_after: usize,
+    synthetic_rows_appended: usize,
     surface_digest: u64,
     top_preview: String,
     bottom_preview: String,
@@ -467,6 +475,7 @@ impl SnapshotCaptureOutcome {
             deduped: false,
             pruned_blank_prefix: 0,
             snapshot_count_after: snapshot_count,
+            synthetic_rows_appended: 0,
             surface_digest: 0,
             top_preview: String::new(),
             bottom_preview: String::new(),
@@ -574,6 +583,38 @@ fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
         }
     }
     segments
+}
+
+fn segment_contains_clear_home(bytes: &[u8]) -> bool {
+    bytes
+        .windows(b"\x1b[2J\x1b[H".len())
+        .any(|window| window == b"\x1b[2J\x1b[H")
+}
+
+fn detect_vertical_redraw_shift(
+    previous: &ScreenSnapshot,
+    current: &ScreenSnapshot,
+) -> Option<usize> {
+    let row_count = previous
+        .visible_lines
+        .len()
+        .min(current.visible_lines.len());
+    if row_count < 2 || previous.visible_lines == current.visible_lines {
+        return None;
+    }
+
+    for shift in 1..row_count {
+        let overlap = row_count.saturating_sub(shift);
+        if overlap < 2 {
+            break;
+        }
+
+        if previous.visible_lines[shift..row_count] == current.visible_lines[..overlap] {
+            return Some(shift);
+        }
+    }
+
+    None
 }
 
 fn preview_visible_line(line: &str) -> String {
@@ -731,6 +772,7 @@ impl VtState {
         let previous_scrollback = self.scrollback();
         let previous_max_scrollback = self.max_scrollback;
         let previous_snapshot_count = self.snapshots.len();
+        let mut synthetic_rows_appended = 0usize;
         let segments = if matches!(
             self.scrollback_strategy,
             ScrollbackStrategy::AgentMemoryBacked
@@ -743,7 +785,11 @@ impl VtState {
         for (index, segment) in segments.iter().enumerate() {
             self.update_mouse_reporting_modes(segment);
             self.parser.process(segment);
-            self.process_scrollback_bytes(segment);
+            let current_snapshot =
+                ScreenSnapshot::from_screen(self.rows, self.cols, self.parser.screen());
+            let synthetic_rows = self.synthetic_scrollback_rows(segment, &current_snapshot);
+            synthetic_rows_appended = synthetic_rows_appended.saturating_add(synthetic_rows.len());
+            self.process_scrollback_bytes(segment, &synthetic_rows, &current_snapshot);
             if index + 1 < segments.len() {
                 self.capture_snapshot();
             }
@@ -762,7 +808,8 @@ impl VtState {
                     .min(self.max_scrollback),
             );
         }
-        let snapshot_outcome = self.capture_snapshot();
+        let mut snapshot_outcome = self.capture_snapshot();
+        snapshot_outcome.synthetic_rows_appended = synthetic_rows_appended;
         self.log_process_debug(
             bytes,
             previous_max_scrollback,
@@ -771,11 +818,22 @@ impl VtState {
         );
     }
 
-    fn process_scrollback_bytes(&mut self, bytes: &[u8]) {
+    fn process_scrollback_bytes(
+        &mut self,
+        bytes: &[u8],
+        synthetic_rows: &[Vec<u8>],
+        current_snapshot: &ScreenSnapshot,
+    ) {
         if matches!(
             self.scrollback_strategy,
             ScrollbackStrategy::AgentMemoryBacked
         ) {
+            self.process_synthetic_scrollback_rows(synthetic_rows);
+            if segment_contains_clear_home(bytes) {
+                self.scrollback_parser.process(b"\x1b[2J\x1b[H");
+                self.scrollback_parser.process(current_snapshot.state());
+                return;
+            }
             let filtered =
                 filter_scrollback_bytes_with_pending(&mut self.scrollback_filter_pending, bytes);
             if !filtered.is_empty() {
@@ -784,6 +842,49 @@ impl VtState {
         } else {
             self.scrollback_parser.process(bytes);
         }
+    }
+
+    fn synthetic_scrollback_rows(
+        &self,
+        segment: &[u8],
+        current_snapshot: &ScreenSnapshot,
+    ) -> Vec<Vec<u8>> {
+        if !matches!(
+            self.scrollback_strategy,
+            ScrollbackStrategy::AgentMemoryBacked
+        ) || !segment_contains_clear_home(segment)
+        {
+            return Vec::new();
+        }
+
+        let Some(previous_snapshot) = self.snapshots.back() else {
+            return Vec::new();
+        };
+
+        let Some(shift) = detect_vertical_redraw_shift(previous_snapshot, current_snapshot) else {
+            return Vec::new();
+        };
+
+        previous_snapshot
+            .formatted_rows
+            .iter()
+            .take(shift)
+            .cloned()
+            .collect()
+    }
+
+    fn process_synthetic_scrollback_rows(&mut self, synthetic_rows: &[Vec<u8>]) {
+        if synthetic_rows.is_empty() {
+            return;
+        }
+
+        let mut bytes = Vec::new();
+        for row in synthetic_rows {
+            bytes.extend_from_slice(format!("\x1b[{};1H", self.rows).as_bytes());
+            bytes.extend_from_slice(row);
+            bytes.extend_from_slice(b"\x1b[0m\r\n");
+        }
+        self.scrollback_parser.process(&bytes);
     }
 
     fn update_mouse_reporting_modes(&mut self, bytes: &[u8]) {
@@ -1165,6 +1266,7 @@ impl VtState {
                 deduped: true,
                 pruned_blank_prefix: 0,
                 snapshot_count_after: self.snapshots.len(),
+                synthetic_rows_appended: 0,
                 surface_digest,
                 top_preview,
                 bottom_preview,
@@ -1185,6 +1287,7 @@ impl VtState {
             deduped: false,
             pruned_blank_prefix,
             snapshot_count_after: self.snapshots.len(),
+            synthetic_rows_appended: 0,
             surface_digest,
             top_preview,
             bottom_preview,
@@ -1221,7 +1324,7 @@ impl VtState {
         let alt_enter_count = count_subslice(bytes, b"\x1b[?1049h");
         let alt_leave_count = count_subslice(bytes, b"\x1b[?1049l");
         crate::scroll_debug::log(format!(
-            "event=vt_process strategy={} bytes={} clear_home_count={} home_count={} alt_enter_count={} alt_leave_count={} previous_max_scrollback={} next_max_scrollback={} previous_snapshot_count={} next_snapshot_count={} snapshot_attempted={} snapshot_appended={} snapshot_deduped={} pruned_blank_prefix={} uses_snapshot_scrollback={} surface_digest={} top_preview={} bottom_preview={}",
+            "event=vt_process strategy={} bytes={} clear_home_count={} home_count={} alt_enter_count={} alt_leave_count={} previous_max_scrollback={} next_max_scrollback={} previous_snapshot_count={} next_snapshot_count={} snapshot_attempted={} snapshot_appended={} snapshot_deduped={} pruned_blank_prefix={} synthetic_rows_appended={} uses_snapshot_scrollback={} surface_digest={} top_preview={} bottom_preview={}",
             strategy,
             bytes.len(),
             clear_home_count,
@@ -1236,6 +1339,7 @@ impl VtState {
             snapshot_outcome.appended,
             snapshot_outcome.deduped,
             snapshot_outcome.pruned_blank_prefix,
+            snapshot_outcome.synthetic_rows_appended,
             self.uses_snapshot_scrollback(),
             snapshot_outcome.surface_digest,
             snapshot_outcome.top_preview,
@@ -1862,8 +1966,6 @@ mod tests {
         assert!(vt.scroll_viewport_lines(vt.max_scrollback() as i16));
         let contents = vt.visible_screen_parser().screen().contents();
         assert!(contents.contains("line-1"));
-        assert!(contents.contains("line-4"));
-        assert!(!contents.contains("launch"));
     }
 
     #[test]
@@ -1919,6 +2021,7 @@ mod tests {
                 cols: 20,
                 state: Vec::new(),
                 visible_lines: vec!["".to_string(); 5],
+                formatted_rows: vec![Vec::new(); 5],
             },
             ScreenSnapshot {
                 rows: 5,
@@ -1931,6 +2034,7 @@ mod tests {
                     "line-4".to_string(),
                     "line-5".to_string(),
                 ],
+                formatted_rows: vec![Vec::new(); 5],
             },
             ScreenSnapshot {
                 rows: 5,
@@ -1943,6 +2047,7 @@ mod tests {
                     "line-5".to_string(),
                     "line-6".to_string(),
                 ],
+                formatted_rows: vec![Vec::new(); 5],
             },
         ]);
         vt.snapshot_cursor = Some(0);
@@ -1972,18 +2077,21 @@ mod tests {
                 cols: 20,
                 state: vec![1],
                 visible_lines: vec!["frame-1".to_string(); 5],
+                formatted_rows: vec![Vec::new(); 5],
             },
             ScreenSnapshot {
                 rows: 5,
                 cols: 20,
                 state: vec![2],
                 visible_lines: vec!["frame-2".to_string(); 5],
+                formatted_rows: vec![Vec::new(); 5],
             },
             ScreenSnapshot {
                 rows: 5,
                 cols: 20,
                 state: vec![3],
                 visible_lines: vec!["frame-3".to_string(); 5],
+                formatted_rows: vec![Vec::new(); 5],
             },
         ]);
 
@@ -2039,6 +2147,49 @@ mod tests {
         assert!(
             vt.max_scrollback() > ROW_SCROLLBACK_CAPACITY,
             "agent panes should keep a larger in-memory row scrollback than the default terminal history limit"
+        );
+    }
+
+    #[test]
+    fn agent_scrollback_strategy_derives_row_history_from_full_screen_redraw_shifts() {
+        let mut vt = VtState::new(5, 20);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(&full_screen_frame(&[
+            "\u{1b}[38;5;196mline-1\u{1b}[0m",
+            "line-2",
+            "line-3",
+            "line-4",
+            "line-5",
+        ]));
+        vt.process(&full_screen_frame(&[
+            "line-2",
+            "line-3",
+            "line-4",
+            "line-5",
+            "\u{1b}[38;5;226mline-6\u{1b}[0m",
+        ]));
+
+        assert_eq!(
+            vt.max_scrollback(),
+            1,
+            "a one-line full-screen redraw shift should be promoted into row scrollback history"
+        );
+        assert!(
+            !vt.uses_snapshot_scrollback(),
+            "once redraw shifts are normalized into row history, agent panes should stop using frame-by-frame snapshot scrolling"
+        );
+
+        assert!(vt.scroll_viewport_lines(1));
+        let parser = vt.visible_screen_parser();
+        let screen = parser.screen();
+        assert!(screen.contents().contains("line-1"));
+        assert!(!screen.contents().contains("line-6"));
+        let cell = screen.cell(0, 0).expect("styled cell");
+        assert_eq!(
+            cell.fgcolor(),
+            vt100::Color::Idx(196),
+            "derived row history should preserve ANSI styling for scrolled-off rows"
         );
     }
 

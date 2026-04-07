@@ -4,7 +4,7 @@
 - Status: `done`
 - Phase: `Done`
 - Task progress: `84/84` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T11:40:00Z`
+- Artifact refresh: `2026-04-07T14:35:00Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -34,8 +34,9 @@
 - Agent panes whose full-screen redraws never advance vt100 row scrollback now fall back to the same in-memory snapshot cache, restoring scrollback without reintroducing session-log/transcript sources.
 - PTY-bound key input now exits row/snapshot history and returns the viewport to live-follow before forwarding bytes, so typing never continues against a stale historical viewport.
 - Agent panes that enable SGR mouse reporting now receive wheel and Terminal.app right-drag scroll input through the PTY, so gwt stops competing with agent-owned redraw and scroll state when the embedded agent can handle scrolling itself.
-- Agent scroll ownership is now capability-driven across both PTY paths: SGR mouse-enabled panes use PTY wheel events, snapshot-backed panes without SGR mouse use repeated cursor up/down PTY input, and only row-backed panes remain on gwt-local scrollback.
-- While any PTY-owned agent scrolling path is active, gwt hides its local scrollbar overlay so the pane no longer shows a stale thumb against agent-controlled viewport state.
+- Agent scroll ownership is now capability-driven with one PTY path: only SGR mouse-enabled panes use PTY-owned scroll, while Codex-style panes without that capability stay on gwt-local scrollback and keep a truthful local scrollbar overlay.
+- Codex-style full-screen redraw panes now promote vertical redraw shifts into local row history, so wheel / trackpad scrolling stays line-granular without synthesizing cursor-key PTY input.
+- While the PTY-owned mouse path is active, gwt hides its local scrollbar overlay so the pane no longer shows a stale thumb against agent-controlled viewport state.
 - Agent-pane snapshot capture now preserves intermediate clear+redraw frames even when one coalesced PTY payload contains multiple full-screen redraws, keeping the remaining local-fallback path reviewable without transcript/session-log sources.
 - Scroll-route diagnostics now record whether each wheel / right-drag gesture took the local, PTY mouse, or PTY keyboard path together with snapshot/alternate-screen state, so live debugging can distinguish routing bugs from agent-side scroll behavior.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.

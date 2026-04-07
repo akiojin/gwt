@@ -90,8 +90,8 @@
 - [x] T077 Write RED tests and implement agent-pane PTY mouse-scroll forwarding so SGR mouse-enabled agents receive wheel / right-drag scroll input directly instead of gwt-local scrollback.
 - [x] T078 Keep agent scroll ownership capability-driven: PTY-mouse-enabled panes use PTY scroll, panes without that capability stay on local scrollback, and stale local scrollbar overlays are suppressed only in the PTY-owned path.
 - [x] T079 Preserve intermediate agent full-screen redraw frames inside coalesced PTY payloads so local Codex snapshot scrollback remains deep enough to review earlier frames.
-- [x] T080 [P] Write RED tests: alternate-screen agents without SGR mouse reporting receive wheel / right-drag scroll through PTY keyboard input, while non-alternate-screen agents still use local scrollback.
-- [x] T081 Implement alternate-screen agent scroll routing in `app.rs` so PTY ownership supports both SGR mouse and repeated cursor up/down fallback, and hide local scrollbar overlays in every PTY-owned path.
-- [x] T082 Refresh SPEC-1 artifacts, lessons learned, and focused/full verification for alternate-screen agent keyboard-scroll ownership.
-- [x] T083 [P] Write RED tests: snapshot-backed Codex redraw panes that never enter alternate-screen still route wheel / right-drag scroll to PTY keyboard input, while row-backed panes remain local.
-- [x] T084 Generalize agent scroll routing in `app.rs` from alternate-screen-only to snapshot-backed PTY keyboard ownership, and add scroll-route diagnostics for future debugging.
+- [x] T080 [P] Write RED tests: agents without SGR mouse reporting keep wheel / right-drag scroll on local viewport history and never synthesize cursor-key PTY input.
+- [x] T081 Implement capability-driven agent scroll routing in `app.rs` so only SGR mouse-enabled panes use PTY-owned scrolling, while local-scroll panes keep their scrollbar overlay.
+- [x] T082 Refresh SPEC-1 artifacts, lessons learned, and focused/full verification for the corrected non-PTY agent scroll ownership model.
+- [x] T083 [P] Write RED tests: Codex-style full-screen redraw panes promote vertical redraw shifts into local row history while preserving snapshot fallback when rows still cannot be derived.
+- [x] T084 Implement redraw-shift row-history normalization in `model.rs` and keep scroll-route diagnostics for local vs PTY-mouse ownership.

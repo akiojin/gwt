@@ -4226,9 +4226,6 @@ where
                 ScrollInputRouting::PtyMouse => {
                     Ok(queue_active_session_mouse_scroll(model, mouse, 1))
                 }
-                ScrollInputRouting::PtyKeyboard => {
-                    Ok(queue_active_session_keyboard_scroll(model, 1))
-                }
             }
         }
         MouseEventKind::ScrollDown => {
@@ -4238,9 +4235,6 @@ where
                 ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, -1)),
                 ScrollInputRouting::PtyMouse => {
                     Ok(queue_active_session_mouse_scroll(model, mouse, -1))
-                }
-                ScrollInputRouting::PtyKeyboard => {
-                    Ok(queue_active_session_keyboard_scroll(model, -1))
                 }
             }
         }
@@ -4265,9 +4259,6 @@ where
                 }
                 ScrollInputRouting::PtyMouse => {
                     Ok(queue_active_session_mouse_scroll(model, mouse, delta_rows))
-                }
-                ScrollInputRouting::PtyKeyboard => {
-                    Ok(queue_active_session_keyboard_scroll(model, delta_rows))
                 }
             }
         }
@@ -4381,7 +4372,6 @@ fn clamped_mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<Termi
 enum ScrollInputRouting {
     LocalViewport,
     PtyMouse,
-    PtyKeyboard,
 }
 
 fn active_session_scroll_routing(model: &Model) -> ScrollInputRouting {
@@ -4398,10 +4388,6 @@ fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRout
 
     if session.vt.accepts_mouse_scroll_input() {
         return ScrollInputRouting::PtyMouse;
-    }
-
-    if session.vt.uses_snapshot_scrollback() {
-        return ScrollInputRouting::PtyKeyboard;
     }
 
     ScrollInputRouting::LocalViewport
@@ -4458,22 +4444,6 @@ fn queue_active_session_mouse_scroll(
             .as_bytes(),
         );
     }
-    push_input_to_active_session(model, bytes);
-    true
-}
-
-fn queue_active_session_keyboard_scroll(model: &mut Model, delta_rows: i16) -> bool {
-    if delta_rows == 0 {
-        return false;
-    }
-
-    reset_active_session_scrollback_for_input(model);
-    let steps = usize::from(delta_rows.unsigned_abs());
-    let bytes = if delta_rows > 0 {
-        b"\x1b[A".repeat(steps)
-    } else {
-        b"\x1b[B".repeat(steps)
-    };
     push_input_to_active_session(model, bytes);
     true
 }
@@ -6889,7 +6859,7 @@ mod tests {
     }
 
     #[test]
-    fn alternate_screen_agent_without_mouse_reporting_forwards_keyboard_scroll_to_pty() {
+    fn alternate_screen_agent_without_mouse_reporting_uses_local_scrollback() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -6901,12 +6871,15 @@ mod tests {
         model.active_session = 0;
 
         update(&mut model, Message::Resize(24, 8));
-        update(
+        enter_alt_screen_with_lines(
             &mut model,
-            Message::PtyOutput(
-                "agent-0".to_string(),
-                b"\x1b[?1049h\x1b[2J\x1b[Hframe-1".to_vec(),
-            ),
+            "agent-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "agent-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
         );
         update(
             &mut model,
@@ -6927,21 +6900,19 @@ mod tests {
         .expect("mouse input should succeed");
 
         assert!(handled);
-        let forwarded = model
-            .pending_pty_inputs()
-            .back()
-            .expect("queued keyboard scroll");
-        assert_eq!(forwarded.session_id, "agent-0");
-        assert_eq!(forwarded.bytes, b"\x1b[A".to_vec());
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "agents without mouse reporting should keep wheel input inside gwt's local viewport cache"
+        );
 
         let session = model.active_session_tab().expect("active session");
         assert!(
-            !session_has_scrollbar(session),
-            "alternate-screen agents that own scroll input should not render a local scrollbar overlay"
+            session_has_scrollbar(session),
+            "local viewport scrolling should keep the scrollbar overlay visible"
         );
         assert!(
-            session.vt.follow_live(),
-            "PTY keyboard scrolling should keep the local viewport pinned to live output"
+            session.vt.viewing_history(),
+            "wheel input should move alternate-screen agents into local history when no PTY mouse capability was negotiated"
         );
     }
 
@@ -7001,7 +6972,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_backed_agent_without_mouse_reporting_forwards_keyboard_scroll_to_pty() {
+    fn snapshot_backed_agent_without_mouse_reporting_uses_local_scrollback() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -7015,17 +6986,23 @@ mod tests {
         update(&mut model, Message::Resize(24, 8));
         update(
             &mut model,
-            Message::PtyOutput("agent-0".to_string(), b"\x1b[2J\x1b[Hframe-1".to_vec()),
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[Hline-1\r\nline-2\r\nline-3\r\nline-4\r\nline-5".to_vec(),
+            ),
         );
         update(
             &mut model,
-            Message::PtyOutput("agent-0".to_string(), b"\x1b[2J\x1b[Hframe-2".to_vec()),
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[Hline-2\r\nline-3\r\nline-4\r\nline-5\r\nline-6".to_vec(),
+            ),
         );
 
         let session = model.active_session_tab().expect("active session");
         assert!(
-            session.vt.uses_snapshot_scrollback(),
-            "precondition: Codex-like redraw panes stay on snapshot-backed local cache when row scrollback does not advance"
+            !session.vt.uses_snapshot_scrollback(),
+            "redraw-shift normalization should promote Codex-like panes into row-based local history before the first wheel step"
         );
 
         let area = active_session_text_area(&model).expect("active session text area");
@@ -7042,21 +7019,19 @@ mod tests {
         .expect("mouse input should succeed");
 
         assert!(handled);
-        let forwarded = model
-            .pending_pty_inputs()
-            .back()
-            .expect("queued keyboard scroll");
-        assert_eq!(forwarded.session_id, "agent-0");
-        assert_eq!(forwarded.bytes, b"\x1b[A".to_vec());
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "snapshot-backed agents without mouse reporting should still scroll locally instead of synthesizing arrow-key input"
+        );
 
         let session = model.active_session_tab().expect("active session");
         assert!(
-            !session_has_scrollbar(session),
-            "snapshot-backed PTY-owned agent scrolling should not render a stale local scrollbar overlay"
+            session_has_scrollbar(session),
+            "once redraw shifts are promoted into row history, the local scrollbar should stay visible"
         );
         assert!(
-            session.vt.follow_live(),
-            "PTY keyboard scrolling should leave the local viewport pinned to live output"
+            session.vt.viewing_history(),
+            "wheel input should move the local viewport into history rather than injecting arrow keys into the PTY"
         );
     }
 
@@ -7116,7 +7091,68 @@ mod tests {
     }
 
     #[test]
-    fn alternate_screen_agent_trackpad_drag_forwards_repeated_keyboard_scroll_steps_to_pty() {
+    fn alternate_screen_agent_trackpad_drag_routes_to_local_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &["line-1", "line-2", "line-3", "line-4", "line-5"],
+        );
+        replace_alt_screen_lines(
+            &mut model,
+            "agent-0",
+            &["line-2", "line-3", "line-4", "line-5", "line-6"],
+        );
+
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::LocalViewport,
+            "agents without mouse reporting should keep trackpad drags on the local viewport path"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right down should succeed");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: area.x,
+                row: area.bottom().saturating_sub(1),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("right drag should succeed");
+
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "trackpad drag should not be translated into arrow-key input for local-scroll agents"
+        );
+    }
+
+    #[test]
+    fn snapshot_backed_agent_trackpad_drag_routes_to_local_scrollback() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -7132,60 +7168,21 @@ mod tests {
             &mut model,
             Message::PtyOutput(
                 "agent-0".to_string(),
-                b"\x1b[?1049h\x1b[2J\x1b[Hframe-1".to_vec(),
+                b"\x1b[2J\x1b[Hline-1\r\nline-2\r\nline-3\r\nline-4\r\nline-5".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[Hline-2\r\nline-3\r\nline-4\r\nline-5\r\nline-6".to_vec(),
             ),
         );
 
-        let area = active_session_text_area(&model).expect("active session text area");
-        handle_mouse_input_with(
-            &mut model,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Right),
-                column: area.x,
-                row: area.y,
-                modifiers: KeyModifiers::NONE,
-            },
-            |_| Ok(()),
-        )
-        .expect("right down should succeed");
-
-        let handled = handle_mouse_input_with(
-            &mut model,
-            MouseEvent {
-                kind: MouseEventKind::Drag(MouseButton::Right),
-                column: area.x,
-                row: area.y.saturating_add(3),
-                modifiers: KeyModifiers::NONE,
-            },
-            |_| Ok(()),
-        )
-        .expect("right drag should succeed");
-
-        assert!(handled);
-        let forwarded = model
-            .pending_pty_inputs()
-            .back()
-            .expect("queued keyboard scroll input");
-        assert_eq!(forwarded.session_id, "agent-0");
-        assert_eq!(forwarded.bytes, b"\x1b[A\x1b[A\x1b[A".to_vec());
-    }
-
-    #[test]
-    fn snapshot_backed_agent_trackpad_drag_forwards_repeated_keyboard_scroll_steps_to_pty() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Main;
-        model.active_focus = FocusPane::Terminal;
-        model.sessions = vec![agent_session_tab(
-            "Codex",
-            "codex",
-            crate::model::AgentColor::Cyan,
-        )];
-        model.active_session = 0;
-
-        update(&mut model, Message::Resize(24, 8));
-        update(
-            &mut model,
-            Message::PtyOutput("agent-0".to_string(), b"\x1b[2J\x1b[Hframe-1".to_vec()),
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::LocalViewport,
+            "snapshot-backed agents without mouse reporting should keep trackpad drags on the local viewport path"
         );
 
         let area = active_session_text_area(&model).expect("active session text area");
@@ -7201,25 +7198,22 @@ mod tests {
         )
         .expect("right down should succeed");
 
-        let handled = handle_mouse_input_with(
+        handle_mouse_input_with(
             &mut model,
             MouseEvent {
                 kind: MouseEventKind::Drag(MouseButton::Right),
                 column: area.x,
-                row: area.y.saturating_add(2),
+                row: area.bottom().saturating_sub(1),
                 modifiers: KeyModifiers::NONE,
             },
             |_| Ok(()),
         )
         .expect("right drag should succeed");
 
-        assert!(handled);
-        let forwarded = model
-            .pending_pty_inputs()
-            .back()
-            .expect("queued keyboard scroll input");
-        assert_eq!(forwarded.session_id, "agent-0");
-        assert_eq!(forwarded.bytes, b"\x1b[A\x1b[A".to_vec());
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "snapshot-backed agents should keep trackpad drags local instead of injecting arrow-key input"
+        );
     }
 
     #[test]

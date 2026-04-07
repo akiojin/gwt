@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot-backed agent scroll を PTY keyboard input に変換してはいけない
+
+### 事象
+
+Codex pane で trackpad scroll すると、scroll ではなく `Up/Down` キー入力として解釈され、
+行移動やカーソル移動になってしまった。
+
+### 原因
+
+- `snapshot-backed agent + no SGR mouse reporting` を `PTY-owned keyboard scroll` に振ったのが誤りだった。
+- scroll capability を持たない pane に対して `\x1b[A` / `\x1b[B` を送っても、それは terminal scroll ではなく通常のキー入力になる。
+- 本来必要だったのは PTY ownership の拡大ではなく、gwt-local memory scrollback を line-granular にすることだった。
+
+### 再発防止策
+
+1. PTY-owned scroll は explicit な SGR mouse reporting がある pane に限定する。
+2. mouse reporting がない agent pane では、wheel / right-drag を local viewport scroll として扱い、PTTYへ cursor-key を注入しない。
+3. Codex-style full-screen redraw pane では、隣接 frame の vertical shift から scrolled-off rows を導出して local row history に昇格させる。
+
 ## 2026-04-07 — fix: alternate-screen agent の local snapshot fallback は line scroll semantics を満たさない
 
 ### 事象

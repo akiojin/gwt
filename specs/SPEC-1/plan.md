@@ -62,10 +62,10 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 12. Do not hydrate agent-pane runtime scrollback from session `jsonl` or session-log files; agent-side PTY re-output is the only restoration mechanism.
 13. When the user presses a key that is forwarded to the active PTY while browsing history, reset the viewport to live-follow before queueing the input bytes.
 14. When an agent pane enables SGR mouse reporting, forward wheel / trackpad scroll gestures to the PTY instead of applying gwt-local scrollback so the agent owns redraw semantics.
-15. When an agent pane would otherwise use snapshot-backed local history without SGR mouse reporting, translate wheel / Terminal.app right-drag scroll into repeated cursor up/down PTY input so the full-screen agent keeps line-granular scroll ownership.
-16. Keep the decision capability-driven: panes that still expose row-based local history without PTY mouse negotiation continue to use gwt-local scrollback.
-17. When an agent pane uses PTY-owned scrolling, suppress the gwt local scrollbar overlay because local snapshot metrics no longer represent the visible viewport position.
-18. For agent panes that stay on local snapshot scrollback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so fallback history does not collapse to a single final frame.
+15. When an agent pane does not negotiate SGR mouse reporting, keep wheel / Terminal.app right-drag input on gwt-local scrollback instead of synthesizing cursor-key PTY input.
+16. For full-screen redraw agent panes, detect vertical overlap shifts between consecutive frames and promote the scrolled-off rows into normalized local row history before falling back to snapshot stepping.
+17. Keep the decision capability-driven: only PTY-mouse-enabled panes use PTY-owned scrolling; all other panes remain on local scrollback and keep their local scrollbar overlay.
+18. For agent panes that still require local snapshot fallback, preserve distinct clear+redraw frames even when the event loop coalesces multiple PTY chunks into one payload, so fallback history does not collapse to a single final frame.
 
 ## Dependencies
 
