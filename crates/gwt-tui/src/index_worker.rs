@@ -135,6 +135,18 @@ fn registry() -> &'static Mutex<WatcherRegistry> {
     REG.get_or_init(|| Mutex::new(WatcherRegistry::default()))
 }
 
+/// Per-worktree build state used to coalesce concurrent rebuild requests.
+#[derive(Default)]
+struct WorktreeBuildState {
+    in_flight: bool,
+    dirty: bool,
+}
+
+fn build_states() -> &'static Mutex<HashMap<String, WorktreeBuildState>> {
+    static STATES: OnceLock<Mutex<HashMap<String, WorktreeBuildState>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn make_runner_spawner() -> PythonRunnerSpawner {
     PythonRunnerSpawner {
         python_executable: gwt_project_index_venv_dir().join(if cfg!(windows) {
@@ -288,10 +300,17 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
                 _ = &mut shutdown_rx => break,
                 batch = watcher.recv_batch() => {
                     let Some(batch) = batch else { break };
+                    let sample: Vec<String> = batch
+                        .changed_paths
+                        .iter()
+                        .take(3)
+                        .map(|p| p.display().to_string())
+                        .collect();
                     log_event(&format!(
-                        "watcher batch: wt_hash={} paths={}",
+                        "watcher batch: wt_hash={} paths={} sample={:?}",
                         wt_hash,
-                        batch.changed_paths.len()
+                        batch.changed_paths.len(),
+                        sample
                     ));
                     schedule_incremental_index(
                         repo_hash.clone(),
@@ -344,7 +363,10 @@ pub fn shutdown_and_remove(repo_root: &Path, worktree_path: &Path) -> Result<()>
 
 /// Kick a background full/incremental rebuild for the three scopes
 /// (files, files-docs, specs) on the worker runtime. Returns immediately;
-/// the actual subprocess execution is throttled by `runner_semaphore`.
+/// the actual subprocess execution is throttled by `runner_semaphore` and
+/// coalesced per-worktree: if a build is already in flight for the
+/// worktree, this call only marks the state dirty so that the in-flight
+/// task runs one more cycle when it finishes.
 fn schedule_incremental_index(repo_hash: RepoHash, wt_hash: WorktreeHash, project_root: PathBuf) {
     let python = gwt_project_index_venv_dir().join(if cfg!(windows) {
         "Scripts/python.exe"
@@ -361,71 +383,124 @@ fn schedule_incremental_index(repo_hash: RepoHash, wt_hash: WorktreeHash, projec
         return;
     }
 
-    worker_runtime().spawn(async move {
-        for scope in ["files", "files-docs", "specs"] {
-            let action = if scope == "specs" {
-                "index-specs"
-            } else {
-                "index-files"
-            };
-            let log_file = open_runner_log_file(&format!("{action}-{scope}-incremental"));
-
-            let permit = match runner_semaphore().acquire().await {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-
+    // Coalesce: if a build is already running for this worktree, set dirty
+    // and return without queueing another.
+    let wt_key = wt_hash.as_str().to_string();
+    {
+        let mut states = build_states().lock().unwrap();
+        let state = states.entry(wt_key.clone()).or_default();
+        if state.in_flight {
+            state.dirty = true;
             log_event(&format!(
-                "spawn runner: action={} scope={} repo_hash={} wt_hash={}",
-                action, scope, repo_hash, wt_hash
+                "schedule: coalesced (build in flight, marking dirty) wt_hash={}",
+                wt_hash
             ));
+            return;
+        }
+        state.in_flight = true;
+        state.dirty = false;
+    }
 
-            let mut cmd = tokio::process::Command::new(&python);
-            cmd.arg(&runner)
-                .arg("--action")
-                .arg(action)
-                .arg("--repo-hash")
-                .arg(repo_hash.as_str())
-                .arg("--worktree-hash")
-                .arg(wt_hash.as_str())
-                .arg("--project-root")
-                .arg(&project_root)
-                .arg("--mode")
-                .arg("incremental")
-                .arg("--scope")
-                .arg(scope);
-            if let Some(file) = log_file.as_ref().and_then(|f| f.try_clone().ok()) {
-                cmd.stdout(file);
-            } else {
-                cmd.stdout(std::process::Stdio::null());
-            }
-            if let Some(file) = log_file.and_then(|f| f.try_clone().ok()) {
-                cmd.stderr(file);
-            } else {
-                cmd.stderr(std::process::Stdio::null());
-            }
-            cmd.stdin(std::process::Stdio::null());
+    let wt_hash_loop = wt_hash.clone();
+    worker_runtime().spawn(async move {
+        loop {
+            run_three_scopes(&python, &runner, &repo_hash, &wt_hash_loop, &project_root).await;
 
-            match cmd.spawn() {
-                Ok(mut child) => match child.wait().await {
-                    Ok(status) => log_event(&format!(
-                        "runner exit: action={} scope={} status={} wt_hash={}",
-                        action, scope, status, wt_hash
-                    )),
-                    Err(e) => log_event(&format!(
-                        "runner wait failed: action={} scope={} err={}",
-                        action, scope, e
-                    )),
-                },
-                Err(e) => log_event(&format!(
-                    "runner spawn failed: action={} scope={} err={}",
-                    action, scope, e
-                )),
+            // Check dirty flag before releasing in_flight. If dirty,
+            // run one more pass.
+            let should_loop = {
+                let mut states = build_states().lock().unwrap();
+                let state = states.entry(wt_key.clone()).or_default();
+                if state.dirty {
+                    state.dirty = false;
+                    true
+                } else {
+                    state.in_flight = false;
+                    false
+                }
+            };
+            if should_loop {
+                log_event(&format!(
+                    "schedule: running coalesced follow-up pass wt_hash={}",
+                    wt_hash_loop
+                ));
+                continue;
             }
-
-            drop(permit);
+            break;
         }
     });
+}
+
+async fn run_three_scopes(
+    python: &Path,
+    runner: &Path,
+    repo_hash: &RepoHash,
+    wt_hash: &WorktreeHash,
+    project_root: &Path,
+) {
+    for scope in ["files", "files-docs", "specs"] {
+        let action = if scope == "specs" {
+            "index-specs"
+        } else {
+            "index-files"
+        };
+        let log_file = open_runner_log_file(&format!("{action}-{scope}-incremental"));
+
+        let permit = match runner_semaphore().acquire().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        log_event(&format!(
+            "spawn runner: action={} scope={} repo_hash={} wt_hash={}",
+            action, scope, repo_hash, wt_hash
+        ));
+
+        let mut cmd = tokio::process::Command::new(python);
+        cmd.arg(runner)
+            .arg("--action")
+            .arg(action)
+            .arg("--repo-hash")
+            .arg(repo_hash.as_str())
+            .arg("--worktree-hash")
+            .arg(wt_hash.as_str())
+            .arg("--project-root")
+            .arg(project_root)
+            .arg("--mode")
+            .arg("incremental")
+            .arg("--scope")
+            .arg(scope);
+        if let Some(file) = log_file.as_ref().and_then(|f| f.try_clone().ok()) {
+            cmd.stdout(file);
+        } else {
+            cmd.stdout(std::process::Stdio::null());
+        }
+        if let Some(file) = log_file.and_then(|f| f.try_clone().ok()) {
+            cmd.stderr(file);
+        } else {
+            cmd.stderr(std::process::Stdio::null());
+        }
+        cmd.stdin(std::process::Stdio::null());
+
+        match cmd.spawn() {
+            Ok(mut child) => match child.wait().await {
+                Ok(status) => log_event(&format!(
+                    "runner exit: action={} scope={} status={} wt_hash={}",
+                    action, scope, status, wt_hash
+                )),
+                Err(e) => log_event(&format!(
+                    "runner wait failed: action={} scope={} err={}",
+                    action, scope, e
+                )),
+            },
+            Err(e) => log_event(&format!(
+                "runner spawn failed: action={} scope={} err={}",
+                action, scope, e
+            )),
+        }
+
+        drop(permit);
+    }
 }
 
 /// Kick an initial integrity-check build for a single Worktree. Used by
