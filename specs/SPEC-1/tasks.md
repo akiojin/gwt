@@ -73,3 +73,6 @@
 - [x] T060 [P] Write RED tests: active Claude/Codex panes can hydrate scrollback from session `jsonl` history and navigate older transcript lines through the same viewport APIs.
 - [x] T061 Implement transcript-backed scrollback mode in `model.rs` + `app.rs`, including source resolution (`~/.claude/projects`, `~/.codex/sessions`) and in-memory cache synchronization for active agent panes.
 - [x] T062 Re-run focused scrollback regression suite (`cargo test -p gwt-tui scrollback -- --nocapture`) to verify transcript-backed history does not regress snapshot/row behavior.
+- [x] T063 [P] Write RED tests: recent agent-pane row/snapshot cache keeps VT color attributes while transcript history remains available as an older fallback.
+- [x] T064 Adjust `VtState` transcript fallback ordering so recent local cache is exhausted before plain-text transcript mode becomes active, and downward scroll returns to the oldest local cache before live-follow.
+- [x] T065 Re-run focused transcript + scrollback regressions and verify scrollbar metrics / viewport routing stay coherent with the new cache-first ordering.

@@ -560,7 +560,7 @@ impl VtState {
     }
 
     pub fn uses_transcript_scrollback(&self) -> bool {
-        self.has_transcript_scrollback()
+        self.transcript_cursor.is_some()
     }
 
     pub fn has_viewport_scrollback(&self) -> bool {
@@ -674,39 +674,18 @@ impl VtState {
             return false;
         }
 
-        if self.has_transcript_scrollback() {
-            if delta_rows > 0 {
-                return self.scroll_transcript_up(delta_rows as usize);
-            }
-            return self.scroll_transcript_down(delta_rows.unsigned_abs() as usize);
-        }
-
-        if self.uses_snapshot_scrollback() {
-            if delta_rows > 0 {
-                return self.scroll_snapshot_up(delta_rows as usize);
-            }
-            return self.scroll_snapshot_down(delta_rows.unsigned_abs() as usize);
-        }
-
         if delta_rows > 0 {
-            let next = self
-                .scrollback()
-                .saturating_add(delta_rows as usize)
-                .min(self.max_scrollback());
-            self.set_follow_live(false);
-            self.set_scrollback(next);
-            return true;
+            return self.scroll_viewport_up(delta_rows as usize);
         }
 
-        let next = self
-            .scrollback()
-            .saturating_sub(delta_rows.unsigned_abs() as usize);
-        self.set_scrollback(next);
-        self.set_follow_live(next == 0);
-        true
+        self.scroll_viewport_down(delta_rows.unsigned_abs() as usize)
     }
 
     pub fn scrollbar_metrics(&self, viewport_height: usize) -> Option<(usize, usize, usize)> {
+        if let Some(metrics) = self.combined_transcript_scrollbar_metrics(viewport_height) {
+            return Some(metrics);
+        }
+
         if self.has_transcript_scrollback() {
             let visible_viewport = viewport_height.max(1);
             let content_length = self
@@ -853,6 +832,14 @@ impl VtState {
         self.has_transcript_lines() && self.transcript_lines.len() > self.rows as usize
     }
 
+    fn has_local_cache_scrollback(&self) -> bool {
+        if self.uses_snapshot_scrollback() {
+            self.has_snapshot_scrollback()
+        } else {
+            self.max_scrollback() > 0
+        }
+    }
+
     fn transcript_live_start(&self) -> usize {
         self.transcript_lines
             .len()
@@ -871,6 +858,175 @@ impl VtState {
         self.transcript_cursor.unwrap_or(live_start).min(live_start)
     }
 
+    fn local_cache_history_depth(&self) -> usize {
+        if self.uses_snapshot_scrollback() {
+            self.snapshot_count().saturating_sub(1)
+        } else {
+            self.max_scrollback()
+        }
+    }
+
+    fn local_cache_position(&self) -> usize {
+        if self.uses_snapshot_scrollback() {
+            self.snapshot_position()
+        } else {
+            self.max_scrollback().saturating_sub(self.scrollback())
+        }
+    }
+
+    fn local_cache_up_capacity(&self) -> usize {
+        if !self.has_local_cache_scrollback() {
+            return 0;
+        }
+
+        if self.uses_snapshot_scrollback() {
+            self.snapshot_position()
+        } else {
+            self.max_scrollback().saturating_sub(self.scrollback())
+        }
+    }
+
+    fn local_cache_down_capacity(&self) -> usize {
+        if !self.has_local_cache_scrollback() {
+            return 0;
+        }
+
+        if self.uses_snapshot_scrollback() {
+            self.snapshots
+                .len()
+                .saturating_sub(1)
+                .saturating_sub(self.snapshot_position())
+        } else {
+            self.scrollback()
+        }
+    }
+
+    fn scroll_local_cache_up(&mut self, rows: usize) -> bool {
+        if rows == 0 || !self.has_local_cache_scrollback() {
+            return false;
+        }
+
+        if self.uses_snapshot_scrollback() {
+            return self.scroll_snapshot_up(rows);
+        }
+
+        let next = self
+            .scrollback()
+            .saturating_add(rows)
+            .min(self.max_scrollback());
+        if next == self.scrollback() {
+            return false;
+        }
+        self.set_follow_live(false);
+        self.set_scrollback(next);
+        true
+    }
+
+    fn scroll_local_cache_down(&mut self, rows: usize) -> bool {
+        if rows == 0 || !self.has_local_cache_scrollback() {
+            return false;
+        }
+
+        if self.uses_snapshot_scrollback() {
+            return self.scroll_snapshot_down(rows);
+        }
+
+        let next = self.scrollback().saturating_sub(rows);
+        if next == self.scrollback() {
+            return false;
+        }
+        self.set_scrollback(next);
+        self.set_follow_live(next == 0);
+        true
+    }
+
+    fn move_local_cache_to_oldest(&mut self) {
+        if !self.has_local_cache_scrollback() {
+            return;
+        }
+
+        if self.uses_snapshot_scrollback() {
+            self.snapshot_cursor = Some(0);
+            self.follow_live = false;
+        } else {
+            self.set_follow_live(false);
+            self.set_scrollback(self.max_scrollback());
+        }
+    }
+
+    fn enter_transcript_history(&mut self) -> bool {
+        if !self.has_transcript_scrollback() || self.transcript_cursor.is_some() {
+            return false;
+        }
+
+        self.transcript_cursor = Some(self.transcript_live_start());
+        self.follow_live = false;
+        true
+    }
+
+    fn scroll_viewport_up(&mut self, mut rows: usize) -> bool {
+        if rows == 0 {
+            return false;
+        }
+
+        let mut changed = false;
+        if self.transcript_cursor.is_some() {
+            return self.scroll_transcript_up(rows);
+        }
+
+        let local_rows = rows.min(self.local_cache_up_capacity());
+        if local_rows > 0 {
+            changed |= self.scroll_local_cache_up(local_rows);
+            rows = rows.saturating_sub(local_rows);
+        }
+
+        if rows == 0 {
+            return changed;
+        }
+
+        if !self.has_local_cache_scrollback() {
+            return changed | self.scroll_transcript_up(rows);
+        }
+
+        if self.enter_transcript_history() {
+            changed = true;
+            rows = rows.saturating_sub(1);
+        }
+
+        if rows > 0 {
+            changed |= self.scroll_transcript_up(rows);
+        }
+
+        changed
+    }
+
+    fn scroll_viewport_down(&mut self, mut rows: usize) -> bool {
+        if rows == 0 {
+            return false;
+        }
+
+        let mut changed = false;
+        if let Some(current) = self.transcript_cursor {
+            let live_start = self.transcript_live_start();
+            let transcript_rows = rows.min(live_start.saturating_sub(current));
+            if transcript_rows > 0 {
+                changed |= self.scroll_transcript_down(transcript_rows);
+                rows = rows.saturating_sub(transcript_rows);
+            }
+
+            if rows > 0 && self.transcript_cursor.is_some() {
+                changed |= self.scroll_transcript_down(1);
+                rows = rows.saturating_sub(1);
+            }
+        }
+
+        if rows > 0 {
+            changed |= self.scroll_local_cache_down(rows.min(self.local_cache_down_capacity()));
+        }
+
+        changed
+    }
+
     fn scroll_transcript_up(&mut self, rows: usize) -> bool {
         if rows == 0 || !self.has_transcript_scrollback() {
             return false;
@@ -878,6 +1034,9 @@ impl VtState {
         let live_start = self.transcript_live_start();
         let current = self.transcript_cursor.unwrap_or(live_start);
         let next = current.saturating_sub(rows);
+        if self.transcript_cursor == Some(next) {
+            return false;
+        }
         self.transcript_cursor = Some(next);
         self.follow_live = false;
         true
@@ -887,17 +1046,54 @@ impl VtState {
         if rows == 0 || !self.has_transcript_scrollback() {
             return false;
         }
+        let Some(current) = self.transcript_cursor else {
+            return false;
+        };
         let live_start = self.transcript_live_start();
-        let current = self.transcript_cursor.unwrap_or(live_start);
-        let next = current.saturating_add(rows).min(live_start);
-        if next >= live_start {
+        let next = current.saturating_add(rows);
+        if next > live_start || (!self.has_local_cache_scrollback() && next >= live_start) {
             self.transcript_cursor = None;
-            self.follow_live = true;
+            if self.has_local_cache_scrollback() {
+                self.move_local_cache_to_oldest();
+                self.follow_live = false;
+            } else {
+                self.follow_live = true;
+            }
         } else {
             self.transcript_cursor = Some(next);
             self.follow_live = false;
         }
         true
+    }
+
+    fn combined_transcript_scrollbar_metrics(
+        &self,
+        viewport_height: usize,
+    ) -> Option<(usize, usize, usize)> {
+        if !self.has_transcript_scrollback() || !self.has_local_cache_scrollback() {
+            return None;
+        }
+
+        let visible_viewport = viewport_height.max(1);
+        let transcript_live_start = self
+            .transcript_lines
+            .len()
+            .saturating_sub(visible_viewport.min(self.transcript_lines.len()));
+        let local_cache_depth = self.local_cache_history_depth();
+        let content_length = transcript_live_start
+            .saturating_add(1)
+            .saturating_add(local_cache_depth)
+            .saturating_add(visible_viewport)
+            .max(visible_viewport);
+        let position = if let Some(cursor) = self.transcript_cursor {
+            cursor.min(transcript_live_start)
+        } else {
+            transcript_live_start
+                .saturating_add(1)
+                .saturating_add(self.local_cache_position())
+        };
+
+        Some((content_length, position, visible_viewport))
     }
 
     fn transcript_visible_parser(&self) -> vt100::Parser {
@@ -1461,6 +1657,14 @@ mod tests {
         sequence.into_bytes()
     }
 
+    fn colored_scrollback_lines(lines: &[(&str, u8)]) -> Vec<u8> {
+        let mut sequence = String::new();
+        for (line, color) in lines {
+            sequence.push_str(&format!("\u{1b}[38;5;{color}m{line}\u{1b}[0m\r\n"));
+        }
+        sequence.into_bytes()
+    }
+
     #[test]
     fn capture_snapshot_skips_identical_consecutive_frames() {
         let mut vt = VtState::new(5, 20);
@@ -1650,6 +1854,99 @@ mod tests {
         assert!(vt.scroll_viewport_lines(-100));
         assert!(vt.follow_live());
         assert!(!vt.viewing_history());
+    }
+
+    #[test]
+    fn recent_row_scrollback_preserves_styles_before_transcript_fallback() {
+        let mut vt = VtState::new(4, 32);
+        vt.process(&colored_scrollback_lines(&[
+            ("line-1", 196),
+            ("line-2", 202),
+            ("line-3", 208),
+            ("line-4", 214),
+            ("line-5", 220),
+            ("line-6", 226),
+        ]));
+        vt.set_transcript_lines_from_source(
+            PathBuf::from("/tmp/transcript.jsonl"),
+            None,
+            (1..=12).map(|index| format!("line-{index}")).collect(),
+        );
+
+        assert!(vt.max_scrollback() > 0);
+        assert!(vt.scroll_viewport_lines(1));
+        assert!(
+            vt.transcript_cursor.is_none(),
+            "recent scrollback should stay on the styled VT cache before entering transcript mode"
+        );
+
+        let parser = vt.visible_screen_parser();
+        let cell = parser.screen().cell(0, 0).expect("styled cell");
+        assert_eq!(cell.fgcolor(), vt100::Color::Idx(208));
+        assert!(parser.screen().contents().contains("line-3"));
+    }
+
+    #[test]
+    fn transcript_fallback_only_activates_after_row_cache_is_exhausted() {
+        let mut vt = VtState::new(4, 32);
+        vt.process(&colored_scrollback_lines(&[
+            ("line-1", 196),
+            ("line-2", 202),
+            ("line-3", 208),
+            ("line-4", 214),
+            ("line-5", 220),
+            ("line-6", 226),
+        ]));
+        vt.set_transcript_lines_from_source(
+            PathBuf::from("/tmp/transcript.jsonl"),
+            None,
+            (1..=12).map(|index| format!("line-{index}")).collect(),
+        );
+
+        assert!(vt.scroll_viewport_lines(vt.max_scrollback() as i16));
+        assert!(
+            vt.transcript_cursor.is_none(),
+            "reaching the oldest local cache should not immediately switch to transcript mode"
+        );
+
+        assert!(vt.scroll_viewport_lines(1));
+        assert_eq!(
+            vt.transcript_cursor,
+            Some(vt.transcript_lines.len().saturating_sub(vt.rows() as usize)),
+            "one additional upward step beyond the oldest cache should enter transcript history at its newest viewport"
+        );
+    }
+
+    #[test]
+    fn transcript_fallback_returns_to_oldest_cache_before_live_view() {
+        let mut vt = VtState::new(4, 32);
+        vt.process(&colored_scrollback_lines(&[
+            ("line-1", 196),
+            ("line-2", 202),
+            ("line-3", 208),
+            ("line-4", 214),
+            ("line-5", 220),
+            ("line-6", 226),
+        ]));
+        vt.set_transcript_lines_from_source(
+            PathBuf::from("/tmp/transcript.jsonl"),
+            None,
+            (1..=12).map(|index| format!("line-{index}")).collect(),
+        );
+
+        assert!(vt.scroll_viewport_lines(vt.max_scrollback() as i16 + 1));
+        assert!(vt.transcript_cursor.is_some());
+
+        assert!(vt.scroll_viewport_lines(-1));
+        assert!(
+            vt.transcript_cursor.is_none(),
+            "scrolling down from transcript history should leave transcript mode first"
+        );
+        assert!(
+            !vt.follow_live(),
+            "leaving transcript history should return to the oldest local cache, not jump directly to live"
+        );
+        assert_eq!(vt.scrollback(), vt.max_scrollback());
     }
 
     #[test]

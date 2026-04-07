@@ -43,6 +43,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 19. Given full-screen redraws mutate overlap rows (for example header/status churn), when the resulting visible VT frame differs from the previous frame, then gwt records that frame as a new snapshot without relying on overlap heuristics.
 20. Given a pane has existing main-screen row scrollback and then enters alternate screen, when the user scrolls while viewing alternate-screen output, then gwt uses snapshot-backed history for the visible alternate-screen frames instead of stale main-screen row scrollback.
 21. Given scrollback interaction, URL hit-testing, selection copy, and terminal rendering happen in one pane, when the viewport moves, then all of them resolve against the same cached visible surface instead of mixing separate live/snapshot sources.
+22. Given a Claude/Codex agent pane has both recent VT/snapshot cache and hydrated transcript history, when the user scrolls upward through recent history, then gwt keeps the styled recent cache visible first and only falls back to plain-text transcript history after the local cache is exhausted.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -97,6 +98,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-003a**: When a pane's visible screen does not expose vt100 row scrollback, gwt keeps a pane-local in-memory ring buffer of recent visible viewport states for the lifetime of that pane.
 - **FR-003b**: Agent-pane scrollback cache remains ephemeral in memory and is discarded when the pane closes.
 - **FR-003c**: For Claude/Codex agent panes, gwt may hydrate in-memory transcript scrollback from the corresponding session `jsonl` file so users can review full session history even when vt100 row scrollback and snapshot history are sparse.
+- **FR-003d**: When both local VT/snapshot cache and hydrated transcript history exist for an agent pane, recent scrollback navigation prefers the local cache so ANSI color and text attributes remain visible until the user scrolls past the oldest local cached viewport.
 - **FR-004**: Mouse wheel and trackpad scrolling is always active when the terminal pane has focus.
 - **FR-004b**: On startup gwt disables host-terminal alternate-scroll mode for its alternate-screen session so Terminal.app trackpad gestures reach gwt's mouse scroll handling.
 - **FR-004c**: When Terminal.app reports trackpad motion as `Down/Drag/Up(Right)` over the session pane, gwt interprets the vertical drag delta as scrollback motion without affecting left-button text selection.
@@ -161,3 +163,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-019**: Snapshot history advances for any distinct full-screen frame even under overlap-row churn, preventing practical scrollback starvation on dynamic panes.
 - **SC-020**: Alternate-screen panes remain scrollable through snapshot history even when legacy main-screen row scrollback exists; scrollbar and visible frame stay in sync.
 - **SC-021**: Viewport movement updates scrollbar, rendered text, URL hit-tests, and copy selection consistently from one visible cache surface, with no source mismatch between features.
+- **SC-022**: Agent-pane scrollback preserves VT-derived color and text attributes throughout recent local cache navigation, and transcript fallback activates only after that local cache is exhausted.

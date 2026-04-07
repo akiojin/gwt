@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `59/59` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T01:57:01Z`
+- Task progress: `62/62` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T04:23:29Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -29,6 +29,7 @@
 - Alternate-screen panes now prefer snapshot-backed scrolling and scrollbar metrics even when main-screen row scrollback metadata is non-zero, so thumb movement always matches visible frame changes.
 - Session viewport handling is now unified under `VtState`: rendering, scrollbar metrics, URL hit-testing, and selection copy all consume the same visible cache surface API.
 - Active Claude/Codex panes now hydrate transcript-backed in-memory scrollback from session `jsonl` files, so users can scroll full conversation history when snapshot count is too small.
+- Agent-pane transcript hydration now treats transcript history as an older fallback segment, preserving styled recent VT/snapshot cache first so ANSI colors and text attributes remain visible while scrolling through recent history.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.

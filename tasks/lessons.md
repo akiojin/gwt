@@ -912,3 +912,20 @@ PTY 出力が継続している間だけ、トラックパッド/マウススク
 1. 出力優先ループを設計する場合でも、pending input の先頭消費を必ず先に行う。
 2. PTY 出力があったフレームでは、即 break せず「短い入力猶予スライス」で入力を一度だけ取りに行く。
 3. イベントループの公平性（output/input）をユニットテストで固定し、順序退行を防ぐ。
+
+## 2026-04-07 — fix: transcript fallback が recent VT cache より先に出ると style が失われる
+
+### 事象
+
+Claude/Codex の scrollback で transcript が有効な状態だと、少し上にスクロールしただけで recent cache ではなく transcript 表示に入り、ANSI 色や文字装飾が消えた。
+
+### 原因
+
+- `VtState::scroll_viewport_lines()` が transcript 利用可能かどうかだけで transcript 経路を優先していた。
+- そのため local VT/snapshot cache が十分残っていても、visible surface が plain-text transcript parser に切り替わっていた。
+
+### 再発防止策
+
+1. transcript は「available」と「active」を分けて扱い、スクロール経路は active 状態だけで切り替える。
+2. cache-backed history と transcript fallback が共存する場合は、境界遷移の上り/下りを別ルールとしてテスト固定する。
+3. style を持つ viewport source と plain-text fallback source を混在させる実装では、色属性を直接検証するテストを必ず追加する。
