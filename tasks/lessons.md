@@ -1,5 +1,43 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: public skill 名は internal action 名ではなくユーザー責務に合わせる
+
+### 事象
+
+`search-files` / `index-files` を canonical action に直した流れで、standalone skill 名まで
+`gwt-file-search` に寄せたが、実際の workflow は「project 内の関連実装箇所を探す」ため、
+public naming が体験の責務からずれた。
+
+### 原因
+
+- internal runner API の名詞を、そのまま user-facing skill surface に投影してしまった。
+- semantic search の返り値が「files」でも、ユーザーが解きたい課題は project understanding /
+  implementation discovery である点を十分に分離できていなかった。
+
+### 再発防止策
+
+1. internal action 名と public skill 名がずれているときは、どちらが「実装都合」でどちらが「ユーザー責務」かを先に言語化する。
+2. naming review では「この skill は何を index するか」ではなく「ユーザーは何を達成するために呼ぶか」を基準に canonical 名を決める。
+3. internal API 名の正規化を public rename に波及させる前に、SKILL の説明文・出力契約・利用導線が同じ責務語彙を使っているか確認する。
+
+## 2026-04-07 — superseded: skill 名は underlying action / historical owner と揃える
+
+### 事象
+
+standalone file search の実体は `search-files` / `index-files` なのに、skill surface が
+`gwt-project-search` に寄っており、`files` 契約と命名が食い違っているように見えた。
+
+### 原因
+
+- internal action 名と public skill 名の責務を分離せず、runtime action の名詞をそのまま public naming に投影した。
+- historical owner 名称を、現在の user-facing workflow semantics より優先してしまった。
+
+### 再発防止策
+
+1. runtime action 名と historical owner は確認するが、public skill 名の決定基準にはしない。
+2. canonical 名を変える場合は、bundled assets・参照 docs・compatibility alias を同じ修正セットで更新する。
+3. asset-only rename でも distribution test で canonical asset と negative case を固定する。
+
 ## 2026-04-07 — fix: Python launcher 判定は path heuristic ではなく実行 probe と構造化エラーで固定する
 
 ### 事象

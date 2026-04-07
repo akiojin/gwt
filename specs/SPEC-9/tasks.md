@@ -255,3 +255,6 @@
 - [x] **T-132**: Add repo-tracked project-index requirements + managed venv bootstrap so gwt can repair the shared search runtime.
 - [x] **T-133**: Update `gwt-search`, `gwt-project-search`, `gwt-project-index`, and `gwt-issue-search` examples to use canonical file-search actions and `index-issues --project-root`.
 - [x] **T-134**: Update SPEC-9 runtime contract language so the search interface, shared runtime, and warning-only degradation stay aligned with implementation.
+- [x] **T-135**: Add RED tests that require `gwt-project-search` as the canonical distributed project-search asset and reject `gwt-file-search` assets.
+- [x] **T-136**: Restore canonical `gwt-project-search` skill / slash-command assets across bundled docs while keeping `search-files` / `index-files` as internal runner actions.
+- [x] **T-137**: Update SPEC-9 artifacts and search-family references so standalone semantic project search points to `gwt-project-search` as the canonical public name.

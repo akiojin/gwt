@@ -187,6 +187,7 @@ The following capabilities from SPEC-1786 are already implemented:
 3. Standardize file-search actions on `index-files` / `search-files` while preserving `index` / `search` aliases.
 4. Update `gwt-search` family skills so `index-issues` examples include `--project-root`.
 5. Validate bootstrap Python candidates before venv creation, keep working Store/launcher entrypoints, and translate only true no-candidate cases into install guidance.
+6. Restore `gwt-project-search` as the canonical standalone semantic project-search skill / command while keeping `search-files` / `index-files` as the internal runner action names.
 
 ### Dependencies
 
