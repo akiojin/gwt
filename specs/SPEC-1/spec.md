@@ -48,6 +48,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 24. Given a Claude/Codex agent pane redraws launch, blank, or status frames in-place, when vt100 row scrollback exists, then gwt prefers the terminal-like row scrollback cache so overwritten transient screens do not appear as separate history entries.
 25. Given a Claude/Codex agent pane redraws full-screen frames in-place and vt100 row scrollback stays at zero, when the user scrolls recent history, then gwt falls back to the same pane-local in-memory frame cache instead of losing scrollback entirely.
 26. Given a Claude/Codex agent pane closes or gwt restarts, when the pane is opened again, then prior scrollback is not restored from session logs and history starts from fresh PTY output.
+27. Given I am viewing older terminal history, when I press any key that is forwarded to the PTY, then gwt returns the viewport to live before sending that input.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -125,6 +126,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005i**: Snapshot progression for full-screen panes does not require viewport-shift overlap scoring; any distinct visible frame remains reviewable through snapshot scrollback.
 - **FR-005j**: While alternate screen is active, snapshot-backed scrollback is the primary history source even if main-screen row scrollback exists.
 - **FR-005k**: Session viewport operations are routed through one cache-backed visible-surface API, and renderer / URL detection / selection copy all consume that same surface.
+- **FR-005l**: Any key input forwarded to the active PTY returns the session viewport to live-follow first, so command input never stays attached to a stale historical viewport.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
@@ -173,3 +175,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-021**: Viewport movement updates scrollbar, rendered text, URL hit-tests, and copy selection consistently from one visible cache surface, with no source mismatch between features.
 - **SC-022**: Agent-pane scrollback preserves VT-derived color and text attributes throughout in-memory history navigation without switching to transcript/session-log fallback.
 - **SC-023**: Agent panes whose output redraws full-screen frames without producing vt100 row scrollback still remain scrollable through pane-local in-memory snapshot history; row-only regressions are prevented.
+- **SC-024**: While browsing row or snapshot history, any PTY-bound key input returns the viewport to the live screen before the input is forwarded.

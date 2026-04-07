@@ -2284,10 +2284,21 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
 }
 
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
+    reset_active_session_scrollback_for_input(model);
     let Some(bytes) = key_event_to_bytes(key) else {
         return;
     };
     push_input_to_active_session(model, bytes);
+}
+
+fn reset_active_session_scrollback_for_input(model: &mut Model) {
+    let Some(session) = model.active_session_tab_mut() else {
+        return;
+    };
+    if session.vt.viewing_history() {
+        session.vt.clear_selection();
+        session.vt.set_follow_live(true);
+    }
 }
 
 fn apply_notification(model: &mut Model, notification: Notification) {
@@ -10818,6 +10829,90 @@ CUSTOM_ENV = "enabled"
         let forwarded = model.pending_pty_inputs().back().unwrap();
         assert_eq!(forwarded.session_id, "shell-0");
         assert_eq!(forwarded.bytes, vec![0x03]);
+    }
+
+    #[test]
+    fn forward_key_to_active_session_returns_row_scrollback_to_live() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+        for i in 0..12 {
+            append_session_line(&mut model, "shell-0", &format!("line-{i}"));
+        }
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .viewing_history(),
+            "precondition: shell session should be browsing history before key input"
+        );
+
+        forward_key_to_active_session(&mut model, key(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(session.vt.follow_live());
+        assert!(!session.vt.viewing_history());
+        assert_eq!(session.vt.scrollback(), 0);
+        let forwarded = model.pending_pty_inputs().back().expect("queued key input");
+        assert_eq!(forwarded.bytes, b"a".to_vec());
+    }
+
+    #[test]
+    fn forward_key_to_active_session_returns_snapshot_history_to_live() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .viewing_history(),
+            "precondition: full-screen session should be browsing snapshot history before key input"
+        );
+
+        forward_key_to_active_session(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(session.vt.follow_live());
+        assert!(!session.vt.viewing_history());
+        let visible = session.vt.visible_screen_parser().screen().contents();
+        assert!(visible.contains("frame-2"));
+        assert!(!visible.contains("frame-1"));
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued enter input");
+        assert_eq!(forwarded.bytes, vec![b'\r']);
     }
 
     #[test]

@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: PTY-bound key input must exit history mode before forwarding
+
+### 事象
+
+scrollback を見ている最中にキー入力しても、
+viewport が古い履歴位置に残ったままで、入力だけが PTY に送られていた。
+
+### 原因
+
+- scrollback の live/history 遷移はマウススクロール経路だけで管理しており、
+  キー入力経路では live 復帰を行っていなかった。
+- そのため row scrollback / snapshot history のどちらでも、
+  「表示は過去、入力は現在の PTY」という不整合が起きえた。
+
+### 再発防止策
+
+1. PTY に転送するキー入力の直前で、active session が history 表示中なら `follow_live=true` に戻す。
+2. row scrollback と snapshot history の両方で、キー入力後に live screen へ戻る回帰テストを固定する。
+
 ## 2026-04-07 — fix: agent memory-only scrollback still needs frame fallback when row history stays zero
 
 ### 事象

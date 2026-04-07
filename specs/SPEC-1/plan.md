@@ -60,6 +60,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 10. When an agent pane redraws full-screen frames without accumulating vt100 row scrollback, fall back to the same pane-local in-memory snapshot history instead of transcript/session-log hydration.
 11. Increase the agent-pane row scrollback capacity above the standard terminal default while keeping it bounded in memory and discarded when the pane closes.
 12. Do not hydrate agent-pane runtime scrollback from session `jsonl` or session-log files; agent-side PTY re-output is the only restoration mechanism.
+13. When the user presses a key that is forwarded to the active PTY while browsing history, reset the viewport to live-follow before queueing the input bytes.
 
 ## Dependencies
 
