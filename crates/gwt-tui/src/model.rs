@@ -439,9 +439,72 @@ fn slice_contains_non_blank_content(lines: &[String]) -> bool {
 
 const SNAPSHOT_HISTORY_CAPACITY: usize = 2048;
 const TRANSCRIPT_SCROLLBACK_LINE_CAPACITY: usize = 50_000;
+const ROW_SCROLLBACK_CAPACITY: usize = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbackStrategy {
+    Standard,
+    AgentTranscriptBacked,
+}
+
+fn is_alt_screen_toggle_sequence(sequence: &[u8]) -> bool {
+    matches!(
+        sequence,
+        b"\x1b[?1049h"
+            | b"\x1b[?1049l"
+            | b"\x1b[?1047h"
+            | b"\x1b[?1047l"
+            | b"\x1b[?47h"
+            | b"\x1b[?47l"
+    )
+}
+
+fn filter_scrollback_bytes_with_pending(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
+    let mut input = std::mem::take(pending);
+    input.extend_from_slice(bytes);
+
+    let mut filtered = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != 0x1b {
+            filtered.push(input[index]);
+            index += 1;
+            continue;
+        }
+
+        if index + 1 >= input.len() {
+            pending.extend_from_slice(&input[index..]);
+            break;
+        }
+
+        if input[index + 1] != b'[' {
+            filtered.push(input[index]);
+            index += 1;
+            continue;
+        }
+
+        let mut end = index + 2;
+        while end < input.len() && !(0x40..=0x7e).contains(&input[end]) {
+            end += 1;
+        }
+        if end >= input.len() {
+            pending.extend_from_slice(&input[index..]);
+            break;
+        }
+
+        let sequence = &input[index..=end];
+        if !is_alt_screen_toggle_sequence(sequence) {
+            filtered.extend_from_slice(sequence);
+        }
+        index = end + 1;
+    }
+
+    filtered
+}
 
 pub struct VtState {
     parser: vt100::Parser,
+    scrollback_parser: vt100::Parser,
     rows: u16,
     cols: u16,
     max_scrollback: usize,
@@ -454,6 +517,8 @@ pub struct VtState {
     transcript_source_path: Option<PathBuf>,
     transcript_source_modified: Option<SystemTime>,
     transcript_overlap_tail_positions: Cell<Option<usize>>,
+    scrollback_strategy: ScrollbackStrategy,
+    scrollback_filter_pending: Vec<u8>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -472,9 +537,15 @@ impl Clone for VtState {
         let mut parser = vt100::Parser::new(self.rows, self.cols, 10_000);
         let state = self.parser.screen().state_formatted();
         parser.process(&state);
-        parser.set_scrollback(self.scrollback());
+        parser.set_scrollback(0);
+        let mut scrollback_parser =
+            vt100::Parser::new(self.rows, self.cols, ROW_SCROLLBACK_CAPACITY);
+        let scrollback_state = self.scrollback_parser.screen().state_formatted();
+        scrollback_parser.process(&scrollback_state);
+        scrollback_parser.set_scrollback(self.scrollback());
         Self {
             parser,
+            scrollback_parser,
             rows: self.rows,
             cols: self.cols,
             max_scrollback: self.max_scrollback,
@@ -489,6 +560,8 @@ impl Clone for VtState {
             transcript_overlap_tail_positions: Cell::new(
                 self.transcript_overlap_tail_positions.get(),
             ),
+            scrollback_strategy: self.scrollback_strategy,
+            scrollback_filter_pending: self.scrollback_filter_pending.clone(),
         }
     }
 }
@@ -496,7 +569,8 @@ impl Clone for VtState {
 impl VtState {
     pub fn new(rows: u16, cols: u16) -> Self {
         let mut state = Self {
-            parser: vt100::Parser::new(rows, cols, 10_000),
+            parser: vt100::Parser::new(rows, cols, ROW_SCROLLBACK_CAPACITY),
+            scrollback_parser: vt100::Parser::new(rows, cols, ROW_SCROLLBACK_CAPACITY),
             rows,
             cols,
             max_scrollback: 0,
@@ -509,9 +583,29 @@ impl VtState {
             transcript_source_path: None,
             transcript_source_modified: None,
             transcript_overlap_tail_positions: Cell::new(None),
+            scrollback_strategy: ScrollbackStrategy::Standard,
+            scrollback_filter_pending: Vec::new(),
         };
         state.refresh_scrollback_metrics();
         state
+    }
+
+    pub fn set_scrollback_strategy(&mut self, strategy: ScrollbackStrategy) {
+        if self.scrollback_strategy == strategy {
+            return;
+        }
+
+        self.scrollback_strategy = strategy;
+        self.scrollback_filter_pending.clear();
+        self.scrollback_parser = vt100::Parser::new(self.rows, self.cols, ROW_SCROLLBACK_CAPACITY);
+        let live_state = self.parser.screen().state_formatted();
+        self.scrollback_parser.process(&live_state);
+        if matches!(strategy, ScrollbackStrategy::AgentTranscriptBacked) {
+            self.snapshots.clear();
+            self.snapshot_cursor = None;
+        }
+        self.refresh_scrollback_metrics();
+        self.set_scrollback(0);
     }
 
     pub fn rows(&self) -> u16 {
@@ -527,9 +621,9 @@ impl VtState {
         self.rows = rows;
         self.cols = cols;
         self.parser.set_size(rows, cols);
+        self.scrollback_parser.set_size(rows, cols);
         self.refresh_scrollback_metrics();
-        self.parser
-            .set_scrollback(current_scrollback.min(self.max_scrollback));
+        self.set_scrollback(current_scrollback.min(self.max_scrollback));
         self.recompute_transcript_overlap_cache();
     }
 
@@ -537,15 +631,16 @@ impl VtState {
         let previous_scrollback = self.scrollback();
         let previous_max_scrollback = self.max_scrollback;
         self.parser.process(bytes);
+        self.process_scrollback_bytes(bytes);
         self.refresh_scrollback_metrics();
         if self.max_scrollback > 0 {
             self.snapshot_cursor = None;
         }
         if self.follow_live {
-            self.parser.set_scrollback(0);
+            self.set_scrollback(0);
         } else {
             let added_scrollback = self.max_scrollback.saturating_sub(previous_max_scrollback);
-            self.parser.set_scrollback(
+            self.set_scrollback(
                 previous_scrollback
                     .saturating_add(added_scrollback)
                     .min(self.max_scrollback),
@@ -555,12 +650,27 @@ impl VtState {
         self.recompute_transcript_overlap_cache();
     }
 
+    fn process_scrollback_bytes(&mut self, bytes: &[u8]) {
+        if matches!(
+            self.scrollback_strategy,
+            ScrollbackStrategy::AgentTranscriptBacked
+        ) {
+            let filtered =
+                filter_scrollback_bytes_with_pending(&mut self.scrollback_filter_pending, bytes);
+            if !filtered.is_empty() {
+                self.scrollback_parser.process(&filtered);
+            }
+        } else {
+            self.scrollback_parser.process(bytes);
+        }
+    }
+
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
     }
 
     pub fn scrollback(&self) -> usize {
-        self.parser.screen().scrollback()
+        self.scrollback_parser.screen().scrollback()
     }
 
     pub fn max_scrollback(&self) -> usize {
@@ -568,7 +678,12 @@ impl VtState {
     }
 
     pub fn uses_snapshot_scrollback(&self) -> bool {
-        self.max_scrollback == 0 || self.parser.screen().alternate_screen()
+        match self.scrollback_strategy {
+            ScrollbackStrategy::AgentTranscriptBacked => false,
+            ScrollbackStrategy::Standard => {
+                self.max_scrollback == 0 || self.parser.screen().alternate_screen()
+            }
+        }
     }
 
     pub fn uses_transcript_scrollback(&self) -> bool {
@@ -586,7 +701,8 @@ impl VtState {
     }
 
     pub fn set_scrollback(&mut self, rows: usize) {
-        self.parser.set_scrollback(rows.min(self.max_scrollback));
+        self.scrollback_parser
+            .set_scrollback(rows.min(self.max_scrollback));
     }
 
     pub fn follow_live(&self) -> bool {
@@ -596,7 +712,7 @@ impl VtState {
     pub fn set_follow_live(&mut self, follow_live: bool) {
         self.follow_live = follow_live;
         if follow_live {
-            self.parser.set_scrollback(0);
+            self.set_scrollback(0);
             self.snapshot_cursor = None;
             self.transcript_cursor = None;
         }
@@ -637,10 +753,17 @@ impl VtState {
             return parser;
         }
 
-        let mut parser = vt100::Parser::new(self.rows, self.cols, 10_000);
+        if !self.follow_live && self.max_scrollback() > 0 {
+            let mut parser = vt100::Parser::new(self.rows, self.cols, ROW_SCROLLBACK_CAPACITY);
+            let state = self.scrollback_parser.screen().state_formatted();
+            parser.process(&state);
+            parser.set_scrollback(self.scrollback());
+            return parser;
+        }
+
+        let mut parser = vt100::Parser::new(self.rows, self.cols, ROW_SCROLLBACK_CAPACITY);
         let state = self.parser.screen().state_formatted();
         parser.process(&state);
-        parser.set_scrollback(self.scrollback());
         parser
     }
 
@@ -823,10 +946,10 @@ impl VtState {
     }
 
     fn refresh_scrollback_metrics(&mut self) {
-        let current_scrollback = self.parser.screen().scrollback();
-        self.parser.set_scrollback(usize::MAX);
-        self.max_scrollback = self.parser.screen().scrollback();
-        self.parser
+        let current_scrollback = self.scrollback_parser.screen().scrollback();
+        self.scrollback_parser.set_scrollback(usize::MAX);
+        self.max_scrollback = self.scrollback_parser.screen().scrollback();
+        self.scrollback_parser
             .set_scrollback(current_scrollback.min(self.max_scrollback));
     }
 
@@ -1241,8 +1364,8 @@ impl VtState {
                     })
                     .collect()
             } else {
-                self.parser.set_scrollback(offset);
-                screen_visible_lines(self.parser.screen())
+                self.scrollback_parser.set_scrollback(offset);
+                screen_visible_lines(self.scrollback_parser.screen())
             };
 
             if transcript_lines == local_lines {
@@ -1253,7 +1376,7 @@ impl VtState {
         }
 
         if !self.uses_snapshot_scrollback() {
-            self.parser
+            self.scrollback_parser
                 .set_scrollback(previous_scrollback.min(self.max_scrollback()));
         }
         self.transcript_overlap_tail_positions.set(Some(overlap));
@@ -1786,6 +1909,19 @@ mod tests {
     }
 
     #[test]
+    fn filter_scrollback_bytes_strips_split_alt_screen_sequence() {
+        let mut pending = Vec::new();
+
+        let first = filter_scrollback_bytes_with_pending(&mut pending, b"\x1b[?104");
+        assert!(first.is_empty());
+        assert_eq!(pending, b"\x1b[?104");
+
+        let second = filter_scrollback_bytes_with_pending(&mut pending, b"9hhello");
+        assert_eq!(second, b"hello");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
     fn capture_snapshot_skips_identical_consecutive_frames() {
         let mut vt = VtState::new(5, 20);
         let frame = full_screen_frame(&["line-1", "line-2", "line-3", "line-4", "line-5"]);
@@ -1865,6 +2001,30 @@ mod tests {
         let contents = snapshot.screen().contents();
         assert!(contents.contains("frame-1"));
         assert!(!contents.contains("frame-2"));
+    }
+
+    #[test]
+    fn agent_scrollback_strategy_uses_normalized_row_history_not_snapshots() {
+        let mut vt = VtState::new(4, 20);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentTranscriptBacked);
+
+        vt.process(b"\x1b[?1049h\x1b[2J\x1b[Hlaunch");
+        vt.process(b"\x1b[2J\x1b[H");
+        vt.process(b"line-1\r\nline-2\r\nline-3\r\nline-4\r\nline-5\r\nline-6");
+
+        assert_eq!(
+            vt.snapshot_count(),
+            0,
+            "agent scrollback should not retain full-screen snapshot frames"
+        );
+        assert!(vt.max_scrollback() > 0);
+        assert!(!vt.uses_snapshot_scrollback());
+
+        assert!(vt.scroll_viewport_lines(vt.max_scrollback() as i16));
+        let contents = vt.visible_screen_parser().screen().contents();
+        assert!(contents.contains("line-1"));
+        assert!(contents.contains("line-4"));
+        assert!(!contents.contains("launch"));
     }
 
     #[test]

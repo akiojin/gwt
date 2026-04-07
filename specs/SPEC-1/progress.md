@@ -32,6 +32,7 @@
 - Agent-pane transcript hydration now treats transcript history as an older fallback segment, preserving styled recent VT/snapshot cache first so ANSI colors and text attributes remain visible while scrolling through recent history.
 - Transcript hydration now preserves raw Claude `tool_result` and Codex `function_call_output` lines, so ANSI-styled tool output from session files remains colorized when transcript-backed scrollback is active.
 - Snapshot-backed agent panes now collapse the overlapping recent transcript tail out of the combined history model, so scrollbar movement no longer spends steps on duplicated recent surfaces before older unique history appears.
+- Claude/Codex agent panes now build recent scrollback from a normalized row-buffer parser instead of full-screen snapshot frames, and transcript resolution now targets the session nearest the gwt launch time rather than whichever worktree transcript was modified most recently.
 - Snapshot history now prunes leading blank frames whenever newer non-blank frames exist, so topmost snapshot scrollback always lands on visible content.
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.

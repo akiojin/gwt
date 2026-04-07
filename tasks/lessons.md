@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot frame history is not terminal scrollback for agent panes
+
+### 事象
+
+scroll 中に agent launch 画面や blank 画面が割り込み、
+scrollbar は動いていても viewport が「別フレーム履歴」を辿っていた。
+
+### 原因
+
+- agent pane の recent cache を distinct full-screen snapshot の履歴として扱っていた。
+- そのため clear / overwrite / launch redraw のような
+  「本来は current screen を置き換えるだけの画面」が scrollback entry として残った。
+- さらに transcript source も worktree 単位の最新 file を選んでおり、
+  同じ worktree 上の別 session が fallback 候補に混ざる余地があった。
+
+### 再発防止策
+
+1. agent pane の recent scrollback は alt-screen toggle を除いた正規化 row buffer から作る。
+2. full-screen snapshot は terminal-like history の代用品にしない。
+3. transcript source は modified time だけでなく session start metadata で選ぶ。
+
 ## 2026-04-07 — fix: transcript fallback must collapse the recent snapshot overlap tail
 
 ### 事象

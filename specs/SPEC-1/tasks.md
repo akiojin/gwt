@@ -80,3 +80,5 @@
 - [x] T067 Preserve raw tool-output transcript lines during Claude/Codex `jsonl` hydration in `app.rs` so transcript-backed scrollback does not drop colorized session output.
 - [x] T068 [P] Write RED tests: snapshot-backed local cache + transcript overlap does not create a scrollbar dead zone before older unique history appears.
 - [x] T069 Collapse overlapping snapshot/transcript tail inside `VtState` so viewport transitions and scrollbar metrics skip duplicated recent history.
+- [x] T070 [P] Write RED tests: agent scrollback ignores alternate-screen launch/blank frame history and transcript selection prefers the session started nearest the gwt launch time.
+- [x] T071 Replace agent-pane snapshot frame scrollback with normalized row scrollback, and select Claude/Codex transcript files by session metadata instead of worktree-global recency.

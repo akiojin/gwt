@@ -59,6 +59,7 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 9. When both agent-pane local cache and hydrated transcript history exist, treat transcript history as an older fallback segment: preserve styled local cache first, then transition into transcript-only view after the local cache is exhausted, and reverse that transition symmetrically on downward scroll.
 10. While hydrating Claude/Codex transcript history, preserve raw tool-output blocks (`tool_result`, `function_call_output`) as line-ordered transcript entries so ANSI-bearing session data is not flattened away before viewport rendering.
 11. When transcript history overlaps recent snapshot-backed cache, detect that shared tail from the visible surfaces themselves and collapse it out of both viewport routing and scrollbar metrics.
+12. For Claude/Codex agent panes, replace snapshot-frame-based recent scrollback with a normalized row-scrollback parser that strips alternate-screen toggles, and choose transcript sources by session start metadata instead of worktree-global newest-file heuristics.
 
 ## Dependencies
 
