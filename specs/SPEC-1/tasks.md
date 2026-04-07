@@ -78,3 +78,5 @@
 - [x] T065 Re-run focused transcript + scrollback regressions and verify scrollbar metrics / viewport routing stay coherent with the new cache-first ordering.
 - [x] T066 [P] Write RED tests: Codex `function_call_output` and Claude `tool_result` transcript hydration preserve ANSI-styled tool output lines inside agent scrollback.
 - [x] T067 Preserve raw tool-output transcript lines during Claude/Codex `jsonl` hydration in `app.rs` so transcript-backed scrollback does not drop colorized session output.
+- [x] T068 [P] Write RED tests: snapshot-backed local cache + transcript overlap does not create a scrollbar dead zone before older unique history appears.
+- [x] T069 Collapse overlapping snapshot/transcript tail inside `VtState` so viewport transitions and scrollbar metrics skip duplicated recent history.

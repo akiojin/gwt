@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: transcript fallback must collapse the recent snapshot overlap tail
+
+### 事象
+
+scrollbar は進むのに viewport がしばらく古い履歴へ進まず、
+「スクロール開始まで遊びがある」ように見えるケースがあった。
+
+### 原因
+
+- local snapshot cache と transcript history を単純連結していたため、
+  recent snapshot と同じ visible surface が transcript 側 tail にも残っていた。
+- その結果、scrollbar position と viewport routing が duplicated recent history を
+  追加で踏み、older unique history に入るまで dead zone が発生した。
+
+### 再発防止策
+
+1. local snapshot cache と transcript tail の overlap は visible surface 比較で検出する。
+2. overlap は scrollbar metrics と transcript entry/exit cursor の両方で同じ値を使う。
+3. 「snapshot overlap を飛ばして older unique transcript に入る」回帰テストを固定する。
+
 ## 2026-04-07 — fix: transcript hydration must preserve raw tool-output blocks
 
 ### 事象

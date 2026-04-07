@@ -1,5 +1,6 @@
 //! Model — central application state for the Elm Architecture.
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -424,8 +425,12 @@ impl ScreenSnapshot {
 fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
     let (rows, cols) = screen.size();
     (0..rows)
-        .map(|row| screen.contents_between(row, 0, row, cols))
+        .map(|row| normalize_visible_line(&screen.contents_between(row, 0, row, cols)))
         .collect()
+}
+
+fn normalize_visible_line(line: &str) -> String {
+    line.trim_end_matches(' ').to_string()
 }
 
 fn slice_contains_non_blank_content(lines: &[String]) -> bool {
@@ -448,6 +453,7 @@ pub struct VtState {
     transcript_cursor: Option<usize>,
     transcript_source_path: Option<PathBuf>,
     transcript_source_modified: Option<SystemTime>,
+    transcript_overlap_tail_positions: Cell<Option<usize>>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -480,6 +486,9 @@ impl Clone for VtState {
             transcript_cursor: self.transcript_cursor,
             transcript_source_path: self.transcript_source_path.clone(),
             transcript_source_modified: self.transcript_source_modified,
+            transcript_overlap_tail_positions: Cell::new(
+                self.transcript_overlap_tail_positions.get(),
+            ),
         }
     }
 }
@@ -499,6 +508,7 @@ impl VtState {
             transcript_cursor: None,
             transcript_source_path: None,
             transcript_source_modified: None,
+            transcript_overlap_tail_positions: Cell::new(None),
         };
         state.refresh_scrollback_metrics();
         state
@@ -520,6 +530,7 @@ impl VtState {
         self.refresh_scrollback_metrics();
         self.parser
             .set_scrollback(current_scrollback.min(self.max_scrollback));
+        self.recompute_transcript_overlap_cache();
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
@@ -541,6 +552,7 @@ impl VtState {
             );
         }
         self.capture_snapshot();
+        self.recompute_transcript_overlap_cache();
     }
 
     pub fn screen(&self) -> &vt100::Screen {
@@ -778,6 +790,7 @@ impl VtState {
         self.transcript_lines = lines;
         self.transcript_source_path = Some(source_path);
         self.transcript_source_modified = source_modified;
+        self.recompute_transcript_overlap_cache();
 
         if self.follow_live {
             self.transcript_cursor = None;
@@ -806,6 +819,7 @@ impl VtState {
         self.transcript_cursor = None;
         self.transcript_source_path = None;
         self.transcript_source_modified = None;
+        self.transcript_overlap_tail_positions.set(Some(0));
     }
 
     fn refresh_scrollback_metrics(&mut self) {
@@ -844,6 +858,47 @@ impl VtState {
         self.transcript_lines
             .len()
             .saturating_sub(self.rows as usize)
+    }
+
+    fn transcript_visible_lines_at_cursor(&self, cursor: usize) -> Vec<String> {
+        if self.transcript_lines.is_empty() {
+            return Vec::new();
+        }
+
+        let start = cursor.min(self.transcript_live_start());
+        let end = start
+            .saturating_add(self.rows as usize)
+            .min(self.transcript_lines.len());
+        self.transcript_lines[start..end]
+            .iter()
+            .map(|line| {
+                normalize_visible_line(&line.chars().take(self.cols as usize).collect::<String>())
+            })
+            .collect()
+    }
+
+    fn transcript_tail_overlap_positions(&self) -> usize {
+        if !self.has_transcript_scrollback() || !self.has_local_cache_scrollback() {
+            return 0;
+        }
+        self.transcript_overlap_tail_positions.get().unwrap_or(0)
+    }
+
+    fn transcript_unique_position_count(&self) -> usize {
+        let transcript_positions = self.transcript_live_start().saturating_add(1);
+        if !self.has_local_cache_scrollback() {
+            return transcript_positions;
+        }
+
+        transcript_positions.saturating_sub(self.transcript_tail_overlap_positions())
+    }
+
+    fn latest_transcript_cursor(&self) -> usize {
+        if !self.has_local_cache_scrollback() {
+            return self.transcript_live_start();
+        }
+
+        self.transcript_unique_position_count().saturating_sub(1)
     }
 
     fn transcript_position_for_viewport(&self, viewport_height: usize) -> usize {
@@ -958,8 +1013,12 @@ impl VtState {
         if !self.has_transcript_scrollback() || self.transcript_cursor.is_some() {
             return false;
         }
+        let unique_positions = self.transcript_unique_position_count();
+        if self.has_local_cache_scrollback() && unique_positions == 0 {
+            return false;
+        }
 
-        self.transcript_cursor = Some(self.transcript_live_start());
+        self.transcript_cursor = Some(self.latest_transcript_cursor());
         self.follow_live = false;
         true
     }
@@ -1007,8 +1066,8 @@ impl VtState {
 
         let mut changed = false;
         if let Some(current) = self.transcript_cursor {
-            let live_start = self.transcript_live_start();
-            let transcript_rows = rows.min(live_start.saturating_sub(current));
+            let latest_cursor = self.latest_transcript_cursor();
+            let transcript_rows = rows.min(latest_cursor.saturating_sub(current));
             if transcript_rows > 0 {
                 changed |= self.scroll_transcript_down(transcript_rows);
                 rows = rows.saturating_sub(transcript_rows);
@@ -1050,15 +1109,24 @@ impl VtState {
             return false;
         };
         let live_start = self.transcript_live_start();
+        let latest_cursor = self.latest_transcript_cursor();
         let next = current.saturating_add(rows);
-        if next > live_start || (!self.has_local_cache_scrollback() && next >= live_start) {
-            self.transcript_cursor = None;
-            if self.has_local_cache_scrollback() {
+        if self.has_local_cache_scrollback() {
+            if next > latest_cursor {
+                self.transcript_cursor = None;
                 self.move_local_cache_to_oldest();
                 self.follow_live = false;
-            } else {
-                self.follow_live = true;
+                return true;
             }
+
+            self.transcript_cursor = Some(next);
+            self.follow_live = false;
+            return true;
+        }
+
+        if next >= live_start {
+            self.transcript_cursor = None;
+            self.follow_live = true;
         } else {
             self.transcript_cursor = Some(next);
             self.follow_live = false;
@@ -1075,22 +1143,16 @@ impl VtState {
         }
 
         let visible_viewport = viewport_height.max(1);
-        let transcript_live_start = self
-            .transcript_lines
-            .len()
-            .saturating_sub(visible_viewport.min(self.transcript_lines.len()));
+        let transcript_unique_positions = self.transcript_unique_position_count();
         let local_cache_depth = self.local_cache_history_depth();
-        let content_length = transcript_live_start
-            .saturating_add(1)
+        let content_length = transcript_unique_positions
             .saturating_add(local_cache_depth)
             .saturating_add(visible_viewport)
             .max(visible_viewport);
         let position = if let Some(cursor) = self.transcript_cursor {
-            cursor.min(transcript_live_start)
+            cursor.min(self.latest_transcript_cursor())
         } else {
-            transcript_live_start
-                .saturating_add(1)
-                .saturating_add(self.local_cache_position())
+            transcript_unique_positions.saturating_add(self.local_cache_position())
         };
 
         Some((content_length, position, visible_viewport))
@@ -1143,6 +1205,58 @@ impl VtState {
             }
         }
         self.prune_leading_blank_snapshots();
+    }
+
+    fn recompute_transcript_overlap_cache(&mut self) {
+        if !self.has_transcript_scrollback() || !self.has_local_cache_scrollback() {
+            self.transcript_overlap_tail_positions.set(Some(0));
+            return;
+        }
+
+        let live_start = self.transcript_live_start();
+        let max_overlap = live_start
+            .saturating_add(1)
+            .min(self.local_cache_history_depth().saturating_add(1));
+        let mut overlap = 0;
+        let previous_scrollback = self.scrollback();
+
+        for offset in 0..max_overlap {
+            let transcript_cursor = live_start.saturating_sub(offset);
+            let transcript_lines = self.transcript_visible_lines_at_cursor(transcript_cursor);
+            let local_lines = if self.uses_snapshot_scrollback() {
+                let Some(live_index) = self.snapshots.len().checked_sub(offset.saturating_add(1))
+                else {
+                    break;
+                };
+                let Some(snapshot) = self.snapshots.get(live_index) else {
+                    break;
+                };
+                snapshot
+                    .visible_lines
+                    .iter()
+                    .map(|line| {
+                        normalize_visible_line(
+                            &line.chars().take(self.cols as usize).collect::<String>(),
+                        )
+                    })
+                    .collect()
+            } else {
+                self.parser.set_scrollback(offset);
+                screen_visible_lines(self.parser.screen())
+            };
+
+            if transcript_lines == local_lines {
+                overlap += 1;
+            } else {
+                break;
+            }
+        }
+
+        if !self.uses_snapshot_scrollback() {
+            self.parser
+                .set_scrollback(previous_scrollback.min(self.max_scrollback()));
+        }
+        self.transcript_overlap_tail_positions.set(Some(overlap));
     }
 
     fn prune_leading_blank_snapshots(&mut self) {
@@ -1665,6 +1779,12 @@ mod tests {
         sequence.into_bytes()
     }
 
+    fn snapshot_from_lines(rows: u16, cols: u16, lines: &[&str]) -> ScreenSnapshot {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.process(&full_screen_frame(lines));
+        ScreenSnapshot::from_screen(rows, cols, parser.screen())
+    }
+
     #[test]
     fn capture_snapshot_skips_identical_consecutive_frames() {
         let mut vt = VtState::new(5, 20);
@@ -1947,6 +2067,83 @@ mod tests {
             "leaving transcript history should return to the oldest local cache, not jump directly to live"
         );
         assert_eq!(vt.scrollback(), vt.max_scrollback());
+    }
+
+    #[test]
+    fn transcript_fallback_skips_recent_snapshot_overlap() {
+        let mut vt = VtState::new(4, 32);
+        vt.max_scrollback = 0;
+        vt.follow_live = true;
+        vt.snapshots = VecDeque::from(vec![
+            snapshot_from_lines(4, 32, &["line-1", "line-2", "line-3", "line-4"]),
+            snapshot_from_lines(4, 32, &["line-2", "line-3", "line-4", "line-5"]),
+            snapshot_from_lines(4, 32, &["line-3", "line-4", "line-5", "line-6"]),
+        ]);
+        vt.set_transcript_lines_from_source(
+            PathBuf::from("/tmp/transcript.jsonl"),
+            None,
+            vec![
+                "old-1".to_string(),
+                "old-2".to_string(),
+                "line-1".to_string(),
+                "line-2".to_string(),
+                "line-3".to_string(),
+                "line-4".to_string(),
+                "line-5".to_string(),
+                "line-6".to_string(),
+            ],
+        );
+
+        assert!(vt.scroll_viewport_lines(2));
+        let oldest_local = vt.visible_screen_parser().screen().contents();
+        assert!(oldest_local.contains("line-1"));
+        assert!(oldest_local.contains("line-4"));
+
+        assert!(vt.scroll_viewport_lines(1));
+        assert_eq!(
+            vt.transcript_cursor,
+            Some(1),
+            "entering transcript history should skip the overlapping recent snapshot tail"
+        );
+
+        let transcript = vt.visible_screen_parser().screen().contents();
+        assert!(transcript.contains("old-2"));
+        assert!(!transcript.contains("line-6"));
+    }
+
+    #[test]
+    fn combined_transcript_scrollbar_metrics_skip_snapshot_overlap() {
+        let mut vt = VtState::new(4, 32);
+        vt.max_scrollback = 0;
+        vt.follow_live = true;
+        vt.snapshots = VecDeque::from(vec![
+            snapshot_from_lines(4, 32, &["line-1", "line-2", "line-3", "line-4"]),
+            snapshot_from_lines(4, 32, &["line-2", "line-3", "line-4", "line-5"]),
+            snapshot_from_lines(4, 32, &["line-3", "line-4", "line-5", "line-6"]),
+        ]);
+        vt.set_transcript_lines_from_source(
+            PathBuf::from("/tmp/transcript.jsonl"),
+            None,
+            vec![
+                "old-1".to_string(),
+                "old-2".to_string(),
+                "line-1".to_string(),
+                "line-2".to_string(),
+                "line-3".to_string(),
+                "line-4".to_string(),
+                "line-5".to_string(),
+                "line-6".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            vt.scrollbar_metrics(4),
+            Some((8, 4, 4)),
+            "combined scrollbar metrics should not double-count transcript rows already covered by local snapshot history"
+        );
+
+        assert!(vt.scroll_viewport_lines(2));
+        assert_eq!(vt.scrollbar_metrics(4), Some((8, 2, 4)));
     }
 
     #[test]
