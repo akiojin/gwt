@@ -44,3 +44,10 @@
 - [x] T031 Run cargo clippy --workspace --all-targets -- -D warnings
 - [x] T032 Verify coverage >= 90%
 - [x] T033 Update SPEC-10 metadata phase to Done
+
+## Phase 5: Project Index Runtime Bootstrap
+
+- [x] T034 Add RED tests for `gwt-core` runtime bootstrap asset writing, idempotency, and broken-venv rebuild behavior.
+- [x] T035 Implement repo-tracked `chroma_index_runner.py` + requirements asset bootstrap in `gwt-core`.
+- [x] T036 Wire runtime bootstrap into `gwt-git::initialize_workspace()` with injected-home tests.
+- [x] T037 Wire startup/clone warning degradation into `gwt-tui` and verify focused helper tests.

@@ -668,6 +668,7 @@ version = "8.17.2"
 dependencies = [
  "dirs",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "which",
 ]

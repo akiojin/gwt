@@ -29,7 +29,7 @@ gwt-search --files "query"      # project source files only
 | (none) | All three | Run all three searches | Default behavior |
 | `--specs` | SPECs only | `search-specs` | Local `specs/SPEC-{N}/` directories |
 | `--issues` | Issues only | `search-issues` | GitHub Issues via ChromaDB index |
-| `--files` | Files only | `search` | Project source files |
+| `--files` | Files only | `search-files` | Project source files |
 
 ## Search commands
 
@@ -67,7 +67,7 @@ $PYTHON $RUNNER \
 
 ```bash
 $PYTHON $RUNNER \
-  --action search \
+  --action search-files \
   --db-path "$DB_PATH" \
   --query "your search query" \
   --n-results 10
@@ -93,6 +93,7 @@ $PYTHON $RUNNER \
 ```bash
 $PYTHON $RUNNER \
   --action index-issues \
+  --project-root "$GWT_PROJECT_ROOT" \
   --db-path "$DB_PATH"
 ```
 

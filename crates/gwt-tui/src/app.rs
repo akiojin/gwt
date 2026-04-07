@@ -513,9 +513,14 @@ pub fn update(model: &mut Model, msg: Message) {
                         match gwt_git::clone_repo(&url, &target) {
                             Ok(path) => {
                                 let _ = gwt_git::install_develop_protection(&path);
-                                let _ = gwt_git::initialize_workspace(&path);
+                                let workspace_warning = gwt_git::initialize_workspace(&path)
+                                    .err()
+                                    .map(workspace_initialization_warning);
                                 model.reset(path);
                                 load_initial_data(model);
+                                if let Some(notification) = workspace_warning {
+                                    apply_notification(model, notification);
+                                }
                             }
                             Err(e) => {
                                 state.clone_status =
@@ -1671,6 +1676,15 @@ fn apply_notification(model: &mut Model, notification: Notification) {
     if let Some(msg) = crate::notification_router::route(&notification) {
         update(model, msg);
     }
+}
+
+fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
+    Notification::new(
+        Severity::Warn,
+        "workspace",
+        "Workspace initialization incomplete",
+    )
+    .with_detail(err.to_string())
 }
 
 fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
@@ -10323,5 +10337,14 @@ CUSTOM_ENV = "enabled"
         assert_eq!(model.settings.fields[0].label, "Bundled skills");
         let count: usize = model.settings.fields[0].value.parse().unwrap_or(0);
         assert!(count > 0, "should have bundled skills");
+    }
+
+    #[test]
+    fn workspace_initialization_warning_is_warn_notification() {
+        let notification = workspace_initialization_warning("runtime setup failed");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "workspace");
+        assert_eq!(notification.message, "Workspace initialization incomplete");
+        assert_eq!(notification.detail.as_deref(), Some("runtime setup failed"));
     }
 }

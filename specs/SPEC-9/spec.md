@@ -219,6 +219,18 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 1. Given any repository, when I call `gwt-review`, then it analyzes domain boundaries, module depth, testability, and agent-friendliness.
 2. Given the review report, when improvements are identified, then it suggests creating improvement SPECs via `gwt-design`.
 
+### US-8: Search Runtime Contract Recovery (P1) -- IMPLEMENTED
+
+As a developer using `gwt-search`, I want the shared search runtime to repair itself and expose stable action names so that project, issue, and SPEC search keep working across upgrades.
+
+**Acceptance Scenarios**
+
+1. Given `~/.gwt/runtime/chroma_index_runner.py` is missing or outdated, when gwt starts or initializes a workspace, then the repo-tracked runner is restored automatically.
+2. Given the managed search venv is missing or broken, when gwt starts or initializes a workspace, then `~/.gwt/runtime/chroma-venv` is rebuilt automatically.
+3. Given file search is invoked, when the runner parses CLI args, then `search-files` and `index-files` are the canonical action names.
+4. Given legacy callers still use `search` or `index`, when the runner executes, then those aliases are normalized to `search-files` and `index-files`.
+5. Given issue indexing is invoked, when the runner executes `index-issues`, then `--project-root` is required in addition to `--db-path`.
+
 ## Functional Requirements (Phase 4: Skill Consolidation)
 
 - **FR-024**: gwt-design runs DDD domain discovery (Bounded Context identification, entity relationships, Ubiquitous Language) in Phase 2.
@@ -233,6 +245,11 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 - **FR-033**: gwt-agent auto-detects discover/read/send/lifecycle mode from arguments.
 - **FR-034**: All 8 skills work standalone without requiring other skills as dependencies.
 - **FR-035**: design → plan → build → review automatic chain suggests the next skill on completion.
+- **FR-036**: gwt-search runtime assets are repo-tracked and copied into `~/.gwt/runtime/` instead of being edited in place.
+- **FR-037**: File search canonical action names are `index-files` and `search-files`; `index` and `search` remain compatibility aliases only.
+- **FR-038**: `index-issues` requires both `--project-root` and `--db-path`.
+- **FR-039**: Search skill documentation and command examples use the canonical file-search action names and the managed `chroma-venv` path.
+- **FR-040**: Search runtime repair uses warning-only degradation when Python or dependency setup fails.
 
 ## Success Criteria
 
@@ -256,3 +273,6 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 - **SC-018**: All 8 skills are callable standalone and produce correct results.
 - **SC-019**: `gwt-review` generates an architecture improvement report on the gwt repository.
 - **SC-020**: The design → plan → build → review chain suggests the next skill at each completion point.
+- **SC-021**: `gwt-search` documentation references `search-files` / `index-files` as the file-search contract.
+- **SC-022**: `index-issues` command examples include `--project-root "$GWT_PROJECT_ROOT"`.
+- **SC-023**: Deleting the shared runner or managed venv and restarting gwt triggers runtime self-repair instead of leaving search silently broken.

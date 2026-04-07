@@ -155,6 +155,36 @@ The following capabilities from SPEC-1786 are already implemented:
 - GitHub Actions runners with cross-compilation toolchains.
 - npm registry access.
 
+## Phase 5: Skill Consolidation
+
+**Goal**: Replace the fragmented skill surface with the methodology-based 8-skill system.
+
+### Key Changes
+
+1. Consolidate design / plan / build / review flows into standalone methodology skills.
+2. Consolidate issue / PR / search / agent operations into auto-detect integration skills.
+3. Update AGENTS and bundled skills so the repo, distributed assets, and workflow guidance stay aligned.
+
+### Dependencies
+
+- Embedded skill bundling and runtime distribution from Phase 2 / 2b.
+
+## Phase 6: Search Runtime Contract Recovery
+
+**Goal**: Keep unified search working across upgrades by restoring the shared runtime and documenting stable action names.
+
+### Key Changes
+
+1. Add repo-tracked project-index runtime assets and requirements under `gwt-core`.
+2. Repair `~/.gwt/runtime/chroma_index_runner.py` and `~/.gwt/runtime/chroma-venv` during startup and workspace initialization.
+3. Standardize file-search actions on `index-files` / `search-files` while preserving `index` / `search` aliases.
+4. Update `gwt-search` family skills so `index-issues` examples include `--project-root`.
+
+### Dependencies
+
+- SPEC-10 workspace/runtime bootstrap flow.
+- Shared Python availability for project-index setup.
+
 ## Risk Mitigation
 
 - **Docker UI complexity**: Start with the progress screen FSM (simplest), then add service select and port select incrementally.
