@@ -88,7 +88,8 @@ TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用しま
   - `OPENAI_API_KEY`
   - `GOOGLE_API_KEY` または `GEMINI_API_KEY`
 - `bunx` / `npx`（ローカル起動のフォールバックに利用）
-- project search / issue indexing を初めて使うときは `PATH` 上に Python 3.9+ が必要です。
+- gwt が shared project-index runtime を bootstrap / repair するとき
+  （起動時やリポジトリ初期化時など）には `PATH` 上に Python 3.9+ が必要です。
   gwt が `~/.gwt/runtime/chroma-venv` を自動作成し、その後は managed runtime を再利用します。
   Windows では Command Prompt / PowerShell で `python` または `py -3` が通る状態にしてください。
 

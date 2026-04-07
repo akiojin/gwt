@@ -58,3 +58,11 @@
 - [x] T039 Add RED tests for user-facing Python install guidance in startup / clone warning notifications.
 - [x] T040 Implement project-index bootstrap Python validation and guidance-aware error shaping in `gwt-core`.
 - [x] T041 Update TUI warning messaging and README docs for managed project-index Python setup, then rerun focused plus broad verification.
+
+## Phase 7: Review Follow-up
+
+- [x] T042 Add RED tests for working Windows Store / launcher Python acceptance, `py -3` propagation, and 3.8→3.9 fallback.
+- [x] T043 Add RED tests for stable project-index runtime error classification across startup and clone-completion paths.
+- [x] T044 Implement runtime candidate discovery / error classification fixes in `gwt-core`.
+- [x] T045 Implement shared notification classification + README corrections in `gwt-tui` / docs.
+- [x] T046 Refresh SPEC artifacts and rerun focused plus broad verification.

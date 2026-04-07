@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: Python launcher 判定は path heuristic ではなく実行 probe と構造化エラーで固定する
+
+### 事象
+
+project-index runtime の Python bootstrap hardening 後レビューで、Windows Store / launcher Python を
+path だけで弾く実装と、clone 後 warning が英語メッセージ部分一致で `index` / `workspace` を
+振り分ける実装が見つかった。
+
+### 原因
+
+- `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python*.exe` を「壊れた alias」と決め打ちし、実行 probe 前に除外していた。
+- runtime bootstrap failure の分類を構造化せず、人間向け文言の substring に依存していた。
+- その結果、有効な launcher を誤拒否し、失敗理由も `Python not installed` に潰れやすかった。
+
+### 再発防止策
+
+1. 外部 runtime / launcher の可用性判定は path やファイル名の heuristic ではなく、実行 probe と version check を RED テストで固定する。
+2. user-facing warning の source 分類は構造化 prefix / enum で運び、英語メッセージ本文の一致判定を禁止する。
+3. runtime bootstrap の review では「有効 launcher を通すケース」「壊れた launcher の detail を残すケース」「通知 source が startup と clone で一致するケース」を最低セットで確認する。
+
 ## 2026-04-07 — fix: Hooks不具合は単点ではなく「実行チェーン」全体で再発する
 
 ### 事象

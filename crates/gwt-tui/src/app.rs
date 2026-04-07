@@ -1835,12 +1835,11 @@ fn apply_notification(model: &mut Model, notification: Notification) {
 
 fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
     let detail = err.to_string();
-    if detail
-        .to_ascii_lowercase()
-        .contains("project index runtime requires python 3.9+")
-    {
+    if gwt_core::runtime::project_index_runtime_error_kind(&detail).is_some() {
         return Notification::new(Severity::Warn, "index", "Project index runtime unavailable")
-            .with_detail(detail);
+            .with_detail(gwt_core::runtime::project_index_runtime_error_detail(
+                &detail,
+            ));
     }
 
     Notification::new(
@@ -11407,9 +11406,7 @@ CUSTOM_ENV = "enabled"
 
     #[test]
     fn workspace_initialization_warning_uses_project_index_guidance_when_python_is_missing() {
-        let notification = workspace_initialization_warning(
-            "Project index runtime requires Python 3.9+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.",
-        );
+        let notification = workspace_initialization_warning("[gwt-project-index-python-install] Project index runtime requires Python 3.9+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.");
         assert_eq!(notification.severity, Severity::Warn);
         assert_eq!(notification.source, "index");
         assert_eq!(notification.message, "Project index runtime unavailable");
@@ -11418,5 +11415,18 @@ CUSTOM_ENV = "enabled"
             .as_deref()
             .unwrap_or_default()
             .contains("py -3"));
+    }
+
+    #[test]
+    fn workspace_initialization_warning_uses_project_index_source_for_runtime_failures() {
+        let notification =
+            workspace_initialization_warning("[gwt-project-index-runtime] pip install -r failed");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert_eq!(
+            notification.detail.as_deref(),
+            Some("pip install -r failed")
+        );
     }
 }

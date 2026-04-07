@@ -297,8 +297,10 @@ where
     E: ToString,
 {
     ensure_runtime().err().map(|err| {
-        Notification::new(Severity::Warn, "index", "Project index runtime unavailable")
-            .with_detail(err.to_string())
+        let detail = err.to_string();
+        Notification::new(Severity::Warn, "index", "Project index runtime unavailable").with_detail(
+            gwt_core::runtime::project_index_runtime_error_detail(&detail),
+        )
     })
 }
 
@@ -394,14 +396,18 @@ mod tests {
 
     #[test]
     fn project_index_runtime_bootstrap_notification_with_returns_warning_on_failure() {
-        let notification =
-            project_index_runtime_bootstrap_notification_with(|| Err::<(), _>("python missing"))
-                .expect("warning notification");
+        let notification = project_index_runtime_bootstrap_notification_with(|| {
+            Err::<(), _>("[gwt-project-index-runtime] pip install -r failed".to_string())
+        })
+        .expect("warning notification");
 
         assert_eq!(notification.severity, Severity::Warn);
         assert_eq!(notification.source, "index");
         assert_eq!(notification.message, "Project index runtime unavailable");
-        assert_eq!(notification.detail.as_deref(), Some("python missing"));
+        assert_eq!(
+            notification.detail.as_deref(),
+            Some("pip install -r failed")
+        );
     }
 
     #[test]
