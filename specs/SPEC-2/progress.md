@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `320/320` checked in `tasks.md`
-- Artifact refresh: `2026-04-06T12:14:05Z`
+- Task progress: `357/357` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T02:45:00Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -64,6 +64,18 @@
 - Session PTYs now also expose an explicit prefixed focus-escape path: `Ctrl+G,Tab` and `Ctrl+G,Shift+Tab` cycle focus without stealing the raw plain-`Tab` key from Shell or Agent processes.
 - Agent session titles now identify the workstream by persisted branch name instead of the tool label, so the right-side tab strip reads as branch-first workspace context.
 - Claude Code, Codex, and Gemini now keep fixed Yellow/Cyan/Magenta identity colors in session-title chrome, while active emphasis is carried by styling modifiers instead of a shared yellow active color.
+- Agent PTYs now receive stable gwt hook-runtime environment (`GWT_SESSION_ID`, `GWT_SESSION_RUNTIME_PATH`), so Codex / Claude hook scripts can update the correct session runtime record without shell-specific discovery logic.
+- Hook-managed runtime state is now persisted in a lightweight JSON sidecar under `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`, mapping `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
+- Branches rows now show one color-coded spinner per live agent session instead of a single `run ...` / `wait ...` text summary, so Claude Code and Codex remain visible at the same time on the same branch row.
+- The Branches spinner strip now uses the old-TUI built-in palette again: `Claude Code=Yellow`, `Codex=Cyan`, and `Gemini=Magenta`, while custom agents keep their existing fallback colors.
+- Explicit agent-session close and detected PTY exit now persist `Stopped`, so stale running/waiting indicators do not survive after the session is gone.
+- Embedded asset distribution now also writes `.codex/hooks/scripts/gwt-*.mjs`, so launched worktrees get the updated Codex hook script alongside the already-distributed Claude hook assets.
+- Claude launch materialization now regenerates `.claude/settings.local.json` in Claude's native `hooks` schema, preserving user hooks and unrelated settings while replacing the stale internal `managed_hooks` / `user_hooks` layout that prevented Claude hook execution.
+- Codex launch materialization now also generates `.codex/hooks.json` for untracked worktrees, preserves tracked hook files by default, migrates tracked files that still contain legacy gwt runtime forward hooks, and uses direct shell commands instead of Node-based live-state forwarders.
+- gwt startup now resets only its own runtime PID namespace before restore, so stale indicators from earlier gwt runs disappear without touching sibling gwt processes.
+- Codex launch configs now add the current `~/.gwt/sessions/runtime/<pid>` namespace as an extra writable root, so Codex hooks can persist live spinner sidecars even under `workspace-write` sandboxing.
+- Materialized Codex launches now append that writable root after the real persisted session id is allocated, so the spawned PTY args finally match the runtime sidecar path injected into the environment.
+- Interactive Codex launches now also bootstrap a PID-scoped `Running` runtime sidecar immediately after PTY spawn succeeds, covering the product gap where interactive Codex does not emit `SessionStart` before the first prompt. Hook events still overwrite that bootstrap state as soon as they arrive.
 
 ## Next
-- Run the reviewer walkthrough in `quickstart.md` and close the remaining manual acceptance evidence.
+- Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

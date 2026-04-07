@@ -67,24 +67,31 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 1. **gwt-skills**: Add `distribute` module with:
    - `distribute_to_worktree(worktree_path: &Path) -> Result<DistributeReport>` — writes all bundled files to target.
-   - Distribution targets: `.claude/skills/gwt-*/`, `.claude/commands/gwt-*.md`, `.claude/hooks/scripts/gwt-*.mjs`, `.codex/skills/gwt-*/`.
+   - Distribution targets: `.claude/skills/gwt-*/`, `.claude/commands/gwt-*.md`, `.claude/hooks/scripts/gwt-*.mjs`, `.codex/skills/gwt-*/`, `.codex/hooks/scripts/gwt-*.mjs`.
    - Full overwrite strategy: all gwt-managed files are replaced unconditionally.
 
 2. **gwt-skills**: Add `git_exclude` module:
    - Reads/creates `.git/info/exclude`.
    - Manages gwt-managed block delimited by `# gwt-managed-begin` / `# gwt-managed-end`.
-   - Adds exclude patterns for all distributed asset paths.
+   - Adds exclude patterns for all distributed asset paths plus generated `.codex/hooks.json`.
 
 3. **gwt-skills**: Add `settings_local` module:
-   - Generates `.claude/settings.local.json` with gwt-managed hooks.
-   - Uses existing `hooks.rs` merge logic to preserve user-defined hooks.
+   - Generates `.claude/settings.local.json` and untracked `.codex/hooks.json` from a shared typed hook builder.
+   - Preserves user-defined hooks while replacing only gwt-managed runtime hooks.
+   - Uses direct shell commands that write `GWT_SESSION_RUNTIME_PATH` instead of a Node-based runtime forwarder.
+   - Skips tracked `.codex/hooks.json` files by default, but migrates tracked files that still contain gwt's legacy runtime forward hooks so launched worktrees do not stay pinned to stale Node-based runtime hooks.
 
 4. **gwt-tui (app.rs)**: Call `distribute_to_worktree()` in agent launch flow, after `PaneManager::launch_agent()` resolves the worktree path.
+   - Bootstrap a PID-scoped `Running` runtime sidecar immediately after successful PTY spawn, because interactive Codex may not emit `SessionStart` before the first prompt.
+
+5. **gwt-agent (launch.rs)**:
+   - Enable Codex hooks explicitly in every gwt-managed Codex launch (`--enable codex_hooks`).
+   - Keep the flag alongside the existing web-search feature enablement so Codex hook execution does not depend on per-user `config.toml` state.
 
 ### Dependencies
 
 - Phase 2 (bundled assets available at runtime)
-- Existing `hooks.rs` merge logic
+- Bundled Claude/Codex hook assets
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 
@@ -104,15 +111,15 @@ Reference the old TUI implementation files (`docker_progress.rs`, `service_selec
 
 - None (can run in parallel with Phase 2/2b)
 
-## Phase 3: Hooks Merge Completion
+## Phase 3: Historical hooks.rs Utility Completion
 
-**Goal**: Complete the hooks.json merge feature carried over from archived SPEC-1786 (20/31 tasks completed, remaining: Phase 3 Polish and Phase 4 Manual E2E).
+**Goal**: Preserve and finish the generic `hooks.rs` utility work carried over from archived SPEC-1786. This phase is historical support for the generic helper; the active Claude/Codex runtime-hook path no longer depends on it.
 
 ### Carried-Over Progress
 
 The following capabilities from SPEC-1786 are already implemented:
 
-- `write_managed_codex_hooks()` with merge mode.
+- Generic `hooks.rs` safe-merge helpers with merge mode.
 - User hook preservation during managed hook updates.
 - gwt-managed hook identification via marker field.
 - Confirmation dialog for Codex agents.
@@ -132,7 +139,7 @@ The following capabilities from SPEC-1786 are already implemented:
 
 ### Dependencies
 
-- Existing hooks merge implementation in gwt-core.
+- Existing `hooks.rs` implementation in gwt-skills.
 
 ## Phase 4: Build Distribution
 

@@ -18,6 +18,9 @@ use crossterm::{
 use crossterm::Command;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
+use gwt_agent::reset_runtime_state_dir;
+#[cfg(test)]
+use gwt_agent::reset_runtime_state_dir_for_pid;
 use gwt_git::RepoType;
 use gwt_notification::{Notification, Severity};
 use gwt_tui::{
@@ -142,6 +145,15 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    if let Some(warning) = reset_startup_runtime_state_with(&gwt_core::paths::gwt_sessions_dir()) {
+        app::update(
+            &mut model,
+            Message::Notify(
+                Notification::new(Severity::Warn, "session", "Runtime reset failed")
+                    .with_detail(warning),
+            ),
+        );
+    }
     if model.active_layer != ActiveLayer::Initialization {
         if let Some(notification) = project_index_runtime_bootstrap_notification_with(|| {
             gwt_core::runtime::ensure_project_index_runtime().map(|_| ())
@@ -256,6 +268,19 @@ fn restore_startup_session_state_with(model: &mut Model, path: &Path) -> Option<
     model.restore_session_state_from_path(path)
 }
 
+fn reset_startup_runtime_state_with(sessions_dir: &Path) -> Option<String> {
+    reset_runtime_state_dir(sessions_dir)
+        .err()
+        .map(|err| err.to_string())
+}
+
+#[cfg(test)]
+fn reset_startup_runtime_state_for_pid_with(sessions_dir: &Path, pid: u32) -> Option<String> {
+    reset_runtime_state_dir_for_pid(sessions_dir, pid)
+        .err()
+        .map(|err| err.to_string())
+}
+
 fn persist_session_state_for_shutdown_with(model: &Model, path: &Path) -> Result<(), String> {
     model.save_session_state(path)
 }
@@ -315,6 +340,31 @@ mod tests {
         let warning = restore_startup_session_state_with(&mut restored, &path);
 
         assert!(warning.is_some());
+    }
+
+    #[test]
+    fn reset_startup_runtime_state_for_pid_with_clears_only_target_namespace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let current_pid = 6060_u32;
+        let other_pid = 7070_u32;
+        let current_dir = dir.path().join("runtime").join(current_pid.to_string());
+        let other_dir = dir.path().join("runtime").join(other_pid.to_string());
+        std::fs::create_dir_all(&current_dir).expect("create current pid dir");
+        std::fs::create_dir_all(&other_dir).expect("create other pid dir");
+        std::fs::write(current_dir.join("session-a.json"), "{}").expect("write current pid file");
+        std::fs::write(other_dir.join("session-b.json"), "{}").expect("write other pid file");
+
+        let warning = reset_startup_runtime_state_for_pid_with(dir.path(), current_pid);
+
+        assert!(warning.is_none());
+        assert!(current_dir.is_dir());
+        assert_eq!(
+            std::fs::read_dir(&current_dir)
+                .expect("read current pid dir")
+                .count(),
+            0
+        );
+        assert!(other_dir.join("session-b.json").exists());
     }
 
     #[test]

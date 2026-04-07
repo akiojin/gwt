@@ -4,6 +4,8 @@
 
 gwt-tui's workspace shell manages terminal sessions (shell and agent) with two display modes: tab view (one session visible at a time) and split window (equal grid showing multiple sessions simultaneously). A management panel containing Branches, Issues, PRs, Profiles, Git View, Versions, Settings, and Logs tabs can be toggled on/off. All navigation uses a Ctrl+G prefix key system with a 2-second timeout. Session state is persisted for restore on restart. The application follows an Elm Architecture pattern (Model/Message/Update/View).
 
+The Branches surface also inherits the old-TUI branch-first discovery contract: developers should be able to scan the branch list and immediately see whether a branch currently has an active coding session and whether that session is still running tools or is waiting for user input. For Claude Code and Codex, that live state is derived from hook events distributed into each launched worktree, with a launch-time bootstrap for sessions whose interactive runtime does not emit `SessionStart` before the first prompt.
+
 ## User Stories
 
 ### US-1: Switch Between Tab and Split Window Modes (P0) -- PARTIALLY IMPLEMENTED
@@ -79,6 +81,23 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 2. Given I press Ctrl+G, when I press an unbound key, then no action is taken and the prefix is consumed.
 3. Given a terminal app is running inside a session, when I type Ctrl+G followed by a bound key, then gwt intercepts it (not the terminal app).
 
+### US-8: Discover Live Agent Sessions From Branches (P1) -- IMPLEMENTED
+
+As a developer, I want the Branches list to show hook-derived live agent presence so that I can tell at a glance which branches currently have Claude Code and Codex sessions without opening Branch Detail.
+
+**Acceptance Scenarios**
+
+1. Given a Codex or Claude Code agent session on branch `feature/x` emits `SessionStart`, `UserPromptSubmit`, `PreToolUse`, or `PostToolUse`, when the Branches list renders, then the `feature/x` row shows a right-aligned animated indicator without opening Branch Detail.
+2. Given the same session later emits `Stop` and the PTY is still alive, when the Branches list renders, then the row keeps that session's indicator visible instead of removing it from the scanable branch surface.
+3. Given the session PTY exits or the user closes the session tab, when the next cleanup tick runs, then the branch row no longer shows an indicator for that session.
+4. Given multiple live agent sessions belong to the same branch, when the Branches list renders, then the row shows one color-coded animated indicator per live session so Claude Code and Codex can both be seen at once. Built-in agent colors in this strip are `Claude Code=Yellow`, `Codex=Cyan`, and `Gemini=Magenta`.
+5. Given the management pane is narrow, when the Branches list cannot fit both the branch label and every indicator, then the branch name and core branch icons stay visible and the right-edge indicators truncate or disappear before the left side becomes unreadable.
+6. Given gwt materializes a launched worktree for Claude Code, when it writes `.claude/settings.local.json`, then the file uses Claude's native `hooks` schema, preserves non-gwt hook entries and unrelated settings, and replaces stale gwt-managed hook entries instead of emitting an internal `managed_hooks` / `user_hooks` schema.
+7. Given gwt launches a Claude Code or Codex agent in a worktree that needs managed hook assets, when the PTY process starts, then the required hook scripts plus `.claude/settings.local.json` / `.codex/hooks.json` have already been written so the first agent turn can emit runtime state immediately.
+8. Given gwt restarts after a previous run left runtime sidecars behind, when startup completes, then only the current gwt process PID namespace is visible to the Branches list and stale indicators from older runs do not reappear.
+9. Given two gwt processes are running at the same time, when their agents emit hook events, then each TUI reads only its own PID-scoped runtime sidecars and their branch indicators do not overwrite each other.
+10. Given an interactive Codex session is launched and Codex has not emitted any runtime hook event yet, when the PTY spawn succeeds, then gwt bootstraps that session's PID-scoped runtime sidecar to `Running` so the branch spinner appears before the first prompt is sent.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -90,6 +109,31 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - Split mode with more than 9 sessions (grid layout scaling).
 - Active session exits while the management panel is visible and terminal focus is still selected.
 - Multiple PTY sessions exit in the same tick.
+- Hook scripts run without `GWT_SESSION_RUNTIME_PATH` in the environment (must fail open without breaking the agent turn).
+- Hook runtime sidecar file is missing or malformed while the Branches list is rendering.
+- A session has emitted `Stop` (waiting for input) but the user closes the PTY before another hook event arrives.
+- Branch rows at narrow widths must keep the branch label and `◆` / `◇` / `▸` legible even when the live session indicator cannot fit.
+- Interactive Codex launches may not emit `SessionStart` before the first user prompt, but the branch list must still show the session as live immediately after spawn.
+
+## Regression Guardrail: Hook-Driven Branch Visibility
+
+This capability has regressed multiple times because "hooks are configured" is not equivalent to "runtime sidecars are actually written and readable by Branches". Future changes to launch, hooks, or sandboxing must validate the full runtime chain.
+
+### Recurring root-cause chain
+
+1. Codex launch omitted `--enable codex_hooks`, so `hooks.json` existed but hooks never executed.
+2. Runtime sidecars targeted `~/.gwt/...` without adding the PID namespace to writable roots under `workspace-write`.
+3. Tracked `.codex/hooks.json` files with legacy Node forwarders were preserved unchanged, leaving stale runtime-hook behavior in active worktrees.
+4. Interactive Codex did not always emit `SessionStart` immediately, so hook-only startup left no initial `Running` sidecar.
+5. Hook assets/settings were not always materialized before PTY spawn, so first-turn events could be missed.
+
+### Mandatory verification checklist (for hook/launch changes)
+
+- Confirm final launch args include both `--enable codex_hooks` and a runtime writable root for `~/.gwt/sessions/runtime/<gwt-pid>`.
+- Confirm the launched worktree's effective `.claude/settings.local.json` / `.codex/hooks.json` are on the no-Node runtime-hook shape, not just the source branch copies.
+- Confirm startup/runtime behavior creates or updates `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json` for both launch bootstrap and subsequent hook events.
+- Confirm Branches shows concurrent multi-agent spinner indicators (Claude + Codex on the same branch) with the fixed palette contract.
+- Confirm tracked legacy `.codex/hooks.json` files migrate only gwt-managed runtime entries while preserving user hooks.
 
 ## Functional Requirements
 
@@ -135,6 +179,21 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-006l**: Branch-detail preload keeps at most one active refresh worker. When startup, `r`, or a Docker action schedules a newer preload, any superseded worker is canceled and must not continue walking later branches in the background.
 - **FR-006m**: Docker container state used by Branch Detail preload is captured once per refresh and shared across every branch payload in that refresh; the preload path must not call `docker ps -a` once per branch.
 - **FR-006n**: Branch-detail preload results are applied incrementally. A single UI tick must not drain an unbounded number of preload events, so large branch sets cannot monopolize one frame and stall Branches list input.
+- **FR-006o**: Branch list rows may render multiple right-aligned live agent-session indicators derived from hook-managed runtime state. The left side remains `name + worktree icon + HEAD indicator`, and the right side is reserved for one indicator per live agent session on that branch.
+- **FR-006p**: Hook-derived branch-session state still distinguishes at least `Running` and `WaitingInput` for lifecycle and ordering. When indicator space is limited, `Running` sessions are kept before `WaitingInput`.
+- **FR-006q**: The branch-row live-session surface uses animated spinner glyphs only: each visible session indicator reuses the existing TUI tick cadence and is colored by the session's agent color, without inline labels such as `run Codex` or `wait Claude Code`.
+- **FR-006q1**: Built-in agent colors in the Branches spinner strip are fixed to `Claude Code=Yellow`, `Codex=Cyan`, and `Gemini=Magenta`. Unknown/custom agents fall back to the session-provided agent color.
+- **FR-006r**: Branch-row live session state is derived from Claude Code / Codex hook events distributed into launched worktrees. `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` mark the session `Running`; `Stop` marks it `WaitingInput`.
+- **FR-006r1**: If an interactive agent session has successfully spawned but no hook-managed runtime sidecar exists yet, gwt bootstraps a PID-scoped `Running` sidecar once at launch time. The first hook event may overwrite that bootstrap state immediately.
+- **FR-006s**: Agent launches inject stable gwt session runtime environment into the spawned PTY so embedded hook scripts can update the correct session runtime record without user configuration.
+- **FR-006t**: Hook scripts persist lightweight runtime state in a per-session sidecar under `~/.gwt/sessions/runtime/<gwt-pid>/<session-id>.json`. The current gwt process reads only its own PID namespace, and Branches rendering safely ignores absent or malformed files.
+- **FR-006t1**: Codex launch configs must add the current runtime PID namespace directory as an extra writable root for `workspace-write` sessions so hook commands can write `GWT_SESSION_RUNTIME_PATH` even though the sidecar lives outside the worktree under `~/.gwt/`.
+- **FR-006u**: Session cleanup is authoritative for terminal-backed reality. When an agent PTY exits or the user closes its tab, gwt marks the persisted session `Stopped` and removes that branch's live-session indicator from the list on the next render.
+- **FR-006v**: Branch-row live session indicators are width-aware. When space is limited, the right-aligned indicator strip truncates before the branch label or branch icons are truncated, and extremely narrow layouts may omit the right side entirely.
+- **FR-006w**: Launch-time Claude hook distribution writes `.claude/settings.local.json` in Claude's native `hooks` schema. Existing non-gwt hooks and unrelated Claude settings are preserved, while legacy gwt-managed entries and the obsolete `managed_hooks` / `user_hooks` schema are replaced during regeneration.
+- **FR-006x**: Managed hook assets are prepared before the agent PTY is spawned. A newly launched Claude Code or Codex process must see the hook scripts and `.claude/settings.local.json` / `.codex/hooks.json` on its very first turn, not only on subsequent launches.
+- **FR-006y**: The live-state runtime hooks generated for Claude Code and Codex write directly to `GWT_SESSION_RUNTIME_PATH` and do not invoke Node-based forwarders or `gwt hook` subprocesses for Branches live-state updates.
+- **FR-006z**: gwt startup resets only its own runtime PID namespace before restoring UI state, so stale live-state from older gwt processes is dropped without touching other running gwt instances.
 - **FR-007**: New shell session created via Ctrl+G,c.
 - **FR-008**: Close session via Ctrl+G,x with unsaved changes warning when applicable.
 - **FR-008a**: PTY exit detection removes the corresponding session tab automatically, clamps the active session index to the nearest surviving tab, and drops the stale PTY handle in the same tick.
@@ -142,6 +201,7 @@ As a developer, I want all navigation keybindings to use a consistent Ctrl+G pre
 - **FR-009a**: The event loop drains PTY output before blocking on the next crossterm poll so terminal echo/render updates are not delayed by the 100ms tick interval.
 - **FR-010**: Help overlay via Ctrl+G,? auto-collects keybindings from code definitions.
 - **FR-011**: Session metadata persisted to `~/.gwt/sessions/` in TOML format.
+- **FR-011a**: Hook-derived runtime session state is persisted alongside session metadata as a lightweight per-session sidecar and treated as a live cache for the current gwt process only. It is safe to rebuild from fresh hook events after startup reset without reparsing PTY scrollback.
 - **FR-012**: Restore session layout on gwt restart (best-effort: working directories, display mode, active tab).
 - **FR-013**: Status bar shows current session info, branch name, and agent type.
 - **FR-013a**: The bottom status line keeps the old-TUI always-on context model: session summary and branch/agent context stay visible even while focus changes.
@@ -321,3 +381,5 @@ agent_id = "claude"  # only for agent type
 - **SC-008**: On startup, the default shell PTY sees the same row/column geometry as the visible session pane before any manual terminal resize occurs.
 - **SC-009**: Toggling the management panel resizes the visible PTY viewport in the same update cycle, without waiting for a later terminal resize event.
 - **SC-010**: Exited PTY sessions are automatically removed from the session strip and never leave a dead tab behind.
+- **SC-011**: The Branches list shows hook-derived `Running` / `WaitingInput` state for live agent sessions without requiring the user to open Branch Detail.
+- **SC-012**: Closing or exiting an agent session clears its branch-row live indicator and persists a `Stopped` session status.

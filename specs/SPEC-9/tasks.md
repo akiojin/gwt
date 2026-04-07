@@ -92,7 +92,29 @@
 - [x] **T-052**: Wire `distribute_to_worktree()` into agent launch flow in `crates/gwt-tui/src/app.rs`.
 - [x] **T-053**: Wire `update_git_exclude()` into agent launch flow.
 - [x] **T-054**: Wire `generate_settings_local()` into agent launch flow.
-- [x] **T-055**: Integration test: full distribution pipeline creates all targets (.claude/, .codex/, .agents/, git exclude, settings.local.json).
+- [x] **T-055**: Integration test: full distribution pipeline creates all targets (.claude/, .codex/, .agents/, git exclude, settings.local.json, hooks.json).
+
+### 2b.5 Claude/Codex Runtime Hook Normalization
+
+- [x] **T-131**: Write RED test: `generate_settings_local()` emits no-Node runtime hooks, includes `SessionStart`, and omits `Notification`.
+- [x] **T-132**: Write RED test: `generate_codex_hooks()` creates `.codex/hooks.json` with no-Node runtime hooks and preserves user hooks.
+- [x] **T-133**: Write RED test: tracked `.codex/hooks.json` is skipped so launch materialization does not dirty tracked worktrees.
+- [x] **T-134**: Write RED test: POSIX runtime hook command writes `GWT_SESSION_RUNTIME_PATH` directly.
+- [x] **T-135**: Implement shared Claude/Codex typed runtime hook generation in `crates/gwt-skills/src/settings_local.rs`.
+- [x] **T-136**: Implement `generate_codex_hooks()` and wire it into `crates/gwt-tui/src/app.rs` launch materialization.
+- [x] **T-137**: Update `.git/info/exclude` patterns and tracked `.codex/hooks.json` to the no-Node runtime hook shape.
+- [x] **T-138**: Verify focused and broad `gwt-skills` / `gwt-tui` tests pass after Claude/Codex runtime hook normalization.
+- [x] **T-139**: Write RED test: gwt-managed Codex launch configs include `--enable codex_hooks`.
+- [x] **T-140**: Implement Codex launch feature-flag enablement in `crates/gwt-agent/src/launch.rs` and rerun focused plus broad verification.
+- [x] **T-141**: Write RED test: Codex launch configs add the `GWT_SESSION_RUNTIME_PATH` parent directory as a writable root.
+- [x] **T-142**: Implement Codex runtime writable-root injection in `crates/gwt-agent/src/launch.rs` so `~/.gwt/sessions/runtime/<pid>` remains writable under `workspace-write`.
+- [x] **T-143**: Refresh `SPEC-9` artifacts and rerun focused plus broad verification for Codex runtime sidecar sandbox access.
+- [x] **T-144**: Write RED test: materialized Codex launches append the runtime namespace writable root after the persisted session id is known.
+- [x] **T-145**: Implement materialized Codex runtime writable-root augmentation in `crates/gwt-tui/src/app.rs`.
+- [x] **T-146**: Refresh `SPEC-9` artifacts and rerun focused plus broad verification for the materialized Codex runtime writable-root path.
+- [x] **T-147**: Write RED test: tracked `.codex/hooks.json` files that still contain legacy gwt runtime forward hooks are migrated to the no-Node runtime-hook shape while preserving user hooks.
+- [x] **T-148**: Implement tracked legacy Codex runtime-hook migration in `crates/gwt-skills/src/settings_local.rs` and cover launch materialization in `crates/gwt-tui/src/app.rs`.
+- [x] **T-149**: Refresh `SPEC-9` / `SPEC-2` artifacts and rerun focused plus broad verification for tracked legacy Codex runtime-hook migration.
 
 ## Phase 2c: Embedded Skills — Quality Improvement
 
@@ -222,6 +244,10 @@
 - [ ] **T-094**: Verify `gwt-review` generates report on gwt repository.
 - [ ] **T-095**: Verify `gwt-issue`, `gwt-pr`, `gwt-search`, `gwt-agent` auto-detect modes.
 - [ ] **T-096**: Verify design → plan → build → review chain suggestions.
+
+### 5e. Runtime Hook Contract Follow-up
+
+- [x] **T-150**: Document the interactive Codex `SessionStart` gap and downstream launch-bootstrap contract in `SPEC-9` artifacts.
 
 ## Phase 6: Search Runtime Contract Recovery
 

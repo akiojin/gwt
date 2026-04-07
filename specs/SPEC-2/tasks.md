@@ -492,10 +492,71 @@ banner in favor of pane-title chrome.
 - [x] T314 Update the keybind registry and app update path so prefixed focus-cycle commands work consistently from Shell and Agent panes.
 - [x] T315 Refresh `SPEC-2` artifacts and focused verification evidence for the prefixed focus-escape contract.
 
-## Phase 50: Make Agent Session Titles Branch-First And Color-Stable
+## Phase 50: Restore Hook-Derived Branch Session Discovery
 
-- [x] T316 [P] Write RED test: full-width agent session titles prefer persisted branch names over agent display names.
-- [x] T317 [P] Write RED test: compact agent session titles keep `n/N` context while showing the active persisted branch name.
-- [x] T318 [P] Write RED test: agent identity colors stay fixed while active-state emphasis comes from modifiers instead of a shared active-yellow foreground.
-- [x] T319 Update `app.rs` and `gwt-agent` color defaults so agent session titles render branch-first and keep Claude/Codex/Gemini as Yellow/Cyan/Magenta.
-- [x] T320 Refresh `SPEC-2` artifacts, launch/conversion expectations, and verification evidence for the branch-first agent-title contract.
+- [x] T316 [P] Write RED test: hook runtime sidecar maps `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` to `Running` and `Stop` to `WaitingInput`.
+- [x] T317 [P] Write RED test: Branches session-summary extraction prefers `Running` over `WaitingInput` when multiple live agent sessions belong to the same branch.
+- [x] T318 [P] Write RED test: launched agent PTYs receive stable gwt hook-runtime environment pointing at the correct session runtime record.
+- [x] T319 [P] Write RED test: PTY exit and explicit session close persist `Stopped` for agent sessions.
+- [x] T320 [P] Write RED test: wide Branches rows render a right-aligned running summary without regressing the left-side branch line.
+- [x] T321 [P] Write RED test: waiting rows render a distinct waiting summary.
+- [x] T322 [P] Write RED test: narrow Branches rows shorten or omit the live summary before the branch label and core icons disappear.
+- [x] T323 Implement hook runtime sidecar persistence, launch env injection, and `Stopped` cleanup updates in `gwt-agent` / `app.rs`.
+- [x] T324 Implement branch-scoped live session summary extraction and right-aligned Branches row rendering in `app.rs` / `branches.rs`.
+- [x] T325 Refresh `SPEC-2` artifacts and run focused plus broad verification for hook-derived Branches session visibility.
+
+## Phase 51: Normalize Claude Hook Settings Materialization
+
+- [x] T326 [P] Write RED test: `.claude/settings.local.json` regeneration emits Claude's native `hooks` schema and removes the obsolete `managed_hooks` / `user_hooks` keys.
+- [x] T327 [P] Write RED test: Claude settings regeneration preserves non-gwt user hooks while replacing stale gwt-managed commands.
+- [x] T328 Update `gwt-skills` / `app.rs` launch materialization to generate Claude hook settings through a typed Claude-schema merge instead of the internal hooks-merge schema.
+- [x] T329 [P] Write RED test and fix: managed hook assets/settings are written before agent PTY spawn so the first launch turn can emit runtime state.
+
+## Phase 52: PID-Scoped Runtime State And No-Node Hook Commands
+
+- [x] T330 [P] Write RED test: runtime sidecar paths are scoped under the current gwt PID namespace.
+- [x] T331 [P] Write RED test: startup/runtime reset clears only the current PID namespace and preserves sibling gwt runtime directories.
+- [x] T332 [P] Write RED test: generated Claude and Codex runtime hooks contain no Node-based live-state forward command, include `SessionStart`, and skip `Notification`.
+- [x] T333 [P] Write RED test: generated `.codex/hooks.json` preserves user hooks for untracked files and skips tracked `.codex/hooks.json`.
+- [x] T334 [P] Write RED test: POSIX runtime hook command writes a runtime sidecar via `GWT_SESSION_RUNTIME_PATH`.
+- [x] T335 Implement PID-scoped runtime path/reset helpers in `gwt-agent` and call startup reset from `gwt-tui/src/main.rs`.
+- [x] T336 Implement shared Claude/Codex runtime hook generation, `.codex/hooks.json` materialization, and launch-time wiring in `gwt-skills` / `app.rs`.
+- [x] T337 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for PID-scoped no-Node hook live-state updates.
+
+## Phase 53: Multi-Agent Branch Spinner Strips
+
+- [x] T338 [P] Write RED test: branch live-session extraction keeps multiple live agent indicators for the same branch instead of collapsing to one summary.
+- [x] T339 [P] Write RED test: wide Branches rows render spinner-only indicators without `run ...` / `wait ...` labels.
+- [x] T340 [P] Write RED test: branch spinner indicators use the originating agent colors so Claude Code and Codex stay visually distinct.
+- [x] T341 Implement multi-indicator branch aggregation and spinner-strip rendering in `app.rs` / `branches.rs`.
+- [x] T342 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for multi-agent spinner-strip Branches rendering.
+
+## Phase 54: Branch Spinner Palette Parity
+
+- [x] T343 [P] Write RED test: Claude and Codex branch spinners use `Yellow` and `Cyan` instead of the session-tab palette.
+- [x] T344 [P] Write RED test: Gemini branch spinner uses `Magenta` in the Branches strip.
+- [x] T345 Implement branch-only built-in agent palette mapping in `app.rs` / `branches.rs` with fallback for custom agents.
+- [x] T346 Refresh `SPEC-2` artifacts and rerun focused plus broad verification for the Branches spinner palette mapping.
+
+## Phase 55: Codex Runtime Namespace Sandboxing
+
+- [x] T347 [P] Write RED test: Codex launch adds the `GWT_SESSION_RUNTIME_PATH` parent directory as a writable root.
+- [x] T348 Implement Codex runtime namespace writable-root injection in `crates/gwt-agent/src/launch.rs`.
+- [x] T349 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for Codex runtime sidecar writes.
+
+## Phase 56: Materialized Codex Runtime Namespace Wiring
+
+- [x] T350 [P] Write RED test: materialized Codex launches append the runtime namespace writable root after the persisted session id is known.
+- [x] T351 Implement materialized Codex runtime namespace augmentation in `crates/gwt-tui/src/app.rs`.
+- [x] T352 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for the materialized Codex runtime writable-root path.
+
+## Phase 57: Tracked Legacy Codex Hook Migration
+
+- [x] T353 [P] Write RED test: materialized Codex launches migrate tracked legacy `.codex/hooks.json` runtime hooks to the no-Node form before the session starts.
+- [x] T354 Implement tracked legacy Codex runtime-hook migration in `crates/gwt-skills/src/settings_local.rs` and launch materialization coverage in `crates/gwt-tui/src/app.rs`.
+- [x] T355 Refresh `SPEC-2` / `SPEC-9` artifacts and rerun focused plus broad verification for tracked legacy Codex runtime-hook migration.
+
+## Phase 58: Interactive Codex Launch Bootstrap
+
+- [x] T356 [P] Write RED test: successful materialized Codex launches bootstrap a PID-scoped `Running` runtime sidecar before the first interactive hook event arrives.
+- [x] T357 Implement launch-time runtime-state bootstrap in `crates/gwt-tui/src/app.rs` and keep failed launches sidecar-free.
