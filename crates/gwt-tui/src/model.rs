@@ -1,6 +1,7 @@
 //! Model — central application state for the Elm Architecture.
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -446,6 +447,33 @@ pub enum ScrollbackStrategy {
     AgentMemoryBacked,
 }
 
+#[derive(Debug, Clone)]
+struct SnapshotCaptureOutcome {
+    attempted: bool,
+    appended: bool,
+    deduped: bool,
+    pruned_blank_prefix: usize,
+    snapshot_count_after: usize,
+    surface_digest: u64,
+    top_preview: String,
+    bottom_preview: String,
+}
+
+impl SnapshotCaptureOutcome {
+    fn skipped(snapshot_count: usize) -> Self {
+        Self {
+            attempted: false,
+            appended: false,
+            deduped: false,
+            pruned_blank_prefix: 0,
+            snapshot_count_after: snapshot_count,
+            surface_digest: 0,
+            top_preview: String::new(),
+            bottom_preview: String::new(),
+        }
+    }
+}
+
 fn is_alt_screen_toggle_sequence(sequence: &[u8]) -> bool {
     matches!(
         sequence,
@@ -499,6 +527,49 @@ fn filter_scrollback_bytes_with_pending(pending: &mut Vec<u8>, bytes: &[u8]) -> 
     }
 
     filtered
+}
+
+fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+fn preview_visible_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let preview: String = trimmed.chars().take(48).collect();
+    preview.replace(' ', "_")
+}
+
+fn visible_surface_digest(lines: &[String]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    lines.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn first_non_blank_preview(lines: &[String]) -> String {
+    lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| preview_visible_line(line))
+        .unwrap_or_default()
+}
+
+fn last_non_blank_preview(lines: &[String]) -> String {
+    lines
+        .iter()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| preview_visible_line(line))
+        .unwrap_or_default()
 }
 
 pub struct VtState {
@@ -613,6 +684,7 @@ impl VtState {
     pub fn process(&mut self, bytes: &[u8]) {
         let previous_scrollback = self.scrollback();
         let previous_max_scrollback = self.max_scrollback;
+        let previous_snapshot_count = self.snapshots.len();
         self.parser.process(bytes);
         self.process_scrollback_bytes(bytes);
         self.refresh_scrollback_metrics();
@@ -629,7 +701,13 @@ impl VtState {
                     .min(self.max_scrollback),
             );
         }
-        self.capture_snapshot();
+        let snapshot_outcome = self.capture_snapshot();
+        self.log_process_debug(
+            bytes,
+            previous_max_scrollback,
+            previous_snapshot_count,
+            &snapshot_outcome,
+        );
     }
 
     fn process_scrollback_bytes(&mut self, bytes: &[u8]) {
@@ -947,23 +1025,36 @@ impl VtState {
         self.scroll_local_cache_down(rows.min(self.local_cache_down_capacity()))
     }
 
-    fn capture_snapshot(&mut self) {
+    fn capture_snapshot(&mut self) -> SnapshotCaptureOutcome {
+        let snapshot_count_before = self.snapshots.len();
         let should_capture = match self.scrollback_strategy {
             ScrollbackStrategy::Standard => self.uses_snapshot_scrollback(),
             ScrollbackStrategy::AgentMemoryBacked => true,
         };
         if !should_capture {
-            return;
+            return SnapshotCaptureOutcome::skipped(snapshot_count_before);
         }
 
         let snapshot = ScreenSnapshot::from_screen(self.rows, self.cols, self.parser.screen());
+        let surface_digest = visible_surface_digest(&snapshot.visible_lines);
+        let top_preview = first_non_blank_preview(&snapshot.visible_lines);
+        let bottom_preview = last_non_blank_preview(&snapshot.visible_lines);
 
         if self
             .snapshots
             .back()
             .is_some_and(|existing| existing.same_visible_surface(&snapshot))
         {
-            return;
+            return SnapshotCaptureOutcome {
+                attempted: true,
+                appended: false,
+                deduped: true,
+                pruned_blank_prefix: 0,
+                snapshot_count_after: self.snapshots.len(),
+                surface_digest,
+                top_preview,
+                bottom_preview,
+            };
         }
 
         self.snapshots.push_back(snapshot);
@@ -973,18 +1064,69 @@ impl VtState {
                 self.snapshot_cursor = Some(cursor.saturating_sub(1));
             }
         }
-        self.prune_leading_blank_snapshots();
+        let pruned_blank_prefix = self.prune_leading_blank_snapshots();
+        SnapshotCaptureOutcome {
+            attempted: true,
+            appended: true,
+            deduped: false,
+            pruned_blank_prefix,
+            snapshot_count_after: self.snapshots.len(),
+            surface_digest,
+            top_preview,
+            bottom_preview,
+        }
     }
 
-    fn prune_leading_blank_snapshots(&mut self) {
+    fn prune_leading_blank_snapshots(&mut self) -> usize {
+        let mut pruned = 0;
         while self.snapshots.len() > 1
             && self.snapshots.front().is_some_and(ScreenSnapshot::is_blank)
         {
             self.snapshots.pop_front();
+            pruned += 1;
             if let Some(cursor) = self.snapshot_cursor {
                 self.snapshot_cursor = Some(cursor.saturating_sub(1));
             }
         }
+        pruned
+    }
+
+    fn log_process_debug(
+        &self,
+        bytes: &[u8],
+        previous_max_scrollback: usize,
+        previous_snapshot_count: usize,
+        snapshot_outcome: &SnapshotCaptureOutcome,
+    ) {
+        let strategy = match self.scrollback_strategy {
+            ScrollbackStrategy::Standard => "standard",
+            ScrollbackStrategy::AgentMemoryBacked => "agent",
+        };
+        let clear_home_count = count_subslice(bytes, b"\x1b[2J\x1b[H");
+        let home_count = count_subslice(bytes, b"\x1b[H");
+        let alt_enter_count = count_subslice(bytes, b"\x1b[?1049h");
+        let alt_leave_count = count_subslice(bytes, b"\x1b[?1049l");
+        crate::scroll_debug::log(format!(
+            "event=vt_process strategy={} bytes={} clear_home_count={} home_count={} alt_enter_count={} alt_leave_count={} previous_max_scrollback={} next_max_scrollback={} previous_snapshot_count={} next_snapshot_count={} snapshot_attempted={} snapshot_appended={} snapshot_deduped={} pruned_blank_prefix={} uses_snapshot_scrollback={} surface_digest={} top_preview={} bottom_preview={}",
+            strategy,
+            bytes.len(),
+            clear_home_count,
+            home_count,
+            alt_enter_count,
+            alt_leave_count,
+            previous_max_scrollback,
+            self.max_scrollback,
+            previous_snapshot_count,
+            snapshot_outcome.snapshot_count_after,
+            snapshot_outcome.attempted,
+            snapshot_outcome.appended,
+            snapshot_outcome.deduped,
+            snapshot_outcome.pruned_blank_prefix,
+            self.uses_snapshot_scrollback(),
+            snapshot_outcome.surface_digest,
+            snapshot_outcome.top_preview,
+            snapshot_outcome.bottom_preview,
+        ));
     }
 }
 
