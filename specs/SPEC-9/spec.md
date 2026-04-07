@@ -262,6 +262,8 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 3. Given file search is invoked, when the runner parses CLI args, then `search-files` and `index-files` are the canonical action names.
 4. Given legacy callers still use `search` or `index`, when the runner executes, then those aliases are normalized to `search-files` and `index-files`.
 5. Given issue indexing is invoked, when the runner executes `index-issues`, then `--project-root` is required in addition to `--db-path`.
+6. Given Windows PATH resolves Python launcher stubs or non-executable aliases first, when gwt chooses a bootstrap Python for the managed search runtime, then it skips invalid candidates and selects a real executable Python 3 candidate instead.
+7. Given the managed search runtime cannot be bootstrapped because no suitable Python is available, when gwt surfaces the warning, then the message includes install guidance instead of only a raw command failure.
 
 ## Functional Requirements (Phase 4: Skill Consolidation)
 
@@ -282,6 +284,9 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 - **FR-038**: `index-issues` requires both `--project-root` and `--db-path`.
 - **FR-039**: Search skill documentation and command examples use the canonical file-search action names and the managed `chroma-venv` path.
 - **FR-040**: Search runtime repair uses warning-only degradation when Python or dependency setup fails.
+- **FR-041**: Search runtime bootstrap validates Python candidates by executing them and checking for a supported Python 3 runtime before creating the managed venv.
+- **FR-042**: Search runtime bootstrap ignores Windows Store Python aliases and other non-executable launcher stubs when selecting the bootstrap Python.
+- **FR-043**: Search runtime failure guidance tells the user to install Python 3.9+ and, on Windows, ensure `python` or `py -3` works from the terminal before reopening gwt.
 
 ## Success Criteria
 
@@ -310,3 +315,5 @@ As a developer using `gwt-search`, I want the shared search runtime to repair it
 - **SC-021**: `gwt-search` documentation references `search-files` / `index-files` as the file-search contract.
 - **SC-022**: `index-issues` command examples include `--project-root "$GWT_PROJECT_ROOT"`.
 - **SC-023**: Deleting the shared runner or managed venv and restarting gwt triggers runtime self-repair instead of leaving search silently broken.
+- **SC-024**: On Windows, a PATH entry that resolves to the Microsoft Store Python alias does not block project-index bootstrap when another executable Python candidate is available.
+- **SC-025**: When no suitable bootstrap Python is available, gwt surfaces install guidance that references Python 3.9+ and the expected Windows `python` / `py -3` commands.

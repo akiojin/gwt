@@ -92,6 +92,9 @@ All TUI key bindings use the `Ctrl+G` prefix.
   - `OPENAI_API_KEY`
   - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
 - `bunx` or `npx` for local agent launch fallback.
+- Python 3.9+ on `PATH` when you use project search / issue indexing for the first time.
+  gwt bootstraps `~/.gwt/runtime/chroma-venv` automatically, then reuses that managed runtime.
+  On Windows, make sure either `python` or `py -3` works in Command Prompt or PowerShell.
 
 ### GitHub Token (PAT) requirements
 

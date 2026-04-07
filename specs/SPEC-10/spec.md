@@ -85,6 +85,9 @@ As a project maintainer, I want develop to be protected from accidental direct c
 - **FR-010**: Workspace initialization creates or repairs the managed project-index Python venv under `~/.gwt/runtime/chroma-venv`.
 - **FR-011**: Existing repository startup runs the same runtime repair path before search features load.
 - **FR-012**: Runtime bootstrap failures degrade to a warning notification and do not abort TUI startup or clone completion.
+- **FR-013**: Runtime bootstrap validates bootstrap Python candidates by execution and accepts only supported Python 3.9+ candidates before creating the managed search venv.
+- **FR-014**: Runtime bootstrap ignores Windows Store Python aliases and other non-executable launcher stubs when scanning for a bootstrap Python.
+- **FR-015**: Warning notifications for runtime bootstrap failure include Python installation guidance, including Windows guidance to make `python` or `py -3` work from the terminal.
 
 ## Implementation Details
 
@@ -149,6 +152,8 @@ branch name itself as the relative directory hierarchy:
 - Runtime assets live in the repo and are copied into `~/.gwt/runtime/` during workspace initialization and normal startup repair.
 - The managed venv lives at `~/.gwt/runtime/chroma-venv/` for backward compatibility with existing skills and user environments.
 - If the venv is missing, lacks `chromadb`, or fails the import probe, gwt rebuilds it once before surfacing a warning.
+- Bootstrap Python selection is validated by actually executing candidates, so broken aliases do not get chosen for venv creation.
+- On Windows, bootstrap guidance references `python` and `py -3` because either may be the working entrypoint after installation.
 - Startup and clone completion continue even when runtime repair fails; the user sees a warning instead of an app crash.
 
 ### Skill Embedding Lifecycle (per SPEC-1438)
@@ -198,3 +203,5 @@ fi
 - **SC-005**: Bare repo shows migration instructions
 - **SC-006**: Removing `~/.gwt/runtime/chroma_index_runner.py` and restarting gwt recreates the runner automatically.
 - **SC-007**: Removing or corrupting `~/.gwt/runtime/chroma-venv` and restarting gwt repairs the managed venv automatically.
+- **SC-008**: Runtime bootstrap ignores Windows Store Python aliases and still succeeds when another executable Python 3.9+ candidate exists on PATH.
+- **SC-009**: When no executable Python 3.9+ candidate exists, startup or clone completion continues and the warning explains how to install Python and verify `python` or `py -3`.

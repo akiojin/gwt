@@ -1834,12 +1834,21 @@ fn apply_notification(model: &mut Model, notification: Notification) {
 }
 
 fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
+    let detail = err.to_string();
+    if detail
+        .to_ascii_lowercase()
+        .contains("project index runtime requires python 3.9+")
+    {
+        return Notification::new(Severity::Warn, "index", "Project index runtime unavailable")
+            .with_detail(detail);
+    }
+
     Notification::new(
         Severity::Warn,
         "workspace",
         "Workspace initialization incomplete",
     )
-    .with_detail(err.to_string())
+    .with_detail(detail)
 }
 
 fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
@@ -11394,5 +11403,20 @@ CUSTOM_ENV = "enabled"
         assert_eq!(notification.source, "workspace");
         assert_eq!(notification.message, "Workspace initialization incomplete");
         assert_eq!(notification.detail.as_deref(), Some("runtime setup failed"));
+    }
+
+    #[test]
+    fn workspace_initialization_warning_uses_project_index_guidance_when_python_is_missing() {
+        let notification = workspace_initialization_warning(
+            "Project index runtime requires Python 3.9+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.",
+        );
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert!(notification
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("py -3"));
     }
 }

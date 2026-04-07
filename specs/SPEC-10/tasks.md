@@ -51,3 +51,10 @@
 - [x] T035 Implement repo-tracked `chroma_index_runner.py` + requirements asset bootstrap in `gwt-core`.
 - [x] T036 Wire runtime bootstrap into `gwt-git::initialize_workspace()` with injected-home tests.
 - [x] T037 Wire startup/clone warning degradation into `gwt-tui` and verify focused helper tests.
+
+## Phase 6: Python Runtime Hardening
+
+- [x] T038 Add RED tests for validated bootstrap Python candidate selection, including ignored Windows launcher stubs.
+- [x] T039 Add RED tests for user-facing Python install guidance in startup / clone warning notifications.
+- [x] T040 Implement project-index bootstrap Python validation and guidance-aware error shaping in `gwt-core`.
+- [x] T041 Update TUI warning messaging and README docs for managed project-index Python setup, then rerun focused plus broad verification.

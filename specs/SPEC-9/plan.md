@@ -186,6 +186,7 @@ The following capabilities from SPEC-1786 are already implemented:
 2. Repair `~/.gwt/runtime/chroma_index_runner.py` and `~/.gwt/runtime/chroma-venv` during startup and workspace initialization.
 3. Standardize file-search actions on `index-files` / `search-files` while preserving `index` / `search` aliases.
 4. Update `gwt-search` family skills so `index-issues` examples include `--project-root`.
+5. Validate bootstrap Python candidates before venv creation and translate missing-Python failures into install guidance.
 
 ### Dependencies
 

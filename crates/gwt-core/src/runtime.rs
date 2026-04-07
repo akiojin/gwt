@@ -9,6 +9,20 @@ use crate::{GwtError, Result};
 const RUNNER_SOURCE: &str = include_str!("../runtime/chroma_index_runner.py");
 const REQUIREMENTS_SOURCE: &str = include_str!("../runtime/project_index_requirements.txt");
 const REQUIREMENTS_FILE: &str = "project_index_requirements.txt";
+const PYTHON_VERSION_SNIPPET: &str =
+    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BootstrapPython {
+    program: PathBuf,
+    prefix_args: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PythonCandidate {
+    executable: &'static str,
+    prefix_args: &'static [&'static str],
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectIndexRuntimeReport {
@@ -24,8 +38,8 @@ pub fn ensure_project_index_runtime() -> Result<ProjectIndexRuntimeReport> {
 }
 
 trait RuntimeProvisioner {
-    fn find_python(&self) -> Result<PathBuf>;
-    fn create_venv(&self, python: &Path, venv_dir: &Path) -> Result<()>;
+    fn find_python(&self) -> Result<BootstrapPython>;
+    fn create_venv(&self, python: &BootstrapPython, venv_dir: &Path) -> Result<()>;
     fn install_requirements(&self, venv_python: &Path, requirements: &Path) -> Result<()>;
     fn probe_chromadb(&self, venv_python: &Path) -> Result<()>;
 }
@@ -33,21 +47,18 @@ trait RuntimeProvisioner {
 struct RealProvisioner;
 
 impl RuntimeProvisioner for RealProvisioner {
-    fn find_python(&self) -> Result<PathBuf> {
-        which::which("python3")
-            .or_else(|_| which::which("python"))
-            .map_err(|_| {
-                GwtError::Other(
-                    "Python 3 not found on PATH; project index runtime is unavailable".into(),
-                )
-            })
+    fn find_python(&self) -> Result<BootstrapPython> {
+        find_bootstrap_python().map_err(GwtError::Other)
     }
 
-    fn create_venv(&self, python: &Path, venv_dir: &Path) -> Result<()> {
-        run_checked(
-            Command::new(python).arg("-m").arg("venv").arg(venv_dir),
-            "python -m venv",
-        )
+    fn create_venv(&self, python: &BootstrapPython, venv_dir: &Path) -> Result<()> {
+        let mut command = Command::new(&python.program);
+        command
+            .args(python.prefix_args)
+            .arg("-m")
+            .arg("venv")
+            .arg(venv_dir);
+        run_checked(&mut command, "python -m venv")
     }
 
     fn install_requirements(&self, venv_python: &Path, requirements: &Path) -> Result<()> {
@@ -127,6 +138,172 @@ fn venv_python_path(venv_dir: &Path) -> PathBuf {
     }
 }
 
+fn system_python_candidates() -> &'static [PythonCandidate] {
+    #[cfg(windows)]
+    {
+        &[
+            PythonCandidate {
+                executable: "python3.13",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.12",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.11",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.10",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.9",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "py",
+                prefix_args: &["-3"],
+            },
+            PythonCandidate {
+                executable: "python",
+                prefix_args: &[],
+            },
+        ]
+    }
+
+    #[cfg(not(windows))]
+    {
+        &[
+            PythonCandidate {
+                executable: "python3.13",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.12",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.11",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.10",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3.9",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python3",
+                prefix_args: &[],
+            },
+            PythonCandidate {
+                executable: "python",
+                prefix_args: &[],
+            },
+        ]
+    }
+}
+
+fn parse_python_version(version_str: &str) -> std::result::Result<(u32, u32), String> {
+    let parts: Vec<&str> = version_str.trim().split('.').collect();
+    if parts.len() < 2 {
+        return Err(format!("Unexpected Python version format: {version_str}"));
+    }
+
+    let major = parts[0]
+        .parse::<u32>()
+        .map_err(|_| format!("Invalid Python major version: {}", parts[0]))?;
+    let minor = parts[1]
+        .parse::<u32>()
+        .map_err(|_| format!("Invalid Python minor version: {}", parts[1]))?;
+    Ok((major, minor))
+}
+
+fn supported_project_index_python_version(major: u32, minor: u32) -> bool {
+    major == 3 && minor >= 9
+}
+
+fn is_windows_store_python_alias(path: &Path) -> bool {
+    let normalized = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    normalized.contains("\\appdata\\local\\microsoft\\windowsapps\\")
+        && file_name.starts_with("python")
+        && file_name.ends_with(".exe")
+}
+
+fn python_version(
+    path: &Path,
+    prefix_args: &[&str],
+) -> std::result::Result<(u32, u32, String), String> {
+    let output = Command::new(path)
+        .args(prefix_args)
+        .arg("-c")
+        .arg(PYTHON_VERSION_SNIPPET)
+        .output()
+        .map_err(|e| format!("Failed to check Python version: {e}"))?;
+
+    if !output.status.success() {
+        return Err("Failed to determine Python version".into());
+    }
+
+    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let (major, minor) = parse_python_version(&version_str)?;
+    Ok((major, minor, version_str))
+}
+
+fn project_index_python_install_guidance() -> String {
+    "Project index runtime requires Python 3.9+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.".into()
+}
+
+fn find_bootstrap_python() -> std::result::Result<BootstrapPython, String> {
+    find_bootstrap_python_with(|name| which::which(name).ok(), python_version)
+}
+
+fn find_bootstrap_python_with<Resolve, Probe>(
+    resolve: Resolve,
+    probe: Probe,
+) -> std::result::Result<BootstrapPython, String>
+where
+    Resolve: Fn(&str) -> Option<PathBuf>,
+    Probe: Fn(&Path, &[&str]) -> std::result::Result<(u32, u32, String), String>,
+{
+    for candidate in system_python_candidates() {
+        let Some(path) = resolve(candidate.executable) else {
+            continue;
+        };
+        if is_windows_store_python_alias(&path) {
+            continue;
+        }
+
+        let Ok((major, minor, _version)) = probe(&path, candidate.prefix_args) else {
+            continue;
+        };
+        if supported_project_index_python_version(major, minor) {
+            return Ok(BootstrapPython {
+                program: path,
+                prefix_args: candidate.prefix_args,
+            });
+        }
+    }
+
+    Err(project_index_python_install_guidance())
+}
+
 fn write_if_changed(path: &Path, contents: &str) -> Result<bool> {
     match fs::read_to_string(path) {
         Ok(existing) if existing == contents => Ok(false),
@@ -167,7 +344,7 @@ mod tests {
     struct FakeProvisioner {
         calls: RefCell<Vec<&'static str>>,
         fail_probe_once: Cell<bool>,
-        python: PathBuf,
+        python: BootstrapPython,
     }
 
     impl FakeProvisioner {
@@ -177,7 +354,10 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 fail_probe_once: Cell::new(false),
-                python,
+                python: BootstrapPython {
+                    program: python,
+                    prefix_args: &[],
+                },
             }
         }
 
@@ -187,12 +367,12 @@ mod tests {
     }
 
     impl RuntimeProvisioner for FakeProvisioner {
-        fn find_python(&self) -> Result<PathBuf> {
+        fn find_python(&self) -> Result<BootstrapPython> {
             self.calls.borrow_mut().push("find_python");
             Ok(self.python.clone())
         }
 
-        fn create_venv(&self, _python: &Path, venv_dir: &Path) -> Result<()> {
+        fn create_venv(&self, _python: &BootstrapPython, venv_dir: &Path) -> Result<()> {
             self.calls.borrow_mut().push("create_venv");
             let venv_python = venv_python_path(venv_dir);
             fs::create_dir_all(venv_python.parent().unwrap()).unwrap();
@@ -283,5 +463,41 @@ mod tests {
                 "probe_chromadb"
             ]
         );
+    }
+
+    #[test]
+    fn find_bootstrap_python_with_skips_windows_store_alias_and_uses_next_candidate() {
+        let windows_store_alias =
+            PathBuf::from(r"C:\Users\akiojin\AppData\Local\Microsoft\WindowsApps\python.exe");
+        let real_python = PathBuf::from(r"C:\Python313\python.exe");
+
+        let selected = find_bootstrap_python_with(
+            |name| match name {
+                "python3.13" => Some(windows_store_alias.clone()),
+                "python3.12" => Some(real_python.clone()),
+                _ => None,
+            },
+            |path, _| {
+                if path == windows_store_alias.as_path() {
+                    Err("windows store alias".into())
+                } else {
+                    Ok((3, 12, "3.12".into()))
+                }
+            },
+        )
+        .expect("bootstrap python");
+
+        assert_eq!(selected.program, real_python);
+    }
+
+    #[test]
+    fn find_bootstrap_python_with_returns_install_guidance_when_missing() {
+        let error =
+            find_bootstrap_python_with(|_| None, |_, _| unreachable!("no candidate should probe"))
+                .expect_err("missing python should fail");
+
+        assert!(error.contains("Python 3.9+"));
+        assert!(error.contains("py -3"));
+        assert!(error.contains("python"));
     }
 }
