@@ -103,3 +103,7 @@
 - [x] T090 Extend redraw-shift detection to accept sparse same-offset matches when contiguous overlap is interrupted by progress/spinner churn.
 - [x] T091 [P] Write RED tests: Codex launch configs include `--no-alt-screen` both in the shared launch builder and the wizard-built launch path.
 - [x] T092 Prefer Codex inline mode by adding `--no-alt-screen` to Codex launch args so PTY output preserves scrollback without relying on fullscreen redraw reconstruction.
+- [x] T093 [P] Write RED tests: invalid `Esc`-prefixed non-SGR sequences replay in original order, and pending normalized keys still traverse the shared keybind dispatch path.
+- [x] T094 [P] Write RED tests: Terminal.app right-drag anchor state clears on outside mouse-up and session/focus changes, while transcript-ignore tests exercise real transcript discovery/parsing first.
+- [x] T095 Implement ordered SGR-normalization fallback replay, share post-normalization dispatch for pending/polled messages, and make the transcript-ignore helper exercise real discovery/parsing without hydrating runtime history.
+- [x] T096 Implement lazy scroll-debug logging and clear Terminal.app right-drag anchor state whenever terminal ownership changes or the drag ends outside the session pane.

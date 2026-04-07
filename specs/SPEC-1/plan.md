@@ -69,6 +69,8 @@ Complete the terminal emulation layer by first adding a real vt100-backed sessio
 19. While the user is actively browsing snapshot-backed history, keep that snapshot source locked even if new PTY redraws promote fresh row history in the background; only switch back to row/live rendering when the user explicitly returns to live-follow.
 20. When Codex-style redraws expose the vertical shift only through sparse same-offset line matches, treat that as row-history evidence before falling back to page-sized snapshot stepping.
 21. Prefer Codex's documented inline mode over gwt-side redraw reconstruction by launching Codex with `--no-alt-screen`, so the PTY preserves normal row scrollback semantics before any local fallback is needed.
+22. When SGR mouse normalization aborts, replay the buffered `Esc`-prefixed input in original order and route any pending normalized messages through the same keybind-aware dispatch path as polled input.
+23. Clear Terminal.app right-drag fallback anchors whenever the drag ends outside the pane or terminal ownership changes, and keep scroll-debug hot paths lazy so disabled diagnostics do not add scroll/render overhead.
 
 ## Dependencies
 

@@ -8,6 +8,20 @@ license.workspace = true
 thiserror = { workspace = true }
 dirs = "6"
 which = "8"
+sha2 = { workspace = true }
+hex = { workspace = true }
+fs2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
+ignore = { workspace = true }
+dunce = { workspace = true }
 
 [build-dependencies]
 serde_yaml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

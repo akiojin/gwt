@@ -123,6 +123,12 @@ nvml-wrapper = "0.12"
 notify = "8"
 notify-debouncer-mini = "0.7"
 
+# .gitignore filtering for the watcher
+ignore = "0.4"
+
+# Hex encoding for hash values
+hex = "0.4"
+
 [profile.release]
 lto = true
 codegen-units = 1

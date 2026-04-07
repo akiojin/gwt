@@ -121,7 +121,7 @@ Runtime-hook regressions repeatedly occurred when only one layer (config generat
   - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-deepen, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
   - Issue management: gwt-issue-register, gwt-issue-resolve, gwt-issue-search
   - Agent pane management: gwt-agent-discover, gwt-agent-read, gwt-agent-send, gwt-agent-lifecycle
-  - Utilities: gwt-project-search, gwt-spec-to-issue-migration
+  - Utilities: gwt-project-search, gwt-project-index, gwt-spec-to-issue-migration
 - **FR-010**: `build.rs` validates YAML frontmatter of every `SKILL.md` at compile time using `serde_yaml`. Malformed YAML causes a build failure with file path and error details.
 - **FR-011**: The `BuiltinSkill` enum, `SKILL_CATALOG` constant, `register_builtins()` function, and `skill_fields()` in the TUI Settings screen are removed. Skill interpretation is the responsibility of Claude Code / Codex, not gwt.
 
@@ -251,6 +251,25 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 1. Given any repository, when I call `gwt-review`, then it analyzes domain boundaries, module depth, testability, and agent-friendliness.
 2. Given the review report, when improvements are identified, then it suggests creating improvement SPECs via `gwt-design`.
 
+### US-8: Search Runtime Contract Recovery (P1) -- IMPLEMENTED
+
+As a developer using `gwt-search`, I want the shared search runtime to repair itself and expose stable action names so that project, issue, and SPEC search keep working across upgrades.
+
+**Acceptance Scenarios**
+
+1. Given `~/.gwt/runtime/chroma_index_runner.py` is missing or outdated, when gwt starts or initializes a workspace, then the repo-tracked runner is restored automatically.
+2. Given the managed search venv is missing or broken, when gwt starts or initializes a workspace, then `~/.gwt/runtime/chroma-venv` is rebuilt automatically.
+3. Given file search is invoked, when the runner parses CLI args, then `search-files` and `index-files` are the canonical action names.
+4. Given legacy callers still use `search` or `index`, when the runner executes, then those aliases are normalized to `search-files` and `index-files`.
+5. Given issue indexing is invoked, when the runner executes `index-issues`, then `--project-root` is required in addition to `--db-path`.
+6. Given Windows PATH resolves launcher entrypoints first, when gwt chooses a bootstrap Python for the managed search runtime, then it probes them and accepts any candidate that successfully reports Python 3.9+.
+7. Given Python candidates exist but are broken or too old, when the managed search runtime cannot be bootstrapped, then gwt surfaces the runtime failure detail instead of misreporting the situation as “Python not installed”.
+8. Given the managed search runtime cannot be bootstrapped because no suitable Python candidate exists at all, when gwt surfaces the warning, then the message includes install guidance.
+9. Given a user invokes standalone semantic search over project implementation files, when gwt exposes the standalone skill and slash command surface, then `gwt-project-search` is the canonical name.
+10. Given the bundled assets are distributed to a worktree, when standalone project search assets are materialized, then no `gwt-file-search` skill or slash-command asset is written.
+11. Given `search-files` is used for implementation discovery, when file indexing runs, then embedded skill assets, local SPEC directories, archived SPEC directories, local task logs, and snapshot files are excluded from the implementation-file collection.
+12. Given project documentation is indexed separately from implementation files, when `index-files` completes, then `search-files` searches the code-focused collection by default and `search-files-docs` can search the docs-focused collection explicitly.
+
 ## Functional Requirements (Phase 4: Skill Consolidation)
 
 - **FR-024**: gwt-design runs DDD domain discovery (Bounded Context identification, entity relationships, Ubiquitous Language) in Phase 2.
@@ -265,6 +284,20 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 - **FR-033**: gwt-agent auto-detects discover/read/send/lifecycle mode from arguments.
 - **FR-034**: All 8 skills work standalone without requiring other skills as dependencies.
 - **FR-035**: design → plan → build → review automatic chain suggests the next skill on completion.
+- **FR-036**: gwt-search runtime assets are repo-tracked and copied into `~/.gwt/runtime/` instead of being edited in place.
+- **FR-037**: File search canonical action names are `index-files` and `search-files`; `index` and `search` remain compatibility aliases only.
+- **FR-038**: `index-issues` requires both `--project-root` and `--db-path`.
+- **FR-039**: Search skill documentation and command examples use the canonical file-search action names and the managed `chroma-venv` path.
+- **FR-040**: Search runtime repair uses warning-only degradation when Python or dependency setup fails.
+- **FR-041**: Search runtime bootstrap validates Python candidates by executing them and checking for a supported Python 3 runtime before creating the managed venv.
+- **FR-042**: Search runtime bootstrap probes launcher candidates by execution and accepts working Python 3.9+ Store/launcher entrypoints instead of rejecting them by path heuristic alone.
+- **FR-043**: Search runtime failure guidance tells the user to install Python 3.9+ only when no candidate exists; broken or too-old candidates surface their runtime failure detail.
+- **FR-044**: Search runtime bootstrap discovers versioned `python3.x` executables beyond a fixed hard-coded list when they are present on PATH.
+- **FR-045**: Startup and clone-completion notifications use the same stable project-index runtime classification rather than brittle human-text matching.
+- **FR-046**: `gwt-project-search` is the canonical standalone skill and slash-command name for semantic search over project implementation files, while internal runner actions remain `search-files` / `index-files`.
+- **FR-047**: Search-related skill documentation that points users to standalone project-file search references `gwt-project-search` as the primary entrypoint, and `gwt-file-search` is not distributed as a public asset.
+- **FR-048**: `index-files` splits indexed project files into separate code and docs collections. `search-files` targets the code-focused collection by default, while `search-files-docs` targets project docs explicitly.
+- **FR-049**: The code-focused file collection excludes embedded skill assets (`.claude/`, `.codex/`), local SPEC directories (`specs/`), archived SPEC directories (`specs-archive/`), local task logs (`tasks/`), and snapshot files (`*.snap`) so implementation search is not dominated by generated or planning artifacts.
 
 ## Success Criteria
 
@@ -290,3 +323,13 @@ As a developer, I want a codebase review skill that closes the feedback loop so 
 - **SC-018**: All 8 skills are callable standalone and produce correct results.
 - **SC-019**: `gwt-review` generates an architecture improvement report on the gwt repository.
 - **SC-020**: The design → plan → build → review chain suggests the next skill at each completion point.
+- **SC-021**: `gwt-search` documentation references `search-files` / `index-files` as the file-search contract.
+- **SC-022**: `index-issues` command examples include `--project-root "$GWT_PROJECT_ROOT"`.
+- **SC-023**: Deleting the shared runner or managed venv and restarting gwt triggers runtime self-repair instead of leaving search silently broken.
+- **SC-024**: On Windows, a PATH entry that resolves to a working Microsoft Store / launcher Python entrypoint is accepted when it reports Python 3.9+.
+- **SC-025**: When only broken or too-old Python candidates are present, gwt surfaces runtime failure detail rather than install guidance.
+- **SC-026**: When no suitable bootstrap Python is available, gwt surfaces install guidance that references Python 3.9+ and the expected Windows `python` / `py -3` commands.
+- **SC-027**: Distributed skill assets include `gwt-project-search` for both Claude and Codex, and `/gwt:gwt-project-search` is available as the canonical slash command.
+- **SC-028**: Distributed worktrees do not contain `gwt-file-search` skill or slash-command assets, preventing public naming drift away from the project-search workflow.
+- **SC-029**: Reindexing a repository with `.claude/`, `.codex/`, `specs/`, `specs-archive/`, `tasks/`, and snapshot files present leaves those artifacts out of the implementation-file collection while still indexing implementation code.
+- **SC-030**: After `index-files`, a query executed through `search-files` returns implementation files without README/spec/skill asset noise, and `search-files-docs` can still retrieve project documentation separately.

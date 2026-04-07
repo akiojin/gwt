@@ -1,8 +1,10 @@
 //! App — Update and View functions for the Elm Architecture.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ use gwt_agent::{
 };
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings, VoiceConfig};
-use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
+use gwt_core::paths::{gwt_cache_dir, gwt_logs_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
@@ -63,6 +65,8 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
+const AGENT_LAUNCH_LOG_FILENAME: &str = "agent-launch.jsonl";
+const REDACTED_ENV_VALUE: &str = "<redacted>";
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -96,6 +100,13 @@ pub fn spawn_pty_for_session(
     session_id: &str,
     config: gwt_terminal::pty::SpawnConfig,
 ) -> Result<(), String> {
+    if let Err(err) = append_agent_launch_log(model.repo_path(), session_id, &config) {
+        tracing::warn!(
+            session_id = session_id,
+            error = %err,
+            "Failed to append agent launch audit log"
+        );
+    }
     tracing::info!(
         session_id = session_id,
         command = %config.command,
@@ -114,6 +125,83 @@ pub fn spawn_pty_for_session(
     model.pty_handles.insert(session_id.to_string(), pty);
     tracing::info!(session_id = session_id, "PTY spawned successfully");
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct AgentLaunchAuditRecord {
+    timestamp: String,
+    repo_path: String,
+    session_id: String,
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: BTreeMap<String, String>,
+}
+
+fn append_agent_launch_log(
+    repo_path: &Path,
+    session_id: &str,
+    config: &gwt_terminal::pty::SpawnConfig,
+) -> std::io::Result<()> {
+    append_agent_launch_log_with(&gwt_logs_dir(), repo_path, session_id, config)
+}
+
+fn append_agent_launch_log_with(
+    logs_dir: &Path,
+    repo_path: &Path,
+    session_id: &str,
+    config: &gwt_terminal::pty::SpawnConfig,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(logs_dir)?;
+    let log_path = logs_dir.join(AGENT_LAUNCH_LOG_FILENAME);
+
+    let record = AgentLaunchAuditRecord {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        repo_path: repo_path.display().to_string(),
+        session_id: session_id.to_string(),
+        command: config.command.clone(),
+        args: config.args.clone(),
+        cwd: config.cwd.as_ref().map(|path| path.display().to_string()),
+        env: redact_env_for_log(&config.env),
+    };
+    let json = serde_json::to_string(&record)
+        .map_err(|err| std::io::Error::other(format!("serialize audit record: {err}")))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    writeln!(file, "{json}")?;
+    Ok(())
+}
+
+fn redact_env_for_log(env: &HashMap<String, String>) -> BTreeMap<String, String> {
+    env.iter()
+        .map(|(key, value)| {
+            let logged_value = if is_sensitive_env_key(key) {
+                REDACTED_ENV_VALUE.to_string()
+            } else {
+                value.clone()
+            };
+            (key.clone(), logged_value)
+        })
+        .collect()
+}
+
+fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    [
+        "API_KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASS",
+        "AUTH",
+        "COOKIE",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle))
 }
 
 /// Compute the session pane content size `(cols, rows)` for PTY/VtState
@@ -145,7 +233,8 @@ fn sync_session_viewports(model: &mut Model) {
             .set_scrollback(current_scrollback.min(session.vt.max_scrollback()));
     }
     if let Some(session) = model.active_session_tab() {
-        crate::scroll_debug::log(format!(
+        crate::scroll_debug::log_lazy(|| {
+            format!(
             "event=viewport_sync session={} content_width={} content_height={} render_width={} vt_rows={} vt_cols={} scrollback={} max_scrollback={} follow_live={}",
             session.id,
             content.width,
@@ -156,7 +245,8 @@ fn sync_session_viewports(model: &mut Model) {
             session.vt.scrollback(),
             session.vt.max_scrollback(),
             session.vt.follow_live(),
-        ));
+        )
+        });
     }
 }
 
@@ -177,12 +267,29 @@ fn sync_active_agent_transcript_scrollback_with(
     claude_projects_root: &Path,
     codex_sessions_root: &Path,
 ) {
-    let _ = (
-        model,
-        sessions_dir,
-        claude_projects_root,
-        codex_sessions_root,
-    );
+    let Some(session_tab) = model.active_session_tab() else {
+        return;
+    };
+    let SessionTabType::Agent { agent_id, .. } = &session_tab.tab_type else {
+        return;
+    };
+    let persisted_path = sessions_dir.join(format!("{}.toml", session_tab.id));
+    let Ok(persisted) = AgentSession::load(&persisted_path) else {
+        return;
+    };
+    let agent_id = match agent_id.as_str() {
+        "claude" => AgentId::ClaudeCode,
+        "codex" => AgentId::Codex,
+        _ => return,
+    };
+    let source = match agent_id {
+        AgentId::ClaudeCode => resolve_claude_transcript_source(&persisted, claude_projects_root),
+        AgentId::Codex => resolve_codex_transcript_source(&persisted, codex_sessions_root),
+        _ => None,
+    };
+    let _ = source
+        .as_ref()
+        .and_then(|source| read_transcript_lines_for_agent(&agent_id, &source.path));
 }
 
 #[cfg(test)]
@@ -727,6 +834,9 @@ fn refresh_branch_live_session_summaries_with(model: &mut Model, sessions_dir: &
 
 /// Process a message and update the model (Elm: update).
 pub fn update(model: &mut Model, msg: Message) {
+    let previous_active_session = model.active_session;
+    let previous_active_focus = model.active_focus;
+
     match msg {
         Message::Quit => {
             model.quit = true;
@@ -831,7 +941,8 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::PtyOutput(pane_id, data) => {
             if let Some(session) = model.session_tab_mut(&pane_id) {
                 session.vt.process(&data);
-                crate::scroll_debug::log(format!(
+                crate::scroll_debug::log_lazy(|| {
+                    format!(
                     "event=pty_output session={} bytes={} vt_rows={} vt_cols={} scrollback={} max_scrollback={} follow_live={}",
                     pane_id,
                     data.len(),
@@ -840,7 +951,8 @@ pub fn update(model: &mut Model, msg: Message) {
                     session.vt.scrollback(),
                     session.vt.max_scrollback(),
                     session.vt.follow_live(),
-                ));
+                )
+                });
             }
             if model
                 .active_session_tab()
@@ -903,10 +1015,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::KeyInput(key) => {
             if route_overlay_key(model, key) {
-                return;
-            }
-
-            if model.active_layer == ActiveLayer::Initialization {
+            } else if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
                 // Dispatch based on focused pane
@@ -1066,9 +1175,14 @@ pub fn update(model: &mut Model, msg: Message) {
                         match gwt_git::clone_repo(&url, &target) {
                             Ok(path) => {
                                 let _ = gwt_git::install_develop_protection(&path);
-                                let _ = gwt_git::initialize_workspace(&path);
+                                let workspace_warning = gwt_git::initialize_workspace(&path)
+                                    .err()
+                                    .map(workspace_initialization_warning);
                                 model.reset(path);
                                 load_initial_data(model);
+                                if let Some(notification) = workspace_warning {
+                                    apply_notification(model, notification);
+                                }
                             }
                             Err(e) => {
                                 state.clone_status =
@@ -1093,6 +1207,12 @@ pub fn update(model: &mut Model, msg: Message) {
             model.wizard = None;
         }
     }
+
+    clear_terminal_trackpad_scroll_row_if_context_changed(
+        model,
+        previous_active_session,
+        previous_active_focus,
+    );
 
     // Flush buffered PTY input after every message so keystrokes reach the PTY
     // without waiting for the next Tick.
@@ -2314,6 +2434,23 @@ fn apply_notification(model: &mut Model, notification: Notification) {
     }
 }
 
+fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
+    let detail = err.to_string();
+    if gwt_core::runtime::project_index_runtime_error_kind(&detail).is_some() {
+        return Notification::new(Severity::Warn, "index", "Project index runtime unavailable")
+            .with_detail(gwt_core::runtime::project_index_runtime_error_detail(
+                &detail,
+            ));
+    }
+
+    Notification::new(
+        Severity::Warn,
+        "workspace",
+        "Workspace initialization incomplete",
+    )
+    .with_detail(detail)
+}
+
 fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
     model
         .notification_log
@@ -3312,18 +3449,22 @@ fn materialize_pending_launch_with(
     }
 
     // Prepare hook assets before the agent process starts so the first turn
-    // can emit runtime state immediately.
-    let worktree = config.working_dir.as_deref().unwrap_or(&model.repo_path);
-    if let Err(e) = distribute_to_worktree(worktree) {
+    // can emit runtime state immediately. Take an owned PathBuf so the borrow
+    // does not outlive the immutable borrow of `model`.
+    let worktree: std::path::PathBuf = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| model.repo_path.clone());
+    if let Err(e) = distribute_to_worktree(&worktree) {
         tracing::warn!("skill distribution failed: {e}");
     }
-    if let Err(e) = update_git_exclude(worktree) {
+    if let Err(e) = update_git_exclude(&worktree) {
         tracing::warn!("git exclude update failed: {e}");
     }
-    if let Err(e) = generate_settings_local(worktree) {
+    if let Err(e) = generate_settings_local(&worktree) {
         tracing::warn!("settings.local.json generation failed: {e}");
     }
-    if let Err(e) = generate_codex_hooks(worktree) {
+    if let Err(e) = generate_codex_hooks(&worktree) {
         tracing::warn!("hooks.json generation failed: {e}");
     }
 
@@ -3338,6 +3479,7 @@ fn materialize_pending_launch_with(
         env: pty_env,
         cwd: config.working_dir.clone(),
     };
+    let repo_path_for_watcher = model.repo_path.clone();
     if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
         apply_notification(
             model,
@@ -3349,6 +3491,9 @@ fn materialize_pending_launch_with(
         );
     } else {
         bootstrap_agent_session_running(sessions_dir, &session.id);
+        // Phase 8: ensure a watcher is running for this Worktree so live
+        // SPEC/file edits feed the incremental indexer.
+        crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
     }
 
     refresh_branch_live_session_summaries_with(model, sessions_dir);
@@ -3711,6 +3856,10 @@ fn handle_confirm_message_with(
         });
         model.branches.pending_delete_worktree = false;
         if let Some((branch_name, path)) = worktree_target {
+            // Phase 8: shutdown the watcher and remove the index dir BEFORE
+            // git removes the worktree, so the path is still resolvable.
+            let _ = crate::index_worker::shutdown_and_remove(&model.repo_path, &path);
+
             let manager = gwt_git::worktree::WorktreeManager::new(&model.repo_path);
             match manager.remove(&path) {
                 Ok(()) => {
@@ -4178,7 +4327,8 @@ where
     G: FnMut(&str) -> Result<(), String>,
 {
     let hits_active_session = mouse_hits_active_session(model, mouse);
-    crate::scroll_debug::log(format!(
+    crate::scroll_debug::log_lazy(|| {
+        format!(
         "event=mouse kind={:?} column={} row={} modifiers={:?} hits_active_session={} active_focus={:?} active_layer={:?}",
         mouse.kind,
         mouse.column,
@@ -4187,7 +4337,8 @@ where
         hits_active_session,
         model.active_focus,
         model.active_layer,
-    ));
+    )
+    });
 
     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         && mouse.modifiers.contains(KeyModifiers::CONTROL)
@@ -4200,6 +4351,9 @@ where
     }
 
     if !hits_active_session {
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
+            model.terminal_trackpad_scroll_row = None;
+        }
         return Ok(false);
     }
 
@@ -4402,7 +4556,8 @@ fn log_active_session_scroll_routing(
     let Some(session) = model.active_session_tab() else {
         return;
     };
-    crate::scroll_debug::log(format!(
+    crate::scroll_debug::log_lazy(|| {
+        format!(
         "event=scroll_route session={} source={} delta_rows={} routing={:?} alternate_screen={} uses_snapshot_scrollback={} max_scrollback={} snapshot_count={} mouse_reporting={} follow_live={}",
         session.id,
         source,
@@ -4414,7 +4569,8 @@ fn log_active_session_scroll_routing(
         session.vt.snapshot_count(),
         session.vt.accepts_mouse_scroll_input(),
         session.vt.follow_live(),
-    ));
+    )
+    });
 }
 
 fn queue_active_session_mouse_scroll(
@@ -4475,7 +4631,8 @@ fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
     };
     let changed = session.vt.scroll_viewport_lines(delta_rows);
     if changed {
-        crate::scroll_debug::log(format!(
+        crate::scroll_debug::log_lazy(|| {
+            format!(
             "event=scroll delta_rows={} session={} mode={} previous_scrollback={} next_scrollback={} max_scrollback={} previous_snapshot_position={} next_snapshot_position={} previous_snapshot_count={} next_snapshot_count={} previous_follow_live={} next_follow_live={}",
             delta_rows,
             session.id,
@@ -4489,9 +4646,23 @@ fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
             session.vt.snapshot_count(),
             previous_follow_live,
             session.vt.follow_live(),
-        ));
+        )
+        });
     }
     changed
+}
+
+fn clear_terminal_trackpad_scroll_row_if_context_changed(
+    model: &mut Model,
+    previous_active_session: usize,
+    previous_active_focus: FocusPane,
+) {
+    if model.active_session != previous_active_session
+        || (previous_active_focus == FocusPane::Terminal
+            && model.active_focus != FocusPane::Terminal)
+    {
+        model.terminal_trackpad_scroll_row = None;
+    }
 }
 
 fn normalize_selection(selection: TerminalSelection) -> (TerminalCell, TerminalCell) {
@@ -5857,6 +6028,15 @@ mod tests {
             .to_string(),
         ];
         fs::write(&transcript_path, transcript_lines.join("\n")).expect("write codex transcript");
+        let resolved = resolve_codex_transcript_source(&persisted, &codex_sessions_root)
+            .expect("resolved codex transcript source");
+        assert_eq!(resolved.path, transcript_path);
+        let parsed_lines = read_transcript_lines_for_agent(&AgentId::Codex, &resolved.path)
+            .expect("parsed codex transcript lines");
+        assert!(
+            parsed_lines.iter().any(|line| line.contains("prompt-1")),
+            "test setup should exercise real transcript parsing before verifying runtime ignore behavior"
+        );
 
         let mut model = Model::new(worktree.clone());
         model.sessions = vec![crate::model::SessionTab {
@@ -6071,6 +6251,104 @@ mod tests {
                 .scrollback()
                 > 0,
             "Terminal.app style right-drag fallback should move the viewport away from live follow mode"
+        );
+    }
+
+    #[test]
+    fn right_drag_state_clears_when_mouse_up_occurs_outside_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(model.terminal_trackpad_scroll_row, Some(area.y + 1));
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Right),
+                column: area.right(),
+                row: area.bottom(),
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(
+            model.terminal_trackpad_scroll_row.is_none(),
+            "right-drag fallback state should clear even if mouse-up lands outside the session area"
+        );
+    }
+
+    #[test]
+    fn right_drag_state_clears_when_active_session_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions.push(crate::model::SessionTab {
+            id: "shell-1".to_string(),
+            name: "Shell 2".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        update(&mut model, Message::Resize(18, 8));
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(model.terminal_trackpad_scroll_row, Some(area.y + 1));
+
+        update(&mut model, Message::SwitchSession(1));
+
+        assert!(
+            model.terminal_trackpad_scroll_row.is_none(),
+            "changing the active session should clear right-drag fallback state"
+        );
+    }
+
+    #[test]
+    fn right_drag_state_clears_when_focus_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(18, 8));
+
+        let area = active_session_content_area(&model).expect("active session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(model.terminal_trackpad_scroll_row, Some(area.y + 1));
+
+        update(&mut model, Message::FocusNext);
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(
+            model.terminal_trackpad_scroll_row.is_none(),
+            "focus changes should clear right-drag fallback state"
         );
     }
 
@@ -9940,6 +10218,93 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_claude_without_skip_permissions_omits_dangerous_flag() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            skip_perms: false,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(!config.skip_permissions);
+        assert!(!config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn append_agent_launch_log_with_writes_record_and_redacts_sensitive_env() {
+        let dir = tempfile::tempdir().expect("temp log dir");
+        let repo_path = PathBuf::from("/tmp/repo");
+        let mut env = HashMap::new();
+        env.insert(
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
+            "1".to_string(),
+        );
+        env.insert("OPENAI_API_KEY".to_string(), "sk-test-secret".to_string());
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        let config = gwt_terminal::pty::SpawnConfig {
+            command: "claude".to_string(),
+            args: vec!["--dangerously-skip-permissions".to_string()],
+            cols: 80,
+            rows: 24,
+            env,
+            cwd: Some(PathBuf::from("/tmp/repo/feature/demo")),
+        };
+
+        append_agent_launch_log_with(dir.path(), &repo_path, "sess-123", &config)
+            .expect("append launch log");
+
+        let path = dir.path().join(AGENT_LAUNCH_LOG_FILENAME);
+        let content = fs::read_to_string(path).expect("read launch log");
+        let line = content.lines().next().expect("one launch log line");
+        let value: serde_json::Value = serde_json::from_str(line).expect("parse launch log json");
+
+        assert_eq!(value["repo_path"], "/tmp/repo");
+        assert_eq!(value["session_id"], "sess-123");
+        assert_eq!(value["command"], "claude");
+        assert_eq!(
+            value["args"],
+            serde_json::json!(["--dangerously-skip-permissions"])
+        );
+        assert_eq!(value["cwd"], "/tmp/repo/feature/demo");
+        assert_eq!(value["env"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"], "1");
+        assert_eq!(value["env"]["OPENAI_API_KEY"], REDACTED_ENV_VALUE);
+        assert_eq!(value["env"]["PATH"], "/usr/bin");
+        assert!(value["timestamp"].as_str().is_some());
+    }
+
+    #[test]
+    fn append_agent_launch_log_with_appends_multiple_records() {
+        let dir = tempfile::tempdir().expect("temp log dir");
+        let repo_path = PathBuf::from("/tmp/repo");
+        let config = gwt_terminal::pty::SpawnConfig {
+            command: "claude".to_string(),
+            args: vec!["--dangerously-skip-permissions".to_string()],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            cwd: Some(PathBuf::from("/tmp/repo")),
+        };
+
+        append_agent_launch_log_with(dir.path(), &repo_path, "sess-1", &config)
+            .expect("append first");
+        append_agent_launch_log_with(dir.path(), &repo_path, "sess-2", &config)
+            .expect("append second");
+
+        let path = dir.path().join(AGENT_LAUNCH_LOG_FILENAME);
+        let content = fs::read_to_string(path).expect("read launch log");
+        let lines = content.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("parse first");
+        let second: serde_json::Value = serde_json::from_str(lines[1]).expect("parse second");
+        assert_eq!(first["session_id"], "sess-1");
+        assert_eq!(second["session_id"], "sess-2");
+    }
+
+    #[test]
     fn materialize_pending_launch_with_creates_agent_session_and_persists_metadata() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut model = test_model();
@@ -13285,5 +13650,40 @@ CUSTOM_ENV = "enabled"
         assert_eq!(model.settings.fields[0].label, "Bundled skills");
         let count: usize = model.settings.fields[0].value.parse().unwrap_or(0);
         assert!(count > 0, "should have bundled skills");
+    }
+
+    #[test]
+    fn workspace_initialization_warning_is_warn_notification() {
+        let notification = workspace_initialization_warning("runtime setup failed");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "workspace");
+        assert_eq!(notification.message, "Workspace initialization incomplete");
+        assert_eq!(notification.detail.as_deref(), Some("runtime setup failed"));
+    }
+
+    #[test]
+    fn workspace_initialization_warning_uses_project_index_guidance_when_python_is_missing() {
+        let notification = workspace_initialization_warning("[gwt-project-index-python-install] Project index runtime requires Python 3.9+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert!(notification
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("py -3"));
+    }
+
+    #[test]
+    fn workspace_initialization_warning_uses_project_index_source_for_runtime_failures() {
+        let notification =
+            workspace_initialization_warning("[gwt-project-index-runtime] pip install -r failed");
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert_eq!(
+            notification.detail.as_deref(),
+            Some("pip install -r failed")
+        );
     }
 }

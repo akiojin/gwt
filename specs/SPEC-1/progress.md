@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `92/92` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T14:12:52Z`
+- Task progress: `96/96` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T16:58:56Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -34,6 +34,10 @@
 - Snapshot-backed agent history now stays locked to the selected frame while new PTY redraws promote fresh row history in the background, preventing scrollback from looping or switching history sources mid-review.
 - Sparse same-offset matches inside Codex-style redraw churn now count as row-history evidence, so line-granular scrolling survives progress/spinner updates that previously forced page-sized snapshot fallback.
 - Codex launches now request the CLI's documented inline mode via `--no-alt-screen`, so PTY output preserves normal terminal scrollback semantics instead of forcing gwt to reconstruct fullscreen redraw history.
+- Aborted SGR mouse-report normalization now replays buffered `Esc`-prefixed input in original order, preventing reordered escape sequences from reaching downstream terminal apps.
+- Pending normalized messages now traverse the same keybind-aware dispatch path as polled input, so flushed escape-prefix keys cannot bypass focus-aware shortcut handling.
+- Terminal.app right-drag fallback state now clears on outside mouse-up and on terminal-to-nonterminal session/focus changes, preventing stale drag anchors from leaking into later pane interactions.
+- Scroll-debug hot paths now use lazy message construction, so disabled diagnostics no longer pay `format!` cost in viewport sync, PTY output, mouse, and scroll handlers.
 - PTY-bound key input now exits row/snapshot history and returns the viewport to live-follow before forwarding bytes, so typing never continues against a stale historical viewport.
 - Agent panes that enable SGR mouse reporting now receive wheel and Terminal.app right-drag scroll input through the PTY, so gwt stops competing with agent-owned redraw and scroll state when the embedded agent can handle scrolling itself.
 - Agent scroll ownership is now capability-driven with one PTY path: only SGR mouse-enabled panes use PTY-owned scroll, while Codex-style panes without that capability stay on gwt-local scrollback.
@@ -47,6 +51,7 @@
 - SGR leak normalization now runs regardless of terminal-focus state, so leaked wheel sequences can still recover into mouse scrolling when focus handoff has not happened yet.
 - Snapshot capture now tolerates redraw churn by preserving any distinct visible frame, preventing history starvation on dynamic full-screen panes without overlap-score tuning.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
+- Transcript-ignore regression coverage now resolves and parses real Claude/Codex transcript candidates before asserting that runtime scrollback remains memory-only.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` if manual confirmation is still required for release evidence.

@@ -5,13 +5,17 @@ description: "Mandatory preflight before gwt-spec-design and gwt-issue. Use proa
 
 # Unified Search
 
-gwt maintains ChromaDB vector search indexes for three scopes:
+gwt maintains ChromaDB vector search indexes for three scopes (Phase 8 layout):
 
-| Scope | Content | Index maintenance |
-|-------|---------|-------------------|
-| SPECs | Local SPEC files (`specs/SPEC-{N}/`) | Automatic (file system watcher) |
-| Issues | GitHub Issues (all states) | Manual (`index-issues` action or GUI button) |
-| Files | Project source files | Automatic (file system watcher) |
+| Scope | Content | Lifecycle |
+|-------|---------|-----------|
+| SPECs | Local SPEC files (`specs/SPEC-{N}/`) | Watcher (TUI) + runner auto-build on first search |
+| Issues | GitHub Issues (all states) | TUI startup async refresh (TTL 15 min) + runner auto-build on first search |
+| Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Watcher (TUI) + runner auto-build on first search |
+
+All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues are repo-scoped and shared across worktrees; SPECs and Files are worktree-scoped under `worktrees/<worktree-hash>/`. The legacy `$WORKTREE/.gwt/index/` location is no longer used and is deleted automatically by the TUI on startup.
+
+When invoked outside the gwt TUI, the runner falls back to a synchronous mtime+size diff per call: results are always correct, just slower than the TUI watcher path.
 
 ## Quick reference
 
@@ -19,36 +23,53 @@ gwt maintains ChromaDB vector search indexes for three scopes:
 gwt-search "query"              # search all three scopes
 gwt-search --specs "query"      # SPECs only
 gwt-search --issues "query"     # GitHub Issues only
-gwt-search --files "query"      # project source files only
+gwt-search --files "query"      # implementation files only
 ```
 
 ## Filter options
 
-| Flag | Scope | Action flag | Notes |
-|------|-------|------------|-------|
-| (none) | All three | Run all three searches | Default behavior |
-| `--specs` | SPECs only | `search-specs` | Local `specs/SPEC-{N}/` directories |
-| `--issues` | Issues only | `search-issues` | GitHub Issues via ChromaDB index |
-| `--files` | Files only | `search` | Project source files |
+| Flag | Scope | Action flag |
+|------|-------|------------|
+| (none) | All three | Run all three searches |
+| `--specs` | SPECs only | `search-specs` |
+| `--issues` | Issues only | `search-issues` |
+| `--files` | Files only | `search-files` |
+
+## Environment
+
+When the gwt TUI launches an agent pane, the following env vars are exported automatically:
+
+- `GWT_PROJECT_ROOT` — absolute path of the active worktree
+- `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
+- `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
+
+If you launch outside the TUI, recompute them:
+
+```bash
+GWT_PROJECT_ROOT="$(pwd)"
+GWT_REPO_HASH=$(git remote get-url origin 2>/dev/null \
+  | sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##; s#^https?://##' \
+  | tr 'A-Z' 'a-z' | sha256sum | cut -c1-16)
+GWT_WORKTREE_HASH=$(printf '%s' "$(cd "$GWT_PROJECT_ROOT" && pwd -P)" | sha256sum | cut -c1-16)
+```
 
 ## Search commands
-
-All commands use the same runner script and database path:
 
 ```bash
 PYTHON=~/.gwt/runtime/chroma-venv/bin/python3
 RUNNER=~/.gwt/runtime/chroma_index_runner.py
-DB_PATH="$GWT_PROJECT_ROOT/.gwt/index"
 ```
 
-On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe` as the Python executable.
+On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe`.
 
 ### Search SPECs
 
 ```bash
 $PYTHON $RUNNER \
   --action search-specs \
-  --db-path "$DB_PATH" \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
   --query "your search query" \
   --n-results 10
 ```
@@ -58,52 +79,96 @@ $PYTHON $RUNNER \
 ```bash
 $PYTHON $RUNNER \
   --action search-issues \
-  --db-path "$DB_PATH" \
+  --repo-hash "$GWT_REPO_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
   --query "your search query" \
   --n-results 10
 ```
 
-### Search project files
+### Search project files (code)
 
 ```bash
 $PYTHON $RUNNER \
-  --action search \
-  --db-path "$DB_PATH" \
+  --action search-files \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
+  --query "your search query" \
+  --n-results 10
+```
+
+`search-files` is implementation-focused: it excludes embedded skill assets (`.claude/`, `.codex/`), local/archived SPEC trees, local task logs, and snapshot files so code search is not dominated by docs noise.
+
+### Search project docs
+
+```bash
+$PYTHON $RUNNER \
+  --action search-files-docs \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
   --query "your search query" \
   --n-results 10
 ```
 
 ### Search all scopes (default)
 
-Run all three search commands above and merge results by scope.
+Run all four search commands above and merge results by scope.
+
+## Auto-build fallback
+
+When the target index does not exist, the runner builds it inline (full mode) and then performs the search. Progress is emitted as NDJSON on stderr:
+
+```text
+{"phase":"indexing","scope":"files","done":0,"total":0}
+{"phase":"complete","scope":"files","total":850}
+```
+
+Pass `--no-auto-build` to disable this behavior; in that case the runner returns:
+
+```json
+{"ok": false, "error_code": "INDEX_MISSING", "error": "index not found at ..."}
+```
 
 ## Index update commands
 
-### Update SPEC index (normally automatic)
+These are run automatically by the TUI watcher (or by the runner's auto-build fallback). Run manually only when forcing a full rebuild.
+
+### Update SPEC index (force full)
 
 ```bash
 $PYTHON $RUNNER \
   --action index-specs \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
   --project-root "$GWT_PROJECT_ROOT" \
-  --db-path "$DB_PATH"
+  --mode full
 ```
 
-### Update Issues index (manual — required before first Issues search)
+### Update Issues index (force, ignore TTL)
 
 ```bash
 $PYTHON $RUNNER \
   --action index-issues \
-  --db-path "$DB_PATH"
+  --repo-hash "$GWT_REPO_HASH" \
+  --project-root "$GWT_PROJECT_ROOT"
 ```
 
-### Update file index (normally automatic)
+Pass `--respect-ttl` to skip if the previous refresh is younger than 15 minutes.
+
+### Update file index (force full)
 
 ```bash
 $PYTHON $RUNNER \
   --action index-files \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
   --project-root "$GWT_PROJECT_ROOT" \
-  --db-path "$DB_PATH"
+  --mode full \
+  --scope files
 ```
+
+For the docs collection, repeat with `--scope files-docs`.
 
 ## Output formats
 
@@ -111,7 +176,7 @@ $PYTHON $RUNNER \
 
 ```json
 {"ok": true, "specResults": [
-  {"spec_id": "1579", "title": "gwt-spec system", "status": "open", "phase": "ready", "dir_name": "SPEC-1579", "distance": 0.08}
+  {"spec_id": "10", "title": "Project workspace", "status": "in-progress", "phase": "Implementation", "dir_name": "SPEC-10", "distance": 0.08}
 ]}
 ```
 
@@ -127,8 +192,7 @@ $PYTHON $RUNNER \
 
 ```json
 {"ok": true, "results": [
-  {"path": "src/git/issue.rs", "description": "GitHub Issue commands", "distance": 0.12},
-  {"path": "src/lib/components/IssuePanel.svelte", "description": "Issue list panel", "distance": 0.25}
+  {"path": "src/git/issue.rs", "description": "GitHub Issue commands", "distance": 0.12}
 ]}
 ```
 
@@ -137,6 +201,7 @@ $PYTHON $RUNNER \
 - Lower distance values indicate higher relevance (0.0 = exact match)
 - Uses semantic similarity, not just keyword matching
 - Results are ranked by distance within each scope
+- The embedding model is `intfloat/multilingual-e5-base` (multilingual; handles Japanese)
 
 ## When to use
 
@@ -144,8 +209,9 @@ $PYTHON $RUNNER \
 
 This skill is a **mandatory preflight step** before:
 
-- `gwt-spec-design`
-- `gwt-issue`
+- `gwt-spec-design` (spec brainstorm, register, clarify, ops)
+- `gwt-spec-register` / `gwt-spec-ops`
+- `gwt-issue-register` / `gwt-issue-resolve`
 
 Run at least 2-3 semantic queries derived from the request before creating any new SPEC or Issue.
 
@@ -183,11 +249,7 @@ Use 2-3 queries with different angles for thorough coverage:
 
 ## Minimum search workflow
 
-1. For Issues scope: update the index first with `index-issues` (SPECs and files are auto-indexed)
-2. Run searches with 2-3 semantic queries derived from the request
+1. Run searches with 2-3 semantic queries derived from the request
+2. The runner auto-builds any missing index on the first call
 3. Pick the canonical existing spec or issue if found
 4. Only fall back to creating a new spec or issue when no suitable canonical match exists
-
-## Environment
-
-- `GWT_PROJECT_ROOT`: absolute path to the project root (set by gwt at pane launch)

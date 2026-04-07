@@ -1476,7 +1476,8 @@ impl VtState {
         let home_count = count_subslice(bytes, b"\x1b[H");
         let alt_enter_count = count_subslice(bytes, b"\x1b[?1049h");
         let alt_leave_count = count_subslice(bytes, b"\x1b[?1049l");
-        crate::scroll_debug::log(format!(
+        crate::scroll_debug::log_lazy(|| {
+            format!(
             "event=vt_process strategy={} bytes={} clear_home_count={} home_count={} alt_enter_count={} alt_leave_count={} previous_max_scrollback={} next_max_scrollback={} previous_snapshot_count={} next_snapshot_count={} snapshot_attempted={} snapshot_appended={} snapshot_deduped={} pruned_blank_prefix={} synthetic_rows_appended={} uses_snapshot_scrollback={} surface_digest={} top_preview={} bottom_preview={}",
             strategy,
             bytes.len(),
@@ -1497,7 +1498,8 @@ impl VtState {
             snapshot_outcome.surface_digest,
             snapshot_outcome.top_preview,
             snapshot_outcome.bottom_preview,
-        ));
+        )
+        });
     }
 }
 
@@ -1754,6 +1756,17 @@ impl Model {
     /// Repository root currently driving the workspace shell.
     pub fn repo_path(&self) -> &Path {
         &self.repo_path
+    }
+
+    /// Absolute paths of every Worktree currently known to the model.
+    /// Used by the index worker bootstrap to spawn watchers and reconcile
+    /// orphan index directories.
+    pub fn active_worktree_paths(&self) -> Vec<std::path::PathBuf> {
+        self.branches
+            .branches
+            .iter()
+            .filter_map(|b| b.worktree_path.clone())
+            .collect()
     }
 
     /// Drain queued notifications from the in-process bus.

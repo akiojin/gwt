@@ -68,23 +68,18 @@ impl InputNormalizer {
 
         match msg {
             Message::KeyInput(key) => self.normalize_key(key, now),
-            other => {
-                self.flush_all();
-                Some(other)
-            }
+            other => self.flush_prefix_then(other),
         }
     }
 
     fn normalize_key(&mut self, key: KeyEvent, now: Instant) -> Option<Message> {
         if key.kind != event::KeyEventKind::Press {
-            self.flush_all();
-            return Some(Message::KeyInput(key));
+            return self.flush_prefix_then_key(key);
         }
 
         if let Some((last_seen_at, buffer)) = self.sgr_mouse_prefix.as_mut() {
             if now.duration_since(*last_seen_at) > ESCAPE_SEQUENCE_TIMEOUT {
-                self.flush_all();
-                return Some(Message::KeyInput(key));
+                return self.flush_prefix_then_key(key);
             }
 
             match key.code {
@@ -99,12 +94,9 @@ impl InputNormalizer {
                         return None;
                     }
                     self.flush_all();
-                    Some(Message::KeyInput(key))
+                    self.pending.pop_front()
                 }
-                _ => {
-                    self.flush_all();
-                    Some(Message::KeyInput(key))
-                }
+                _ => self.flush_prefix_then_key(key),
             }
         } else if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
             self.sgr_mouse_prefix = Some((now, String::new()));
@@ -127,12 +119,32 @@ impl InputNormalizer {
     }
 
     fn flush_all(&mut self) {
-        if self.sgr_mouse_prefix.take().is_some() {
+        if let Some((_, buffer)) = self.sgr_mouse_prefix.take() {
             self.pending.push_back(Message::KeyInput(KeyEvent::new(
                 KeyCode::Esc,
                 KeyModifiers::NONE,
             )));
+            for ch in buffer.chars() {
+                self.pending.push_back(Message::KeyInput(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                )));
+            }
         }
+    }
+
+    fn flush_prefix_then(&mut self, msg: Message) -> Option<Message> {
+        self.flush_all();
+        if self.pending.is_empty() {
+            Some(msg)
+        } else {
+            self.pending.push_back(msg);
+            self.pending.pop_front()
+        }
+    }
+
+    fn flush_prefix_then_key(&mut self, key: KeyEvent) -> Option<Message> {
+        self.flush_prefix_then(Message::KeyInput(key))
     }
 }
 
@@ -448,6 +460,53 @@ mod tests {
                 row: 42,
                 modifiers
             })) if modifiers == KeyModifiers::NONE
+        ));
+    }
+
+    #[test]
+    fn input_normalizer_replays_invalid_escape_prefix_in_original_order() {
+        let mut normalizer = InputNormalizer::default();
+        let now = Instant::now();
+
+        assert!(normalizer
+            .normalize(Message::KeyInput(key(KeyCode::Esc)), now, true)
+            .is_none());
+        assert!(normalizer
+            .normalize(
+                Message::KeyInput(key(KeyCode::Char('['))),
+                now + Duration::from_millis(1),
+                true,
+            )
+            .is_none());
+
+        let first = normalizer.normalize(
+            Message::KeyInput(key(KeyCode::Char('j'))),
+            now + Duration::from_millis(2),
+            true,
+        );
+        let second = normalizer.pop_pending(now + Duration::from_millis(3));
+        let third = normalizer.pop_pending(now + Duration::from_millis(4));
+
+        assert!(matches!(
+            first,
+            Some(Message::KeyInput(KeyEvent {
+                code: KeyCode::Esc,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            second,
+            Some(Message::KeyInput(KeyEvent {
+                code: KeyCode::Char('['),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            third,
+            Some(Message::KeyInput(KeyEvent {
+                code: KeyCode::Char('j'),
+                ..
+            }))
         ));
     }
 }

@@ -54,6 +54,8 @@ As a developer, I want to scroll through terminal history so that I can review p
 30. Given I am browsing an older snapshot-backed agent frame, when new PTY output arrives and that redraw now produces row-history entries, then gwt keeps showing the selected snapshot until I explicitly return to live-follow.
 31. Given a Codex-style redraw keeps the same vertical shift but progress or spinner churn breaks contiguous overlap between frames, when sparse same-offset matches still show the shift, then gwt derives local row history instead of stepping whole snapshots.
 32. Given gwt launches a Codex agent session, when the Codex CLI starts, then it runs in the CLI's inline scrollback-preserving mode instead of the alternate screen so PTY output retains normal row scrollback semantics.
+33. Given an `Esc`-prefixed input sequence is not actually an SGR mouse report, when gwt abandons SGR normalization, then the buffered keys are replayed to downstream input handling in their original order.
+34. Given a Terminal.app right-drag scroll begins over the session pane, when mouse-up lands outside the pane or the active session/focus changes away from the terminal, then gwt clears the drag anchor so later interactions do not inherit stale scroll state.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -122,6 +124,8 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-004e**: Consecutive wheel events that are already waiting in the outer-terminal queue are drained as a bounded burst before the next render pass so one gesture does not force one full redraw per raw wheel event.
 - **FR-004f**: SGR mouse leak normalization uses inter-character inactivity timeout semantics so moderately delayed sequence fragments are still reconstructed as one mouse event instead of leaking partial literal text.
 - **FR-004g**: SGR leak normalization is applied independent of current terminal-focus state so leaked wheel reports can still recover into mouse events that trigger session focus handoff and scrolling.
+- **FR-004h**: If an `Esc`-prefixed sequence stops matching SGR mouse-report syntax, gwt replays the buffered input to downstream key handling in the original key order instead of reordering `Esc` behind later keys.
+- **FR-004i**: Terminal.app right-drag fallback state is cleared when the drag ends outside the active session pane or when focus / active session changes away from the terminal, so stale drag anchors do not leak across panes.
 - **FR-005**: Live-follow mode auto-scrolls to the bottom on new output; disengages when user scrolls up.
 - **FR-005a**: Viewport movement remains correct without relying on any rendered scrollbar thumb or gutter.
 - **FR-005b**: While the user is viewing an older snapshot-backed frame, new output appends to the history cache without forcing the viewport back to live until the user scrolls down to the newest frame.
@@ -197,3 +201,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-029**: While the user is viewing snapshot-backed agent history, incoming PTY redraws that start producing row-history entries do not replace the selected snapshot or force the visible source away from snapshot mode until live-follow is restored.
 - **SC-030**: Codex-style redraws whose overlap is sparse rather than contiguous still avoid page-sized snapshot scrolling when same-offset matches are sufficient to prove a vertical shift.
 - **SC-031**: Codex launch configs always include `--no-alt-screen`, and wizard-built Codex sessions inherit that flag so runtime PTY output stays scrollback-friendly before any gwt-local fallback logic is needed.
+- **SC-032**: Aborted SGR mouse-report normalization preserves the original `Esc` key order, and Terminal.app right-drag fallback state never survives an outside mouse-up or a terminal-to-nonterminal focus/session change.

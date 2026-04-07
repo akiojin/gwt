@@ -104,6 +104,42 @@ fn poll_immediate_message_for_scroll_burst(
     }
 }
 
+fn dispatch_post_normalized_message(
+    model: &mut Model,
+    keybinds: &mut KeybindRegistry,
+    msg: Message,
+) {
+    let msg = match msg {
+        Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
+            let terminal_focused = model.active_focus == gwt_tui::model::FocusPane::Terminal;
+            keybinds
+                .process_key_with_focus(key, terminal_focused)
+                .unwrap_or(Message::KeyInput(key))
+        }
+        other => other,
+    };
+
+    app::update(model, msg);
+}
+
+fn handle_post_normalized_message<F>(
+    model: &mut Model,
+    keybinds: &mut KeybindRegistry,
+    first: Message,
+    pending_messages: &mut VecDeque<Message>,
+    next_message: F,
+) where
+    F: FnMut() -> Option<Message>,
+{
+    let burst = drain_mouse_scroll_burst(first, pending_messages, next_message);
+    for msg in burst {
+        dispatch_post_normalized_message(model, keybinds, msg);
+        if model.quit {
+            break;
+        }
+    }
+}
+
 fn drain_mouse_scroll_burst<F>(
     first: Message,
     pending_messages: &mut VecDeque<Message>,
@@ -271,6 +307,11 @@ fn run_app(
         );
     }
     if model.active_layer != ActiveLayer::Initialization {
+        if let Some(notification) = project_index_runtime_bootstrap_notification_with(|| {
+            gwt_core::runtime::ensure_project_index_runtime().map(|_| ())
+        }) {
+            app::update(&mut model, Message::Notify(notification));
+        }
         let session_state_path = Model::session_state_path(model.repo_path());
         if let Some(warning) = restore_startup_session_state_with(&mut model, &session_state_path) {
             app::update(
@@ -287,6 +328,13 @@ fn run_app(
     // Load initial data (branches, specs, tags) — best-effort
     if model.active_layer != ActiveLayer::Initialization {
         app::load_initial_data(&mut model);
+    }
+
+    // Phase 8: bootstrap the index worker (reconcile + Issue refresh + watchers).
+    if model.active_layer != ActiveLayer::Initialization {
+        let repo_root = model.repo_path().to_path_buf();
+        let active_worktrees = model.active_worktree_paths();
+        gwt_tui::index_worker::bootstrap(&repo_root, &active_worktrees);
     }
 
     // Spawn PTY for the default shell-0 session.
@@ -338,7 +386,13 @@ fn run_app(
         let deadline = event::next_tick_deadline();
         loop {
             if let Some(msg) = input_normalizer.pop_pending(std::time::Instant::now()) {
-                app::update(&mut model, msg);
+                handle_post_normalized_message(
+                    &mut model,
+                    &mut keybinds,
+                    msg,
+                    &mut pending_messages,
+                    || input_normalizer.pop_pending(std::time::Instant::now()),
+                );
                 break;
             }
 
@@ -363,34 +417,19 @@ fn run_app(
                 continue;
             };
 
-            let burst = drain_mouse_scroll_burst(msg, &mut pending_messages, || {
-                poll_immediate_message_for_scroll_burst(
-                    deadline,
-                    &mut input_normalizer,
-                    terminal_focused,
-                )
-            });
-
-            for msg in burst {
-                // Route key events through keybind registry
-                // (skip keybind processing when in Initialization layer)
-                let msg = match msg {
-                    Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
-                        let terminal_focused =
-                            model.active_focus == gwt_tui::model::FocusPane::Terminal;
-                        keybinds
-                            .process_key_with_focus(key, terminal_focused)
-                            .unwrap_or(Message::KeyInput(key))
-                    }
-                    other => other,
-                };
-
-                // Update: process message
-                app::update(&mut model, msg);
-                if model.quit {
-                    break;
-                }
-            }
+            handle_post_normalized_message(
+                &mut model,
+                &mut keybinds,
+                msg,
+                &mut pending_messages,
+                || {
+                    poll_immediate_message_for_scroll_burst(
+                        deadline,
+                        &mut input_normalizer,
+                        terminal_focused,
+                    )
+                },
+            );
             break;
         }
     }
@@ -433,12 +472,27 @@ fn sync_startup_terminal_size(model: &mut Model, width: u16, height: u16) {
     app::update(model, Message::Resize(width, height));
 }
 
+fn project_index_runtime_bootstrap_notification_with<F, E>(
+    ensure_runtime: F,
+) -> Option<Notification>
+where
+    F: FnOnce() -> std::result::Result<(), E>,
+    E: ToString,
+{
+    ensure_runtime().err().map(|err| {
+        let detail = err.to_string();
+        Notification::new(Severity::Warn, "index", "Project index runtime unavailable").with_detail(
+            gwt_core::runtime::project_index_runtime_error_detail(&detail),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use gwt_tui::app;
-    use gwt_tui::model::{ManagementTab, SessionLayout};
+    use gwt_tui::model::{FocusPane, ManagementTab, SessionLayout};
 
     fn scroll_message(kind: MouseEventKind) -> Message {
         Message::MouseInput(MouseEvent {
@@ -550,6 +604,29 @@ mod tests {
         let active = model.active_session_tab().expect("active session");
         assert_eq!(active.vt.cols(), cols);
         assert_eq!(active.vt.rows(), rows);
+    }
+
+    #[test]
+    fn project_index_runtime_bootstrap_notification_with_returns_warning_on_failure() {
+        let notification = project_index_runtime_bootstrap_notification_with(|| {
+            Err::<(), _>("[gwt-project-index-runtime] pip install -r failed".to_string())
+        })
+        .expect("warning notification");
+
+        assert_eq!(notification.severity, Severity::Warn);
+        assert_eq!(notification.source, "index");
+        assert_eq!(notification.message, "Project index runtime unavailable");
+        assert_eq!(
+            notification.detail.as_deref(),
+            Some("pip install -r failed")
+        );
+    }
+
+    #[test]
+    fn project_index_runtime_bootstrap_notification_with_returns_none_on_success() {
+        let notification =
+            project_index_runtime_bootstrap_notification_with(|| Ok::<(), &'static str>(()));
+        assert!(notification.is_none());
     }
 
     #[test]
@@ -707,6 +784,38 @@ mod tests {
 
         assert!(matches!(next, Some(Message::Tick)));
         assert_eq!(observed_slice, Some(PTY_OUTPUT_POLL_SLICE));
+    }
+
+    #[test]
+    fn dispatch_post_normalized_message_routes_pending_keys_through_keybinds() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::TabContent;
+        let mut keybinds = KeybindRegistry::new();
+
+        dispatch_post_normalized_message(
+            &mut model,
+            &mut keybinds,
+            Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+        dispatch_post_normalized_message(
+            &mut model,
+            &mut keybinds,
+            Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+            )),
+        );
+
+        assert_eq!(
+            model.active_focus,
+            FocusPane::Terminal,
+            "pending normalized keys should still use the keybind dispatch path"
+        );
     }
 
     #[test]

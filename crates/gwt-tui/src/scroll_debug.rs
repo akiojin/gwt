@@ -6,11 +6,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gwt_core::paths::{ensure_dir, gwt_logs_dir};
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn log(message: impl AsRef<str>) {
     let Some(path) = configured_log_path() else {
         return;
     };
     append_line(&path, message.as_ref());
+}
+
+pub(crate) fn log_lazy(message: impl FnOnce() -> String) {
+    let Some(path) = configured_log_path() else {
+        return;
+    };
+    append_line(&path, &message());
+}
+
+#[allow(dead_code)]
+pub(crate) fn is_enabled() -> bool {
+    configured_log_path().is_some()
 }
 
 fn append_line(path: &Path, message: &str) {
@@ -30,7 +43,20 @@ fn append_line(path: &Path, message: &str) {
     let _ = writeln!(file, "[{timestamp_ms}] {message}");
 }
 
+#[cfg(test)]
 fn configured_log_path() -> Option<PathBuf> {
+    configured_log_path_uncached()
+}
+
+#[cfg(not(test))]
+fn configured_log_path() -> Option<PathBuf> {
+    static CONFIGURED_LOG_PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CONFIGURED_LOG_PATH
+        .get_or_init(configured_log_path_uncached)
+        .clone()
+}
+
+fn configured_log_path_uncached() -> Option<PathBuf> {
     if let Some(path) = explicit_log_path() {
         return Some(path);
     }
@@ -99,6 +125,7 @@ fn with_test_env<T>(entries: &[(&str, Option<&str>)], run: impl FnOnce() -> T) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     static SCROLL_DEBUG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -166,5 +193,28 @@ mod tests {
         assert!(contents.contains("event=mouse"));
         assert!(contents.contains("kind=ScrollUp"));
         let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn log_lazy_skips_message_construction_when_disabled() {
+        let _guard = SCROLL_DEBUG_TEST_LOCK
+            .lock()
+            .expect("scroll debug test lock");
+        let called = Cell::new(false);
+
+        with_test_env(
+            &[("GWT_SCROLL_DEBUG", None), ("GWT_SCROLL_DEBUG_LOG", None)],
+            || {
+                log_lazy(|| {
+                    called.set(true);
+                    "event=disabled".to_string()
+                });
+            },
+        );
+
+        assert!(
+            !called.get(),
+            "disabled debug logging should not evaluate lazy message construction"
+        );
     }
 }

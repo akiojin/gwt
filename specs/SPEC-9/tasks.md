@@ -248,3 +248,17 @@
 ### 5e. Runtime Hook Contract Follow-up
 
 - [x] **T-150**: Document the interactive Codex `SessionStart` gap and downstream launch-bootstrap contract in `SPEC-9` artifacts.
+
+## Phase 6: Search Runtime Contract Recovery
+
+- [x] **T-131**: Add canonical `index-files` / `search-files` action names to the repo-tracked project-index runner and keep `index` / `search` aliases for compatibility.
+- [x] **T-132**: Add repo-tracked project-index requirements + managed venv bootstrap so gwt can repair the shared search runtime.
+- [x] **T-133**: Update `gwt-search`, `gwt-project-search`, `gwt-project-index`, and `gwt-issue-search` examples to use canonical file-search actions and `index-issues --project-root`.
+- [x] **T-134**: Update SPEC-9 runtime contract language so the search interface, shared runtime, and warning-only degradation stay aligned with implementation.
+- [x] **T-135**: Add RED tests that require `gwt-project-search` as the canonical distributed project-search asset and reject `gwt-file-search` assets.
+- [x] **T-136**: Restore canonical `gwt-project-search` skill / slash-command assets across bundled docs while keeping `search-files` / `index-files` as internal runner actions.
+- [x] **T-137**: Update SPEC-9 artifacts and search-family references so standalone semantic project search points to `gwt-project-search` as the canonical public name.
+- [x] **T-138**: Add RED tests for file-bucket classification so embedded skill assets, SPEC directories, archived SPEC directories, task logs, and snapshots are excluded from implementation search.
+- [x] **T-139**: Split `index-files` into code/docs collections and add `search-files-docs` while keeping `search-files` implementation-focused.
+- [x] **T-140**: Update `gwt-search`, `gwt-project-search`, and `gwt-project-index` docs to describe implementation-focused `search-files` behavior and the separate docs collection.
+- [x] **T-141**: Refresh SPEC-9 artifacts and rerun Python + Cargo verification for the new code/docs file-index contract.

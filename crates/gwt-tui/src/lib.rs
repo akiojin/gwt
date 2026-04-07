@@ -6,6 +6,7 @@
 pub mod app;
 pub(crate) mod custom_agents;
 pub mod event;
+pub mod index_worker;
 pub mod input;
 pub mod message;
 pub mod model;

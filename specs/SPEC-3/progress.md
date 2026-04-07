@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `185/185` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T01:45:00Z`
+- Artifact refresh: `2026-04-07T00:57:37Z`
 
 ## Done
 - Startup cache scheduling, wizard integration, and session conversion flow documentation are now aligned to the implemented code.
@@ -33,6 +33,13 @@
   agent sessions, render the old-TUI grouped history layout, and restore
   `Resume` / `Start new` semantics including the resume-ID fallback to
   `Continue`.
+- Quick Start restore now applies persisted `skip_permissions` consistently
+  across built-in agents, including Claude.
+- Claude launch keeps `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` enabled by
+  default so Agent Teams can be used immediately from launched sessions.
+- PTY spawn now appends a structured launch audit record to
+  `~/.gwt/logs/agent-launch.jsonl` with command/args/cwd/env, and sensitive
+  env values are redacted before write.
 - Persisted agent session metadata now stores Quick Start restore fields
   (`reasoning_level`, `skip_permissions`, resume session ID) so future
   launches can replay the previous configuration instead of showing a static

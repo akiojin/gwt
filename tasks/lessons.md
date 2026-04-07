@@ -1,5 +1,45 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: abandoning SGR parsing must replay buffered input in original order
+
+### 事象
+
+`Esc` で始まる入力が一度 SGR mouse report 候補として取り込まれたあと、
+実際には mouse report ではなかったケースで、後続キーが `Esc` より先に app へ渡っていた。
+
+### 原因
+
+- `flush_all()` が `Esc` だけを pending queue に積み、現在キーは即 return していた。
+- そのため `Esc` + `j` や `Esc` + `[` のような sequence で、downstream には元順ではなく
+  `j`, `Esc` のような並びで届く経路が残っていた。
+- pending queue を app へ流す経路も、polled input と同じ keybind dispatch を共有していなかった。
+
+### 再発防止策
+
+1. SGR parsing を abandon する分岐では `Esc` だけでなく取り込んだ prefix 全体を pending queue へ元順で replay する。
+2. `input_normalizer.pop_pending()` の出力も、polled message と同じ post-normalization dispatch を必ず通す。
+3. `Esc`-prefixed non-SGR fallback の RED テストで、返却順と keybind 経路の両方を固定する。
+
+## 2026-04-08 — fix: Terminal.app right-drag fallback state should clear only when terminal ownership is lost
+
+### 事象
+
+Terminal.app の right-drag fallback について、drag anchor の stale state を消す修正を入れた後、
+正常な `TabContent -> Terminal` focus 移動まで anchor を消してしまい、既存の right-drag scroll が壊れた。
+
+### 原因
+
+- cleanup 条件を「focus が変わったら消す」と広く取りすぎていた。
+- right-drag 開始時は session hit により `TabContent` から `Terminal` へ focus が移るのが正常挙動であり、
+  そこでは anchor を維持する必要があった。
+- 本当に消すべき条件は「outside mouse-up」「active session 変更」「terminal から離れる focus change」だった。
+
+### 再発防止策
+
+1. input-state cleanup は「状態を持つ権利を失った時」に限定し、状態を持ち始める正常遷移では消さない。
+2. right-drag fallback では inside `Down(Right)`、outside `Up(Right)`、session switch、focus switch を別々に RED テストで固定する。
+3. pointer fallback 状態は pane ownership の lifecycle と一緒に考え、単純な focus diff だけで処理しない。
+
 ## 2026-04-07 — fix: prefer Codex's official inline mode over terminal-side redraw reconstruction
 
 ### 事象
@@ -717,6 +757,102 @@ scrollback に入らず、terminal 側で握りつぶされているように見
 1. Terminal.app の trackpad 不具合は、`ScrollUp/ScrollDown` 前提で考えず、必ず診断ログで実イベント形を確認する。
 2. mouse fallback を入れるときは、left-button selection と right-button trackpad fallback を明示的に分離する。
 3. host terminal 診断用の小さい event dumper を残して、再発時に `events.log` で比較できるようにする。
+
+## 2026-04-07 — fix: Claude auto-mode系エラーは skip 復元抑止ではなく gwt 固有launch差分を先に疑う
+
+### 事象
+
+`Auto mode is unavailable for your plan` の報告に対し、Quick Start の
+`skip_permissions` 復元そのものを無効化する修正を先行してしまい、実際の
+症状（gwt経由のみ再現）と原因候補の切り分けがずれた。
+
+### 原因
+
+- 「直接 `bunx @anthropic-ai/claude-code` では再現しない」という強い事実より
+  前に、保存済みフラグ復元を主因と仮定した。
+- gwt固有の launch 差分（追加 env / 追加 args）の比較を先に固定しなかった。
+
+### 再発防止策
+
+1. CLIラッパー経由でのみ再現する不具合は、まず「直接CLIとの差分（env/args/runner）」を最優先で比較する。
+2. ユーザーが「フラグ自体ではない」と明示した場合、フラグ復元ロジックを触る前に launch 組み立て層の証跡（実際の引数・環境）を確定する。
+3. 既存UXを弱める回避策（復元OFFなど）は、根本原因を確定するまで入れない。
+
+## 2026-04-07 — fix: semantic file search は collection 設計でノイズを消す
+
+### 事象
+
+`gwt-search --files` が skill docs、SPEC、archive、snapshot まで同じ collection に入れていたため、
+implementation code を探したい query でも markdown 系 artifacts が先に出やすかった。
+
+### 原因
+
+- 「files」を 1 collection で持ち、planning/docs artifacts と implementation files を分離していなかった。
+- embedded skills や local SPECs は別 search surface を持っているのに、file search 側でも再度 index してしまっていた。
+
+### 再発防止策
+
+1. semantic search の品質問題を query tuning だけで片付けず、collection 境界が user intent に合っているか先に確認する。
+2. 別の検索 surface を持つ artifacts（embedded skills, SPECs, archive, task logs, snapshots）は implementation-file collection に入れない。
+3. implementation search と docs search を両立したい場合は 1 collection に混ぜず、collection を分けて default surface を意図的に選ぶ。
+
+## 2026-04-07 — fix: public skill 名は internal action 名ではなくユーザー責務に合わせる
+
+### 事象
+
+`search-files` / `index-files` を canonical action に直した流れで、standalone skill 名まで
+`gwt-file-search` に寄せたが、実際の workflow は「project 内の関連実装箇所を探す」ため、
+public naming が体験の責務からずれた。
+
+### 原因
+
+- internal runner API の名詞を、そのまま user-facing skill surface に投影してしまった。
+- semantic search の返り値が「files」でも、ユーザーが解きたい課題は project understanding /
+  implementation discovery である点を十分に分離できていなかった。
+
+### 再発防止策
+
+1. internal action 名と public skill 名がずれているときは、どちらが「実装都合」でどちらが「ユーザー責務」かを先に言語化する。
+2. naming review では「この skill は何を index するか」ではなく「ユーザーは何を達成するために呼ぶか」を基準に canonical 名を決める。
+3. internal API 名の正規化を public rename に波及させる前に、SKILL の説明文・出力契約・利用導線が同じ責務語彙を使っているか確認する。
+
+## 2026-04-07 — superseded: skill 名は underlying action / historical owner と揃える
+
+### 事象
+
+standalone file search の実体は `search-files` / `index-files` なのに、skill surface が
+`gwt-project-search` に寄っており、`files` 契約と命名が食い違っているように見えた。
+
+### 原因
+
+- internal action 名と public skill 名の責務を分離せず、runtime action の名詞をそのまま public naming に投影した。
+- historical owner 名称を、現在の user-facing workflow semantics より優先してしまった。
+
+### 再発防止策
+
+1. runtime action 名と historical owner は確認するが、public skill 名の決定基準にはしない。
+2. canonical 名を変える場合は、bundled assets・参照 docs・compatibility alias を同じ修正セットで更新する。
+3. asset-only rename でも distribution test で canonical asset と negative case を固定する。
+
+## 2026-04-07 — fix: Python launcher 判定は path heuristic ではなく実行 probe と構造化エラーで固定する
+
+### 事象
+
+project-index runtime の Python bootstrap hardening 後レビューで、Windows Store / launcher Python を
+path だけで弾く実装と、clone 後 warning が英語メッセージ部分一致で `index` / `workspace` を
+振り分ける実装が見つかった。
+
+### 原因
+
+- `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python*.exe` を「壊れた alias」と決め打ちし、実行 probe 前に除外していた。
+- runtime bootstrap failure の分類を構造化せず、人間向け文言の substring に依存していた。
+- その結果、有効な launcher を誤拒否し、失敗理由も `Python not installed` に潰れやすかった。
+
+### 再発防止策
+
+1. 外部 runtime / launcher の可用性判定は path やファイル名の heuristic ではなく、実行 probe と version check を RED テストで固定する。
+2. user-facing warning の source 分類は構造化 prefix / enum で運び、英語メッセージ本文の一致判定を禁止する。
+3. runtime bootstrap の review では「有効 launcher を通すケース」「壊れた launcher の detail を残すケース」「通知 source が startup と clone で一致するケース」を最低セットで確認する。
 ## 2026-04-07 — fix: Hooks不具合は単点ではなく「実行チェーン」全体で再発する
 
 ### 事象
