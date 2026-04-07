@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `52/52` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T00:23:54Z`
+- Task progress: `54/54` checked in `tasks.md`
+- Artifact refresh: `2026-04-07T00:59:30Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -30,6 +30,7 @@
 - Snapshot live-to-history transition now applies exact one-step movement, fixing the off-by-one jump that skipped one frame on the first upward scroll.
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.
 - SGR leak normalization now runs regardless of terminal-focus state, so leaked wheel sequences can still recover into mouse scrolling when focus handoff has not happened yet.
+- Snapshot viewport-shift detection now accepts majority contiguous overlap under partial row churn while still rejecting low-similarity rewrites, preventing history starvation on dynamic full-screen panes.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 
 ## Next

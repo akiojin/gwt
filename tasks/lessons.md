@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-07 — fix: snapshot viewport shift 判定は「全行一致」だと実運用で取りこぼす
+
+### 事象
+
+full-screen pane で明らかに画面が流れているのに snapshot history が増えず、
+スクロールバックがほぼ効かないケースがあった。
+
+### 原因
+
+- viewport-shift 判定が overlap 全行一致を必須にしていた。
+- 実際の TUI はヘッダー/ステータス等が毎フレーム微妙に変わるため、
+  実質的に shift していても 1 行でも差分があると history 追加が失敗していた。
+
+### 再発防止策
+
+1. 判定を majority contiguous-overlap 方式に変更し、部分的な行変動を許容する。
+2. 「部分的行変動ありでも shift 扱い」「低類似リライトは非shift」の
+   2系統テストを固定する。
+3. フルスクリーン系不具合ではまず shift 検出の厳しさ（false negative）を疑う。
+
 ## 2026-04-07 — fix: SGR leak 正規化は terminal focus に依存させない
 
 ### 事象

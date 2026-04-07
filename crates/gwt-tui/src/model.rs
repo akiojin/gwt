@@ -440,20 +440,61 @@ fn snapshots_capture_viewport_shift(previous: &ScreenSnapshot, current: &ScreenS
     }
 
     for shift in 1..line_count {
+        let overlap = line_count - shift;
+
         let previous_suffix = &previous.visible_lines[shift..];
-        let current_prefix = &current.visible_lines[..line_count - shift];
-        if previous_suffix == current_prefix {
+        let current_prefix = &current.visible_lines[..overlap];
+        if overlap_looks_like_viewport_shift(previous_suffix, current_prefix) {
             return true;
         }
 
-        let previous_prefix = &previous.visible_lines[..line_count - shift];
+        let previous_prefix = &previous.visible_lines[..overlap];
         let current_suffix = &current.visible_lines[shift..];
-        if previous_prefix == current_suffix {
+        if overlap_looks_like_viewport_shift(previous_prefix, current_suffix) {
             return true;
         }
     }
 
     false
+}
+
+fn overlap_looks_like_viewport_shift(previous_slice: &[String], current_slice: &[String]) -> bool {
+    if previous_slice.len() != current_slice.len() || previous_slice.len() < 2 {
+        return false;
+    }
+
+    if previous_slice == current_slice {
+        return true;
+    }
+
+    let overlap = previous_slice.len();
+    let mut total_matches = 0usize;
+    let mut longest_run = 0usize;
+    let mut current_run = 0usize;
+    let mut has_non_blank_match = false;
+
+    for (previous_line, current_line) in previous_slice.iter().zip(current_slice.iter()) {
+        if previous_line == current_line {
+            total_matches += 1;
+            current_run += 1;
+            longest_run = longest_run.max(current_run);
+            if !previous_line.trim().is_empty() {
+                has_non_blank_match = true;
+            }
+        } else {
+            current_run = 0;
+        }
+    }
+
+    // Accept partial overlap when most rows still align contiguously.
+    let mostly_aligned = total_matches * 100 >= overlap * 60 && longest_run >= 2;
+    if !mostly_aligned {
+        return false;
+    }
+
+    has_non_blank_match
+        || (!slice_contains_non_blank_content(previous_slice)
+            && !slice_contains_non_blank_content(current_slice))
 }
 
 const SNAPSHOT_HISTORY_CAPACITY: usize = 256;
@@ -1271,6 +1312,76 @@ mod tests {
         assert!(
             snapshots_capture_viewport_shift(&previous, &current),
             "non-blank overlapping rows should still be treated as a viewport shift"
+        );
+    }
+
+    #[test]
+    fn viewport_shift_detection_tolerates_partial_overlap_row_churn() {
+        let previous = ScreenSnapshot {
+            rows: 6,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec![
+                "header".to_string(),
+                "line-1".to_string(),
+                "line-2".to_string(),
+                "line-3".to_string(),
+                "line-4".to_string(),
+                "line-5".to_string(),
+            ],
+        };
+        let current = ScreenSnapshot {
+            rows: 6,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec![
+                "line-1 *".to_string(),
+                "line-2".to_string(),
+                "line-3".to_string(),
+                "line-4".to_string(),
+                "line-5".to_string(),
+                "line-6".to_string(),
+            ],
+        };
+
+        assert!(
+            snapshots_capture_viewport_shift(&previous, &current),
+            "minor overlap churn should not block viewport-shift history progression"
+        );
+    }
+
+    #[test]
+    fn viewport_shift_detection_rejects_low_similarity_rewrites() {
+        let previous = ScreenSnapshot {
+            rows: 6,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec![
+                "alpha".to_string(),
+                "bravo".to_string(),
+                "charlie".to_string(),
+                "delta".to_string(),
+                "echo".to_string(),
+                "foxtrot".to_string(),
+            ],
+        };
+        let current = ScreenSnapshot {
+            rows: 6,
+            cols: 20,
+            state: Vec::new(),
+            visible_lines: vec![
+                "xray".to_string(),
+                "bravo".to_string(),
+                "yankee".to_string(),
+                "delta".to_string(),
+                "zulu".to_string(),
+                "omega".to_string(),
+            ],
+        };
+
+        assert!(
+            !snapshots_capture_viewport_shift(&previous, &current),
+            "low-similarity in-place redraws should replace, not append, snapshot history"
         );
     }
 

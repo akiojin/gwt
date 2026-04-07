@@ -63,3 +63,5 @@
 - [x] T050 Switch SGR leak timeout handling in `event.rs` to inter-character inactivity semantics so delayed fragments do not leak literal `[<...M` text.
 - [x] T051 [P] Write RED test: leaked SGR wheel reports are still normalized when terminal pane is not focused.
 - [x] T052 Apply SGR leak normalization regardless of terminal focus state and keep timeout tuned for practical trackpad sequence jitter.
+- [x] T053 [P] Write RED tests: snapshot viewport-shift detection accepts majority overlap with partial row churn and still rejects low-similarity rewrites.
+- [x] T054 Replace strict full-overlap shift detection in `model.rs` with majority contiguous-overlap scoring so snapshot progression survives realistic full-screen redraw jitter.

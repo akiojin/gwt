@@ -40,6 +40,7 @@ As a developer, I want to scroll through terminal history so that I can review p
 16. Given snapshot-backed scrollback is at live-follow and I scroll one step upward, when gwt enters history mode, then it lands on the immediately previous snapshot (one-step movement) instead of skipping older frames.
 17. Given a leaked SGR wheel sequence arrives with small per-character delays, when gwt normalizes that input, then the entire sequence is consumed as mouse input and never appears as literal `[<...M` text.
 18. Given Terminal pane is not focused and host leaks SGR wheel sequences, when the user scrolls over the session area, then gwt still normalizes the sequence into mouse events and can focus+scroll the session instead of forwarding literal escape fragments.
+19. Given full-screen redraws shift viewport content while mutating a subset of overlap rows (for example header/status churn), when gwt evaluates snapshot progression, then it still records a new historical viewport if overlap remains majority-aligned, instead of replacing history and losing scrollback progression.
 
 ### US-3: Select and Copy Text from Terminal Output (P1) -- NOT IMPLEMENTED
 
@@ -108,6 +109,7 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **FR-005d**: PTY output chunks drained in the same event-loop pass are coalesced per session before they enter the app update path so snapshot-backed scrollback tracks rendered frames rather than PTY reader chunk boundaries.
 - **FR-005e**: Full-screen redraws that overwrite or clear the same visible viewport replace the latest cached viewport in place; only vertical viewport advances extend the in-memory history.
 - **FR-005f**: Viewport-shift detection for snapshot-backed history remains overlap-based so full-screen frame history can progress even when updates are sparse across mostly blank rows.
+- **FR-005i**: Snapshot viewport-shift detection tolerates partial overlap churn by accepting majority contiguous overlap matches, so real TUI redraw jitter does not collapse history progression into single-frame replacement.
 - **FR-005g**: Snapshot-backed history prunes leading blank frames whenever newer non-blank frames exist so the oldest reachable viewport is never an empty phantom frame.
 - **FR-005h**: Snapshot scroll navigation from live-follow applies exact one-step deltas; the first upward step from live lands on `latest - 1` without off-by-one skipping.
 - **FR-006**: Text selection via mouse drag with reversed-video highlight on selected cells.
@@ -151,3 +153,4 @@ As a developer, I want TUI applications (vi, top, htop) running inside gwt sessi
 - **SC-016**: First upward scroll from live snapshot mode moves exactly one snapshot backward; frame skipping on live-to-history transition is eliminated.
 - **SC-017**: Leaked SGR wheel reports remain normalized even when characters arrive with short gaps; literal `[<...M` artifacts no longer surface in pane output.
 - **SC-018**: Even when Terminal pane was not focused before scrolling, leaked SGR wheel sequences are recovered as mouse scroll input and do not leak into pane text.
+- **SC-019**: Snapshot history still advances when viewport shift overlap is mostly preserved but some rows churn, preventing practical scrollback starvation on dynamic full-screen panes.
