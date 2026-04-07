@@ -132,6 +132,9 @@ fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
         tmp.sync_all()?;
     }
 
+    if cfg!(windows) && path.exists() {
+        fs::remove_file(path)?;
+    }
     fs::rename(&tmp_path, path)?;
     Ok(())
 }
@@ -224,7 +227,9 @@ fn is_gwt_managed_command(command: &str) -> bool {
 
 fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
     let root = read_existing_settings(path)?;
-    Ok(contains_legacy_runtime_forwarder(root.get("hooks")))
+    let hooks = root.get("hooks");
+    Ok(contains_legacy_runtime_forwarder(hooks)
+        || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell()))
 }
 
 fn contains_legacy_runtime_forwarder(existing: Option<&Value>) -> bool {
@@ -253,6 +258,44 @@ fn contains_legacy_runtime_forwarder(existing: Option<&Value>) -> bool {
                 })
             })
     })
+}
+
+fn contains_managed_runtime_shell_mismatch(existing: Option<&Value>, shell: HookShell) -> bool {
+    let Some(Value::Object(events)) = existing else {
+        return false;
+    };
+
+    MANAGED_EVENT_ORDER.iter().any(|event| {
+        events
+            .get(*event)
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .as_object()
+                        .and_then(|obj| obj.get("hooks"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.as_object()
+                                    .and_then(|obj| obj.get("command"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|command| {
+                                        command.contains(GWT_MANAGED_RUNTIME_MARKER)
+                                            && command_shell_mismatch(command, shell)
+                                    })
+                            })
+                        })
+                })
+            })
+    })
+}
+
+fn command_shell_mismatch(command: &str, shell: HookShell) -> bool {
+    match shell {
+        HookShell::Posix => command.contains("powershell -NoProfile -Command"),
+        HookShell::PowerShell => command.contains(" sh -lc '"),
+    }
 }
 
 fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Value> {
@@ -706,6 +749,62 @@ mod tests {
         assert!(!content.contains("gwt-forward-hook.mjs"));
         assert!(!session_start_command.contains("node"));
         assert!(pre_tool_commands.contains(&"my-custom-hook"));
+    }
+
+    #[test]
+    fn generate_codex_hooks_migrates_tracked_runtime_hooks_when_shell_shape_mismatches_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let foreign_managed_command = match managed_hook_shell() {
+            HookShell::Posix => powershell_runtime_hook_command("SessionStart", "Running"),
+            HookShell::PowerShell => posix_runtime_hook_command("SessionStart", "Running"),
+        };
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": foreign_managed_command,
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("session start command");
+        let expected = runtime_hook_command("SessionStart", managed_hook_shell());
+        assert_eq!(session_start_command, expected);
     }
 
     #[cfg(not(windows))]

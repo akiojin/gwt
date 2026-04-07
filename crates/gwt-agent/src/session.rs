@@ -1,5 +1,6 @@
 //! Agent session persistence: save/load sessions as TOML files.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -146,7 +147,26 @@ impl SessionRuntimeState {
         }
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        std::fs::write(path, content)
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp_path = dir.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("runtime.json"),
+            std::process::id()
+        ));
+
+        {
+            let mut tmp = std::fs::File::create(&tmp_path)?;
+            tmp.write_all(content.as_bytes())?;
+            tmp.write_all(b"\n")?;
+            tmp.sync_all()?;
+        }
+
+        if cfg!(windows) && path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        std::fs::rename(tmp_path, path)
     }
 
     /// Load the runtime state from a JSON sidecar file.
@@ -333,6 +353,20 @@ mod tests {
         assert_eq!(waiting.source_event.as_deref(), Some("Stop"));
 
         assert!(SessionRuntimeState::from_hook_event("Notification").is_none());
+    }
+
+    #[test]
+    fn runtime_state_save_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime").join("session-123.json");
+        let first = SessionRuntimeState::new(AgentStatus::Running);
+        first.save(&path).unwrap();
+
+        let second = SessionRuntimeState::new(AgentStatus::WaitingInput);
+        second.save(&path).unwrap();
+
+        let loaded = SessionRuntimeState::load(&path).unwrap();
+        assert_eq!(loaded.status, AgentStatus::WaitingInput);
     }
 
     #[test]

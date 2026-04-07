@@ -699,17 +699,10 @@ keeping agent identity visible through fixed colors that do not collapse when Cl
 50.3: Verification (1 task)
 - Re-run focused session-title / launch-color tests, broad workspace verification, and refresh SPEC-2 artifacts and progress tracking.
 
-## Dependencies
-
-- SPEC-3 (Agent Management): Agent detection for agent launch action
-- SPEC-4 (GitHub): Git status and PR data for detail sections
-- SPEC-10 (Workspace): Worktree management for delete action
-- SPEC-9 (Infrastructure): Embedded Claude/Codex hook assets and hooks merge remain the distribution owner for hook-managed worktree assets
-
-### Phase 50: Restore Hook-Derived Branch Session Discovery (10 tasks)
+### Phase 51: Restore Hook-Derived Branch Session Discovery (10 tasks)
 Bring back the old-TUI scanability contract by letting Branches show live agent activity directly in the list, using hook-derived runtime state instead of requiring a jump into Branch Detail.
 
-50.1: Hook runtime state ingestion (4 tasks)
+51.1: Hook runtime state ingestion (9 tasks)
 - Inject stable gwt session runtime environment into launched agent PTYs so embedded hook scripts can identify the correct session runtime record.
 - Store hook-derived runtime state in a lightweight sidecar under the current gwt PID namespace and read it back without blocking or failing the list render.
 - Map `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` to `Running`, and `Stop` to `WaitingInput`.
@@ -720,42 +713,49 @@ Bring back the old-TUI scanability contract by letting Branches show live agent 
 - Replace the Node-based runtime forwarder path with direct shell commands that write `GWT_SESSION_RUNTIME_PATH`.
 - Reset only the current gwt PID namespace on startup so stale runtime sidecars from previous runs disappear without touching sibling gwt processes.
 
-50.2: Branches list rendering (4 tasks)
+51.2: Branches list rendering (4 tasks)
 - Derive one highest-priority live agent-session summary per branch from the existing session tabs plus the hook runtime sidecar.
 - Render that summary right-aligned in the Branches list while preserving the old-TUI left-side branch line contract.
 - Reuse the existing tick cadence for a running spinner and keep waiting state visually distinct.
 - Make the row width-aware so the right side shortens or disappears before the branch name becomes unreadable.
 
-50.3: Verification and artifact sync (2 tasks)
+51.3: Verification and artifact sync (2 tasks)
 - Add focused RED coverage for hook-state mapping, launch env injection, session cleanup, and Branches-row rendering at wide and narrow widths.
 - Re-run focused and broad workspace verification, then refresh SPEC-2 progress evidence and metadata.
 
-### Phase 53: Replace Text Summaries With Multi-Agent Spinner Strips (5 tasks)
+### Phase 52: Replace Text Summaries With Multi-Agent Spinner Strips (5 tasks)
 Correct the remaining Branches visibility gap where multiple live agent sessions on the same branch
 collapse into a single `run Claude Code` style label, hiding Codex behind the first summary.
 
-53.1: Multi-session aggregation contract (2 tasks)
+52.1: Multi-session aggregation contract (2 tasks)
 - Derive an ordered list of live agent indicators per branch from the existing session tabs plus the hook runtime sidecar instead of collapsing to one highest-priority summary.
 - Preserve internal `Running` / `WaitingInput` status for ordering and lifecycle, but expose one visible indicator per live session so Claude Code and Codex can both be scanned from the same branch row.
 
-53.2: Spinner-only rendering contract (2 tasks)
+52.2: Spinner-only rendering contract (2 tasks)
 - Replace the right-aligned `run ...` / `wait ...` text summary with a spinner-only strip that uses the existing tick cadence and the existing per-agent colors.
 - Keep the row width-aware so the spinner strip truncates or disappears before the branch label and branch icons become unreadable.
 
-53.3: Verification and artifact sync (1 task)
+52.3: Verification and artifact sync (1 task)
 - Add focused RED coverage for multi-session extraction, spinner-only rendering, per-agent colors, and narrow-width truncation, then rerun focused and broad verification and refresh SPEC-2 artifacts.
 
-### Phase 54: Branch Spinner Palette Parity (4 tasks)
+### Phase 53: Branch Spinner Palette Parity (4 tasks)
 Align the restored spinner strip with the old-TUI built-in agent palette so the indicators are
 recognizable at a glance without adding labels back into the row.
 
-54.1: Palette contract (2 tasks)
+53.1: Palette contract (2 tasks)
 - Fix the Branches spinner strip palette for built-in agents to `Claude Code=Yellow`, `Codex=Cyan`, and `Gemini=Magenta`.
 - Keep the change local to the Branches spinner surface; other TUI surfaces continue using their current agent colors unless separately specified.
 
-54.2: Verification and artifact sync (2 tasks)
+53.2: Verification and artifact sync (2 tasks)
 - Add RED coverage for the Claude/Codex/Gemini spinner palette mapping.
 - Re-run focused and broad verification, then refresh SPEC-2 artifacts and execution tracking.
+
+## Dependencies
+
+- SPEC-3 (Agent Management): Agent detection for agent launch action
+- SPEC-4 (GitHub): Git status and PR data for detail sections
+- SPEC-10 (Workspace): Worktree management for delete action
+- SPEC-9 (Infrastructure): Embedded Claude/Codex hook assets and hooks merge remain the distribution owner for hook-managed worktree assets
 
 ## Verification
 

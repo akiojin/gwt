@@ -3,7 +3,7 @@
 // Best-effort only: this script never blocks Claude execution.
 
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const event = process.argv[2];
@@ -42,8 +42,15 @@ function writeRuntimeState() {
   };
 
   try {
+    const tempPath = `${runtimePath}.tmp.${process.pid}`;
     mkdirSync(dirname(runtimePath), { recursive: true });
-    writeFileSync(runtimePath, `${JSON.stringify(runtime, null, 2)}\n`);
+    writeFileSync(tempPath, `${JSON.stringify(runtime, null, 2)}\n`);
+    try {
+      renameSync(tempPath, runtimePath);
+    } catch {
+      rmSync(runtimePath, { force: true });
+      renameSync(tempPath, runtimePath);
+    }
     return true;
   } catch {
     return false;

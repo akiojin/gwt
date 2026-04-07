@@ -145,18 +145,16 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    if let Some(warning) = reset_startup_runtime_state_with(&gwt_core::paths::gwt_sessions_dir()) {
+        app::update(
+            &mut model,
+            Message::Notify(
+                Notification::new(Severity::Warn, "session", "Runtime reset failed")
+                    .with_detail(warning),
+            ),
+        );
+    }
     if model.active_layer != ActiveLayer::Initialization {
-        if let Some(warning) =
-            reset_startup_runtime_state_with(&gwt_core::paths::gwt_sessions_dir())
-        {
-            app::update(
-                &mut model,
-                Message::Notify(
-                    Notification::new(Severity::Warn, "session", "Runtime reset failed")
-                        .with_detail(warning),
-                ),
-            );
-        }
         let session_state_path = Model::session_state_path(model.repo_path());
         if let Some(warning) = restore_startup_session_state_with(&mut model, &session_state_path) {
             app::update(

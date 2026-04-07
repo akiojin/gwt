@@ -247,4 +247,4 @@
 
 ### 5e. Runtime Hook Contract Follow-up
 
-- [x] **T-149**: Document the interactive Codex `SessionStart` gap and downstream launch-bootstrap contract in `SPEC-9` artifacts.
+- [x] **T-150**: Document the interactive Codex `SessionStart` gap and downstream launch-bootstrap contract in `SPEC-9` artifacts.
