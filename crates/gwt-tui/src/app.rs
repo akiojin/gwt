@@ -5554,6 +5554,59 @@ mod tests {
     }
 
     #[test]
+    fn style_only_redraw_flood_does_not_evict_meaningful_snapshot_history() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        enter_alt_screen_with_text(&mut model, "shell-0", "frame-1");
+        replace_alt_screen_text(&mut model, "shell-0", "frame-2");
+
+        for index in 0..2200 {
+            let style_redraw = if index % 2 == 0 {
+                "\x1b[7m\x1b[1;1Hframe-2\x1b[0m"
+            } else {
+                "\x1b[4m\x1b[1;1Hframe-2\x1b[0m"
+            };
+            update(
+                &mut model,
+                Message::PtyOutput("shell-0".to_string(), style_redraw.as_bytes().to_vec()),
+            );
+        }
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            session.vt.snapshot_count() <= 3,
+            "style-only redraw flood should collapse into a tiny bounded history footprint"
+        );
+        assert!(session.vt.has_snapshot_scrollback());
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let mut reached_frame_1 = false;
+        for _ in 0..3 {
+            update(
+                &mut model,
+                Message::MouseInput(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: area.x,
+                    row: area.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            );
+            let after = render_model_text(&model, 24, 8);
+            if after.contains("frame-1") {
+                reached_frame_1 = true;
+                break;
+            }
+        }
+
+        assert!(
+            reached_frame_1,
+            "bounded history should still preserve the oldest meaningful frame after redraw flood"
+        );
+    }
+
+    #[test]
     fn snapshot_scrollback_works_in_alt_screen_after_main_output() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;

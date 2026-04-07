@@ -413,6 +413,12 @@ impl ScreenSnapshot {
     fn is_blank(&self) -> bool {
         !slice_contains_non_blank_content(&self.visible_lines)
     }
+
+    fn same_visible_surface(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.cols == other.cols
+            && self.visible_lines == other.visible_lines
+    }
 }
 
 fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
@@ -426,7 +432,7 @@ fn slice_contains_non_blank_content(lines: &[String]) -> bool {
     lines.iter().any(|line| !line.trim().is_empty())
 }
 
-const SNAPSHOT_HISTORY_CAPACITY: usize = 256;
+const SNAPSHOT_HISTORY_CAPACITY: usize = 2048;
 
 pub struct VtState {
     parser: vt100::Parser,
@@ -741,7 +747,7 @@ impl VtState {
         if self
             .snapshots
             .back()
-            .is_some_and(|existing| *existing == snapshot)
+            .is_some_and(|existing| existing.same_visible_surface(&snapshot))
         {
             return;
         }
@@ -1278,6 +1284,22 @@ mod tests {
 
         assert_eq!(vt.max_scrollback(), 0);
         assert_eq!(vt.snapshot_count(), 1);
+        assert!(!vt.has_snapshot_scrollback());
+    }
+
+    #[test]
+    fn capture_snapshot_ignores_style_only_redraw_frames() {
+        let mut vt = VtState::new(5, 20);
+        vt.process(b"\x1b[?1049h\x1b[2J\x1b[Hframe");
+        vt.process(b"\x1b[7m\x1b[1;1Hframe\x1b[0m");
+        vt.process(b"\x1b[4m\x1b[1;1Hframe\x1b[0m");
+
+        assert_eq!(vt.max_scrollback(), 0);
+        assert_eq!(
+            vt.snapshot_count(),
+            1,
+            "style-only redraws should not consume snapshot history"
+        );
         assert!(!vt.has_snapshot_scrollback());
     }
 
