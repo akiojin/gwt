@@ -2286,6 +2286,7 @@ fn refresh_branches(model: &mut Model) {
 /// queue drained by the tick loop.
 fn refresh_cleanup_merge_state(model: &mut Model) {
     use screens::branches::MergeState;
+    use std::sync::atomic::AtomicBool;
 
     let local_names: Vec<String> = model
         .branches
@@ -2310,7 +2311,11 @@ fn refresh_cleanup_merge_state(model: &mut Model) {
 
     let queue: crate::model::MergeStateQueue =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
-    model.merge_state_events = Some(queue.clone());
+    let finished = Arc::new(AtomicBool::new(false));
+    model.merge_state_events = Some(crate::model::MergeStateChannel {
+        queue: queue.clone(),
+        finished: finished.clone(),
+    });
     let repo_path = model.repo_path.clone();
 
     std::thread::spawn(move || {
@@ -2331,6 +2336,9 @@ fn refresh_cleanup_merge_state(model: &mut Model) {
                 .unwrap()
                 .push_back(crate::model::MergeStateEvent { branch, state });
         }
+        // Mark the worker finished AFTER the last event is enqueued so the
+        // drain helper cannot race the loop.
+        finished.store(true, std::sync::atomic::Ordering::Release);
     });
 }
 
@@ -2341,24 +2349,33 @@ fn refresh_cleanup_merge_state(model: &mut Model) {
 const MERGE_STATE_DRAIN_PER_TICK: usize = 2;
 
 /// Drain pending merge-state events into `BranchesState::merged_state`,
-/// at most [`MERGE_STATE_DRAIN_PER_TICK`] events per call.
+/// at most [`MERGE_STATE_DRAIN_PER_TICK`] events per call. The shared
+/// channel handle is dropped only after the worker has explicitly
+/// signalled completion AND the queue is empty, so a momentarily empty
+/// queue between two single-event pushes cannot tear the worker handle
+/// down prematurely.
 fn drain_merge_state_events(model: &mut Model) {
-    let Some(queue) = model.merge_state_events.clone() else {
+    use std::sync::atomic::Ordering;
+
+    let Some(channel) = model.merge_state_events.clone() else {
         return;
     };
     let events: Vec<crate::model::MergeStateEvent> = {
-        let mut guard = queue.lock().unwrap();
+        let mut guard = channel.queue.lock().unwrap();
         let take = MERGE_STATE_DRAIN_PER_TICK.min(guard.len());
         guard.drain(..take).collect()
     };
-    let drained_any = !events.is_empty();
     for event in events {
         model.branches.set_merge_state(event.branch, event.state);
     }
-    // Once the queue is empty after at least one event was drained, drop
-    // the queue handle so the worker thread state is fully cleaned up.
-    if drained_any {
-        let queue_empty = queue.lock().unwrap().is_empty();
+
+    // Tear the channel down only when the worker is finished AND the queue
+    // has been fully drained. Without the explicit `finished` flag the
+    // queue can be empty between two single-event pushes, which would
+    // strand the remaining branches in `Computing` forever.
+    let worker_done = channel.finished.load(Ordering::Acquire);
+    if worker_done {
+        let queue_empty = channel.queue.lock().unwrap().is_empty();
         if queue_empty {
             model.merge_state_events = None;
         }
@@ -3575,8 +3592,9 @@ fn handle_cleanup_progress_message(
 ) {
     use screens::cleanup_progress::CleanupProgressMessage;
 
-    let was_dismiss = matches!(msg, CleanupProgressMessage::Dismiss);
     let was_completed = matches!(msg, CleanupProgressMessage::Completed);
+    let was_dismiss_attempt = matches!(msg, CleanupProgressMessage::Dismiss);
+    let was_visible_before = model.cleanup_progress.visible;
     screens::cleanup_progress::update(&mut model.cleanup_progress, msg);
     if was_completed {
         let succeeded = model
@@ -3605,7 +3623,14 @@ fn handle_cleanup_progress_message(
             ),
         );
     }
-    if was_dismiss {
+    // FR-018g: tear down only when the modal actually transitioned out of
+    // visible state. The modal swallows `Dismiss` while `Running`, so we
+    // must consult the post-update visibility instead of trusting the raw
+    // incoming message — otherwise a stray `Dismiss` mid-run would clear
+    // the selection and drop the cleanup queue while the worker thread
+    // was still deleting branches.
+    let dismissed = was_dismiss_attempt && was_visible_before && !model.cleanup_progress.visible;
+    if dismissed {
         model.branches.clear_selection_after_cleanup();
         model.cleanup_progress.run = None;
         model.cleanup_events = None;

@@ -291,6 +291,17 @@ pub struct MergeStateEvent {
 /// Shared queue of merge-state events drained from the tick loop.
 pub type MergeStateQueue = Arc<Mutex<VecDeque<MergeStateEvent>>>;
 
+/// Tracked merge-state worker handle: a queue plus an explicit finished
+/// flag the worker sets when its loop completes. Without the flag the tick
+/// loop's drain helper would have to guess from queue emptiness, racing
+/// against single-event pushes and tearing the queue down before the
+/// remaining branches were ever delivered (FR-018d).
+#[derive(Debug, Clone)]
+pub struct MergeStateChannel {
+    pub queue: MergeStateQueue,
+    pub finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Shared queue of branch-detail preload results produced in the background.
 pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
@@ -626,8 +637,8 @@ pub struct Model {
     pub(crate) cleanup_progress: crate::screens::cleanup_progress::CleanupProgressState,
     /// Background queue for cleanup runner events.
     pub(crate) cleanup_events: Option<CleanupEventQueue>,
-    /// Background queue for merge-state computation events (FR-018d).
-    pub(crate) merge_state_events: Option<MergeStateQueue>,
+    /// Background channel for merge-state computation events (FR-018d).
+    pub(crate) merge_state_events: Option<MergeStateChannel>,
     /// Pending session conversion awaiting confirmation.
     pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
     /// Launch config built from completed wizard, ready for PTY spawn.

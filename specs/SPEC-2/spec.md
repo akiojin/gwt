@@ -81,14 +81,13 @@ As a developer who creates one feature branch per task and accumulates dozens of
 2. Given a cleanable branch is focused, when I press `Space`, then the row is added to the cleanup selection set, the row gains a `[x]` marker on the right, and the footer shows the running selection count.
 3. Given I press `Space` on a non-cleanable row (protected, not yet computed, or unmerged), then nothing happens and the footer flashes a hint explaining why.
 4. Given I press `a` while merge detection is complete, then every currently visible cleanable branch (filter- and search-aware) is added to the selection set; pressing `a` a second time is a no-op for already-selected branches.
-5. Given the selection set is non-empty, when I press `Shift+C`, then a Cleanup Confirm modal opens listing every selected branch with its merge target (`merged → main`, `merged → develop`, or `gone`) and a `[ ] Also delete remote (r)` toggle defaulting to off.
-6. Given the Cleanup Confirm modal is visible, when I press `r`, then the remote-deletion toggle flips and the next session restores the same default from `.gwt/cleanup_settings.json`.
-7. Given the Cleanup Confirm modal is visible, when I press `Enter`, then a Cleanup Progress modal replaces it, the selected branches are deleted sequentially via `git worktree remove --force` followed by `git branch -D`, and per-branch outcomes appear inline as the run progresses.
-8. Given the Cleanup Progress modal is running, when I press `Esc` or `Ctrl+C`, then nothing happens — input is fully blocked until the run completes.
-9. Given the run finishes, when the modal flips to summary mode, then it lists every result (`✓` succeeded, `✗ <reason>` failed), `Enter` / `Esc` dismisses it, the selection set is cleared, the Branches list reloads with refreshed merge state, and the status bar shows a transient `Cleaned N, failed M` summary.
-10. Given a selected branch becomes the current `HEAD` or gains a running session between selection and execution, when the run reaches that branch, then it is skipped with an explicit failure entry rather than being force-deleted.
-11. Given I switch the view mode (`m`), sort (`s`), or search (`/`) with selections active, then the selection set is preserved; only an actual cleanup run clears it.
-12. Given I press `Ctrl+C` on the Branches list outside the cleanup flow, then nothing happens — single-branch `Ctrl+C` delete-worktree has been removed in favor of FR-018.
+5. Given the selection set is non-empty, when I press `Shift+C`, then a Cleanup Confirm modal opens listing every selected branch with its merge target (`merged → main`, `merged → develop`, or `gone`) and accepts `Enter` to confirm or `Esc` to cancel. The modal does **not** expose an `Also delete remote` toggle in this initial port; remote deletion is deferred until `gwt-git` grows the corresponding helper (see FR-018e).
+6. Given the Cleanup Confirm modal is visible, when I press `Enter`, then a Cleanup Progress modal replaces it, the selected branches are deleted sequentially via `git worktree remove --force` followed by `git branch -D`, and per-branch outcomes appear inline as the run progresses.
+7. Given the Cleanup Progress modal is running, when I press `Esc` or `Ctrl+C`, then nothing happens — input is fully blocked until the run completes.
+8. Given the run finishes, when the modal flips to summary mode, then it lists every result (`✓` succeeded, `✗ <reason>` failed), `Enter` / `Esc` dismisses it, the selection set is cleared, the Branches list reloads with refreshed merge state, and the status bar shows a transient `Cleaned N, failed M` summary.
+9. Given a selected branch becomes the current `HEAD` or gains a running session between selection and execution, when the run reaches that branch, then it is skipped with an explicit failure entry rather than being force-deleted.
+10. Given I switch the view mode (`m`), sort (`s`), or search (`/`) with selections active, then the selection set is preserved; only an actual cleanup run clears it.
+11. Given I press `Ctrl+C` on the Branches list outside the cleanup flow, then nothing happens — single-branch `Ctrl+C` delete-worktree has been removed in favor of FR-018.
 
 ### US-7: Navigate Keybindings with Ctrl+G Prefix (P0) -- IMPLEMENTED
 
