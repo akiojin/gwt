@@ -3260,8 +3260,6 @@ fn start_cleanup_run(model: &mut Model, delete_remote: bool) {
     let repo_path = model.repo_path.clone();
     let active_session_branches: std::collections::HashSet<String> =
         model.branches.active_session_branches.clone();
-    let checked_out_branches: std::collections::HashSet<String> =
-        model.branches.checked_out_branches.clone();
     let current_head_branch: Option<String> = model.branches.current_head_branch.clone();
 
     std::thread::spawn(move || {
@@ -3275,12 +3273,13 @@ fn start_cleanup_run(model: &mut Model, delete_remote: bool) {
                 });
 
             // Revalidate FR-018b protections immediately before deletion.
+            // Branches with their own worktree are still candidates — the
+            // whole point of Branch Cleanup is to remove the worktree along
+            // with the branch.
             let blocked_reason = if gwt_git::is_protected_branch(&branch) {
                 Some("protected branch".to_string())
             } else if current_head_branch.as_deref() == Some(branch.as_str()) {
                 Some("current HEAD".to_string())
-            } else if checked_out_branches.contains(&branch) {
-                Some("checked out elsewhere".to_string())
             } else if active_session_branches.contains(&branch) {
                 Some("active session".to_string())
             } else {
