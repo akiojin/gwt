@@ -16,7 +16,9 @@ use regex::Regex;
 /// The parser does not interpret the section name; higher layers are free to
 /// map strings such as `"spec"`, `"plan"`, `"contract/api.yaml"`, or
 /// `"checklist/tdd.md"` onto domain-specific types.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct SectionName(pub String);
 
 impl fmt::Display for SectionName {

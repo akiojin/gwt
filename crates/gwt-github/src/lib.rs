@@ -18,6 +18,7 @@
 pub mod body;
 pub mod cache;
 pub mod client;
+pub mod migration;
 pub mod routing;
 pub mod sections;
 pub mod spec_ops;
