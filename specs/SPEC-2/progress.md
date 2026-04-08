@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `374/374` checked in `tasks.md`
-- Artifact refresh: `2026-04-08T14:18:15Z`
+- Task progress: `378/378` checked in `tasks.md`
+- Artifact refresh: `2026-04-08T15:53:15Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -80,6 +80,7 @@
 - Terminal startup now always requests minimal kitty keyboard enhancements (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them during shutdown with fail-open handling, so compatible terminals expose less key ambiguity while unsupported terminals keep existing behavior.
 - The event loop now routes `KeyEventKind::Repeat` through the same `Message::KeyInput` path as `Press` while still ignoring `Release`, so compatible terminals do not drop repeated IME candidate-navigation keys during page changes.
 - The existing `cargo run -p gwt-tui --example keytest` probe now logs every raw `crossterm` event to JSONL, mirrors gwt's minimal keyboard-enhancement negotiation, and writes to `/tmp/gwt-crossterm-events.jsonl` by default so Terminal.app IME behavior can be compared against gwt's in-app trace without touching the main app.
+- The same `keytest` example now also acts as a layered IME reproduction probe with `raw`, `redraw`, and `ratatui` modes plus configurable tick timing, so redraw-only regressions can be isolated before returning to the full gwt event loop.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

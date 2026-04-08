@@ -85,9 +85,16 @@ trace records raw `crossterm` key events, keybind decisions, and forwarded PTY
 bytes without adding a runtime input-mode toggle.
 
 To compare that routed trace with raw terminal input, run
-`cargo run -p gwt-tui --example keytest` in the same terminal. The probe logs
-every raw `crossterm::event::Event` to `/tmp/gwt-crossterm-events.jsonl` by
-default, or to the first path argument you pass.
+`cargo run -p gwt-tui --example keytest -- --mode raw` in the same terminal.
+The probe logs every raw `crossterm::event::Event` to
+`/tmp/gwt-crossterm-events.jsonl` by default, or to the positional output path
+you pass.
+
+To isolate redraw-related IME regressions, the same probe also supports
+`--mode redraw` and `--mode ratatui`. `redraw` repaints the same committed-text
+surface on a periodic tick using direct `crossterm` commands, while `ratatui`
+uses the same surface through ratatui on the same tick. Use `--tick-ms <N>` to
+change the redraw interval when comparing modes.
 
 gwt also requests minimal kitty keyboard enhancements during terminal startup
 (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them on shutdown.

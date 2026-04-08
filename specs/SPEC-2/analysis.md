@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `374/374` completed items after closing Phase 62 for the standalone raw `crossterm` probe.
+- Task traceability snapshot: `tasks.md` currently records `378/378` completed items after closing Phase 63 for the layered IME probe workflow.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -54,3 +54,4 @@ Status: CLEAR
 - Notes: Phase 60 enables `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)` during terminal startup and `PopKeyboardEnhancementFlags` during shutdown with fail-open handling, improving compatibility with kitty keyboard protocol terminals without introducing a runtime toggle.
 - Notes: Phase 61 closes the downstream event-loop gap exposed by `REPORT_EVENT_TYPES`; `KeyEventKind::Repeat` now follows the normal key-input path while `Release` stays filtered, preventing compatible terminals from silently dropping repeated candidate-navigation keys.
 - Notes: Phase 62 upgrades the existing `keytest` example into a raw `crossterm` probe that records every event to JSONL with stable event typing while mirroring gwt's minimal keyboard-enhancement negotiation, making Terminal.app vs gwt event-path comparisons possible without instrumenting the main app further.
+- Notes: Phase 63 extends that same `keytest` example into a layered IME reproduction tool with `raw`, `redraw`, and `ratatui` modes backed by a shared probe state helper, including display-width cursor placement for wide glyphs and configurable redraw ticks.

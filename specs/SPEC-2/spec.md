@@ -170,6 +170,30 @@ event stream against gwt's in-app trace.
    it writes to a stable default log file and prints that path in English so
    the probe can be run without extra setup.
 
+### US-13: Intermediate IME Probe With Controlled Redraw Modes (P2) -- IMPLEMENTED
+
+As a developer isolating why gwt breaks IME candidate navigation while the raw
+probe does not, I want a tiny standalone example that can independently enable
+periodic redraw and ratatui rendering so I can identify which rendering layer
+causes the regression.
+
+**Acceptance Scenarios**
+
+1. Given I run `cargo run -p gwt-tui --example keytest -- --mode raw`, when I
+   type in the probe, then it behaves like the existing raw event logger with
+   no periodic redraw loop.
+2. Given I run the same example with `--mode redraw`, when the probe is active,
+   then it redraws a fixed input surface on a configurable periodic tick
+   without involving ratatui.
+3. Given I run the same example with `--mode ratatui`, when the probe is
+   active, then it redraws the same input surface through ratatui on the same
+   periodic tick so the effect of the rendering stack can be compared against
+   `raw` and `redraw`.
+4. Given the probe renders committed text and an input cursor, when wide
+   characters are present, then the cursor column is derived from display width
+   rather than byte length so IME candidate anchoring is not skewed by
+   full-width glyphs.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -195,6 +219,8 @@ event stream against gwt's in-app trace.
   tagged as `Press`.
 - The standalone raw `crossterm` probe must stay debug-only and must not change
   normal gwt startup, footer hints, or runtime input routing.
+- The intermediate IME probe must isolate redraw behavior one layer at a time
+  and must not depend on PTY forwarding or the full gwt application loop.
 
 ## Regression Guardrail: Hook-Driven Branch Visibility
 
@@ -241,6 +267,10 @@ This capability has regressed multiple times because "hooks are configured" is n
   it reads to JSONL, includes full key metadata when the event is a key event,
   and defaults to `/tmp/gwt-crossterm-events.jsonl` when no explicit output path
   is passed.
+- **FR-004d**: That same example also supports explicit IME probe modes:
+  `raw`, `redraw`, and `ratatui`. `redraw` and `ratatui` render the same small
+  committed-text surface on a configurable tick, differing only in whether the
+  redraw path uses direct `crossterm` commands or ratatui.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.

@@ -826,6 +826,23 @@ application flow.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the standalone raw-probe workflow.
 
+### Phase 58: Intermediate IME Probe Modes (4 tasks)
+Turn the raw probe into a layered IME reproduction tool that can isolate
+periodic redraw behavior before touching the full gwt event loop again.
+
+58.1: Probe state and CLI (2 tasks)
+- Add RED coverage for parsing `raw` / `redraw` / `ratatui` probe modes plus
+  configurable tick duration and output path.
+- Add RED coverage for the tiny probe state machine: committed-text handling,
+  bounded recent-event history, double-`Ctrl+C` exit, and display-width cursor
+  placement for wide glyphs.
+
+58.2: Example rendering modes (2 tasks)
+- Refactor `crates/gwt-tui/examples/keytest.rs` to use the shared probe state
+  and offer the three rendering modes without introducing PTY integration.
+- Re-run focused plus broad verification and refresh SPEC-2/README artifacts
+  with the layered IME probe workflow.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

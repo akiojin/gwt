@@ -589,3 +589,10 @@ banner in favor of pane-title chrome.
 - [x] T372 [P] Write RED test: shared trace helper serializes non-key probe events such as `Paste` without losing the raw debug payload.
 - [x] T373 Upgrade `crates/gwt-tui/examples/keytest.rs` to log every raw `crossterm` event to JSONL via the shared helper while mirroring gwt's minimal keyboard-enhancement negotiation.
 - [x] T374 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the standalone raw `crossterm` probe workflow.
+
+## Phase 63: Intermediate IME Probe Modes
+
+- [x] T375 [P] Write RED test: probe CLI parsing supports `raw` / `redraw` / `ratatui`, configurable tick rate, and an optional output path.
+- [x] T376 [P] Write RED test: probe state keeps bounded recent events, handles committed text editing, and computes cursor columns using display width for wide glyphs.
+- [x] T377 Refactor `crates/gwt-tui/examples/keytest.rs` into layered IME probe modes backed by a shared helper module.
+- [x] T378 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the layered IME probe workflow.
