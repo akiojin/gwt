@@ -120,7 +120,11 @@ pub fn log_event(message: &str) {
     // Best-effort notification bus push for the legacy in-memory mirror
     // (only useful in tests where the file watcher is not running).
     if let Some(bus) = notification_bus().get() {
-        let _ = bus.send(Notification::new(Severity::Debug, "index", message.to_string()));
+        let _ = bus.send(Notification::new(
+            Severity::Debug,
+            "index",
+            message.to_string(),
+        ));
     }
 }
 

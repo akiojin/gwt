@@ -129,14 +129,14 @@ Key invariant: **the file is the single source of truth**. The Logs tab does not
 | Warn/Error UI          | dedicated `Layer` forwards to UI channel                             | Preserves existing UX without keeping `Notification` alive                     |
 | File watching          | `notify` crate (event-driven)                                        | Latency < 500 ms; no polling cost                                              |
 | Initial read           | Today's full file from local midnight                                | Matches rotation boundary; bounded read cost                                   |
-| Redaction              | **None**                                                             | User's directory, user's responsibility. Matches `0644` permission decision    |
+| Redaction              | **None**                                                             | User's directory, user's responsibility. Combined with restrictive 0700/0600 file perms (revised after reviewer comment B7) |
 | tracing depth          | Subscriber init + `#[instrument]` on major user actions              | Span context is a big uplift for post-mortem debug                             |
 | Multi-instance         | Trust POSIX `O_APPEND`, single file                                  | Realistically rare; line-buffered JSONL is robust to interleaving              |
 | Test strategy          | Tempdir + real file E2E                                              | Tests the full pipeline, catches wiring bugs                                   |
 | Logs tab UX            | Status quo (severity filter, debug toggle)                           | No scope creep                                                                 |
 | `agent_launch.log`     | Collapsed into `gwt.log` via `target: "gwt_tui::agent::launch"`      | One file to search                                                             |
 | Default level          | `info` for all crates                                                | Balanced default; `RUST_LOG` escape hatch                                      |
-| File permissions       | OS default (dir `0755`, file `0644`)                                 | User chose speed over defensive posture                                        |
+| File permissions       | Restrictive on Unix (dir `0700`, file `0600`); Windows ACL default | Reviewer comment B7 — combined with no-redaction, the previous `0644` default exposed tokens to other local users on shared hosts. Tightened in `crates/gwt-core/src/logging/writer.rs::tighten_log_dir_permissions`. |
 | Rotation boundary      | Local midnight                                                       | Matches "yesterday" mental model                                               |
 | UI channel             | `tokio::sync::mpsc::unbounded_channel`                               | tracing must never block background threads                                    |
 | Removal plan           | Single PR, no staged deprecation                                     | Avoid a transient mixed-world                                                  |

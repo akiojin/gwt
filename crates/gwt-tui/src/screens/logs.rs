@@ -148,6 +148,11 @@ pub enum LogsMessage {
     SetFilter(FilterLevel),
     Refresh,
     SetEntries(Vec<LogEntry>),
+    /// Append a batch of new entries from the file watcher. Routes
+    /// through `update()` so `clamp_selected()` runs after the push,
+    /// which `Model::drain_logs_watcher` previously bypassed
+    /// (reviewer comment B4).
+    AppendEntries(Vec<LogEntry>),
     /// Cycle the global tracing log level (Info → Debug → Warn →
     /// Error → Info). Handled by the app update fn so that the
     /// `tracing_subscriber::reload::Handle` is invoked alongside the
@@ -189,6 +194,14 @@ pub fn update(state: &mut LogsState, msg: LogsMessage) {
         }
         LogsMessage::SetEntries(entries) => {
             state.entries = entries;
+            state.clamp_selected();
+        }
+        LogsMessage::AppendEntries(entries) => {
+            state.entries.extend(entries);
+            // Clamp after the append so a previously valid `selected`
+            // index that no longer points to a visible entry (because
+            // the active filter excludes the new tail) is brought back
+            // into bounds.
             state.clamp_selected();
         }
         LogsMessage::CycleLogLevel => {
@@ -674,6 +687,48 @@ mod tests {
             .join("\n");
         assert!(text.contains("Warn+"));
         assert!(text.contains("Debug: on"));
+    }
+
+    #[test]
+    fn append_entries_clamps_selected_when_active_filter_hides_new_tail() {
+        // Reviewer comment B4 regression: AppendEntries used to bypass
+        // `clamp_selected()` and could leave `selected` past the
+        // filtered view length when the active filter hid every new
+        // entry.
+        let mut state = LogsState::default();
+        // Pre-populate with two ERROR entries so the filter shows them.
+        state.entries = vec![
+            LogEntry::new(Severity::Error, "core", "boom 1"),
+            LogEntry::new(Severity::Error, "core", "boom 2"),
+        ];
+        state.filter_level = FilterLevel::ErrorOnly;
+        state.selected = 1; // points at "boom 2"
+
+        // Append two new INFO entries that the active filter excludes.
+        let new_tail = vec![
+            LogEntry::new(Severity::Info, "core", "info 1"),
+            LogEntry::new(Severity::Info, "core", "info 2"),
+        ];
+        update(&mut state, LogsMessage::AppendEntries(new_tail));
+
+        assert_eq!(state.entries.len(), 4);
+        // Filter still surfaces the two ERROR entries; selected must
+        // remain within bounds.
+        assert_eq!(state.filtered_entries().len(), 2);
+        assert!(state.selected < state.filtered_entries().len());
+    }
+
+    #[test]
+    fn append_entries_grows_visible_view_when_filter_passes_new_tail() {
+        let mut state = LogsState::default();
+        state.entries = vec![LogEntry::new(Severity::Info, "core", "first")];
+        let appended = vec![
+            LogEntry::new(Severity::Info, "core", "second"),
+            LogEntry::new(Severity::Warn, "core", "third"),
+        ];
+        update(&mut state, LogsMessage::AppendEntries(appended));
+        assert_eq!(state.entries.len(), 3);
+        assert_eq!(state.filtered_entries().len(), 3);
     }
 
     #[test]

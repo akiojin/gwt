@@ -1856,9 +1856,12 @@ impl Model {
                 }
                 LogsWatcherPacket::AppendEntries(entries) => {
                     total += entries.len();
-                    for entry in entries {
-                        self.logs.entries.push(entry);
-                    }
+                    // Route through the screen update fn so
+                    // `clamp_selected()` runs after the push (reviewer
+                    // comment B4 — `selected` could otherwise drift
+                    // past the filtered view length when the active
+                    // filter hides the new tail).
+                    logs_update(&mut self.logs, LogsMessage::AppendEntries(entries));
                 }
             }
         }

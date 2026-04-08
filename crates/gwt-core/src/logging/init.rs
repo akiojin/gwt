@@ -93,9 +93,19 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     let (ui_tx, ui_rx) = unbounded_channel::<LogEvent>();
 
     let directive = config.initial_filter_directive();
-    let env_filter = EnvFilter::try_new(&directive)
-        .or_else(|_| EnvFilter::try_new(config.default_level.to_env_directive()))
-        .map_err(|e| format!("env filter init failed: {e}"))?;
+    // Reviewer comment B6: capture the parse error so we can surface
+    // it via `tracing::warn!` AFTER the subscriber is installed —
+    // otherwise a malformed `RUST_LOG` / `config.toml` value silently
+    // falls back to `default_level` and the user has no signal that
+    // their override was ignored.
+    let (env_filter, invalid_directive_error) = match EnvFilter::try_new(&directive) {
+        Ok(filter) => (filter, None),
+        Err(err) => {
+            let fallback = EnvFilter::try_new(config.default_level.to_env_directive())
+                .map_err(|fallback_err| format!("env filter init failed: {fallback_err}"))?;
+            (fallback, Some(err.to_string()))
+        }
+    };
     let (reloadable_filter, reload_handle) = reload::Layer::new(env_filter);
 
     let fmt = fmt_layer::build(non_blocking);
@@ -107,6 +117,16 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
         .with(ui)
         .try_init()
         .map_err(|e| format!("subscriber init failed: {e}"))?;
+
+    if let Some(err) = invalid_directive_error {
+        tracing::warn!(
+            target: "gwt_core::logging",
+            raw = %directive,
+            error = %err,
+            fallback = %config.default_level,
+            "invalid initial filter directive — fell back to default level"
+        );
+    }
 
     Ok(LoggingHandles {
         guard,

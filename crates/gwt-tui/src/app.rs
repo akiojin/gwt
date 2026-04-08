@@ -1,6 +1,6 @@
 //! App — Update and View functions for the Elm Architecture.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
@@ -91,6 +91,13 @@ fn spawn_pty_reader(
 
 /// Spawn a PTY process, start a reader thread, and register the handle on
 /// the model.  On failure the error is returned so the caller can notify.
+///
+/// **Logging policy:** This helper is shared between **shell** and
+/// **agent** spawn paths, so it intentionally does NOT log the agent
+/// launch event or the env map. Agent-specific spawns must call
+/// [`emit_agent_launch_event`] from the agent code path before calling
+/// this helper. The trace inside this function is limited to safe
+/// metadata (session_id, command name).
 #[tracing::instrument(
     name = "spawn_pty",
     skip(model, config),
@@ -101,26 +108,6 @@ pub fn spawn_pty_for_session(
     session_id: &str,
     config: gwt_terminal::pty::SpawnConfig,
 ) -> Result<(), String> {
-    // SPEC-6 Phase 5: the agent-launch audit record is now a
-    // structured tracing event. It lands in
-    // `~/.gwt/logs/gwt.log.YYYY-MM-DD` alongside every other event and
-    // is picked up by the Logs tab via the file watcher. No redaction
-    // per FR-016.
-    let env_fields: BTreeMap<String, String> = config
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    tracing::info!(
-        target: "gwt_tui::agent::launch",
-        repo_path = %model.repo_path().display(),
-        session_id = session_id,
-        command = %config.command,
-        args = ?config.args,
-        cwd = ?config.cwd.as_ref().map(|p| p.display().to_string()),
-        env = ?env_fields,
-        "agent launch"
-    );
     let pty = gwt_terminal::PtyHandle::spawn(config).map_err(|e| {
         tracing::error!(session_id = session_id, error = %e, "PTY spawn failed");
         e.to_string()
@@ -133,6 +120,37 @@ pub fn spawn_pty_for_session(
     model.pty_handles.insert(session_id.to_string(), pty);
     tracing::info!(session_id = session_id, "PTY spawned successfully");
     Ok(())
+}
+
+/// Emit a structured agent-launch audit event (SPEC-6 FR-020 / FR-016 /
+/// reviewer comment B2).
+///
+/// Called from the agent-only code path right before
+/// [`spawn_pty_for_session`]. The event lands in
+/// `~/.gwt/logs/gwt.log.YYYY-MM-DD` alongside every other tracing event,
+/// and the Logs tab picks it up via the file watcher.
+///
+/// The env map is **not** included in the event. Custom-agent
+/// configurations may inject API keys / tokens into `pty_env` and the
+/// log file is world-readable on shared hosts (see B7 file permission
+/// hardening). Recording only a presence flag and a count is enough to
+/// audit that an agent was launched without persisting secrets.
+pub fn emit_agent_launch_event(
+    repo_path: &Path,
+    session_id: &str,
+    config: &gwt_terminal::pty::SpawnConfig,
+) {
+    tracing::info!(
+        target: "gwt_tui::agent::launch",
+        repo_path = %repo_path.display(),
+        session_id = session_id,
+        command = %config.command,
+        args = ?config.args,
+        cwd = ?config.cwd.as_ref().map(|p| p.display().to_string()),
+        env_keys = config.env.len(),
+        custom_env = !config.env.is_empty(),
+        "agent launch"
+    );
 }
 
 /// Compute the session pane content size `(cols, rows)` for PTY/VtState
@@ -3097,21 +3115,29 @@ fn handle_logs_message(model: &mut Model, msg: screens::logs::LogsMessage) {
     screens::logs::update(&mut model.logs, msg);
 }
 
-/// Drain the UI log bridge channel and dispatch warn/error/info
-/// events as toast / error modal messages.
+/// Drain the UI log bridge channel and dispatch user-facing events
+/// as toast / error modal messages.
 ///
-/// Filters out events with `target` starting with `gwt_tui::notify`
-/// (the legacy `apply_notification` path already creates a UI
-/// message for those), and events emitted from
-/// `gwt_tui::notification_router` to avoid double-toasts while the
-/// legacy router path coexists.
+/// **Filter policy (reviewer comment B3):** the bridge ONLY forwards
+/// events whose `target` starts with `gwt_tui::ui::` — a dedicated
+/// namespace reserved for "this is intended for a user-visible
+/// notification surface". Internal traces (`gwt_tui::main`,
+/// `gwt_tui::agent::launch`, `gwt_tui::index`, etc.) are persisted to
+/// the file but are NOT pushed as toasts. This prevents the bridge
+/// from spamming the status bar with internal info logs and from
+/// double-firing notifications that the legacy `apply_notification`
+/// path already enqueues.
+///
+/// To surface a warn/error from any crate as a toast/modal **without**
+/// going through `apply_notification`, emit a tracing event with
+/// `target: "gwt_tui::ui::<area>"`.
 fn drain_ui_log_events(model: &mut Model) {
     let Some(rx) = model.ui_log_rx.as_ref() else {
         return;
     };
     let mut pending = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        if event.source.starts_with("gwt_tui::notify") {
+        if !event.source.starts_with("gwt_tui::ui::") {
             continue;
         }
         pending.push(event);
@@ -3721,6 +3747,10 @@ fn materialize_pending_launch_with(
         cwd: config.working_dir.clone(),
     };
     let repo_path_for_watcher = model.repo_path.clone();
+    // Emit the agent-launch audit event before delegating to the
+    // shared PTY helper. The helper itself logs only generic
+    // metadata (FR-020 / reviewer comment B2).
+    emit_agent_launch_event(&model.repo_path, &tab_id, &pty_config);
     if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
         apply_notification(
             model,

@@ -365,18 +365,39 @@ fn run_app(
         model.set_log_reload_handle(handle);
     }
 
-    // SPEC-6 FR-015: bridge the tokio UnboundedReceiver<LogEvent>
-    // from `logging::init` into a std::sync::mpsc channel so the
-    // synchronous TUI loop can drain UI log events (warn/error from
-    // any crate's `tracing::*!` call) without a tokio runtime.
+    // SPEC-6 FR-015 + reviewer comment B5: bridge the tokio
+    // UnboundedReceiver<LogEvent> from `logging::init` into a
+    // std::sync::mpsc channel so the synchronous TUI loop can drain
+    // UI log events without a tokio runtime.
+    //
+    // The bridge loop polls `try_recv` and watches an
+    // `Arc<AtomicBool>` shutdown flag instead of using
+    // `blocking_recv()`. The reason: the `UnboundedSender` produced
+    // by `logging::init` is cloned into the global tracing
+    // subscriber's `UiForwarderLayer` and there is no way to drop the
+    // global subscriber, so `blocking_recv()` would never see all
+    // senders dropped and the bridge thread would hang on shutdown.
+    let logs_bridge_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(mut ui_rx) = logging_ui_rx.take() {
         let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Notification>();
+        let shutdown = std::sync::Arc::clone(&logs_bridge_shutdown);
         std::thread::Builder::new()
             .name("gwt-ui-log-bridge".into())
             .spawn(move || {
-                while let Some(event) = ui_rx.blocking_recv() {
-                    if bridge_tx.send(event).is_err() {
-                        break;
+                use std::sync::atomic::Ordering;
+                while !shutdown.load(Ordering::Relaxed) {
+                    match ui_rx.try_recv() {
+                        Ok(event) => {
+                            if bridge_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            break;
+                        }
                     }
                 }
             })
@@ -526,6 +547,10 @@ fn run_app(
 
     // Kill all live PTY processes on shutdown.
     model.kill_all_pty();
+
+    // Signal the UI log bridge thread to exit so it does not outlive
+    // `run_app` (reviewer comment B5).
+    logs_bridge_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
 
     if model.active_layer != ActiveLayer::Initialization {
         let session_state_path = Model::session_state_path(model.repo_path());
