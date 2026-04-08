@@ -771,6 +771,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-github"
+version = "8.17.2"
+dependencies = [
+ "fs2",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gwt-notification"
 version = "8.17.2"
 dependencies = [
