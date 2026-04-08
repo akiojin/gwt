@@ -1,5 +1,193 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: coalesced `home + repaint` payloads need frame segmentation before Codex row-history derivation
+
+### 事象
+
+Codex の inline mode でも、1 回の `PtyOutput` payload に複数の `home + repaint`
+full-screen redraw が畳まれるケースでは、scroll が 다시 page-sized snapshot fallback に落ちた。
+
+### 原因
+
+- `split_agent_snapshot_segments()` は `\x1b[2J\x1b[H` だけを redraw 境界としていた。
+- そのため `\x1b[H` で始まる full repaint が 1 payload に複数入っても最後の frame しか見えず、
+  `detect_vertical_redraw_shift()` が必要とする隣接 frame 間の shift が消えていた。
+- 結果として `max_scrollback == 0` のままになり、Codex pane が line-granular row history へ昇格できなかった。
+
+### 再発防止策
+
+1. agent redraw segmentation は `clear+home` だけでなく、「top rows を連続再描画する qualified home repaint」も frame 境界として扱う。
+2. `1 payload 内に 2 回の home repaint がある Codex 相当ケース` を model/app の RED テストで固定する。
+3. Codex inline mode 導入後も、大きい PTY payload は `multiple redraw frames per payload` を疑ってログとコードを照合する。
+
+## 2026-04-08 — fix: runtime distribution must prune stale managed asset paths, not just root entries
+
+### 事象
+
+`distribute_to_worktree()` は current bundle を materialize できていたが、
+managed roots に残っている古い `gwt-*` skill / command / hook が残存した。
+さらに root entry だけを消す実装では、現行 bundle に残っている skill directory の内側に
+ぶら下がった stale file / subdirectory までは消えず、launch を重ねても過去の遺産が worktree に居座った。
+
+### 原因
+
+- distribution は「今ある managed asset を書く」ことしかしておらず、
+  「今の bundle に存在しない managed path を消す」責務を持っていなかった。
+- 最初の cleanup は managed roots の root-level `gwt-*` entry にしか効かず、
+  retain される `gwt-*` directory の内部までは source tree と照合していなかった。
+- tracked-file 保護は current bundle の write skip には有効だったが、
+  stale residue の pruning まで止める設計ではなかった。
+
+### 再発防止策
+
+1. managed roots は write 前に embedded bundle source tree と照合し、current bundle に存在しない path を prune する。
+2. stale path の pruning は tracked / untracked を問わず、root entry だけでなく retained managed directory 配下の nested file / subdirectory まで適用する。
+3. recursive cleanup は current bundle が管理する tree に限定し、非 `gwt-*` root entry や hook config (`settings.local.json`, `hooks.json`) には触れない。
+
+## 2026-04-08 — fix: launch-only cleanup leaves previously active worktrees dirty until relaunch
+
+### 事象
+
+agent launch 時の cleanup を実装した後も、すでに起動済みだった worktree には
+old `gwt-*` skill / command residue が残り続け、Claude/Codex から旧 surface が見えた。
+
+### 原因
+
+- cleanup の契約を launch materialization にだけ置いていたため、
+  「過去に launch 済みで、まだ relaunch していない active worktree」は sweep 対象外だった。
+- その結果、現在の binary が clean でも、既存 worktree 上の legacy residue は次の launch まで残留した。
+
+### 再発防止策
+
+1. launch 時の full distribution とは別に、startup / repo-worktree discovery で prune-only sweep を持つ。
+2. startup sweep は repo root と active worktree だけを対象にし、unrelated directory には触れない。
+3. startup sweep は stale path の削除だけを行い、missing bundle asset の materialize は launch 時に限定する。
+
+## 2026-04-08 — chore: managed gwt asset cleanup must distinguish source-of-truth from generated residue
+
+### 事象
+
+`gwt-*` の削除整理で、「埋め込み/managed かどうか」を search embedding と混同し、
+さらに `repo-tracked` の有無だけで削除可否を判断しかけた。
+その結果、source-of-truth の managed asset、broken symlink の tracked residue、
+ignored な generated residue が同じバケツに入っていた。
+
+### 原因
+
+- 判定基準を `crates/gwt-skills` の bundle/distribution 契約ではなく、名前や追跡状態に寄せてしまった。
+- `.codex/skills/*` のように「tracked でも source-of-truth ではないもの」と、
+  `.claude/commands/gwt-file-search.md` のように「untracked だが local residue として削除すべきもの」を分けていなかった。
+
+### 再発防止策
+
+1. `gwt-*` の削除前に、`assets.rs` / `distribute.rs` / `SPEC-9` / `AGENTS.md` を照合して managed contract を確定する。
+2. 削除対象は `tracked stale residue` と `untracked unmanaged residue` に分け、source-of-truth と generated copy を混同しない。
+3. local residue を削除する場合は、対応する tracked command/skill docs の参照先も同時に正規 surface へ揃える。
+
+## 2026-04-08 — fix: PTY output must signal dirty state, not permission to redraw immediately
+
+### 事象
+
+snapshot churn、visible row O(rows²)、live render cache miss、Python index worker を潰した後も、
+`gwt-tui` 本体がなお `20-30%` 台の CPU を消費し続け、`sample` では
+`drain_pty_output_into_model()` と `render_session_surface()` が高頻度で積み上がっていた。
+
+### 原因
+
+- event loop は PTY 出力を 1 回でも drain すると、入力がなくても直ちに inner loop を抜けて `terminal.draw()` していた。
+- そのため active agent pane が継続的に PTY 出力を流す状況では、描画の必要量ではなく reader wakeup 回数に引きずられて redraw していた。
+- 既存の `1ms` grace slice は「入力を取り逃さない」には有効だったが、draw rate の上限にはなっておらず、実際には `~80-180fps` 級の redraw が発生していた。
+
+### 再発防止策
+
+1. PTY 出力は「dirty になった」合図として扱い、次の redraw は最後の draw からの最小フレーム間隔で pace する。
+2. redraw 待ち時間は sleep ではなく input poll に使い、ユーザー入力で即座に抜けられるようにする。
+3. `sample` で render hot path が残るときは、1 フレーム当たりのコストだけでなく、1 秒当たり何回 redraw しているかも必ず確認する。
+
+## 2026-04-08 — fix: watcher-driven incremental indexing must preserve scope specificity
+
+### 事象
+
+`gwt-tui` の親プロセス自体の CPU を下げたあとも、`ps` では `gwt-tui` の子として
+`chroma_index_runner.py --action index-specs --mode incremental` が code edit のたびに高 CPU で走っていた。
+
+### 原因
+
+- watcher batch は changed paths を持っていたが、`schedule_incremental_index()` はそれを見ずに
+  `files` / `files-docs` / `specs` の 3 scope を毎回順番に起動していた。
+- coalescing state も `dirty: bool` だけだったため、build 中に追加イベントが来ても
+  「次に何の scope を再実行すべきか」を保持できず、狭い変更でも広い Python work に戻りやすかった。
+
+### 再発防止策
+
+1. watcher から runner を起動する前に changed paths を `files` / `files-docs` / `specs` へ分類し、必要 scope だけを queue する。
+2. coalescing state は bool ではなく scope union を保持し、follow-up pass でも narrow rebuild を維持する。
+3. `index.log` に watcher batch ごとの scope を出し、実運用で Python runner が何を起動しているかを直接確認できるようにする。
+
+## 2026-04-08 — fix: live render paths must not rebuild the visible parser and URL scan every frame
+
+### 事象
+
+snapshot churn と visible row O(rows²) を止めたあとも、再起動した `gwt-tui` では
+`render_session_surface()` -> `visible_screen_parser()` -> `collect_url_regions()` が hot path に残り、
+CPU がなお高止まりした。
+
+### 原因
+
+- live render / selection copy / Ctrl+click hit testing が、それぞれ visible screen 用 parser を再構築していた。
+- URL 領域も draw ごとに毎回フル画面再計算しており、画面内容が変わっていなくても
+  `state_formatted` / text assembly / URL regex 走査を繰り返していた。
+
+### 再発防止策
+
+1. live surface を読むだけの経路では parser clone を増やさず、借用ベースの helper で同じ `vt100::Screen` を使い回す。
+2. URL region のような純粋導出データは、surface が不変な間は cache し、invalidate 条件を `process` / `resize` / scrollback mode change に集中させる。
+3. 1 つの hot path を消した後は `sample` を撮り直し、次の支配項が render / parsing / sidecar のどこへ移ったかを確認してから次の修正に進む。
+
+## 2026-04-08 — fix: per-row visible line scans must not go through `contents_between()`
+
+### 事象
+
+snapshot churn を止めた後も、更新済み `gwt-tui` を再起動すると依然として高 CPU が残り、
+`sample` では `VtState::process()` -> `ScreenSnapshot::from_screen()` ->
+`screen_visible_lines()` -> `vt100::Screen::contents_between()` が hot path になっていた。
+
+### 原因
+
+- `screen_visible_lines()` が各 row ごとに `contents_between(row, 0, row, cols)` を呼んでいた。
+- vt100 側の `contents_between()` は単一行ケースでも内部で `rows(start, width).nth(row)` を辿るため、
+  visible row 全体を読むだけで O(rows²) になっていた。
+- redraw-shift 判定は agent repaint ごとに走るため、この隠れた二乗コストが CPU 張り付きとして表面化した。
+
+### 再発防止策
+
+1. 画面全行を読む用途では selection/clipboard API を流用せず、`rows()` のような単一走査 API を使う。
+2. per-frame hot path に入る helper は、呼び出し先ライブラリの計算量まで確認してから採用する。
+3. プロファイルで hot path が移ったら「前のボトルネックを消せた」だけで満足せず、次の支配項まで潰す。
+
+## 2026-04-08 — fix: live redraw comparison state must not double as user-visible snapshot history
+
+### 事象
+
+`AgentMemoryBacked` scrollback が row history へ正規化できているのに、
+`gwt-tui` が依然として高 CPU のまま張り付き、`sample` では
+`VtState::capture_snapshot()` -> `ScreenSnapshot::from_screen()` が hot path になっていた。
+
+### 原因
+
+- redraw shift を検出するための「最新フレーム比較用 snapshot」と、
+  ユーザーが scrollback で辿る「snapshot history」を同じ `snapshots` deque で兼用していた。
+- そのため `uses_snapshot_scrollback() == false` に切り替わった後も、agent pane は
+  各 PTY chunk ごとに full-surface snapshot を append / dedupe し続けていた。
+- `process()` 末尾の `capture_snapshot()` は、同じ更新サイクル内で一度作った `current_snapshot`
+  を再利用せず、`ScreenSnapshot::from_screen()` をもう一度実行していた。
+
+### 再発防止策
+
+1. full-screen redraw の比較用 state と user-visible history を分離し、row history が有効な間は snapshot storage を最新 1 枚の baseline に潰す。
+2. `process()` の更新サイクルで既に構築した current frame snapshot を、最終 capture に再利用して二重構築を禁止する。
+3. 「row history mode では snapshot_count が 1 のまま増えない」RED テストを model に固定する。
+
 ## 2026-04-08 — fix: abandoning SGR parsing must replay buffered input in original order
 
 ### 事象

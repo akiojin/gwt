@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use gwt_notification::Notification;
+use gwt_core::logging::LogEvent as Notification;
 use ratatui::{
     layout::Rect,
     style::Style,
@@ -84,7 +84,7 @@ pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_notification::{Notification, Severity};
+    use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

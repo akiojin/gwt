@@ -9,6 +9,7 @@ pub(crate) mod custom_agents;
 pub mod event;
 pub mod index_worker;
 pub mod input;
+pub mod logs_watcher;
 pub mod message;
 pub mod model;
 pub mod notification_router;

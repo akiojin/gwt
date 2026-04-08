@@ -9,7 +9,6 @@ members = [
     "crates/gwt-docker",
     "crates/gwt-git",
     "crates/gwt-github",
-    "crates/gwt-notification",
     "crates/gwt-skills",
     "crates/gwt-terminal",
     "crates/gwt-tui",
@@ -36,7 +35,6 @@ gwt-core = { path = "crates/gwt-core" }
 gwt-docker = { path = "crates/gwt-docker" }
 gwt-git = { path = "crates/gwt-git" }
 gwt-github = { path = "crates/gwt-github" }
-gwt-notification = { path = "crates/gwt-notification" }
 gwt-skills = { path = "crates/gwt-skills" }
 gwt-terminal = { path = "crates/gwt-terminal" }
 gwt-voice = { path = "crates/gwt-voice" }
@@ -69,7 +67,7 @@ serde_yaml = "0.9"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "chrono"] }
 tracing-appender = "0.2"
 tracing-chrome = "0.7"
 

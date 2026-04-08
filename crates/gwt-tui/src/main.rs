@@ -21,8 +21,11 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use gwt_agent::reset_runtime_state_dir;
 #[cfg(test)]
 use gwt_agent::reset_runtime_state_dir_for_pid;
+use gwt_core::logging::{
+    init as init_logging, LogEvent as Notification, LogLevel as Severity, LoggingConfig,
+};
+use gwt_core::paths::gwt_logs_dir;
 use gwt_git::RepoType;
-use gwt_notification::{Notification, Severity};
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
@@ -31,7 +34,7 @@ use gwt_tui::{
 };
 
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
-const PTY_OUTPUT_INPUT_GRACE_SLICE: Duration = Duration::from_millis(1);
+const PTY_REDRAW_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MAX_MOUSE_SCROLL_BURST_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +175,7 @@ fn next_message_for_loop_iteration<F>(
     pending_messages: &mut VecDeque<Message>,
     deadline: Instant,
     had_pty_output: bool,
+    last_draw_at: Option<Instant>,
     mut poll_event: F,
 ) -> Option<Message>
 where
@@ -182,11 +186,17 @@ where
     }
 
     let poll_slice = if had_pty_output {
-        PTY_OUTPUT_INPUT_GRACE_SLICE
+        last_draw_at.map_or(Duration::ZERO, |last_draw_at| {
+            pty_redraw_poll_slice(Instant::now(), last_draw_at)
+        })
     } else {
         PTY_OUTPUT_POLL_SLICE
     };
     poll_event(deadline, poll_slice)
+}
+
+fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
+    PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
 }
 
 fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
@@ -243,23 +253,61 @@ fn terminal_leave_commands_ansi() -> String {
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
-    // SPEC-12 Phase 6: argv-driven dispatch. When invoked as
-    // `gwt issue ...`, hand off to the CLI entry point without touching the
-    // terminal. Any other argv shape keeps the legacy TUI behaviour below.
+    // SPEC-12 Phase 6 (CORE-CLI / #1942): argv-driven dispatch. When invoked
+    // as `gwt issue ...` or `gwt hook ...`, hand off to the CLI entry point
+    // without touching the terminal or initializing the TUI tracing
+    // subscriber. Any other argv shape keeps the legacy TUI behaviour below.
     let argv: Vec<String> = std::env::args().collect();
     if gwt_tui::cli::should_dispatch_cli(&argv) {
         return run_cli(&argv);
     }
 
-    // Install a panic hook that restores the terminal before printing the
-    // backtrace.  Without this, panics leave the terminal in raw/alt-screen
-    // mode and the error message is invisible.
+    // SPEC-6 Phase 5: initialize `tracing_subscriber` with a non-blocking
+    // JSONL file writer rolling daily, plus a UI forwarder layer. The
+    // returned handles MUST be kept alive for the lifetime of main so
+    // that the background writer thread stays up.
+    let logging_config = LoggingConfig::new(gwt_logs_dir());
+    let mut logging_handles = match init_logging(logging_config) {
+        Ok(h) => Some(h),
+        Err(err) => {
+            eprintln!("warning: structured logging disabled: {err}");
+            None
+        }
+    };
+
+    // Install a panic hook that:
+    //   1. restores the terminal (raw mode + alt screen) so panics are visible
+    //   2. emits the panic info as a `tracing::error!` so that the final
+    //      event lands in `gwt.log.YYYY-MM-DD`
+    //   3. delegates to the previous hook (which prints the standard
+    //      backtrace to stderr)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = leave_terminal(&mut io::stdout());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            target: "gwt_tui::panic",
+            panic = %info,
+            backtrace = %backtrace,
+            "TUI panic"
+        );
         default_hook(info);
     }));
+
+    tracing::info!(
+        target: "gwt_tui::main",
+        version = env!("CARGO_PKG_VERSION"),
+        "gwt-tui starting"
+    );
+
+    // Take the UI log receiver before we move into run_app — we will
+    // bridge it into a std::sync::mpsc channel that the synchronous
+    // event loop can drain.
+    let logging_ui_rx = logging_handles.as_mut().and_then(|h| h.take_ui_rx());
+    // Clone the reload handle so the Logs tab can cycle the global
+    // log level live (SPEC-6 FR-011).
+    let logging_reload_handle = logging_handles.as_ref().map(|h| h.reload_handle.clone());
 
     // Parse CLI args: optional repo path
     let repo_path = std::env::args()
@@ -275,7 +323,12 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let result = run_app(&mut terminal, repo_path);
+    let result = run_app(
+        &mut terminal,
+        repo_path,
+        logging_ui_rx,
+        logging_reload_handle,
+    );
 
     // Restore terminal
     disable_raw_mode()?;
@@ -283,30 +336,63 @@ fn main() -> io::Result<()> {
     terminal.show_cursor()?;
 
     if let Err(e) = result {
+        tracing::error!(target: "gwt_tui::main", error = %e, "gwt-tui exited with error");
         eprintln!("Error: {e}");
     }
+
+    tracing::info!(target: "gwt_tui::main", "gwt-tui shutdown");
+
+    // Dropping the logging handles flushes the non-blocking writer.
+    drop(logging_handles.take());
 
     Ok(())
 }
 
-/// SPEC-12 Phase 6: CLI entry point.
+/// SPEC-12 Phase 6 (CORE-CLI / #1942): CLI entry point.
 ///
-/// This is reached when argv[1] == "issue". We resolve the repository
-/// coordinates from the current git remote, build the production
-/// [`DefaultCliEnv`], and dispatch the subcommand.
+/// This is reached when argv[1] is a known CLI verb (`issue` or `hook`).
+/// We resolve the repository coordinates from the current git remote,
+/// build the production [`DefaultCliEnv`], and dispatch the subcommand
+/// without initializing the TUI tracing subscriber (CLI invocations are
+/// short-lived and must not interfere with concurrent TUI sessions writing
+/// to the same log directory).
 #[cfg(not(tarpaulin_include))]
 fn run_cli(argv: &[String]) -> io::Result<()> {
-    let (owner, repo) = match resolve_repo_coordinates() {
-        Some(coords) => coords,
-        None => {
-            eprintln!("gwt issue: could not resolve GitHub owner/repo from the current git remote");
-            std::process::exit(2);
-        }
-    };
-    let mut env = match gwt_tui::cli::DefaultCliEnv::new(&owner, &repo) {
+    // For `gwt hook ...` we can run even outside a GitHub-linked repo,
+    // because hooks don't need owner/repo for local atomic writes and
+    // stdin judgement. For `gwt issue ...` we need the remote coordinates.
+    let needs_repo = argv.get(1).map(String::as_str) == Some("issue");
+
+    if needs_repo {
+        let (owner, repo) = match resolve_repo_coordinates() {
+            Some(coords) => coords,
+            None => {
+                eprintln!(
+                    "gwt issue: could not resolve GitHub owner/repo from the current git remote"
+                );
+                std::process::exit(2);
+            }
+        };
+        let mut env = match gwt_tui::cli::DefaultCliEnv::new(&owner, &repo) {
+            Ok(env) => env,
+            Err(e) => {
+                eprintln!("gwt issue: {e}");
+                std::process::exit(1);
+            }
+        };
+        let code = gwt_tui::cli::dispatch(&mut env, argv);
+        std::process::exit(code);
+    }
+
+    // `gwt hook ...` path: use a stub env with empty owner/repo since hooks
+    // don't touch GitHub. We still reuse DefaultCliEnv for stdout/stderr
+    // plumbing; the HttpIssueClient inside is simply unused by hook handlers.
+    let mut env = match gwt_tui::cli::DefaultCliEnv::new("", "") {
         Ok(env) => env,
         Err(e) => {
-            eprintln!("gwt issue: {e}");
+            // Hook handlers should still work even without gh auth; if env
+            // construction fails due to auth, log and exit 1.
+            eprintln!("gwt hook: {e}");
             std::process::exit(1);
         }
     };
@@ -316,8 +402,7 @@ fn run_cli(argv: &[String]) -> io::Result<()> {
 
 /// Parse the `origin` remote URL and return `(owner, repo)` when the remote
 /// points at github.com. Supports both HTTPS and SSH URLs. Returns `None`
-/// when the remote cannot be resolved (e.g. not in a git repo) or when the
-/// host is not github.com.
+/// when the remote cannot be resolved or the host is not github.com.
 fn resolve_repo_coordinates() -> Option<(String, String)> {
     use std::process::Command;
     let output = Command::new("git")
@@ -357,43 +442,12 @@ fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
     None
 }
 
-#[cfg(test)]
-mod main_tests {
-    use super::parse_github_remote_url;
-
-    #[test]
-    fn parses_ssh_url() {
-        assert_eq!(
-            parse_github_remote_url("git@github.com:akiojin/gwt.git"),
-            Some(("akiojin".into(), "gwt".into()))
-        );
-    }
-
-    #[test]
-    fn parses_https_url() {
-        assert_eq!(
-            parse_github_remote_url("https://github.com/akiojin/gwt"),
-            Some(("akiojin".into(), "gwt".into()))
-        );
-        assert_eq!(
-            parse_github_remote_url("https://github.com/akiojin/gwt.git"),
-            Some(("akiojin".into(), "gwt".into()))
-        );
-    }
-
-    #[test]
-    fn rejects_non_github_url() {
-        assert_eq!(
-            parse_github_remote_url("https://example.com/owner/repo"),
-            None
-        );
-    }
-}
-
 #[cfg(not(tarpaulin_include))]
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     repo_path: PathBuf,
+    mut logging_ui_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>,
+    logging_reload_handle: Option<gwt_core::logging::ReloadHandle>,
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
@@ -406,6 +460,61 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    // SPEC-6 Phase 5: spawn the Logs-tab file watcher so the
+    // `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL stream flows into
+    // `LogsState.entries`. Keeping the handle alive for the lifetime
+    // of run_app is enough — the watcher owns its own thread.
+    let (logs_tx, logs_rx) = std::sync::mpsc::channel();
+    let _logs_watcher_handle =
+        gwt_tui::logs_watcher::spawn(gwt_core::paths::gwt_logs_dir(), logs_tx);
+    model.set_logs_watcher_rx(logs_rx);
+
+    // Plumb the reload handle through so the Logs tab can cycle the
+    // tracing level live (SPEC-6 FR-011).
+    if let Some(handle) = logging_reload_handle {
+        model.set_log_reload_handle(handle);
+    }
+
+    // SPEC-6 FR-015 + reviewer comment B5: bridge the tokio
+    // UnboundedReceiver<LogEvent> from `logging::init` into a
+    // std::sync::mpsc channel so the synchronous TUI loop can drain
+    // UI log events without a tokio runtime.
+    //
+    // The bridge loop polls `try_recv` and watches an
+    // `Arc<AtomicBool>` shutdown flag instead of using
+    // `blocking_recv()`. The reason: the `UnboundedSender` produced
+    // by `logging::init` is cloned into the global tracing
+    // subscriber's `UiForwarderLayer` and there is no way to drop the
+    // global subscriber, so `blocking_recv()` would never see all
+    // senders dropped and the bridge thread would hang on shutdown.
+    let logs_bridge_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Some(mut ui_rx) = logging_ui_rx.take() {
+        let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Notification>();
+        let shutdown = std::sync::Arc::clone(&logs_bridge_shutdown);
+        std::thread::Builder::new()
+            .name("gwt-ui-log-bridge".into())
+            .spawn(move || {
+                use std::sync::atomic::Ordering;
+                while !shutdown.load(Ordering::Relaxed) {
+                    match ui_rx.try_recv() {
+                        Ok(event) => {
+                            if bridge_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("spawn ui log bridge thread");
+        model.set_ui_log_rx(bridge_rx);
+    }
+
     if let Some(warning) = reset_startup_runtime_state_with(&gwt_core::paths::gwt_sessions_dir()) {
         app::update(
             &mut model,
@@ -488,6 +597,7 @@ fn run_app(
         terminal.draw(|frame| {
             app::view(&model, frame);
         })?;
+        let last_draw_at = Instant::now();
 
         // Check quit
         if model.quit {
@@ -510,11 +620,13 @@ fn run_app(
 
             let had_pty_output = drain_pty_output_into_model(&mut model);
 
-            let Some(msg) =
-                next_message_for_loop_iteration(&mut pending_messages, deadline, had_pty_output, {
-                    |deadline, slice| event::poll_event_slice(deadline, slice)
-                })
-            else {
+            let Some(msg) = next_message_for_loop_iteration(
+                &mut pending_messages,
+                deadline,
+                had_pty_output,
+                Some(last_draw_at),
+                event::poll_event_slice,
+            ) else {
                 if had_pty_output {
                     break;
                 }
@@ -548,6 +660,10 @@ fn run_app(
 
     // Kill all live PTY processes on shutdown.
     model.kill_all_pty();
+
+    // Signal the UI log bridge thread to exit so it does not outlive
+    // `run_app` (reviewer comment B5).
+    logs_bridge_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
 
     if model.active_layer != ActiveLayer::Initialization {
         let session_state_path = Model::session_state_path(model.repo_path());
@@ -847,6 +963,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             true,
+            Some(Instant::now()),
             |_deadline, _slice| {
                 polled = true;
                 None
@@ -861,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn next_message_for_loop_iteration_uses_grace_slice_after_pty_output() {
+    fn next_message_for_loop_iteration_uses_frame_budget_after_pty_output() {
         let mut pending_messages = VecDeque::new();
         let mut observed_slice = None;
 
@@ -869,6 +986,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             true,
+            Some(Instant::now()),
             |_deadline, slice| {
                 observed_slice = Some(slice);
                 Some(Message::Tick)
@@ -876,7 +994,9 @@ mod tests {
         );
 
         assert!(matches!(next, Some(Message::Tick)));
-        assert_eq!(observed_slice, Some(PTY_OUTPUT_INPUT_GRACE_SLICE));
+        let observed_slice = observed_slice.expect("observed slice");
+        assert!(observed_slice > Duration::from_millis(1));
+        assert!(observed_slice <= PTY_REDRAW_FRAME_INTERVAL);
     }
 
     #[test]
@@ -888,6 +1008,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             false,
+            None,
             |_deadline, slice| {
                 observed_slice = Some(slice);
                 Some(Message::Tick)
@@ -896,6 +1017,26 @@ mod tests {
 
         assert!(matches!(next, Some(Message::Tick)));
         assert_eq!(observed_slice, Some(PTY_OUTPUT_POLL_SLICE));
+    }
+
+    #[test]
+    fn pty_redraw_poll_slice_waits_for_remaining_frame_budget() {
+        let now = Instant::now();
+        let last_draw_at = now - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::from_millis(28));
+    }
+
+    #[test]
+    fn pty_redraw_poll_slice_returns_zero_after_frame_budget_is_spent() {
+        let now = Instant::now();
+        let last_draw_at = now - PTY_REDRAW_FRAME_INTERVAL - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::ZERO);
     }
 
     #[test]

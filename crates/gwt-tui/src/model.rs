@@ -1,5 +1,6 @@
 //! Model — central application state for the Elm Architecture.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use std::time::Duration;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use gwt_config::VoiceConfig;
 use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
+use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
 use crate::input::voice::VoiceInputState;
@@ -28,7 +30,46 @@ use crate::screens::service_select::ServiceSelectState;
 use crate::screens::settings::SettingsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
-use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
+use gwt_core::logging::LogEvent as Notification;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+/// In-memory buffer of log events surfaced in the Logs tab.
+///
+/// Replaces the old `gwt_notification::StructuredLog` ring buffer. The
+/// file on disk (`~/.gwt/logs/gwt.log.YYYY-MM-DD`) is the authoritative
+/// record; this in-memory copy only feeds the UI filter/render pipeline
+/// so that the Logs tab can display events without parsing the file.
+#[derive(Debug, Default, Clone)]
+pub struct NotificationLog {
+    entries: Vec<Notification>,
+}
+
+impl NotificationLog {
+    const CAPACITY: usize = 10_000;
+
+    pub fn push(&mut self, entry: Notification) {
+        if self.entries.len() >= Self::CAPACITY {
+            let drop_count = self.entries.len() - Self::CAPACITY + 1;
+            self.entries.drain(0..drop_count);
+        }
+        self.entries.push(entry);
+    }
+
+    /// Borrow the underlying entries as a slice. Avoids the per-call
+    /// allocation that the previous `Vec<&Notification>` signature
+    /// incurred (reviewer nitpick on PR #1916).
+    pub fn entries(&self) -> &[Notification] {
+        &self.entries
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 type BoxedVoiceBackend = Box<dyn VoiceBackend + Send>;
 
@@ -471,9 +512,10 @@ impl ScreenSnapshot {
 }
 
 fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
-    let (rows, cols) = screen.size();
-    (0..rows)
-        .map(|row| normalize_visible_line(&screen.contents_between(row, 0, row, cols)))
+    let (_, cols) = screen.size();
+    screen
+        .rows(0, cols)
+        .map(|row| normalize_visible_line(&row))
         .collect()
 }
 
@@ -527,6 +569,13 @@ impl SnapshotCaptureOutcome {
             bottom_preview: String::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleUrlRegionCache {
+    width: u16,
+    height: u16,
+    regions: Vec<crate::renderer::UrlRegion>,
 }
 
 fn is_alt_screen_toggle_sequence(sequence: &[u8]) -> bool {
@@ -597,6 +646,7 @@ fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
 
 fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
     const CLEAR_HOME: &[u8] = b"\x1b[2J\x1b[H";
+    const HOME: &[u8] = b"\x1b[H";
 
     if bytes.is_empty() {
         return Vec::new();
@@ -604,18 +654,26 @@ fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
 
     let mut starts = vec![0usize];
     let mut search_index = 0usize;
-    while search_index + CLEAR_HOME.len() <= bytes.len() {
-        let Some(relative) = bytes[search_index..]
-            .windows(CLEAR_HOME.len())
-            .position(|window| window == CLEAR_HOME)
-        else {
-            break;
-        };
-        let absolute = search_index + relative;
-        if absolute != 0 {
-            starts.push(absolute);
+    while search_index < bytes.len() {
+        if bytes[search_index..].starts_with(CLEAR_HOME) {
+            if search_index != 0 {
+                starts.push(search_index);
+            }
+            search_index = search_index.saturating_add(CLEAR_HOME.len());
+            continue;
         }
-        search_index = absolute.saturating_add(CLEAR_HOME.len());
+
+        if bytes[search_index..].starts_with(HOME)
+            && segment_starts_full_home_repaint(&bytes[search_index..])
+        {
+            if search_index != 0 {
+                starts.push(search_index);
+            }
+            search_index = search_index.saturating_add(HOME.len());
+            continue;
+        }
+
+        search_index += 1;
     }
 
     starts.sort_unstable();
@@ -629,6 +687,18 @@ fn split_agent_snapshot_segments(bytes: &[u8]) -> Vec<&[u8]> {
         }
     }
     segments
+}
+
+fn segment_starts_full_home_repaint(bytes: &[u8]) -> bool {
+    const HOME_REPAINT_SCAN_LIMIT: usize = 512;
+    const HOME_REPAINT_MIN_TOP_ROWS: usize = 3;
+
+    let scan = &bytes[..bytes.len().min(HOME_REPAINT_SCAN_LIMIT)];
+    (1..=HOME_REPAINT_MIN_TOP_ROWS).all(|row| {
+        let needle = format!("\x1b[{row};1H");
+        scan.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    })
 }
 
 fn segment_contains_clear_home(bytes: &[u8]) -> bool {
@@ -787,6 +857,7 @@ pub struct VtState {
     mouse_mode_pending: Vec<u8>,
     mouse_tracking_enabled: bool,
     sgr_mouse_enabled: bool,
+    visible_url_cache: RefCell<Option<VisibleUrlRegionCache>>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -828,6 +899,7 @@ impl Clone for VtState {
             mouse_mode_pending: self.mouse_mode_pending.clone(),
             mouse_tracking_enabled: self.mouse_tracking_enabled,
             sgr_mouse_enabled: self.sgr_mouse_enabled,
+            visible_url_cache: RefCell::new(self.visible_url_cache.borrow().clone()),
         }
     }
 }
@@ -851,6 +923,7 @@ impl VtState {
             mouse_mode_pending: Vec::new(),
             mouse_tracking_enabled: false,
             sgr_mouse_enabled: false,
+            visible_url_cache: RefCell::new(None),
         };
         state.refresh_scrollback_metrics();
         state
@@ -877,6 +950,7 @@ impl VtState {
         self.refresh_scrollback_metrics();
         self.set_scrollback(0);
         self.capture_snapshot();
+        self.invalidate_visible_url_cache();
     }
 
     pub fn rows(&self) -> u16 {
@@ -895,6 +969,7 @@ impl VtState {
         self.scrollback_parser.set_size(rows, cols);
         self.refresh_scrollback_metrics();
         self.set_scrollback(current_scrollback.min(self.max_scrollback));
+        self.invalidate_visible_url_cache();
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
@@ -902,6 +977,7 @@ impl VtState {
         let previous_max_scrollback = self.max_scrollback;
         let previous_snapshot_count = self.snapshots.len();
         let mut synthetic_rows_appended = 0usize;
+        let mut last_snapshot = None;
         let segments = if matches!(
             self.scrollback_strategy,
             ScrollbackStrategy::AgentMemoryBacked
@@ -920,8 +996,9 @@ impl VtState {
             synthetic_rows_appended = synthetic_rows_appended.saturating_add(synthetic_rows.len());
             self.process_scrollback_bytes(segment, &synthetic_rows, &current_snapshot);
             if index + 1 < segments.len() {
-                self.capture_snapshot();
+                self.capture_snapshot_from(current_snapshot.clone());
             }
+            last_snapshot = Some(current_snapshot);
         }
         self.refresh_scrollback_metrics();
         if self.max_scrollback > 0 && self.follow_live {
@@ -937,7 +1014,11 @@ impl VtState {
                     .min(self.max_scrollback),
             );
         }
-        let mut snapshot_outcome = self.capture_snapshot();
+        let mut snapshot_outcome = if let Some(snapshot) = last_snapshot {
+            self.capture_snapshot_from(snapshot)
+        } else {
+            self.capture_snapshot()
+        };
         snapshot_outcome.synthetic_rows_appended = synthetic_rows_appended;
         self.log_process_debug(
             bytes,
@@ -945,6 +1026,7 @@ impl VtState {
             previous_snapshot_count,
             &snapshot_outcome,
         );
+        self.invalidate_visible_url_cache();
     }
 
     fn process_scrollback_bytes(
@@ -1091,12 +1173,16 @@ impl VtState {
     }
 
     pub fn set_scrollback(&mut self, rows: usize) {
+        let previous = self.scrollback();
         if self.uses_agent_row_history() {
             self.agent_scrollback = rows.min(self.max_scrollback);
-            return;
+        } else {
+            self.scrollback_parser
+                .set_scrollback(rows.min(self.max_scrollback));
         }
-        self.scrollback_parser
-            .set_scrollback(rows.min(self.max_scrollback));
+        if self.scrollback() != previous {
+            self.invalidate_visible_url_cache();
+        }
     }
 
     pub fn follow_live(&self) -> bool {
@@ -1108,11 +1194,15 @@ impl VtState {
     }
 
     pub fn set_follow_live(&mut self, follow_live: bool) {
+        if self.follow_live == follow_live {
+            return;
+        }
         self.follow_live = follow_live;
         if follow_live {
             self.set_scrollback(0);
             self.snapshot_cursor = None;
         }
+        self.invalidate_visible_url_cache();
     }
 
     fn row_scrollback_capacity(&self) -> usize {
@@ -1146,6 +1236,29 @@ impl VtState {
         Some(parser)
     }
 
+    pub(crate) fn with_visible_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
+        if let Some(snapshot) = self.active_snapshot() {
+            let mut parser = vt100::Parser::new(snapshot.rows(), snapshot.cols(), 0);
+            parser.process(snapshot.state());
+            return f(parser.screen());
+        }
+
+        if !self.follow_live && self.max_scrollback() > 0 {
+            if self.uses_agent_row_history() {
+                let parser = self.agent_row_history_parser();
+                return f(parser.screen());
+            }
+            let mut parser =
+                vt100::Parser::new(self.rows, self.cols, self.row_scrollback_capacity());
+            let state = self.scrollback_parser.screen().state_formatted();
+            parser.process(&state);
+            parser.set_scrollback(self.scrollback());
+            return f(parser.screen());
+        }
+
+        f(self.parser.screen())
+    }
+
     pub fn visible_screen_parser(&self) -> vt100::Parser {
         if let Some(snapshot) = self.active_snapshot() {
             let mut parser = vt100::Parser::new(snapshot.rows(), snapshot.cols(), 0);
@@ -1171,6 +1284,16 @@ impl VtState {
         parser
     }
 
+    pub(crate) fn visible_url_regions(&self, area: Rect) -> Vec<crate::renderer::UrlRegion> {
+        self.with_visible_screen(|screen| {
+            self.visible_url_regions_with_builder(
+                screen,
+                area,
+                crate::renderer::collect_url_regions,
+            )
+        })
+    }
+
     pub fn viewing_history(&self) -> bool {
         self.active_snapshot().is_some() || (!self.follow_live && self.max_scrollback() > 0)
     }
@@ -1185,6 +1308,7 @@ impl VtState {
         let base = self.snapshot_cursor.unwrap_or(newest_snapshot);
         self.snapshot_cursor = Some(base.saturating_sub(rows).min(oldest_past_snapshot));
         self.follow_live = false;
+        self.invalidate_visible_url_cache();
         true
     }
 
@@ -1205,6 +1329,7 @@ impl VtState {
             self.snapshot_cursor = Some(next);
             self.follow_live = false;
         }
+        self.invalidate_visible_url_cache();
         true
     }
 
@@ -1264,6 +1389,41 @@ impl VtState {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
+    }
+
+    fn visible_url_regions_with_builder<F>(
+        &self,
+        screen: &vt100::Screen,
+        area: Rect,
+        build: F,
+    ) -> Vec<crate::renderer::UrlRegion>
+    where
+        F: FnOnce(&vt100::Screen, Rect) -> Vec<crate::renderer::UrlRegion>,
+    {
+        let normalized = Rect::new(
+            0,
+            0,
+            area.width.min(screen.size().1),
+            area.height.min(screen.size().0),
+        );
+
+        if let Some(cache) = self.visible_url_cache.borrow().as_ref() {
+            if cache.width == normalized.width && cache.height == normalized.height {
+                return cache.regions.clone();
+            }
+        }
+
+        let regions = build(screen, normalized);
+        self.visible_url_cache.replace(Some(VisibleUrlRegionCache {
+            width: normalized.width,
+            height: normalized.height,
+            regions: regions.clone(),
+        }));
+        regions
+    }
+
+    fn invalidate_visible_url_cache(&mut self) {
+        self.visible_url_cache.get_mut().take();
     }
 
     fn refresh_scrollback_metrics(&mut self) {
@@ -1440,16 +1600,23 @@ impl VtState {
     }
 
     fn capture_snapshot(&mut self) -> SnapshotCaptureOutcome {
+        let snapshot = ScreenSnapshot::from_screen(self.rows, self.cols, self.parser.screen());
+        self.capture_snapshot_from(snapshot)
+    }
+
+    fn capture_snapshot_from(&mut self, snapshot: ScreenSnapshot) -> SnapshotCaptureOutcome {
         let snapshot_count_before = self.snapshots.len();
-        let should_capture = match self.scrollback_strategy {
-            ScrollbackStrategy::Standard => self.uses_snapshot_scrollback(),
-            ScrollbackStrategy::AgentMemoryBacked => true,
-        };
-        if !should_capture {
-            return SnapshotCaptureOutcome::skipped(snapshot_count_before);
+        let keep_history = self.uses_snapshot_scrollback();
+        if !keep_history {
+            return match self.scrollback_strategy {
+                ScrollbackStrategy::Standard => {
+                    self.snapshots.clear();
+                    SnapshotCaptureOutcome::skipped(snapshot_count_before)
+                }
+                ScrollbackStrategy::AgentMemoryBacked => self.replace_snapshot_baseline(snapshot),
+            };
         }
 
-        let snapshot = ScreenSnapshot::from_screen(self.rows, self.cols, self.parser.screen());
         let surface_digest = visible_surface_digest(&snapshot.visible_lines);
         let top_preview = first_non_blank_preview(&snapshot.visible_lines);
         let bottom_preview = last_non_blank_preview(&snapshot.visible_lines);
@@ -1485,6 +1652,62 @@ impl VtState {
             appended: true,
             deduped: false,
             pruned_blank_prefix,
+            snapshot_count_after: self.snapshots.len(),
+            synthetic_rows_appended: 0,
+            surface_digest,
+            top_preview,
+            bottom_preview,
+        }
+    }
+
+    fn replace_snapshot_baseline(&mut self, snapshot: ScreenSnapshot) -> SnapshotCaptureOutcome {
+        let surface_digest = visible_surface_digest(&snapshot.visible_lines);
+        let top_preview = first_non_blank_preview(&snapshot.visible_lines);
+        let bottom_preview = last_non_blank_preview(&snapshot.visible_lines);
+
+        if self
+            .snapshots
+            .back()
+            .is_some_and(|existing| existing.same_visible_surface(&snapshot))
+        {
+            if self.snapshots.len() > 1 {
+                self.snapshots.clear();
+                self.snapshots.push_back(snapshot);
+                self.snapshot_cursor = None;
+                return SnapshotCaptureOutcome {
+                    attempted: true,
+                    appended: true,
+                    deduped: false,
+                    pruned_blank_prefix: 0,
+                    snapshot_count_after: self.snapshots.len(),
+                    synthetic_rows_appended: 0,
+                    surface_digest,
+                    top_preview,
+                    bottom_preview,
+                };
+            }
+
+            return SnapshotCaptureOutcome {
+                attempted: true,
+                appended: false,
+                deduped: true,
+                pruned_blank_prefix: 0,
+                snapshot_count_after: self.snapshots.len(),
+                synthetic_rows_appended: 0,
+                surface_digest,
+                top_preview,
+                bottom_preview,
+            };
+        }
+
+        self.snapshots.clear();
+        self.snapshots.push_back(snapshot);
+        self.snapshot_cursor = None;
+        SnapshotCaptureOutcome {
+            attempted: true,
+            appended: true,
+            deduped: false,
+            pruned_blank_prefix: 0,
             snapshot_count_after: self.snapshots.len(),
             synthetic_rows_appended: 0,
             surface_digest,
@@ -1555,12 +1778,14 @@ pub struct Model {
     pub(crate) current_notification: Option<Notification>,
     /// Remaining lifetime for auto-dismissing status notifications.
     pub(crate) current_notification_ttl: Option<Duration>,
-    /// Structured notification log.
-    pub(crate) notification_log: StructuredLog,
-    /// Sender side of the notification bus.
-    pub(crate) _notification_bus: NotificationBus,
-    /// Receiver side of the notification bus.
-    pub(crate) notification_receiver: NotificationReceiver,
+    /// Structured notification log (in-memory mirror of file-based log).
+    pub(crate) notification_log: NotificationLog,
+    /// Sender side of the in-process bus used by legacy call sites that
+    /// dispatch `Notification`s directly rather than going through
+    /// `tracing::*!`. New code should emit `tracing` events instead.
+    pub(crate) _notification_bus: UnboundedSender<Notification>,
+    /// Receiver side of the in-process bus. Drained each tick.
+    pub(crate) notification_receiver: UnboundedReceiver<Notification>,
     /// Which layer has focus.
     pub active_layer: ActiveLayer,
     /// Which pane has keyboard focus.
@@ -1644,6 +1869,23 @@ pub struct Model {
     pub(crate) pty_output_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
     /// Receiver for PTY output drained in the event loop.
     pub(crate) pty_output_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    /// Receiver for Logs tab packets produced by the background file
+    /// tail watcher. `None` in contexts without a spawned watcher
+    /// (most unit tests).
+    pub(crate) logs_watcher_rx:
+        Option<std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>>,
+    /// Receiver for `tracing::warn!` / `tracing::error!` / `tracing::info!`
+    /// events that should surface as toasts or error modal entries.
+    /// Fed by a bridge thread that drains the tokio
+    /// `UnboundedReceiver<LogEvent>` returned by `logging::init` and
+    /// forwards into this std::sync::mpsc channel so the synchronous
+    /// event loop can drain it without a tokio runtime. `None` in
+    /// tests.
+    pub(crate) ui_log_rx: Option<std::sync::mpsc::Receiver<Notification>>,
+    /// Live tracing-subscriber reload handle (SPEC-6 FR-011). When
+    /// present, the Logs tab can cycle the global log level at
+    /// runtime via `LogsMessage::CycleLogLevel`.
+    pub(crate) log_reload_handle: Option<gwt_core::logging::ReloadHandle>,
     /// Initialization screen state (present when ActiveLayer::Initialization).
     pub(crate) initialization: Option<InitializationState>,
 }
@@ -1675,12 +1917,12 @@ impl Model {
             vt: VtState::new(24, 80),
             created_at: std::time::Instant::now(),
         };
-        let (notification_bus, notification_receiver) = NotificationBus::new();
+        let (notification_bus, notification_receiver) = unbounded_channel::<Notification>();
         let (pty_output_tx, pty_output_rx) = std::sync::mpsc::channel();
         Self {
             current_notification: None,
             current_notification_ttl: None,
-            notification_log: StructuredLog::default(),
+            notification_log: NotificationLog::default(),
             _notification_bus: notification_bus,
             notification_receiver,
             active_layer: ActiveLayer::Management,
@@ -1732,8 +1974,79 @@ impl Model {
             terminal_trackpad_scroll_row: None,
             pty_output_tx,
             pty_output_rx,
+            logs_watcher_rx: None,
+            ui_log_rx: None,
+            log_reload_handle: None,
             initialization: None,
         }
+    }
+
+    /// Attach a logs-watcher receiver produced by
+    /// [`crate::logs_watcher::spawn`]. Called exactly once from `main`.
+    pub fn set_logs_watcher_rx(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>,
+    ) {
+        self.logs_watcher_rx = Some(rx);
+    }
+
+    /// Attach a UI log event receiver (SPEC-6 FR-015).
+    ///
+    /// The receiver is drained each tick; `Warn`/`Error` events
+    /// produced by **any** crate's `tracing::warn!` / `tracing::error!`
+    /// call become toasts / error modal entries automatically.
+    pub fn set_ui_log_rx(&mut self, rx: std::sync::mpsc::Receiver<Notification>) {
+        self.ui_log_rx = Some(rx);
+    }
+
+    /// Attach a tracing-subscriber reload handle (SPEC-6 FR-011).
+    /// Enables live log level toggling from the Logs tab.
+    pub fn set_log_reload_handle(&mut self, handle: gwt_core::logging::ReloadHandle) {
+        self.log_reload_handle = Some(handle);
+    }
+
+    /// Apply a new log level via the reload handle. Returns an error
+    /// string if the handle is missing or the reload fails.
+    ///
+    /// Delegates to `gwt_core::logging::apply_log_level_to_handle` so
+    /// the EnvFilter parsing logic stays in lockstep with
+    /// `LoggingHandles::set_level` (reviewer nitpick on PR #1916).
+    pub(crate) fn apply_log_level(&self, level: gwt_core::logging::LogLevel) -> Result<(), String> {
+        let handle = self
+            .log_reload_handle
+            .as_ref()
+            .ok_or_else(|| "log reload handle not attached".to_string())?;
+        gwt_core::logging::apply_log_level_to_handle(handle, level)
+    }
+
+    /// Drain pending logs-watcher packets into `LogsState`. Returns the
+    /// number of events applied (0 when the receiver is absent or
+    /// empty).
+    pub(crate) fn drain_logs_watcher(&mut self) -> usize {
+        use crate::logs_watcher::LogsWatcherPacket;
+        use crate::screens::logs::{update as logs_update, LogsMessage};
+        let Some(rx) = self.logs_watcher_rx.as_ref() else {
+            return 0;
+        };
+        let mut total = 0usize;
+        while let Ok(packet) = rx.try_recv() {
+            match packet {
+                LogsWatcherPacket::SetEntries(entries) => {
+                    total += entries.len();
+                    logs_update(&mut self.logs, LogsMessage::SetEntries(entries));
+                }
+                LogsWatcherPacket::AppendEntries(entries) => {
+                    total += entries.len();
+                    // Route through the screen update fn so
+                    // `clamp_selected()` runs after the push (reviewer
+                    // comment B4 — `selected` could otherwise drift
+                    // past the filtered view length when the active
+                    // filter hides the new tail).
+                    logs_update(&mut self.logs, LogsMessage::AppendEntries(entries));
+                }
+            }
+        }
+        total
     }
 
     /// Create a new Model in Initialization layer (no repo detected).
@@ -1815,10 +2128,9 @@ impl Model {
         }
     }
 
-    /// Cloneable handle for sending notifications into the TUI.
-    /// Public clone of the notification bus sender. Used by `index_worker`
-    /// to publish lifecycle events into the Logs tab.
-    pub fn notification_bus_handle(&self) -> NotificationBus {
+    /// Cloneable handle for sending notifications into the TUI. Used by
+    /// `index_worker` to publish lifecycle events into the Logs tab.
+    pub fn notification_bus_handle(&self) -> UnboundedSender<Notification> {
         self._notification_bus.clone()
     }
 
@@ -1840,7 +2152,11 @@ impl Model {
 
     /// Drain queued notifications from the in-process bus.
     pub(crate) fn drain_notifications(&mut self) -> Vec<Notification> {
-        self.notification_receiver.drain()
+        let mut out = Vec::new();
+        while let Ok(n) = self.notification_receiver.try_recv() {
+            out.push(n);
+        }
+        out
     }
 
     /// Get a mutable reference to the initialization state.
@@ -2031,11 +2347,14 @@ mod tests {
         assert!(model.error_queue.is_empty());
         assert!(!model.quit);
         assert!(model.drain_notifications().is_empty());
-        assert!(model.notification_bus_handle().send(Notification::new(
-            gwt_notification::Severity::Info,
-            "test",
-            "queued",
-        )));
+        assert!(model
+            .notification_bus_handle()
+            .send(Notification::new(
+                gwt_core::logging::LogLevel::Info,
+                "test",
+                "queued",
+            ))
+            .is_ok());
     }
 
     #[test]
@@ -2101,6 +2420,27 @@ mod tests {
     }
 
     #[test]
+    fn split_agent_snapshot_segments_splits_coalesced_home_repaints() {
+        let bytes = [
+            home_repaint_frame(&[
+                "header", "line-2", "line-3", "progress", "line-5", "line-6", "footer",
+            ]),
+            home_repaint_frame(&[
+                "header", "line-3", "progress", "progress", "line-6", "line-7", "footer",
+            ]),
+        ]
+        .concat();
+
+        let segments = split_agent_snapshot_segments(&bytes);
+
+        assert_eq!(
+            segments.len(),
+            2,
+            "agent redraw payloads that contain back-to-back full home repaints should be segmented so Codex-like row shifts can be derived from each frame"
+        );
+    }
+
+    #[test]
     fn filter_scrollback_bytes_strips_split_alt_screen_sequence() {
         let mut pending = Vec::new();
 
@@ -2111,6 +2451,73 @@ mod tests {
         let second = filter_scrollback_bytes_with_pending(&mut pending, b"9hhello");
         assert_eq!(second, b"hello");
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn screen_visible_lines_collect_each_visible_row_once() {
+        let mut parser = vt100::Parser::new(3, 12, 0);
+        parser.process(b"\x1b[2J\x1b[Halpha   \x1b[2;1Hbeta\x1b[3;1Hgamma   ");
+
+        assert_eq!(
+            screen_visible_lines(parser.screen()),
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+        );
+    }
+
+    #[test]
+    fn visible_url_regions_cache_reuses_unchanged_live_surface() {
+        let mut vt = VtState::new(3, 40);
+        vt.process(b"https://example.com/docs");
+        let area = ratatui::layout::Rect::new(0, 0, 40, 3);
+        let builds = std::cell::Cell::new(0usize);
+
+        let first = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+        let second = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+
+        assert_eq!(builds.get(), 1);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn visible_url_regions_cache_invalidates_when_surface_changes() {
+        let mut vt = VtState::new(3, 40);
+        let area = ratatui::layout::Rect::new(0, 0, 40, 3);
+        let builds = std::cell::Cell::new(0usize);
+
+        vt.process(b"https://example.com/docs");
+        let first = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+
+        vt.process(b"\r\nhttps://example.com/next");
+        let second = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+
+        assert_eq!(builds.get(), 2);
+        assert_ne!(second, first);
+        assert!(
+            second
+                .iter()
+                .any(|region| region.url == "https://example.com/next"),
+            "surface changes should invalidate the cached URL regions"
+        );
     }
 
     #[test]
@@ -2524,6 +2931,76 @@ mod tests {
         let contents = vt.visible_screen_parser().screen().contents();
         assert!(contents.contains("line-1"));
         assert!(!contents.contains("line-6"));
+    }
+
+    #[test]
+    fn agent_row_history_mode_keeps_only_latest_snapshot_baseline() {
+        let mut vt = VtState::new(5, 20);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(&full_screen_frame(&[
+            "line-1", "line-2", "line-3", "line-4", "line-5",
+        ]));
+        vt.process(&home_repaint_frame(&[
+            "line-2", "line-3", "line-4", "line-5", "line-6",
+        ]));
+
+        assert_eq!(vt.max_scrollback(), 1);
+        assert!(!vt.uses_snapshot_scrollback());
+        assert_eq!(
+            vt.snapshot_count(),
+            1,
+            "once agent output is normalized into row history, snapshot storage should collapse to a single live comparison baseline"
+        );
+
+        vt.process(&home_repaint_frame(&[
+            "line-3", "line-4", "line-5", "line-6", "line-7",
+        ]));
+
+        assert_eq!(vt.max_scrollback(), 2);
+        assert!(!vt.uses_snapshot_scrollback());
+        assert_eq!(
+            vt.snapshot_count(),
+            1,
+            "subsequent row-history updates should reuse the latest baseline instead of growing snapshot history"
+        );
+    }
+
+    #[test]
+    fn agent_scrollback_strategy_derives_row_history_from_coalesced_home_repaints() {
+        let mut vt = VtState::new(7, 24);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(&full_screen_frame(&[
+            "header", "line-1", "line-2", "line-3", "line-4", "line-5", "footer",
+        ]));
+        vt.process(
+            &[
+                home_repaint_frame(&[
+                    "header", "line-2", "line-3", "progress", "line-5", "line-6", "footer",
+                ]),
+                home_repaint_frame(&[
+                    "header", "line-3", "progress", "progress", "line-6", "line-7", "footer",
+                ]),
+            ]
+            .concat(),
+        );
+
+        assert_eq!(
+            vt.max_scrollback(),
+            2,
+            "coalesced home-repaint payloads should materialize each intermediate vertical shift so Codex-like panes keep line-granular history"
+        );
+        assert!(
+            !vt.uses_snapshot_scrollback(),
+            "once coalesced home repaints are segmented, the pane should stay in row history instead of page-sized snapshot stepping"
+        );
+
+        assert!(vt.scroll_viewport_lines(2));
+        let contents = vt.visible_screen_parser().screen().contents();
+        assert!(contents.contains("line-1"));
+        assert!(contents.contains("line-2"));
+        assert!(!contents.contains("line-7"));
     }
 
     #[test]
