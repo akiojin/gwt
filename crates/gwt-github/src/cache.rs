@@ -222,7 +222,14 @@ impl Cache {
 
 /// Write bytes to `path` atomically via a `.tmp-<pid>-<nanos>` sibling file
 /// followed by `rename`.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// Exposed (via `cache::write_atomic`) so that other crates in the workspace
+/// — notably `gwt-tui`'s hook handlers (SPEC #1942) — can reuse the exact
+/// same crash-safe write path for state files like `runtime-state.json`.
+/// Not part of the semver-stable surface; `#[doc(hidden)]` keeps it out of
+/// generated docs but `pub` is required so the hook code can link against it.
+#[doc(hidden)]
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().expect("path must have a parent");
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(

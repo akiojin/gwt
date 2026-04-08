@@ -71,18 +71,57 @@ fn red_92_parse_hook_empty_is_usage_error() {
 }
 
 #[test]
-fn red_93_dispatch_hook_stub_returns_success() {
+fn dispatch_hook_runtime_state_without_env_is_silent_ok() {
+    // T-025 (SPEC #1942): the old stub printed "not yet implemented"
+    // and returned 0. The real handler now delegates to
+    // `runtime_state::handle`, which returns Ok(()) as a silent no-op
+    // when `GWT_SESSION_RUNTIME_PATH` is unset. Same exit code, quieter
+    // stderr.
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let prev = std::env::var_os("GWT_SESSION_RUNTIME_PATH");
+    std::env::remove_var("GWT_SESSION_RUNTIME_PATH");
+
     let code = dispatch(
         &mut env,
         &argv(&["gwt", "hook", "runtime-state", "PreToolUse"]),
     );
-    assert_eq!(code, 0, "hook skeleton should allow (exit 0)");
+
+    if let Some(v) = prev {
+        std::env::set_var("GWT_SESSION_RUNTIME_PATH", v);
+    }
+
+    assert_eq!(code, 0, "runtime-state with no env var should exit 0");
     let err_text = String::from_utf8(env.stderr.clone()).unwrap();
     assert!(
-        err_text.contains("not yet implemented"),
-        "stub should advertise its scaffold state"
+        err_text.is_empty(),
+        "runtime-state no-op must not print to stderr, got {err_text:?}"
+    );
+}
+
+#[test]
+fn dispatch_hook_unknown_name_exits_2() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "no-such-hook"]));
+    assert_eq!(code, 2, "unknown hook should exit 2");
+    let err_text = String::from_utf8(env.stderr.clone()).unwrap();
+    assert!(
+        err_text.contains("unknown hook 'no-such-hook'"),
+        "stderr should name the unknown hook, got {err_text:?}"
+    );
+}
+
+#[test]
+fn dispatch_hook_runtime_state_missing_event_exits_2() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "runtime-state"]));
+    assert_eq!(code, 2, "runtime-state without <event> should exit 2");
+    let err_text = String::from_utf8(env.stderr.clone()).unwrap();
+    assert!(
+        err_text.contains("missing <event> argument"),
+        "stderr should explain the missing argument, got {err_text:?}"
     );
 }
 

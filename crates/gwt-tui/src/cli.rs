@@ -17,6 +17,8 @@
 //! Missing (deferred to next cycle): `pull`, `create`, `repair`,
 //! `migrate-specs`.
 
+pub mod hook;
+
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -466,15 +468,54 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
 /// - exits 0 (allow / success, stdout empty or a human-readable status)
 /// - exits 2 with a `{"decision":"block",...}` JSON on stdout (block)
 ///
-/// At the skeleton stage every handler is a no-op stub that allows the
-/// event and prints "not yet implemented" on stderr. Individual handlers
-/// (runtime-state, block-*, forward) are ported in follow-up commits.
-pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, _rest: &[String]) -> Result<i32, SpecOpsError> {
-    let _ = writeln!(
-        env.stderr(),
-        "gwt hook {name}: not yet implemented (SPEC #1942 scaffold), allowing"
-    );
-    Ok(0)
+/// Dispatches to the hook handlers in [`crate::cli::hook`]. Unknown hooks
+/// exit 2 with a `gwt hook: unknown hook '<name>'` message on stderr so
+/// that settings_local typos surface loudly. Runtime errors from known
+/// handlers exit 1 with the error chain on stderr; they are never turned
+/// into `decision=block` to avoid false positives under partial outages.
+pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
+    use crate::cli::hook::{runtime_state, HookKind};
+
+    let Some(kind) = HookKind::from_name(name) else {
+        let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
+        return Ok(2);
+    };
+
+    match kind {
+        HookKind::RuntimeState => {
+            // runtime-state takes the event name as its first positional argument
+            // and does not consume stdin.
+            let Some(event) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwt hook runtime-state: missing <event> argument"
+                );
+                return Ok(2);
+            };
+            match runtime_state::handle(event) {
+                Ok(()) => Ok(0),
+                Err(err) => {
+                    let _ = writeln!(env.stderr(), "gwt hook runtime-state: {err}");
+                    Ok(1)
+                }
+            }
+        }
+        HookKind::BlockGitBranchOps
+        | HookKind::BlockCdCommand
+        | HookKind::BlockFileOps
+        | HookKind::BlockGitDirOverride
+        | HookKind::Forward => {
+            // Handlers for these hooks are ported in subsequent tasks
+            // (T-030 onward). Until then they are fail-open no-ops so
+            // that wiring them into settings_local.rs does not regress
+            // behaviour compared to the existing Node scripts.
+            let _ = writeln!(
+                env.stderr(),
+                "gwt hook {name}: handler not yet ported, allowing"
+            );
+            Ok(0)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
