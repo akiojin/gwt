@@ -1,5 +1,45 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: watcher-driven incremental indexing must preserve scope specificity
+
+### 事象
+
+`gwt-tui` の親プロセス自体の CPU を下げたあとも、`ps` では `gwt-tui` の子として
+`chroma_index_runner.py --action index-specs --mode incremental` が code edit のたびに高 CPU で走っていた。
+
+### 原因
+
+- watcher batch は changed paths を持っていたが、`schedule_incremental_index()` はそれを見ずに
+  `files` / `files-docs` / `specs` の 3 scope を毎回順番に起動していた。
+- coalescing state も `dirty: bool` だけだったため、build 中に追加イベントが来ても
+  「次に何の scope を再実行すべきか」を保持できず、狭い変更でも広い Python work に戻りやすかった。
+
+### 再発防止策
+
+1. watcher から runner を起動する前に changed paths を `files` / `files-docs` / `specs` へ分類し、必要 scope だけを queue する。
+2. coalescing state は bool ではなく scope union を保持し、follow-up pass でも narrow rebuild を維持する。
+3. `index.log` に watcher batch ごとの scope を出し、実運用で Python runner が何を起動しているかを直接確認できるようにする。
+
+## 2026-04-08 — fix: live render paths must not rebuild the visible parser and URL scan every frame
+
+### 事象
+
+snapshot churn と visible row O(rows²) を止めたあとも、再起動した `gwt-tui` では
+`render_session_surface()` -> `visible_screen_parser()` -> `collect_url_regions()` が hot path に残り、
+CPU がなお高止まりした。
+
+### 原因
+
+- live render / selection copy / Ctrl+click hit testing が、それぞれ visible screen 用 parser を再構築していた。
+- URL 領域も draw ごとに毎回フル画面再計算しており、画面内容が変わっていなくても
+  `state_formatted` / text assembly / URL regex 走査を繰り返していた。
+
+### 再発防止策
+
+1. live surface を読むだけの経路では parser clone を増やさず、借用ベースの helper で同じ `vt100::Screen` を使い回す。
+2. URL region のような純粋導出データは、surface が不変な間は cache し、invalidate 条件を `process` / `resize` / scrollback mode change に集中させる。
+3. 1 つの hot path を消した後は `sample` を撮り直し、次の支配項が render / parsing / sidecar のどこへ移ったかを確認してから次の修正に進む。
+
 ## 2026-04-08 — fix: per-row visible line scans must not go through `contents_between()`
 
 ### 事象

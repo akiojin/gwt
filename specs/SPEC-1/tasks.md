@@ -111,3 +111,5 @@
 - [x] T098 Rework `VtState` snapshot capture so agent panes reuse the current frame snapshot and keep only the latest live baseline whenever row-history scrollback is active.
 - [x] T099 [P] Add a regression test covering visible row extraction semantics before replacing per-row selection reads with a single-pass scan.
 - [x] T100 Replace `screen_visible_lines()` with a single-pass `vt100::Screen::rows()` walk so redraw-shift detection no longer pays the hidden O(rows²) `contents_between(...).nth(row)` cost on every frame.
+- [x] T101 [P] Write RED tests: unchanged live surfaces reuse cached visible URL regions and invalidate the cache when the rendered VT surface changes.
+- [x] T102 Rework live session render / selection / URL hit-testing paths to borrow the visible screen directly and cache URL-region extraction instead of rebuilding a parser and rescanning URLs every frame.

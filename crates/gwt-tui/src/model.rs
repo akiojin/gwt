@@ -1,5 +1,6 @@
 //! Model — central application state for the Elm Architecture.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use std::time::Duration;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use gwt_config::VoiceConfig;
 use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
+use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
 use crate::input::voice::VoiceInputState;
@@ -524,6 +526,13 @@ impl SnapshotCaptureOutcome {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleUrlRegionCache {
+    width: u16,
+    height: u16,
+    regions: Vec<crate::renderer::UrlRegion>,
+}
+
 fn is_alt_screen_toggle_sequence(sequence: &[u8]) -> bool {
     matches!(
         sequence,
@@ -782,6 +791,7 @@ pub struct VtState {
     mouse_mode_pending: Vec<u8>,
     mouse_tracking_enabled: bool,
     sgr_mouse_enabled: bool,
+    visible_url_cache: RefCell<Option<VisibleUrlRegionCache>>,
 }
 
 impl std::fmt::Debug for VtState {
@@ -823,6 +833,7 @@ impl Clone for VtState {
             mouse_mode_pending: self.mouse_mode_pending.clone(),
             mouse_tracking_enabled: self.mouse_tracking_enabled,
             sgr_mouse_enabled: self.sgr_mouse_enabled,
+            visible_url_cache: RefCell::new(self.visible_url_cache.borrow().clone()),
         }
     }
 }
@@ -846,6 +857,7 @@ impl VtState {
             mouse_mode_pending: Vec::new(),
             mouse_tracking_enabled: false,
             sgr_mouse_enabled: false,
+            visible_url_cache: RefCell::new(None),
         };
         state.refresh_scrollback_metrics();
         state
@@ -872,6 +884,7 @@ impl VtState {
         self.refresh_scrollback_metrics();
         self.set_scrollback(0);
         self.capture_snapshot();
+        self.invalidate_visible_url_cache();
     }
 
     pub fn rows(&self) -> u16 {
@@ -890,6 +903,7 @@ impl VtState {
         self.scrollback_parser.set_size(rows, cols);
         self.refresh_scrollback_metrics();
         self.set_scrollback(current_scrollback.min(self.max_scrollback));
+        self.invalidate_visible_url_cache();
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
@@ -946,6 +960,7 @@ impl VtState {
             previous_snapshot_count,
             &snapshot_outcome,
         );
+        self.invalidate_visible_url_cache();
     }
 
     fn process_scrollback_bytes(
@@ -1092,12 +1107,16 @@ impl VtState {
     }
 
     pub fn set_scrollback(&mut self, rows: usize) {
+        let previous = self.scrollback();
         if self.uses_agent_row_history() {
             self.agent_scrollback = rows.min(self.max_scrollback);
-            return;
+        } else {
+            self.scrollback_parser
+                .set_scrollback(rows.min(self.max_scrollback));
         }
-        self.scrollback_parser
-            .set_scrollback(rows.min(self.max_scrollback));
+        if self.scrollback() != previous {
+            self.invalidate_visible_url_cache();
+        }
     }
 
     pub fn follow_live(&self) -> bool {
@@ -1109,11 +1128,15 @@ impl VtState {
     }
 
     pub fn set_follow_live(&mut self, follow_live: bool) {
+        if self.follow_live == follow_live {
+            return;
+        }
         self.follow_live = follow_live;
         if follow_live {
             self.set_scrollback(0);
             self.snapshot_cursor = None;
         }
+        self.invalidate_visible_url_cache();
     }
 
     fn row_scrollback_capacity(&self) -> usize {
@@ -1147,6 +1170,29 @@ impl VtState {
         Some(parser)
     }
 
+    pub(crate) fn with_visible_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
+        if let Some(snapshot) = self.active_snapshot() {
+            let mut parser = vt100::Parser::new(snapshot.rows(), snapshot.cols(), 0);
+            parser.process(snapshot.state());
+            return f(parser.screen());
+        }
+
+        if !self.follow_live && self.max_scrollback() > 0 {
+            if self.uses_agent_row_history() {
+                let parser = self.agent_row_history_parser();
+                return f(parser.screen());
+            }
+            let mut parser =
+                vt100::Parser::new(self.rows, self.cols, self.row_scrollback_capacity());
+            let state = self.scrollback_parser.screen().state_formatted();
+            parser.process(&state);
+            parser.set_scrollback(self.scrollback());
+            return f(parser.screen());
+        }
+
+        f(self.parser.screen())
+    }
+
     pub fn visible_screen_parser(&self) -> vt100::Parser {
         if let Some(snapshot) = self.active_snapshot() {
             let mut parser = vt100::Parser::new(snapshot.rows(), snapshot.cols(), 0);
@@ -1172,6 +1218,16 @@ impl VtState {
         parser
     }
 
+    pub(crate) fn visible_url_regions(&self, area: Rect) -> Vec<crate::renderer::UrlRegion> {
+        self.with_visible_screen(|screen| {
+            self.visible_url_regions_with_builder(
+                screen,
+                area,
+                crate::renderer::collect_url_regions,
+            )
+        })
+    }
+
     pub fn viewing_history(&self) -> bool {
         self.active_snapshot().is_some() || (!self.follow_live && self.max_scrollback() > 0)
     }
@@ -1186,6 +1242,7 @@ impl VtState {
         let base = self.snapshot_cursor.unwrap_or(newest_snapshot);
         self.snapshot_cursor = Some(base.saturating_sub(rows).min(oldest_past_snapshot));
         self.follow_live = false;
+        self.invalidate_visible_url_cache();
         true
     }
 
@@ -1206,6 +1263,7 @@ impl VtState {
             self.snapshot_cursor = Some(next);
             self.follow_live = false;
         }
+        self.invalidate_visible_url_cache();
         true
     }
 
@@ -1265,6 +1323,41 @@ impl VtState {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
+    }
+
+    fn visible_url_regions_with_builder<F>(
+        &self,
+        screen: &vt100::Screen,
+        area: Rect,
+        build: F,
+    ) -> Vec<crate::renderer::UrlRegion>
+    where
+        F: FnOnce(&vt100::Screen, Rect) -> Vec<crate::renderer::UrlRegion>,
+    {
+        let normalized = Rect::new(
+            0,
+            0,
+            area.width.min(screen.size().1),
+            area.height.min(screen.size().0),
+        );
+
+        if let Some(cache) = self.visible_url_cache.borrow().as_ref() {
+            if cache.width == normalized.width && cache.height == normalized.height {
+                return cache.regions.clone();
+            }
+        }
+
+        let regions = build(screen, normalized);
+        self.visible_url_cache.replace(Some(VisibleUrlRegionCache {
+            width: normalized.width,
+            height: normalized.height,
+            regions: regions.clone(),
+        }));
+        regions
+    }
+
+    fn invalidate_visible_url_cache(&mut self) {
+        self.visible_url_cache.get_mut().take();
     }
 
     fn refresh_scrollback_metrics(&mut self) {
@@ -2174,6 +2267,62 @@ mod tests {
         assert_eq!(
             screen_visible_lines(parser.screen()),
             vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+        );
+    }
+
+    #[test]
+    fn visible_url_regions_cache_reuses_unchanged_live_surface() {
+        let mut vt = VtState::new(3, 40);
+        vt.process(b"https://example.com/docs");
+        let area = ratatui::layout::Rect::new(0, 0, 40, 3);
+        let builds = std::cell::Cell::new(0usize);
+
+        let first = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+        let second = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+
+        assert_eq!(builds.get(), 1);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn visible_url_regions_cache_invalidates_when_surface_changes() {
+        let mut vt = VtState::new(3, 40);
+        let area = ratatui::layout::Rect::new(0, 0, 40, 3);
+        let builds = std::cell::Cell::new(0usize);
+
+        vt.process(b"https://example.com/docs");
+        let first = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+
+        vt.process(b"\r\nhttps://example.com/next");
+        let second = vt.with_visible_screen(|screen| {
+            vt.visible_url_regions_with_builder(screen, area, |screen, area| {
+                builds.set(builds.get().saturating_add(1));
+                crate::renderer::collect_url_regions(screen, area)
+            })
+        });
+
+        assert_eq!(builds.get(), 2);
+        assert_ne!(second, first);
+        assert!(
+            second
+                .iter()
+                .any(|region| region.url == "https://example.com/next"),
+            "surface changes should invalidate the cached URL regions"
         );
     }
 

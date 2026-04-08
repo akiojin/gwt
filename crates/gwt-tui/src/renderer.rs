@@ -237,11 +237,23 @@ pub fn render_vt_screen_with_selection(
     area: Rect,
     selection: Option<TerminalSelection>,
 ) -> Vec<UrlRegion> {
+    let url_regions = collect_url_regions(screen, area);
+    render_vt_screen_with_selection_and_urls(screen, buf, area, selection, &url_regions);
+    url_regions
+}
+
+/// Render a vt100 screen into a ratatui Buffer with precomputed URL regions.
+pub fn render_vt_screen_with_selection_and_urls(
+    screen: &vt100::Screen,
+    buf: &mut Buffer,
+    area: Rect,
+    selection: Option<TerminalSelection>,
+    url_regions: &[UrlRegion],
+) {
     let rows = area.height.min(screen.size().0);
     let cols = area.width.min(screen.size().1);
-    let url_regions = collect_url_regions(screen, area);
     let mut url_cells = std::collections::HashSet::new();
-    for region in &url_regions {
+    for region in url_regions {
         for col in region.start_col..=region.end_col {
             url_cells.insert((region.row, col));
         }
@@ -292,8 +304,6 @@ pub fn render_vt_screen_with_selection(
             }
         }
     }
-
-    url_regions
 }
 
 fn selection_contains(selection: TerminalSelection, row: u16, col: u16) -> bool {

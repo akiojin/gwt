@@ -3,8 +3,8 @@
 ## Progress
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: `95/96` checked in `tasks.md` (Phase 8: 49/50; T-IDX-049 manual e2e pending user verification)
-- Artifact refresh: `2026-04-07T20:00:00Z`
+- Task progress: `97/98` checked in `tasks.md` (Phase 8: 51/52; T-IDX-049 manual e2e pending user verification)
+- Artifact refresh: `2026-04-08T02:31:02Z`
 
 ## Done
 - The missing support artifacts for this near-complete SPEC are now present.
@@ -18,6 +18,8 @@
 - Startup and clone-completion warnings now preserve Python install guidance instead of surfacing only raw runtime setup failures.
 - Phase 7 completed the review follow-up: working Store/launcher Python entrypoints are accepted, future `python3.x` binaries can be discovered from `PATH`, runtime failures preserve probe detail, and startup/clone warnings share stable project-index classification.
 - Broad verification reran successfully across `cargo fmt -- --check`, `cargo test -p gwt-core -p gwt-git -p gwt-tui`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo build -p gwt-tui`.
+- Watcher-driven incremental indexing now classifies changed paths into `files`, `files-docs`, and `specs` before queueing Python runners, so code-only edits no longer spawn `index-specs` or docs rebuilds unless those buckets actually changed.
+- Worktree build coalescing now merges pending scope masks instead of a single dirty bit, preserving narrow follow-up rebuilds under edit bursts instead of falling back to all-scope Python work.
 
 ## Phase 8 Reopening (2026-04-07)
 

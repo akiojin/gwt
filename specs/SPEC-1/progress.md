@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `100/100` checked in `tasks.md`
-- Artifact refresh: `2026-04-08T02:06:00Z`
+- Task progress: `102/102` checked in `tasks.md`
+- Artifact refresh: `2026-04-08T02:31:02Z`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -52,6 +52,7 @@
 - Snapshot capture now tolerates redraw churn by preserving any distinct visible frame, preventing history starvation on dynamic full-screen panes without overlap-score tuning.
 - Agent panes that already have normalized row-history scrollback now collapse snapshot storage to one live comparison baseline and reuse the current frame snapshot, eliminating the hidden full-surface snapshot churn that was driving high CPU.
 - Visible-line extraction for redraw-shift detection now walks `vt100::Screen::rows()` once instead of repeatedly calling `contents_between(...).nth(row)`, removing the hidden O(rows²) surface scan that kept the updated build hot.
+- Live session rendering now borrows the visible `vt100::Screen` directly and caches URL regions per unchanged surface, removing the per-frame parser rebuild plus full-screen URL rescan that had become the next CPU hot path.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 - Transcript-ignore regression coverage now resolves and parses real Claude/Codex transcript candidates before asserting that runtime scrollback remains memory-only.
 

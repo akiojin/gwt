@@ -4919,8 +4919,9 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
     }
 
     let session = model.active_session_tab()?;
-    let parser = session.vt.visible_screen_parser();
-    crate::renderer::collect_url_regions(parser.screen(), Rect::new(0, 0, area.width, area.height))
+    session
+        .vt
+        .visible_url_regions(Rect::new(0, 0, area.width, area.height))
         .into_iter()
         .find(|region| {
             let row = area.y + region.row;
@@ -5055,10 +5056,10 @@ fn queue_active_session_mouse_scroll(
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     let selection = session.vt.selection()?;
     let (start, end) = normalize_selection(selection);
-    let parser = session.vt.visible_screen_parser();
-    let screen = parser.screen();
-    let end_col = end.col.saturating_add(1).min(screen.size().1);
-    Some(screen.contents_between(start.row, start.col, end.row, end_col))
+    session.vt.with_visible_screen(|screen| {
+        let end_col = end.col.saturating_add(1).min(screen.size().1);
+        Some(screen.contents_between(start.row, start.col, end.row, end_col))
+    })
 }
 
 fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
@@ -5267,80 +5268,85 @@ fn render_session_surface(
     show_cursor: bool,
 ) {
     let text_area = session_text_area(session, area);
-    let parser = session.vt.visible_screen_parser();
-    let screen = parser.screen();
-    if screen.contents().trim().is_empty() {
-        match &session.tab_type {
-            crate::model::SessionTabType::Agent { agent_id, color } => {
-                // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
-                const SPINNER: [char; 6] = [
-                    '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
-                ];
-                let elapsed = session.created_at.elapsed().as_millis() as usize;
-                let ch = SPINNER[(elapsed / 200) % SPINNER.len()];
-                let agent_fg = agent_color_to_ratatui(*color);
+    session.vt.with_visible_screen(|screen| {
+        if screen.contents().trim().is_empty() {
+            match &session.tab_type {
+                crate::model::SessionTabType::Agent { agent_id, color } => {
+                    // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
+                    const SPINNER: [char; 6] = [
+                        '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
+                    ];
+                    let elapsed = session.created_at.elapsed().as_millis() as usize;
+                    let ch = SPINNER[(elapsed / 200) % SPINNER.len()];
+                    let agent_fg = agent_color_to_ratatui(*color);
 
-                // Center the startup display vertically
-                let top_pad = area.height.saturating_sub(5) / 2;
-                let mut lines: Vec<Line<'_>> = Vec::new();
-                for _ in 0..top_pad {
+                    // Center the startup display vertically
+                    let top_pad = area.height.saturating_sub(5) / 2;
+                    let mut lines: Vec<Line<'_>> = Vec::new();
+                    for _ in 0..top_pad {
+                        lines.push(Line::from(""));
+                    }
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{} ", theme::icon::SESSION_AGENT),
+                            Style::default().fg(agent_fg),
+                        ),
+                        Span::styled(
+                            session.name.clone(),
+                            Style::default().fg(agent_fg).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
                     lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{ch} "), Style::default().fg(agent_fg)),
+                        Span::styled(
+                            format!("Starting {agent_id}..."),
+                            Style::default().fg(theme::color::TEXT_SECONDARY),
+                        ),
+                    ]));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "Waiting for agent output",
+                        Style::default().fg(theme::color::TEXT_DISABLED),
+                    )));
+                    let paragraph =
+                        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+                    frame.render_widget(paragraph, text_area);
                 }
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} ", theme::icon::SESSION_AGENT),
-                        Style::default().fg(agent_fg),
-                    ),
-                    Span::styled(
-                        session.name.clone(),
-                        Style::default().fg(agent_fg).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{ch} "), Style::default().fg(agent_fg)),
-                    Span::styled(
-                        format!("Starting {agent_id}..."),
-                        Style::default().fg(theme::color::TEXT_SECONDARY),
-                    ),
-                ]));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Waiting for agent output",
-                    Style::default().fg(theme::color::TEXT_DISABLED),
-                )));
-                let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-                frame.render_widget(paragraph, text_area);
+                _ => {
+                    let placeholder = Paragraph::new(format!(
+                        "Session: {} ({}x{})",
+                        session.name,
+                        session.vt.cols(),
+                        session.vt.rows()
+                    ))
+                    .style(Style::default().fg(theme::color::TEXT_DISABLED));
+                    frame.render_widget(placeholder, text_area);
+                }
             }
-            _ => {
-                let placeholder = Paragraph::new(format!(
-                    "Session: {} ({}x{})",
-                    session.name,
-                    session.vt.cols(),
-                    session.vt.rows()
-                ))
-                .style(Style::default().fg(theme::color::TEXT_DISABLED));
-                frame.render_widget(placeholder, text_area);
-            }
+        } else {
+            let url_regions =
+                session
+                    .vt
+                    .visible_url_regions(Rect::new(0, 0, text_area.width, text_area.height));
+            crate::renderer::render_vt_screen_with_selection_and_urls(
+                screen,
+                frame.buffer_mut(),
+                text_area,
+                session.vt.selection(),
+                &url_regions,
+            );
         }
-    } else {
-        let _ = crate::renderer::render_vt_screen_with_selection(
-            screen,
-            frame.buffer_mut(),
-            text_area,
-            session.vt.selection(),
-        );
-    }
 
-    // Show the vt100 cursor when this session has terminal focus.
-    if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let x = text_area.x + cursor_col;
-        let y = text_area.y + cursor_row;
-        if x < text_area.right() && y < text_area.bottom() {
-            frame.set_cursor_position((x, y));
+        if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
+            let (cursor_row, cursor_col) = screen.cursor_position();
+            let x = text_area.x + cursor_col;
+            let y = text_area.y + cursor_row;
+            if x < text_area.right() && y < text_area.bottom() {
+                frame.set_cursor_position((x, y));
+            }
         }
-    }
+    });
 }
 
 /// Render the full UI (Elm: view).
