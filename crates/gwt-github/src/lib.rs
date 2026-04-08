@@ -20,6 +20,7 @@ pub mod cache;
 pub mod client;
 pub mod routing;
 pub mod sections;
+pub mod spec_ops;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
 pub use cache::{Cache, CacheEntry, CacheError, CacheMeta};
@@ -31,3 +32,4 @@ pub use routing::{decide_routing, Routing, ROUTING_PROMOTE_THRESHOLD_BYTES};
 pub use sections::{
     extract_sections, ExtractedSection, SectionName, SectionParseError, SectionPart,
 };
+pub use spec_ops::{SpecOps, SpecOpsError};
