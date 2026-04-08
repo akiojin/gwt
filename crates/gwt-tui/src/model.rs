@@ -465,9 +465,10 @@ impl ScreenSnapshot {
 }
 
 fn screen_visible_lines(screen: &vt100::Screen) -> Vec<String> {
-    let (rows, cols) = screen.size();
-    (0..rows)
-        .map(|row| normalize_visible_line(&screen.contents_between(row, 0, row, cols)))
+    let (_, cols) = screen.size();
+    screen
+        .rows(0, cols)
+        .map(|row| normalize_visible_line(&row))
         .collect()
 }
 
@@ -2163,6 +2164,17 @@ mod tests {
         let second = filter_scrollback_bytes_with_pending(&mut pending, b"9hhello");
         assert_eq!(second, b"hello");
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn screen_visible_lines_collect_each_visible_row_once() {
+        let mut parser = vt100::Parser::new(3, 12, 0);
+        parser.process(b"\x1b[2J\x1b[Halpha   \x1b[2;1Hbeta\x1b[3;1Hgamma   ");
+
+        assert_eq!(
+            screen_visible_lines(parser.screen()),
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+        );
     }
 
     #[test]

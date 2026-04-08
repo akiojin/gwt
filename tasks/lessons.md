@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: per-row visible line scans must not go through `contents_between()`
+
+### 事象
+
+snapshot churn を止めた後も、更新済み `gwt-tui` を再起動すると依然として高 CPU が残り、
+`sample` では `VtState::process()` -> `ScreenSnapshot::from_screen()` ->
+`screen_visible_lines()` -> `vt100::Screen::contents_between()` が hot path になっていた。
+
+### 原因
+
+- `screen_visible_lines()` が各 row ごとに `contents_between(row, 0, row, cols)` を呼んでいた。
+- vt100 側の `contents_between()` は単一行ケースでも内部で `rows(start, width).nth(row)` を辿るため、
+  visible row 全体を読むだけで O(rows²) になっていた。
+- redraw-shift 判定は agent repaint ごとに走るため、この隠れた二乗コストが CPU 張り付きとして表面化した。
+
+### 再発防止策
+
+1. 画面全行を読む用途では selection/clipboard API を流用せず、`rows()` のような単一走査 API を使う。
+2. per-frame hot path に入る helper は、呼び出し先ライブラリの計算量まで確認してから採用する。
+3. プロファイルで hot path が移ったら「前のボトルネックを消せた」だけで満足せず、次の支配項まで潰す。
+
 ## 2026-04-08 — fix: live redraw comparison state must not double as user-visible snapshot history
 
 ### 事象

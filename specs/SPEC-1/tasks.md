@@ -109,3 +109,5 @@
 - [x] T096 Implement lazy scroll-debug logging and clear Terminal.app right-drag anchor state whenever terminal ownership changes or the drag ends outside the session pane.
 - [x] T097 [P] Write RED test: once `AgentMemoryBacked` redraws are normalized into row history, snapshot storage collapses to a single live comparison baseline instead of growing hidden snapshot history.
 - [x] T098 Rework `VtState` snapshot capture so agent panes reuse the current frame snapshot and keep only the latest live baseline whenever row-history scrollback is active.
+- [x] T099 [P] Add a regression test covering visible row extraction semantics before replacing per-row selection reads with a single-pass scan.
+- [x] T100 Replace `screen_visible_lines()` with a single-pass `vt100::Screen::rows()` walk so redraw-shift detection no longer pays the hidden O(rows²) `contents_between(...).nth(row)` cost on every frame.
