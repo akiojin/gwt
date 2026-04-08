@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-search
-description: "Semantic search over local SPEC files (specs/SPEC-{N}/) using vector embeddings. Use when searching for existing specs, finding related specs, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before creating a new SPEC or re-homing work into an existing SPEC."
+description: "Semantic search over local SPEC files (specs/SPEC-{N}/) using vector embeddings. Use when searching for existing specs, finding related specs, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. Use when user says 'search specs', 'find related specs', 'check for duplicate specs', or asks which spec owns a scope."
 ---
 
 # SPEC Search
