@@ -880,7 +880,10 @@ fn e2e_space_on_branch_moves_focus_to_detail_without_opening_wizard() {
 }
 
 #[test]
-fn e2e_ctrl_c_on_branch_opens_delete_confirm() {
+fn e2e_ctrl_c_on_branch_does_not_open_delete_confirm() {
+    // FR-018: legacy single-branch Ctrl+C delete-worktree shortcut removed.
+    // Ctrl+C on the Branches list must no longer open any confirmation
+    // modal — deletion goes through the multi-select Cleanup flow.
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     let mut branches = sample_branches();
@@ -891,10 +894,8 @@ fn e2e_ctrl_c_on_branch_opens_delete_confirm() {
     );
     app::update(&mut model, Message::Branches(BranchesMessage::MoveDown));
 
-    let status = send_key(&mut model, &mut kb, ctrl('c'));
-    assert!(matches!(status, DispatchStatus::Forwarded));
+    let _ = send_key(&mut model, &mut kb, ctrl('c'));
 
     let output = render_to_string(&model, 80, 24);
-    assert!(output.contains("Confirm"));
-    assert!(output.contains("Delete worktree for feature/api?"));
+    assert!(!output.contains("Delete worktree for feature/api?"));
 }

@@ -502,8 +502,86 @@ def _search_file_collection(db_path: str, query: str, n_results: int, collection
     return {"ok": True, "results": items}
 
 
+def _legacy_to_v2_args(db_path: str) -> Optional[Dict[str, str]]:
+    """Derive (repo_hash, worktree_hash, project_root) from a legacy
+    `--db-path = $WORKTREE/.gwt/index` argument so the legacy entrypoints
+    can transparently fall through to the v2 auto-build pipeline.
+
+    Returns None when the path does not match the legacy pattern.
+    """
+    p = Path(db_path).resolve()
+    # Expected layout: <worktree>/.gwt/index
+    if p.name != "index":
+        return None
+    parent = p.parent
+    if parent.name != ".gwt":
+        return None
+    worktree = parent.parent
+    if not worktree.is_dir():
+        return None
+    # Compute repo hash via origin URL.
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(worktree),
+            capture_output=True,
+            encoding="utf-8",
+            check=True,
+        )
+        url = result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    if not url:
+        return None
+
+    # Normalize: git@host:path → host/path; scheme://[user@]host[:port]/path → host/path;
+    # strip trailing .git, lowercase.
+    normalized = url
+    if normalized.startswith("git@"):
+        rest = normalized[len("git@"):]
+        if ":" in rest:
+            host, path = rest.split(":", 1)
+            normalized = f"{host}/{path}"
+    elif "://" in normalized:
+        after = normalized.split("://", 1)[1]
+        if "@" in after:
+            after = after.split("@", 1)[1]
+        if "/" in after:
+            host_port, path = after.split("/", 1)
+            host = host_port.split(":", 1)[0]
+            normalized = f"{host}/{path}"
+    if normalized.endswith(".git"):
+        normalized = normalized[: -len(".git")]
+    normalized = normalized.rstrip("/").lower()
+
+    repo_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    worktree_hash = hashlib.sha256(str(worktree).encode("utf-8")).hexdigest()[:16]
+    return {
+        "repo_hash": repo_hash,
+        "worktree_hash": worktree_hash,
+        "project_root": str(worktree),
+    }
+
+
 def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search implementation-focused project files."""
+    """Search implementation-focused project files (legacy entrypoint).
+
+    Phase 8: when the legacy index path is missing, transparently fall
+    through to the v2 auto-build pipeline.
+    """
+    legacy_db = Path(db_path).resolve()
+    if not legacy_db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-files",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=v2["worktree_hash"],
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
     return _search_file_collection(
         db_path,
         query,
@@ -514,7 +592,20 @@ def action_search(db_path: str, query: str, n_results: int = 10) -> dict:
 
 
 def action_search_docs(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search project docs kept separate from implementation files."""
+    """Search project docs (legacy entrypoint with v2 auto-build fallback)."""
+    legacy_db = Path(db_path).resolve()
+    if not legacy_db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-files-docs",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=v2["worktree_hash"],
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
     return _search_file_collection(
         db_path,
         query,
@@ -651,11 +742,22 @@ def action_index_issues(project_root: str, db_path: str) -> dict:
 
 
 def action_search_issues(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search the GitHub Issues index."""
+    """Search the GitHub Issues index (legacy entrypoint with v2 fallback)."""
     import chromadb  # type: ignore
 
     db = Path(db_path).resolve()
     if not db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-issues",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=None,
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
         return {"ok": False, "error": f"Index not found at {db}"}
 
     client = chromadb.PersistentClient(path=str(db))
@@ -768,11 +870,22 @@ def action_index_specs(project_root: str, db_path: str) -> dict:
 
 
 def action_search_specs(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search the local SPEC index."""
+    """Search the local SPEC index (legacy entrypoint with v2 fallback)."""
     import chromadb  # type: ignore
 
     db = Path(db_path).resolve()
     if not db.is_dir():
+        v2 = _legacy_to_v2_args(db_path)
+        if v2:
+            return action_search_v2(
+                action="search-specs",
+                repo_hash=v2["repo_hash"],
+                worktree_hash=v2["worktree_hash"],
+                project_root=v2["project_root"],
+                query=query,
+                n_results=n_results,
+                no_auto_build=False,
+            )
         return {"ok": False, "error": f"Index not found at {db}"}
 
     client = chromadb.PersistentClient(path=str(db))
@@ -1277,6 +1390,16 @@ def action_index_files_v2(
     paths = _scan_files(root, bucket_filter=bucket)
     new_entries = _build_manifest_entries(root, paths)
 
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": scope,
+            "mode": mode,
+            "done": 0,
+            "total": len(new_entries),
+        }
+    )
+
     with acquire_lock(db_path, exclusive=True):
         client, collection = _make_chroma_collection(
             db_path,
@@ -1292,6 +1415,15 @@ def action_index_files_v2(
             embedded_paths = [root / rel for rel in to_embed]
             count = embed_documents_for_paths(embedded_paths, root, collection)
             _delete_paths_from_collection(collection, to_delete)
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": scope,
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
         else:
             # full mode
             try:
@@ -1305,6 +1437,15 @@ def action_index_files_v2(
 
         write_manifest(db_path, scope=scope, entries=new_entries)
 
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": scope,
+            "mode": mode,
+            "indexed": count,
+            "total": len(new_entries),
+        }
+    )
     return {
         "ok": True,
         "scope": scope,
@@ -1316,6 +1457,51 @@ def action_index_files_v2(
 # ---------------------------------------------------------------------
 # v2 actions: index-specs
 # ---------------------------------------------------------------------
+
+
+def _chunk_spec_content(content: str, max_chunk_len: int = 1800) -> List[Dict[str, str]]:
+    """Split a spec.md body into semantic chunks.
+
+    - Split primarily by H2 headings (`## ...`) so each functional area becomes
+      its own embedding unit.
+    - If a section exceeds `max_chunk_len`, split further by blank lines
+      (paragraphs), packing paragraphs into chunks until the limit is reached.
+    - Returns a list of {heading, body} dicts.
+    """
+    if not content.strip():
+        return []
+
+    # Split while keeping headings at the start of each resulting section.
+    sections = re.split(r"(?m)^(?=## )", content)
+    chunks: List[Dict[str, str]] = []
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        heading_match = re.match(r"^(## .+?)(?:\n|$)", section)
+        heading = heading_match.group(1) if heading_match else "(intro)"
+        if len(section) <= max_chunk_len:
+            chunks.append({"heading": heading, "body": section})
+            continue
+        # Too large: pack paragraphs into smaller chunks under the cap.
+        paragraphs = re.split(r"\n\s*\n", section)
+        current = ""
+        part = 1
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                continue
+            candidate = f"{current}\n\n{paragraph}" if current else paragraph
+            if len(candidate) > max_chunk_len and current:
+                chunks.append(
+                    {"heading": f"{heading} [{part}]", "body": current.strip()}
+                )
+                part += 1
+                current = paragraph
+            else:
+                current = candidate
+        if current.strip():
+            chunks.append({"heading": f"{heading} [{part}]", "body": current.strip()})
+    return chunks
 
 
 def action_index_specs_v2(
@@ -1352,7 +1538,7 @@ def action_index_specs_v2(
         spec_content = ""
         if spec_md.is_file():
             try:
-                spec_content = spec_md.read_text(errors="replace")[:2000]
+                spec_content = spec_md.read_text(errors="replace")
                 stat = spec_md.stat()
                 rel = str(spec_md.relative_to(root))
                 new_entries.append(
@@ -1361,21 +1547,47 @@ def action_index_specs_v2(
             except OSError:
                 pass
 
-        spec_records.append(
-            {
-                "id": f"spec-{spec_id}",
-                "document": f"{title}\n{spec_content}",
-                "metadata": {
-                    "spec_id": spec_id,
-                    "title": title,
-                    "status": status,
-                    "phase": phase,
-                    "dir_name": dir_name,
-                },
-            }
-        )
+        # Chunk spec.md by ## sections so large SPECs (like SPEC-10's
+        # 300+ line Phase 8 additions) do not silently drop content past
+        # the first 2000 characters. Each chunk is embedded separately;
+        # duplicate spec_ids in search results are collapsed in
+        # `_format_spec_results`.
+        chunks = _chunk_spec_content(spec_content)
+        if not chunks:
+            chunks = [{"heading": "(empty)", "body": ""}]
+        total_chunks = len(chunks)
+        for idx, chunk in enumerate(chunks):
+            # Prepend title + heading so semantic search picks up both the
+            # SPEC identity and the section context.
+            document = f"{title}\n{chunk['heading']}\n{chunk['body']}"
+            spec_records.append(
+                {
+                    "id": f"spec-{spec_id}:chunk-{idx}",
+                    "document": document,
+                    "metadata": {
+                        "spec_id": spec_id,
+                        "title": title,
+                        "status": status,
+                        "phase": phase,
+                        "dir_name": dir_name,
+                        "chunk_idx": idx,
+                        "total_chunks": total_chunks,
+                        "chunk_heading": chunk["heading"],
+                    },
+                }
+            )
 
     new_entries.sort(key=lambda e: e["path"])
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "specs",
+            "mode": mode,
+            "done": 0,
+            "total": len(spec_records),
+        }
+    )
 
     with acquire_lock(db_path, exclusive=True):
         client, collection = _make_chroma_collection(db_path, V2_SPECS_COLLECTION)
@@ -1402,6 +1614,15 @@ def action_index_specs_v2(
 
         write_manifest(db_path, scope="specs", entries=new_entries)
 
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "specs",
+            "mode": mode,
+            "indexed": len(spec_records),
+            "total": len(spec_records),
+        }
+    )
     return {"ok": True, "scope": "specs", "indexed": len(spec_records)}
 
 
@@ -1453,12 +1674,29 @@ def action_index_issues_v2(
             if last is not None:
                 age = (_now_utc() - last).total_seconds()
                 if age < ttl_minutes * 60:
+                    emit_progress(
+                        {
+                            "phase": "skipped",
+                            "scope": "issues",
+                            "reason": "ttl",
+                            "ttl_remaining_seconds": int(ttl_minutes * 60 - age),
+                        }
+                    )
                     return {
                         "ok": True,
                         "skipped": True,
                         "scope": "issues",
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age),
                     }
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "issues",
+            "done": 0,
+            "total": 0,
+        }
+    )
 
     with acquire_lock(db_path, exclusive=True):
         try:
@@ -1535,6 +1773,14 @@ def action_index_issues_v2(
             },
         )
 
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "issues",
+            "indexed": len(issues),
+            "total": len(issues),
+        }
+    )
     return {"ok": True, "scope": "issues", "indexed": len(issues)}
 
 
@@ -1581,17 +1827,31 @@ def _format_file_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _format_spec_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [
-        {
-            "spec_id": (it["metadata"] or {}).get("spec_id", it["id"]),
-            "title": (it["metadata"] or {}).get("title", ""),
-            "status": (it["metadata"] or {}).get("status", ""),
-            "phase": (it["metadata"] or {}).get("phase", ""),
-            "dir_name": (it["metadata"] or {}).get("dir_name", ""),
-            "distance": it["distance"],
-        }
-        for it in items
-    ]
+    """Collapse chunked SPEC results so each spec_id appears only once.
+
+    Items are delivered in distance order (lowest first), so the first
+    occurrence of each spec_id is the best-scoring chunk for that SPEC.
+    """
+    formatted: List[Dict[str, Any]] = []
+    seen_spec_ids: set = set()
+    for it in items:
+        meta = it["metadata"] or {}
+        spec_id = meta.get("spec_id", it["id"])
+        if spec_id in seen_spec_ids:
+            continue
+        seen_spec_ids.add(spec_id)
+        formatted.append(
+            {
+                "spec_id": spec_id,
+                "title": meta.get("title", ""),
+                "status": meta.get("status", ""),
+                "phase": meta.get("phase", ""),
+                "dir_name": meta.get("dir_name", ""),
+                "distance": it["distance"],
+                "matched_section": meta.get("chunk_heading", ""),
+            }
+        )
+    return formatted
 
 
 def _format_issue_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1687,12 +1947,15 @@ def action_search_v2(
             "issues": V2_ISSUES_COLLECTION,
         }[scope]
         client, collection = _make_chroma_collection(db_path, collection_name)
-        items = _search_collection_v2(collection, query, n_results)
+        # SPECs are chunked, so a single SPEC can span many Chroma records.
+        # Over-fetch by 5x then collapse by spec_id in the formatter.
+        fetch_n = n_results * 5 if scope == "specs" else n_results
+        items = _search_collection_v2(collection, query, fetch_n)
 
     if scope in ("files", "files-docs"):
         return {"ok": True, "results": _format_file_results(items)}
     if scope == "specs":
-        return {"ok": True, "specResults": _format_spec_results(items)}
+        return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
     return {"ok": True, "issueResults": _format_issue_results(items)}
 
 
