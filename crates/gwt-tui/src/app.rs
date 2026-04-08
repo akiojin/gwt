@@ -7485,6 +7485,68 @@ mod tests {
     }
 
     #[test]
+    fn codex_coalesced_home_repaints_use_local_row_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[H\x1b[1;1Hheader\x1b[2;1Hline-1\x1b[3;1Hline-2\x1b[4;1Hline-3\x1b[5;1Hline-4\x1b[6;1Hline-5\x1b[7;1Hfooter".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                [
+                    b"\x1b[H\x1b[1;1Hheader\x1b[2;1Hline-2\x1b[3;1Hline-3\x1b[4;1Hprogress\x1b[5;1Hline-5\x1b[6;1Hline-6\x1b[7;1Hfooter".as_slice(),
+                    b"\x1b[H\x1b[1;1Hheader\x1b[2;1Hline-3\x1b[3;1Hprogress\x1b[4;1Hprogress\x1b[5;1Hline-6\x1b[6;1Hline-7\x1b[7;1Hfooter".as_slice(),
+                ]
+                .concat(),
+            ),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session.vt.uses_snapshot_scrollback(),
+            "coalesced home-repaint redraws should still promote Codex panes into row-based local history"
+        );
+        assert_eq!(
+            session.vt.max_scrollback(),
+            2,
+            "each repaint shift inside one payload should contribute its own scrolled-off line"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("line-2"));
+        assert!(!frozen.contains("line-7"));
+    }
+
+    #[test]
     fn agent_memory_scrollback_preserves_coalesced_full_screen_redraw_frames() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;

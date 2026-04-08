@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `96/96` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T17:06:36Z`
+- Task progress: `98/98` checked in `tasks.md`
+- Artifact refresh: `2026-04-08T02:44:53+09:00`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -50,6 +50,7 @@
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.
 - SGR leak normalization now runs regardless of terminal-focus state, so leaked wheel sequences can still recover into mouse scrolling when focus handoff has not happened yet.
 - Snapshot capture now tolerates redraw churn by preserving any distinct visible frame, preventing history starvation on dynamic full-screen panes without overlap-score tuning.
+- Coalesced Codex-style `home + repaint` payloads are now segmented into qualified redraw frames before row-history derivation, so each intermediate vertical shift contributes its own scrolled-off line instead of collapsing back to page-sized snapshot scrolling.
 - Acceptance and TDD checklists now reflect that the implementation tasks are complete and backed by focused verification evidence.
 - Transcript-ignore regression coverage now resolves and parses real Claude/Codex transcript candidates before asserting that runtime scrollback remains memory-only.
 
