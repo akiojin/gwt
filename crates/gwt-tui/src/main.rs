@@ -31,7 +31,7 @@ use gwt_tui::{
 };
 
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
-const PTY_OUTPUT_INPUT_GRACE_SLICE: Duration = Duration::from_millis(1);
+const PTY_REDRAW_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MAX_MOUSE_SCROLL_BURST_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +172,7 @@ fn next_message_for_loop_iteration<F>(
     pending_messages: &mut VecDeque<Message>,
     deadline: Instant,
     had_pty_output: bool,
+    last_draw_at: Option<Instant>,
     mut poll_event: F,
 ) -> Option<Message>
 where
@@ -182,11 +183,17 @@ where
     }
 
     let poll_slice = if had_pty_output {
-        PTY_OUTPUT_INPUT_GRACE_SLICE
+        last_draw_at.map_or(Duration::ZERO, |last_draw_at| {
+            pty_redraw_poll_slice(Instant::now(), last_draw_at)
+        })
     } else {
         PTY_OUTPUT_POLL_SLICE
     };
     poll_event(deadline, poll_slice)
+}
+
+fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
+    PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
 }
 
 fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
@@ -379,6 +386,7 @@ fn run_app(
         terminal.draw(|frame| {
             app::view(&model, frame);
         })?;
+        let last_draw_at = Instant::now();
 
         // Check quit
         if model.quit {
@@ -401,11 +409,13 @@ fn run_app(
 
             let had_pty_output = drain_pty_output_into_model(&mut model);
 
-            let Some(msg) =
-                next_message_for_loop_iteration(&mut pending_messages, deadline, had_pty_output, {
-                    |deadline, slice| event::poll_event_slice(deadline, slice)
-                })
-            else {
+            let Some(msg) = next_message_for_loop_iteration(
+                &mut pending_messages,
+                deadline,
+                had_pty_output,
+                Some(last_draw_at),
+                event::poll_event_slice,
+            ) else {
                 if had_pty_output {
                     break;
                 }
@@ -738,6 +748,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             true,
+            Some(Instant::now()),
             |_deadline, _slice| {
                 polled = true;
                 None
@@ -752,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn next_message_for_loop_iteration_uses_grace_slice_after_pty_output() {
+    fn next_message_for_loop_iteration_uses_frame_budget_after_pty_output() {
         let mut pending_messages = VecDeque::new();
         let mut observed_slice = None;
 
@@ -760,6 +771,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             true,
+            Some(Instant::now()),
             |_deadline, slice| {
                 observed_slice = Some(slice);
                 Some(Message::Tick)
@@ -767,7 +779,9 @@ mod tests {
         );
 
         assert!(matches!(next, Some(Message::Tick)));
-        assert_eq!(observed_slice, Some(PTY_OUTPUT_INPUT_GRACE_SLICE));
+        let observed_slice = observed_slice.expect("observed slice");
+        assert!(observed_slice > Duration::from_millis(1));
+        assert!(observed_slice <= PTY_REDRAW_FRAME_INTERVAL);
     }
 
     #[test]
@@ -779,6 +793,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             false,
+            None,
             |_deadline, slice| {
                 observed_slice = Some(slice);
                 Some(Message::Tick)
@@ -787,6 +802,26 @@ mod tests {
 
         assert!(matches!(next, Some(Message::Tick)));
         assert_eq!(observed_slice, Some(PTY_OUTPUT_POLL_SLICE));
+    }
+
+    #[test]
+    fn pty_redraw_poll_slice_waits_for_remaining_frame_budget() {
+        let now = Instant::now();
+        let last_draw_at = now - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::from_millis(28));
+    }
+
+    #[test]
+    fn pty_redraw_poll_slice_returns_zero_after_frame_budget_is_spent() {
+        let now = Instant::now();
+        let last_draw_at = now - PTY_REDRAW_FRAME_INTERVAL - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::ZERO);
     }
 
     #[test]

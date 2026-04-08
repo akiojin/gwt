@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: PTY output must signal dirty state, not permission to redraw immediately
+
+### 事象
+
+snapshot churn、visible row O(rows²)、live render cache miss、Python index worker を潰した後も、
+`gwt-tui` 本体がなお `20-30%` 台の CPU を消費し続け、`sample` では
+`drain_pty_output_into_model()` と `render_session_surface()` が高頻度で積み上がっていた。
+
+### 原因
+
+- event loop は PTY 出力を 1 回でも drain すると、入力がなくても直ちに inner loop を抜けて `terminal.draw()` していた。
+- そのため active agent pane が継続的に PTY 出力を流す状況では、描画の必要量ではなく reader wakeup 回数に引きずられて redraw していた。
+- 既存の `1ms` grace slice は「入力を取り逃さない」には有効だったが、draw rate の上限にはなっておらず、実際には `~80-180fps` 級の redraw が発生していた。
+
+### 再発防止策
+
+1. PTY 出力は「dirty になった」合図として扱い、次の redraw は最後の draw からの最小フレーム間隔で pace する。
+2. redraw 待ち時間は sleep ではなく input poll に使い、ユーザー入力で即座に抜けられるようにする。
+3. `sample` で render hot path が残るときは、1 フレーム当たりのコストだけでなく、1 秒当たり何回 redraw しているかも必ず確認する。
+
 ## 2026-04-08 — fix: watcher-driven incremental indexing must preserve scope specificity
 
 ### 事象
