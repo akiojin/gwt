@@ -1,10 +1,46 @@
 //! Agent launch builder: construct launch configurations for coding agents.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
 use crate::types::{AgentColor, AgentId, SessionMode};
+
+/// Resolve the gwt repo hash for the directory by shelling out to
+/// `git remote get-url origin`. Returns `None` when no origin is configured.
+fn detect_repo_hash_for_dir(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("remote")
+        .arg("get-url")
+        .arg("origin")
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        return None;
+    }
+    Some(
+        gwt_core::repo_hash::compute_repo_hash(&url)
+            .as_str()
+            .to_string(),
+    )
+}
+
+/// Resolve the gwt worktree hash for the directory.
+fn compute_worktree_hash_for_dir(dir: &Path) -> Option<String> {
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    gwt_core::worktree_hash::compute_worktree_hash(&abs)
+        .ok()
+        .map(|h| h.as_str().to_string())
+}
 
 /// Resolved runner command for agent execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +258,16 @@ impl AgentLaunchBuilder {
         env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
         if let Some(ref dir) = self.working_dir {
             env_vars.insert("GWT_PROJECT_ROOT".to_string(), dir.display().to_string());
+
+            // Phase 8 / SPEC-10 FR-028: export repo & worktree hashes so the
+            // skill-driven runner calls can reconstruct the DB path without
+            // re-deriving via `git remote` on every invocation.
+            if let Some(repo_hash) = detect_repo_hash_for_dir(dir) {
+                env_vars.insert("GWT_REPO_HASH".to_string(), repo_hash);
+            }
+            if let Some(wt_hash) = compute_worktree_hash_for_dir(dir) {
+                env_vars.insert("GWT_WORKTREE_HASH".to_string(), wt_hash);
+            }
         }
 
         // Resolve runner (installed binary vs bunx/npx)
@@ -352,6 +398,15 @@ impl AgentLaunchBuilder {
     }
 
     fn build_codex_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
+        env_vars.insert(
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
+            "1".to_string(),
+        );
+
+        // Keep Codex out of the alternate screen so the PTY emits normal scrollback
+        // instead of redraw-only fullscreen frames. This matches the CLI's documented
+        // inline mode for preserving terminal history.
+        args.push("--no-alt-screen".to_string());
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());
@@ -692,6 +747,17 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
+    }
+
+    #[test]
+    fn build_codex_disables_alternate_screen() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert!(
+            config.args.contains(&"--no-alt-screen".to_string()),
+            "Codex should run inline so the PTY emits row scrollback instead of full-screen redraw-only history: {:?}",
+            config.args
+        );
     }
 
     #[test]

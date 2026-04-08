@@ -750,128 +750,150 @@ recognizable at a glance without adding labels back into the row.
 - Add RED coverage for the Claude/Codex/Gemini spinner palette mapping.
 - Re-run focused and broad verification, then refresh SPEC-2 artifacts and execution tracking.
 
-### Phase 54: Terminal Input Trace For IME Investigation (5 tasks)
+### Phase 59: Branch Cleanup Multi-Select Flow (FR-018, US-9)
+
+Port the merged-branch bulk cleanup workflow that lived in the old TUI/GUI `CleanupModal` (`crates/gwt-tauri/src/commands/cleanup.rs`, `gwt-gui/src/lib/components/CleanupModal.svelte`) into the rewritten `gwt-tui` Branches surface, and remove the old per-branch `Ctrl+C` delete-worktree shortcut that has been carrying single-branch deletion in the meantime.
+
+59.1: gwt-git layer
+- Add `is_protected_branch`, `is_branch_merged_into` (`git cherry`-based), `detect_cleanable_target` (multi-base + gone), `list_gone_branches`, `delete_local_branch`, `WorktreeManager::remove_force`, and `WorktreeManager::cleanup_branch` (worktree force-remove + branch force-delete, idempotent against missing artifacts). Test-first against tempdir bare repo + worktree to cover squash merge, rebase merge, true merge, gone-upstream, and protected names.
+
+59.2: gwt-tui state
+- Extend `BranchesState` with `cleanup_selected: HashSet<String>`, `merged_state: HashMap<String, MergeState>`, `cleanup_settings: CleanupSettings`, and `cleanup_run: Option<CleanupRunState>`, plus a Braille spinner tick counter. Selection toggle is a no-op for protected/computing/unmerged branches, `select_all_visible_cleanable` only picks `Cleanable` rows, selection persists across view-mode/sort/search/tab changes and clears only on cleanup completion.
+
+59.3: Modals
+- Add `screens/cleanup_confirm.rs` (lists selected branches with merge target, `r` toggles `Also delete remote`, `Enter` confirms, `Esc` cancels) and `screens/cleanup_progress.rs` (determinate progress bar plus per-branch outcome list, blocks all input while `phase == Running`, accepts `Enter`/`Esc` only after `phase == Done`).
+
+59.4: app.rs integration
+- Wire `Space` / `Shift+C` / `a` on the Branches list. Remove the `Ctrl+C` → `DeleteWorktree` route on both `route_key_to_branch_list` and `route_key_to_branch_detail`, drop `pending_delete_worktree` plumbing, and update the `confirm` consumer. Run merge detection as a background worker that drains at most a few events per tick so the `Computing` spinner stays visible on small repos. Run cleanup as a background thread that revalidates protections per branch, invokes `index_worker::shutdown_and_remove` on the per-worktree index watcher before `cleanup_branch` removes the worktree, and emits `CleanupProgress` / `CleanupCompleted` messages. Update the footer hints and differentiate the cleanup gutter glyphs (`●` / `✔` / spinner / `·` / `–` / blank) so the reason a branch is not cleanable is visible at a glance.
+
+59.5: Verification
+- `cargo test -p gwt-core -p gwt-git -p gwt-tui`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo fmt`
+- Manual: in a repo with merged + unmerged + protected + gone branches, open Branches, watch the spinner reveal row-by-row, multi-select with `Space`/`a`, run `Shift+C`, confirm, observe progress modal, dismiss, verify selection cleared and list refreshed.
+
+### Phase 60: Terminal Input Trace For IME Investigation (5 tasks)
 Replace the rejected explicit IME toggle with opt-in instrumentation so the
 real terminal input path can be observed in gwt without changing normal UX.
 
-54.1: Opt-in trace contract (2 tasks)
+60.1: Opt-in trace contract (2 tasks)
 - Remove the `Ctrl+G,y` terminal IME mode and any footer/help chrome tied to
   that workaround so normal terminal input behavior returns to the pre-toggle
   contract.
 - Add a `GWT_INPUT_TRACE_PATH`-driven JSONL trace contract that stays inactive
   unless the environment variable is set.
 
-54.2: Input-path instrumentation (2 tasks)
+60.2: Input-path instrumentation (2 tasks)
 - Record raw `crossterm` key press events, post-prefix routing decisions, and
   PTY-forwarded bytes so IME candidate-navigation behavior can be diagnosed in
   the real app.
 - Keep the instrumentation fail-open and scoped to terminal input paths so
   management behavior and ordinary sessions are unchanged when tracing is off.
 
-54.3: Verification and artifact sync (1 task)
+60.3: Verification and artifact sync (1 task)
 - Add focused RED coverage for the removed `Ctrl+G,y` binding and the new
   trace-file records, then rerun focused and broad verification and refresh
   SPEC-2 artifacts and execution tracking.
 
-### Phase 55: Always-On Minimal Kitty Keyboard Enhancements (4 tasks)
+### Phase 61: Always-On Minimal Kitty Keyboard Enhancements (4 tasks)
 Request the least disruptive kitty keyboard enhancement flags at terminal
 startup to reduce escape-key ambiguity on compatible terminals while keeping
 unsupported terminals fail-open.
 
-55.1: Startup/shutdown contract (2 tasks)
+61.1: Startup/shutdown contract (2 tasks)
 - During terminal enter, request
   `DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES` via
   `PushKeyboardEnhancementFlags`.
 - During terminal leave, issue `PopKeyboardEnhancementFlags` before restoring
   the rest of terminal state, and keep both operations fail-open.
 
-55.2: Verification and artifact sync (2 tasks)
+61.2: Verification and artifact sync (2 tasks)
 - Add RED coverage proving enter/leave ANSI command builders include keyboard
   enhancement push/pop sequences.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the always-on minimal keyboard-enhancement contract.
 
-### Phase 56: Repeat-Key Delivery Under Kitty Event Types (4 tasks)
+### Phase 62: Repeat-Key Delivery Under Kitty Event Types (4 tasks)
 Honor the downstream event contract implied by `REPORT_EVENT_TYPES` so repeated
 candidate-navigation keys keep flowing through the normal terminal input path.
 
-56.1: Event-loop contract (2 tasks)
+62.1: Event-loop contract (2 tasks)
 - Treat `KeyEventKind::Repeat` the same as `Press` at the event-translation
   boundary so repeat events still reach keybind routing and PTY forwarding.
 - Continue ignoring `KeyEventKind::Release` so keyboard-enhancement negotiation
   does not create duplicate actions for a single physical keypress.
 
-56.2: Verification and artifact sync (2 tasks)
+62.2: Verification and artifact sync (2 tasks)
 - Add RED coverage for `Repeat` delivery and `Release` filtering in
   `crates/gwt-tui/src/event.rs`.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the repeat-key routing contract.
 
-### Phase 57: Standalone Raw Crossterm Probe (4 tasks)
+### Phase 63: Standalone Raw Crossterm Probe (4 tasks)
 Strengthen the existing `keytest` example so IME triage can compare raw
 `crossterm` events against gwt's routed input trace without modifying the main
 application flow.
 
-57.1: Shared probe serialization (2 tasks)
+63.1: Shared probe serialization (2 tasks)
 - Add RED coverage in the shared trace helper for serializing raw
   `crossterm::event::Event` values into JSONL with stable event typing and key
   metadata for key events.
 - Reuse the existing input-trace helper module instead of inventing a second
   ad-hoc JSON schema for the example.
 
-57.2: Example upgrade and verification (2 tasks)
+63.2: Example upgrade and verification (2 tasks)
 - Update `crates/gwt-tui/examples/keytest.rs` to log every raw event, mirror
   gwt's minimal keyboard-enhancement negotiation, and advertise a stable
   default output path.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the standalone raw-probe workflow.
 
-### Phase 58: Intermediate IME Probe Modes (4 tasks)
+### Phase 64: Intermediate IME Probe Modes (4 tasks)
 Turn the raw probe into a layered IME reproduction tool that can isolate
 periodic redraw behavior before touching the full gwt event loop again.
 
-58.1: Probe state and CLI (2 tasks)
+64.1: Probe state and CLI (2 tasks)
 - Add RED coverage for parsing `raw` / `redraw` / `ratatui` probe modes plus
   configurable tick duration and output path.
 - Add RED coverage for the tiny probe state machine: committed-text handling,
   bounded recent-event history, double-`Ctrl+C` exit, and display-width cursor
   placement for wide glyphs.
 
-58.2: Example rendering modes (2 tasks)
+64.2: Example rendering modes (2 tasks)
 - Refactor `crates/gwt-tui/examples/keytest.rs` to use the shared probe state
   and offer the three rendering modes without introducing PTY integration.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the layered IME probe workflow.
 
-### Phase 59: Idle Tick Redraw Suppression For Terminal Focus (4 tasks)
+### Phase 65: Idle Tick Redraw Suppression For Terminal Focus (4 tasks)
 Use the probe result (`raw` works; `redraw` and `ratatui` fail) to narrow the
 main-loop fix to idle tick repaint behavior instead of broader input routing.
 
-59.1: Render-decision contract (2 tasks)
+65.1: Render-decision contract (2 tasks)
 - Add RED coverage for a render-decision helper that suppresses redraw after
   `Message::Tick` while `FocusPane::Terminal` owns input and no visible overlay
   or periodic terminal-facing animation requires repainting.
 - Add RED coverage that the same helper still redraws on tick for
   non-terminal focus and other explicitly visible periodic UI states.
 
-59.2: Main-loop integration (2 tasks)
+65.2: Main-loop integration (2 tasks)
 - Update `crates/gwt-tui/src/main.rs` so the outer render loop becomes
   dirty-driven instead of unconditionally repainting every iteration.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the idle-tick redraw suppression behavior.
 
-### Phase 60: PTY Output Redraw Under Dirty-Driven Rendering (4 tasks)
+### Phase 66: PTY Output Redraw Under Dirty-Driven Rendering (4 tasks)
 Close the regression where idle-tick suppression accidentally lets terminal
 output appear one keypress late by forgetting to mark redraw dirty when PTY
 bytes are drained during the poll loop.
 
-60.1: PTY redraw contract (2 tasks)
+66.1: PTY redraw contract (2 tasks)
 - Add RED coverage proving that draining PTY output marks redraw dirty even
   when terminal focus owns input.
-- Keep the Phase 59 tick-redraw coverage intact so the fix does not regress
+- Keep the Phase 65 tick-redraw coverage intact so the fix does not regress
   back into unconditional idle repainting.
 
-60.2: Main-loop correction (2 tasks)
+66.2: Main-loop correction (2 tasks)
 - Update the shared PTY-drain helper in `crates/gwt-tui/src/main.rs` so any
   drained terminal output requests an immediate redraw.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts

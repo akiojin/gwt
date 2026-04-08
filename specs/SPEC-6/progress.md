@@ -4,7 +4,7 @@
 - Status: `in-progress`
 - Phase: `Implementation`
 - Task progress: `44/44` checked in `tasks.md`
-- Artifact refresh: `2026-04-03T06:24:00Z`
+- Artifact refresh: `2026-04-08T17:24:59Z`
 
 ## Done
 - Severity routing is now wired through structured notifications: debug logs only, info/warn feed the status bar, and errors keep their detail in the modal queue.
@@ -19,6 +19,7 @@
 - A focused E2E test now proves Info notifications render in the status bar and auto-dismiss after the 5-second timeout.
 - A focused E2E test now proves dismissing one error keeps the next error visible in the modal queue.
 - A burst-load E2E test now proves 100 queued errors do not break rendering or queue progression.
+- Log file naming, watcher rotation, and housekeeping now all follow the UTC-day contract used by `tracing_appender 0.2.4`, eliminating the previous local-date mismatch near midnight.
 
 ## Next
 - Run the reviewer flow and close the remaining acceptance gate items.

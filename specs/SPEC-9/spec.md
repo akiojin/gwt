@@ -38,10 +38,12 @@ As a developer, I want gwt to bundle all embedded skills, commands, and hooks in
 1. Given an agent is launched from gwt, when the launch completes, then `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.codex/skills/`, and `.codex/hooks/scripts/` are written to the target worktree with the bundled skill files.
 2. Given the target worktree already has older untracked gwt-managed skill files, when an agent is launched, then those generated files are overwritten with the latest bundled versions.
 3. Given the target worktree tracks `.claude/*` or `.codex/*` gwt asset paths in Git, when an agent is launched, then distribution preserves those tracked files and only writes untracked generated targets.
-4. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` and `.codex/hooks.json` for untracked worktrees or tracked worktrees that still carry legacy gwt-managed runtime forward hooks are generated or migrated with gwt-managed runtime hooks, preserving any existing user-defined hooks while replacing only gwt-managed runtime entries.
-5. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.codex/hooks/scripts/gwt-*`, `.claude/settings.local.json`, `.codex/hooks.json`).
-6. Given the gwt binary is built, when build.rs runs, then all SKILL.md files are validated for YAML frontmatter syntax errors, and the build fails with a clear error if any SKILL.md has malformed YAML.
-7. Given all skills are bundled, when the binary starts, then no runtime file I/O is needed to read skill definitions — skills are embedded in the binary via `include_dir`.
+4. Given the target worktree contains stale `gwt-*` skill, command, or hook paths that are not part of the current embedded bundle, when an agent is launched, then those stale paths are deleted from the managed asset trees before the current bundle is materialized, regardless of whether the stale paths are tracked by Git.
+5. Given gwt starts and loads the current repo plus active worktree inventory, when stale `gwt-*` paths remain from older bundled surfaces, then those stale paths are pruned from the repo root and active worktrees without materializing missing bundle assets solely because the TUI refreshed its metadata.
+6. Given an agent is launched, when skill distribution completes, then `.claude/settings.local.json` and `.codex/hooks.json` for untracked worktrees or tracked worktrees that still carry legacy gwt-managed runtime forward hooks are generated or migrated with gwt-managed runtime hooks, preserving any existing user-defined hooks while replacing only gwt-managed runtime entries.
+7. Given an agent is launched, when skill distribution completes, then `.git/info/exclude` in the worktree is updated to exclude gwt-managed asset paths (`.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/hooks/scripts/gwt-*`, `.codex/skills/gwt-*`, `.codex/hooks/scripts/gwt-*`, `.claude/settings.local.json`, `.codex/hooks.json`).
+8. Given the gwt binary is built, when build.rs runs, then all SKILL.md files are validated for YAML frontmatter syntax errors, and the build fails with a clear error if any SKILL.md has malformed YAML.
+9. Given all skills are bundled, when the binary starts, then no runtime file I/O is needed to read skill definitions — skills are embedded in the binary via `include_dir`.
 
 ### US-4: Generate Managed Claude/Codex Hook Configs Preserving User Hooks (P1) -- IMPLEMENTED
 
@@ -120,7 +122,7 @@ Runtime-hook regressions repeatedly occurred when only one layer (config generat
   - PR management: gwt-pr, gwt-pr-check, gwt-pr-fix
   - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-deepen, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
   - Issue management: gwt-issue-register, gwt-issue-resolve, gwt-issue-search
-  - Agent pane management: gwt-agent-discover, gwt-agent-read, gwt-agent-send, gwt-agent-lifecycle
+  - Agent pane management: gwt-agent
   - Utilities: gwt-project-search, gwt-project-index, gwt-spec-to-issue-migration
 - **FR-010**: `build.rs` validates YAML frontmatter of every `SKILL.md` at compile time using `serde_yaml`. Malformed YAML causes a build failure with file path and error details.
 - **FR-011**: The `BuiltinSkill` enum, `SKILL_CATALOG` constant, `register_builtins()` function, and `skill_fields()` in the TUI Settings screen are removed. Skill interpretation is the responsibility of Claude Code / Codex, not gwt.
@@ -135,6 +137,8 @@ Runtime-hook regressions repeatedly occurred when only one layer (config generat
   - `.codex/hooks/scripts/gwt-*.mjs` — Codex hook scripts
 - **FR-013**: Distribution overwrites untracked gwt-managed generated files on each agent launch.
 - **FR-013a**: Distribution must skip writes for gwt-managed asset paths that are already tracked by Git in the target worktree, except `.claude/settings.local.json` (always regenerated) and tracked `.codex/hooks.json` files that require runtime-hook migration.
+- **FR-013b**: Distribution removes stale `gwt-*` skill, command, and hook paths under `.claude/skills/`, `.claude/commands/`, `.claude/hooks/scripts/`, `.codex/skills/`, and `.codex/hooks/scripts/` by synchronizing each managed asset tree against the current embedded bundle. This includes stale root entries and stale nested paths inside retained managed directories, even if the stale paths are tracked by Git in the target worktree.
+- **FR-013c**: During initial repo/worktree metadata load, gwt performs a prune-only sweep across the current repo root and active worktree paths so stale `gwt-*` managed paths from older bundled surfaces are removed even before the next agent relaunch. This sweep must not materialize missing bundle assets in worktrees that are merely being discovered.
 - **FR-014**: `.claude/settings.local.json` is generated on each agent launch from a typed hook-config builder even when tracked, preserving non-gwt hooks and unrelated Claude settings while replacing only gwt-managed runtime hooks.
 - **FR-014a**: `.codex/hooks.json` is generated on each agent launch when the file is untracked in the target worktree. Existing user hooks are preserved, gwt-managed runtime hooks are replaced, and tracked `.codex/hooks.json` files are left untouched unless they still contain legacy gwt-managed runtime forward hooks or gwt-managed runtime commands for a non-host shell.
 - **FR-015**: `.git/info/exclude` is updated on each agent launch to exclude gwt-managed asset paths, including `.codex/hooks.json`. Existing user entries are preserved; gwt-managed entries are delimited by `# gwt-managed-begin` / `# gwt-managed-end` markers.

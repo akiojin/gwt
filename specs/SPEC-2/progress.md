@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `386/386` checked in `tasks.md`
-- Artifact refresh: `2026-04-08T16:59:43Z`
+- Task progress: `421/421` checked in `tasks.md`
+- Artifact refresh: `2026-04-08T17:24:59Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.

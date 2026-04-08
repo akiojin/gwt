@@ -116,6 +116,85 @@ pub struct BranchItem {
     pub worktree_path: Option<std::path::PathBuf>,
 }
 
+/// Per-branch merge state used by Branch Cleanup (FR-018a/d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeState {
+    /// Background merge detection has not produced a result yet.
+    Computing,
+    /// Branch is fully merged into the named target and can be cleaned up.
+    Cleanable(gwt_git::MergeTarget),
+    /// Branch is not merged into any configured base.
+    NotMerged,
+}
+
+/// User-configurable Branch Cleanup settings (FR-018e).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CleanupSettings {
+    /// Whether the next confirmed cleanup should also delete the matching
+    /// remote tracking branch via `gh` / `git push --delete origin`.
+    pub delete_remote: bool,
+}
+
+/// Phase of an in-flight Branch Cleanup execution (FR-018g/h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupRunPhase {
+    Running,
+    Done,
+}
+
+/// Outcome row for a single branch in a Cleanup run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupResultRow {
+    pub branch: String,
+    pub success: bool,
+    pub message: Option<String>,
+}
+
+/// Live state of a Branch Cleanup execution displayed in the progress modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupRunState {
+    pub total: usize,
+    pub processed: usize,
+    pub current: Option<String>,
+    pub results: Vec<CleanupResultRow>,
+    pub phase: CleanupRunPhase,
+    pub delete_remote: bool,
+}
+
+impl CleanupRunState {
+    pub fn new(total: usize, delete_remote: bool) -> Self {
+        Self {
+            total,
+            processed: 0,
+            current: None,
+            results: Vec::with_capacity(total),
+            phase: CleanupRunPhase::Running,
+            delete_remote,
+        }
+    }
+
+    /// Append a per-branch result, advance `processed`, and clear `current`.
+    pub fn record_result(&mut self, row: CleanupResultRow) {
+        self.results.push(row);
+        self.processed = self.processed.saturating_add(1);
+        self.current = None;
+    }
+
+    /// Mark the run as finished. Idempotent.
+    pub fn finish(&mut self) {
+        self.phase = CleanupRunPhase::Done;
+        self.current = None;
+    }
+
+    pub fn succeeded(&self) -> usize {
+        self.results.iter().filter(|r| r.success).count()
+    }
+
+    pub fn failed(&self) -> usize {
+        self.results.iter().filter(|r| !r.success).count()
+    }
+}
+
 /// A SPEC entry loaded from a branch worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailSpecItem {
@@ -208,8 +287,31 @@ pub struct BranchesState {
     pub(crate) pending_launch_agent: bool,
     /// Flag: caller should spawn shell in worktree cwd.
     pub(crate) pending_open_shell: bool,
-    /// Flag: caller should show worktree delete confirmation.
-    pub(crate) pending_delete_worktree: bool,
+    /// Branch Cleanup multi-selection set (FR-018c). Names are kept stable
+    /// across view-mode/sort/search/tab changes and only cleared after a
+    /// cleanup run completes.
+    pub(crate) cleanup_selected: HashSet<String>,
+    /// Per-branch merge state used by Branch Cleanup (FR-018a/d).
+    pub(crate) merged_state: HashMap<String, MergeState>,
+    /// Persisted Branch Cleanup settings (FR-018e).
+    /// Wired into the confirm modal in Phase 51.4.
+    #[allow(dead_code)]
+    pub(crate) cleanup_settings: CleanupSettings,
+    /// Active Branch Cleanup run, when present (FR-018g/h).
+    /// Wired into the progress modal in Phase 51.4.
+    #[allow(dead_code)]
+    pub(crate) cleanup_run: Option<CleanupRunState>,
+    /// Branches that should never be selected because another worktree owns
+    /// them. Updated by app.rs from the live worktree list.
+    pub(crate) checked_out_branches: HashSet<String>,
+    /// Branches with at least one running session pane bound to them.
+    pub(crate) active_session_branches: HashSet<String>,
+    /// HEAD branch of the gwt-tui process itself, if known.
+    pub(crate) current_head_branch: Option<String>,
+    /// Spinner frame counter advanced once per tick while at least one
+    /// branch is still in `MergeState::Computing`. Drives the animated
+    /// `⋯` glyph in the Branch Cleanup gutter.
+    pub(crate) merge_spinner_tick: usize,
     /// SPECs loaded from the selected branch worktree.
     pub(crate) detail_specs: Vec<DetailSpecItem>,
     /// Git status files for the selected branch worktree.
@@ -410,6 +512,133 @@ impl BranchesState {
             .iter()
             .any(|branch| branch.name == branch_name)
     }
+
+    // ---- Branch Cleanup helpers (FR-018) ----
+
+    /// Replace the merge state for a single branch (background preload sink).
+    pub fn set_merge_state(&mut self, branch: impl Into<String>, state: MergeState) {
+        self.merged_state.insert(branch.into(), state);
+    }
+
+    /// Returns the merge state for `branch`, defaulting to `Computing` so the
+    /// list view can render the spinner glyph until a result lands.
+    pub fn merge_state(&self, branch: &str) -> MergeState {
+        self.merged_state
+            .get(branch)
+            .copied()
+            .unwrap_or(MergeState::Computing)
+    }
+
+    /// Returns true when the branch is currently selected for cleanup.
+    pub fn is_cleanup_selected(&self, branch: &str) -> bool {
+        self.cleanup_selected.contains(branch)
+    }
+
+    /// Returns true when `branch` is allowed to participate in Branch Cleanup
+    /// selection (FR-018b).
+    ///
+    /// Protected names, the current HEAD, and branches with an active agent
+    /// or shell session are rejected. Feature branches that are checked out
+    /// by a worktree **are still candidates** — cleaning up the worktree is
+    /// the whole point of Branch Cleanup in a gwt workflow where every
+    /// branch normally has its own worktree.
+    pub fn is_cleanable_candidate(&self, branch: &str) -> bool {
+        if gwt_git::is_protected_branch(branch) {
+            return false;
+        }
+        if self
+            .current_head_branch
+            .as_deref()
+            .is_some_and(|head| head == branch)
+        {
+            return false;
+        }
+        if self.active_session_branches.contains(branch) {
+            return false;
+        }
+        true
+    }
+
+    /// Returns true when the branch is both a protection-allowed candidate
+    /// and has a positive merge result that makes it cleanable right now.
+    pub fn is_cleanup_selectable(&self, branch: &str) -> bool {
+        if !self.is_cleanable_candidate(branch) {
+            return false;
+        }
+        matches!(self.merge_state(branch), MergeState::Cleanable(_))
+    }
+
+    /// Toggle Branch Cleanup selection for `branch`. No-op when the branch
+    /// is not currently selectable (FR-018c).
+    pub fn toggle_cleanup_selection(&mut self, branch: &str) -> bool {
+        if !self.is_cleanup_selectable(branch) {
+            return false;
+        }
+        if self.cleanup_selected.contains(branch) {
+            self.cleanup_selected.remove(branch);
+        } else {
+            self.cleanup_selected.insert(branch.to_string());
+        }
+        true
+    }
+
+    /// Add every currently visible cleanable branch to the selection set.
+    /// `visible_branches` should come from `filtered_branches()` so that the
+    /// search query / view mode / sort filter is honored.
+    pub fn select_all_visible_cleanable(&mut self, visible_branches: &[&BranchItem]) {
+        let names: Vec<String> = visible_branches
+            .iter()
+            .filter(|branch| self.is_cleanup_selectable(&branch.name))
+            .map(|branch| branch.name.clone())
+            .collect();
+        for name in names {
+            self.cleanup_selected.insert(name);
+        }
+    }
+
+    /// Cleanup execution finished — drop the selection set so the next
+    /// browse session starts clean. Called only after a run completes.
+    pub fn clear_selection_after_cleanup(&mut self) {
+        self.cleanup_selected.clear();
+    }
+
+    /// Number of currently selected branches.
+    pub fn cleanup_selection_count(&self) -> usize {
+        self.cleanup_selected.len()
+    }
+
+    /// Returns the merge target for a branch when it is cleanable.
+    pub fn cleanup_target(&self, branch: &str) -> Option<gwt_git::MergeTarget> {
+        match self.merge_state(branch) {
+            MergeState::Cleanable(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Returns true when at least one branch is still being computed by
+    /// the background merge-state worker.
+    pub fn has_computing_branches(&self) -> bool {
+        self.merged_state
+            .values()
+            .any(|state| matches!(state, MergeState::Computing))
+    }
+
+    /// Advance the spinner frame counter. Called from the tick loop only
+    /// while `has_computing_branches()` is true.
+    pub fn tick_merge_spinner(&mut self) {
+        self.merge_spinner_tick = self.merge_spinner_tick.wrapping_add(1);
+    }
+
+    /// Current spinner glyph for the `⋯` gutter slot. Cycles through a
+    /// short Braille pattern so the gutter visibly animates while merge
+    /// detection is running.
+    pub fn merge_spinner_glyph(&self) -> &'static str {
+        const FRAMES: [&str; 10] = [
+            "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}",
+            "\u{2827}", "\u{2807}", "\u{280F}",
+        ];
+        FRAMES[self.merge_spinner_tick % FRAMES.len()]
+    }
 }
 
 /// Messages specific to the branches screen.
@@ -434,8 +663,6 @@ pub enum BranchesMessage {
     LaunchAgent,
     /// Open shell action.
     OpenShell,
-    /// Delete worktree action.
-    DeleteWorktree,
     /// Move to the next Docker container in the overview area.
     DockerContainerDown,
     /// Move to the previous Docker container in the overview area.
@@ -536,9 +763,6 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         }
         BranchesMessage::OpenShell => {
             state.pending_open_shell = true;
-        }
-        BranchesMessage::DeleteWorktree => {
-            state.pending_delete_worktree = true;
         }
         BranchesMessage::DockerContainerDown => {
             if !state.docker_containers.is_empty() {
@@ -801,8 +1025,32 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
             } else {
                 ""
             };
+            // Branch Cleanup gutter glyphs (FR-018c/d):
+            //   `●` (cyan)   — selected for cleanup
+            //   `✔` (green)  — cleanable now (merged into main or develop)
+            //   spinner      — merge detection still running
+            //   `·` (gray)   — local feature branch with unmerged commits
+            //   `–` (dim)    — protected / current HEAD / active session
+            //   ` ` (blank)  — remote-tracking branch (never a candidate)
+            let spinner_glyph = state.merge_spinner_glyph();
+            let (gutter_glyph, gutter_color) = if !branch.is_local {
+                (" ", theme::color::TEXT_DISABLED)
+            } else if state.is_cleanup_selected(&branch.name) {
+                ("\u{25CF}", theme::color::ACTIVE)
+            } else if !state.is_cleanable_candidate(&branch.name) {
+                ("\u{2013}", theme::color::TEXT_DISABLED)
+            } else {
+                match state.merge_state(&branch.name) {
+                    MergeState::Computing => (spinner_glyph, theme::color::ACTIVE),
+                    MergeState::Cleanable(_) => ("\u{2714}", theme::color::SUCCESS),
+                    MergeState::NotMerged => ("\u{00B7}", theme::color::TEXT_SECONDARY),
+                }
+            };
+
             let mut spans = vec![
                 super::selection_prefix(idx == state.selected),
+                Span::styled(gutter_glyph, Style::default().fg(gutter_color)),
+                Span::raw(" "),
                 Span::styled(
                     &branch.name,
                     Style::default().fg(theme::color::TEXT_PRIMARY),
@@ -1693,14 +1941,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_worktree_sets_flag() {
-        let mut state = BranchesState::default();
-        assert!(!state.pending_delete_worktree);
-        update(&mut state, BranchesMessage::DeleteWorktree);
-        assert!(state.pending_delete_worktree);
-    }
-
-    #[test]
     fn render_with_detail_split_does_not_panic() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
@@ -2189,5 +2429,209 @@ mod tests {
             found_no_branch,
             "Should show 'No branch selected' when empty"
         );
+    }
+
+    // ---------------- Branch Cleanup state (FR-018) ----------------
+
+    fn feature(name: &str) -> BranchItem {
+        BranchItem {
+            name: name.to_string(),
+            is_head: false,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: None,
+        }
+    }
+
+    fn cleanup_state_with(branches: Vec<BranchItem>) -> BranchesState {
+        let mut state = BranchesState::default();
+        state.branches = branches;
+        state
+    }
+
+    #[test]
+    fn merge_state_defaults_to_computing() {
+        let state = BranchesState::default();
+        assert_eq!(state.merge_state("feature/foo"), MergeState::Computing);
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_skips_computing_branches() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        // Default state is Computing → not selectable.
+        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert!(state.cleanup_selected.is_empty());
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_adds_then_removes_cleanable_branch() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+
+        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert!(state.is_cleanup_selected("feature/foo"));
+
+        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert!(!state.is_cleanup_selected("feature/foo"));
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_rejects_protected_branches() {
+        let mut state = cleanup_state_with(vec![BranchItem {
+            name: "main".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Main,
+            worktree_path: None,
+        }]);
+        state.set_merge_state("main", MergeState::Cleanable(gwt_git::MergeTarget::Main));
+        assert!(!state.toggle_cleanup_selection("main"));
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_rejects_current_head_branch() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        state.current_head_branch = Some("feature/foo".to_string());
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+        assert!(!state.toggle_cleanup_selection("feature/foo"));
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_rejects_branch_with_active_session() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        state
+            .active_session_branches
+            .insert("feature/foo".to_string());
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+        assert!(!state.toggle_cleanup_selection("feature/foo"));
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_allows_branch_with_worktree() {
+        // FR-018b (revised): feature branches that have their own worktree
+        // are still cleanup candidates — removing the worktree is the whole
+        // point of Branch Cleanup in a gwt workflow.
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        state.checked_out_branches.insert("feature/foo".to_string());
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+        assert!(state.toggle_cleanup_selection("feature/foo"));
+    }
+
+    #[test]
+    fn select_all_visible_cleanable_only_picks_cleanable_rows() {
+        let mut state = cleanup_state_with(vec![
+            feature("feature/foo"),
+            feature("feature/bar"),
+            feature("feature/baz"),
+            BranchItem {
+                name: "main".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Main,
+                worktree_path: None,
+            },
+        ]);
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+        state.set_merge_state(
+            "feature/bar",
+            MergeState::Cleanable(gwt_git::MergeTarget::Develop),
+        );
+        state.set_merge_state("feature/baz", MergeState::NotMerged);
+        // main stays Computing → also rejected via protected guard.
+
+        let visible_owned: Vec<BranchItem> = state.branches.clone();
+        let visible: Vec<&BranchItem> = visible_owned.iter().collect();
+        state.select_all_visible_cleanable(&visible);
+
+        assert!(state.is_cleanup_selected("feature/foo"));
+        assert!(state.is_cleanup_selected("feature/bar"));
+        assert!(!state.is_cleanup_selected("feature/baz"));
+        assert!(!state.is_cleanup_selected("main"));
+        assert_eq!(state.cleanup_selection_count(), 2);
+    }
+
+    #[test]
+    fn cleanup_selection_persists_across_view_mode_and_sort_changes() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+        assert!(state.toggle_cleanup_selection("feature/foo"));
+
+        // Simulate the view-mode toggle and sort cycle paths.
+        update(&mut state, BranchesMessage::ToggleView);
+        update(&mut state, BranchesMessage::ToggleSort);
+        update(&mut state, BranchesMessage::SearchStart);
+        update(&mut state, BranchesMessage::SearchInput('f'));
+        update(&mut state, BranchesMessage::SearchClear);
+
+        assert!(state.is_cleanup_selected("feature/foo"));
+    }
+
+    #[test]
+    fn clear_selection_after_cleanup_drops_all_selections() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo"), feature("feature/bar")]);
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+        state.set_merge_state(
+            "feature/bar",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+        state.toggle_cleanup_selection("feature/foo");
+        state.toggle_cleanup_selection("feature/bar");
+        assert_eq!(state.cleanup_selection_count(), 2);
+
+        state.clear_selection_after_cleanup();
+        assert_eq!(state.cleanup_selection_count(), 0);
+    }
+
+    #[test]
+    fn cleanup_run_state_records_progress_and_finishes() {
+        let mut run = CleanupRunState::new(3, false);
+        assert_eq!(run.phase, CleanupRunPhase::Running);
+        assert_eq!(run.total, 3);
+        assert_eq!(run.processed, 0);
+
+        run.current = Some("feature/foo".to_string());
+        run.record_result(CleanupResultRow {
+            branch: "feature/foo".to_string(),
+            success: true,
+            message: None,
+        });
+        run.record_result(CleanupResultRow {
+            branch: "feature/bar".to_string(),
+            success: false,
+            message: Some("worktree busy".to_string()),
+        });
+        run.record_result(CleanupResultRow {
+            branch: "feature/baz".to_string(),
+            success: true,
+            message: None,
+        });
+        run.finish();
+
+        assert_eq!(run.processed, 3);
+        assert_eq!(run.succeeded(), 2);
+        assert_eq!(run.failed(), 1);
+        assert_eq!(run.phase, CleanupRunPhase::Done);
+        assert!(run.current.is_none());
     }
 }

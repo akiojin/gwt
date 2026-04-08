@@ -8,7 +8,7 @@ pub mod registry;
 pub mod settings_local;
 pub mod validate;
 
-pub use distribute::{distribute_to_worktree, DistributeReport};
+pub use distribute::{distribute_to_worktree, prune_stale_gwt_assets, DistributeReport};
 pub use git_exclude::update_git_exclude;
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
@@ -534,6 +534,79 @@ mod tests {
             files.contains(&"gwt-forward-hook.mjs"),
             "missing gwt-forward-hook.mjs"
         );
+    }
+
+    #[test]
+    fn repo_does_not_track_split_codex_agent_skill_symlinks() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".codex/skills/gwt-agent-discover",
+            ".codex/skills/gwt-agent-read",
+            ".codex/skills/gwt-agent-send",
+            ".codex/skills/gwt-agent-lifecycle",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
+                "unexpected stale asset {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn spec_9_uses_unified_gwt_agent_contract() {
+        let spec = include_str!("../../../specs/SPEC-9/spec.md");
+        assert!(
+            spec.contains("Agent pane management: gwt-agent"),
+            "expected unified gwt-agent contract in SPEC-9"
+        );
+
+        for legacy in [
+            "gwt-agent-discover",
+            "gwt-agent-read",
+            "gwt-agent-send",
+            "gwt-agent-lifecycle",
+        ] {
+            assert!(
+                !spec.contains(legacy),
+                "unexpected legacy split agent contract {legacy} in SPEC-9"
+            );
+        }
+    }
+
+    #[test]
+    fn repo_does_not_keep_unmanaged_local_search_assets() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/commands/gwt-file-search.md",
+            ".claude/commands/gwt-issue-search.md",
+            ".claude/skills/gwt-file-search",
+            ".codex/skills/gwt-file-search",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
+                "unexpected unmanaged local asset {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_commands_route_issue_queries_through_unified_gwt_search() {
+        for command in [
+            include_str!("../../../.claude/commands/gwt-project-index.md"),
+            include_str!("../../../.claude/commands/gwt-project-search.md"),
+            include_str!("../../../.claude/commands/gwt-spec-search.md"),
+        ] {
+            assert!(
+                command.contains("/gwt:gwt-search --issues"),
+                "expected unified issue-search routing"
+            );
+            assert!(
+                !command.contains("/gwt:gwt-issue-search"),
+                "unexpected legacy gwt-issue-search command reference"
+            );
+        }
     }
 
     // ── Integration: full distribution pipeline ──

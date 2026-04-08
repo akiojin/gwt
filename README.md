@@ -124,6 +124,12 @@ shell output are not delayed until the next keypress.
   (for example during startup or repository initialization).
   gwt bootstraps `~/.gwt/runtime/chroma-venv` automatically, then reuses that managed runtime.
   On Windows, make sure either `python` or `py -3` works in Command Prompt or PowerShell.
+- Vector index data (SPECs / Issues / source files) is stored under `~/.gwt/index/<repo-hash>/`.
+  Issues are repo-scoped and shared across worktrees; SPECs and source files are worktree-scoped.
+  The TUI runs a per-Worktree filesystem watcher and refreshes the Issue index asynchronously
+  (15-minute TTL) at startup. The first search after a fresh install downloads the
+  `intfloat/multilingual-e5-base` embedding model (~440 MB) into `~/.cache/huggingface/`. See
+  [SPEC-10](specs/SPEC-10/spec.md) for the full lifecycle.
 
 ### GitHub Token (PAT) requirements
 

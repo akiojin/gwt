@@ -1,11 +1,13 @@
 //! Message type — all actions in the Elm Architecture.
 
 use crossterm::event::{KeyEvent, MouseEvent};
-use gwt_notification::Notification;
+use gwt_core::logging::LogEvent;
 
 use crate::input::voice::VoiceInputMessage;
 use crate::model::ManagementTab;
 use crate::screens::branches::BranchesMessage;
+use crate::screens::cleanup_confirm::CleanupConfirmMessage;
+use crate::screens::cleanup_progress::CleanupProgressMessage;
 use crate::screens::confirm::ConfirmMessage;
 use crate::screens::docker_progress::DockerProgressMessage;
 use crate::screens::git_view::GitViewMessage;
@@ -60,11 +62,11 @@ pub enum Message {
     /// Push a plain error message onto the queue.
     PushError(String),
     /// Push a structured error notification onto the queue.
-    PushErrorNotification(Notification),
+    PushErrorNotification(LogEvent),
     /// Push a structured notification through the UI routing path.
-    Notify(Notification),
+    Notify(LogEvent),
     /// Show a structured notification in the status bar.
-    ShowNotification(Notification),
+    ShowNotification(LogEvent),
     /// Dismiss the current status-bar notification.
     DismissNotification,
     /// Dismiss the top error.
@@ -95,6 +97,10 @@ pub enum Message {
     PortSelect(PortSelectMessage),
     /// Confirmation dialog message.
     Confirm(ConfirmMessage),
+    /// Branch Cleanup confirm modal message.
+    CleanupConfirm(CleanupConfirmMessage),
+    /// Branch Cleanup progress modal message.
+    CleanupProgress(CleanupProgressMessage),
     /// Voice input message.
     Voice(VoiceInputMessage),
     /// Initialization screen message.
@@ -128,19 +134,19 @@ mod tests {
         let _ = Message::CloseSession;
         let _ = Message::Tick;
         let _ = Message::PushError("err".into());
-        let _ = Message::PushErrorNotification(Notification::new(
-            gwt_notification::Severity::Error,
+        let _ = Message::PushErrorNotification(LogEvent::new(
+            gwt_core::logging::LogLevel::Error,
             "test",
             "err",
         ));
-        let _ = Message::Notify(Notification::new(
-            gwt_notification::Severity::Info,
+        let _ = Message::Notify(LogEvent::new(
+            gwt_core::logging::LogLevel::Info,
             "test",
             "message",
         ));
         let _ = Message::ToggleHelp;
-        let _ = Message::ShowNotification(Notification::new(
-            gwt_notification::Severity::Warn,
+        let _ = Message::ShowNotification(LogEvent::new(
+            gwt_core::logging::LogLevel::Warn,
             "test",
             "warning",
         ));

@@ -561,52 +561,104 @@ banner in favor of pane-title chrome.
 - [x] T356 [P] Write RED test: successful materialized Codex launches bootstrap a PID-scoped `Running` runtime sidecar before the first interactive hook event arrives.
 - [x] T357 Implement launch-time runtime-state bootstrap in `crates/gwt-tui/src/app.rs` and keep failed launches sidecar-free.
 
-## Phase 59: Terminal Input Trace For IME Investigation
+## Phase 59: Branch Cleanup Multi-Select Flow (FR-018, US-9)
 
-- [x] T358 [P] Write RED test: `Ctrl+G,y` is no longer registered or bound after removing the explicit terminal IME mode workaround.
-- [x] T359 [P] Write RED test: opt-in input tracing appends JSONL records for keybind decisions and PTY-forwarded bytes.
-- [x] T360 [P] Write RED test: raw `crossterm` key events are serialized into the trace file with stable stage metadata.
-- [x] T361 Implement `GWT_INPUT_TRACE_PATH`-gated input tracing and remove terminal IME mode state, footer/help affordances, toggle notification, and key-guard logic from `crates/gwt-tui/src/input_trace.rs`, `crates/gwt-tui/src/event.rs`, `crates/gwt-tui/src/main.rs`, `crates/gwt-tui/src/app.rs`, `crates/gwt-tui/src/input/keybind.rs`, `crates/gwt-tui/src/message.rs`, `crates/gwt-tui/src/model.rs`, and `crates/gwt-tui/src/widgets/status_bar.rs`.
-- [x] T362 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the input-trace investigation contract.
+### 59.1 gwt-git layer
 
-## Phase 60: Always-On Minimal Kitty Keyboard Enhancements
+- [x] T358 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `is_protected_branch` returns true for `main`/`master`/`develop`/`development`/`release` and false for `feature/*`/`bugfix/*`/`hotfix/*`.
+- [x] T359 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `is_branch_merged_into(repo, branch, base)` returns true when every commit on `branch` is reachable from `base` via `git cherry`, including squash- and rebase-merged branches, and false when at least one commit is missing.
+- [x] T360 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `detect_cleanable_target` walks `[origin/main, origin/develop]`, returns the first matching `MergeTarget` (`Main` / `Develop` / `Gone`) or `None`, and gracefully skips bases that do not exist.
+- [x] T361 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `list_gone_branches` parses `[gone]` upstream tracking from `for-each-ref` output and returns the matching local branch names.
+- [x] T362 [P] Write RED test in `crates/gwt-git/src/branch.rs`: `delete_local_branch` runs `git branch -D` when `force == true`, surfaces the underlying error on real failures, and is a no-op when the branch does not exist.
+- [x] T363 [P] Write RED test in `crates/gwt-git/src/worktree.rs`: `WorktreeManager::remove_force` calls `git worktree remove --force` and succeeds even when the worktree contains uncommitted/untracked files.
+- [x] T364 [P] Write RED test in `crates/gwt-git/src/worktree.rs`: `WorktreeManager::cleanup_branch(name)` removes the worktree (force) when one exists, then deletes the local branch (force), is idempotent against missing worktrees, missing branches, and orphaned worktree metadata, and surfaces the underlying Git error on real failures.
+- [x] T365 Implement `is_protected_branch`, `is_branch_merged_into`, `detect_cleanable_target`, `list_gone_branches`, and `delete_local_branch` in `crates/gwt-git/src/branch.rs`, then re-export through `crates/gwt-git/src/lib.rs`.
+- [x] T366 Implement `WorktreeManager::remove_force` and `WorktreeManager::cleanup_branch` in `crates/gwt-git/src/worktree.rs`, mirroring the old `gwt-tauri` cleanup semantics with the `is_missing_worktree_error` fallback.
+- [x] T367 Run `cargo test -p gwt-git` and confirm Phase 59.1 RED tests turn green.
 
-- [x] T363 [P] Write RED test: terminal enter ANSI sequence includes `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)`.
-- [x] T364 [P] Write RED test: terminal leave ANSI sequence includes `PopKeyboardEnhancementFlags`.
-- [x] T365 Update `crates/gwt-tui/src/main.rs` terminal enter/leave handling to request minimal kitty keyboard enhancements at startup and pop them at shutdown with fail-open behavior.
-- [x] T366 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the minimal kitty keyboard-enhancement contract.
+### 59.2 gwt-tui state
 
-## Phase 61: Repeat-Key Delivery Under Kitty Event Types
+- [x] T368 [P] Write RED test in `crates/gwt-tui/src/screens/branches.rs`: `BranchesState::toggle_cleanup_selection(name)` only adds the branch when its `merged_state` is `Cleanable(_)` and the branch is cleanup-selectable; other rows are no-ops.
+- [x] T369 [P] Write RED test: `BranchesState::select_all_visible_cleanable(visible_branches)` adds every visible `Cleanable(_)` branch and skips `Computing` / `NotMerged` / protected entries.
+- [x] T370 [P] Write RED test: changing view mode (`set_view_mode`), sort (`set_sort_mode`), search query, or active management tab does not clear `cleanup_selected`; only `clear_selection_after_cleanup()` does.
+- [x] T371 [P] Write RED test: `BranchesState::is_cleanable_candidate(branch)` returns false for protected branches, the current HEAD, and branches with an active session bound. Worktree-bound feature branches remain candidates because removing the worktree is the whole point of the flow.
+- [x] T372 Implement `cleanup_selected: HashSet<String>`, `merged_state: HashMap<String, MergeState>`, `cleanup_settings: CleanupSettings`, `cleanup_run: Option<CleanupRunState>`, `merge_spinner_tick`, and the helpers above on `BranchesState`.
+- [x] T373 Run `cargo test -p gwt-tui --lib screens::branches` and confirm Phase 59.2 RED tests turn green.
 
-- [x] T367 [P] Write RED test: `translate_event()` maps `KeyEventKind::Repeat` into `Message::KeyInput`.
-- [x] T368 [P] Write RED test: `translate_event()` still ignores `KeyEventKind::Release`.
-- [x] T369 Update `crates/gwt-tui/src/event.rs` so `Repeat` follows the normal key-input path while `Release` remains filtered.
-- [x] T370 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the repeat-key routing contract.
+### 59.3 Modals
 
-## Phase 62: Standalone Raw Crossterm Probe
+- [x] T374 [P] Write RED test in `crates/gwt-tui/src/screens/cleanup_confirm.rs`: the confirm modal lists every selected branch with its `MergeTarget` rendered as `merged → main` / `merged → develop` / `gone`, and `[ ] Also delete remote (r)` reflects the current `delete_remote` flag.
+- [x] T375 [P] Write RED test: `CleanupConfirmMessage::ToggleRemote` flips `delete_remote`, `CleanupConfirmMessage::Confirm` returns the run plan, and `CleanupConfirmMessage::Cancel` aborts.
+- [x] T376 [P] Write RED test in `crates/gwt-tui/src/screens/cleanup_progress.rs`: while `phase == Running` the modal renders the progress bar and inline outcome list and ignores `Esc` / `Ctrl+C` / `Enter`; when `phase == Done` only `Enter` and `Esc` dismiss the modal and other keys remain ignored.
+- [x] T377 Implement `screens/cleanup_confirm.rs` and `screens/cleanup_progress.rs` and re-export through `crates/gwt-tui/src/screens/mod.rs`.
+- [x] T378 Run `cargo test -p gwt-tui --lib screens::cleanup_confirm screens::cleanup_progress` and confirm Phase 59.3 RED tests turn green.
 
-- [x] T371 [P] Write RED test: shared trace helper serializes a raw `Event::Key` probe record with stable event typing and key metadata.
-- [x] T372 [P] Write RED test: shared trace helper serializes non-key probe events such as `Paste` without losing the raw debug payload.
-- [x] T373 Upgrade `crates/gwt-tui/examples/keytest.rs` to log every raw `crossterm` event to JSONL via the shared helper while mirroring gwt's minimal keyboard-enhancement negotiation.
-- [x] T374 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the standalone raw `crossterm` probe workflow.
+### 59.4 app.rs integration
 
-## Phase 63: Intermediate IME Probe Modes
+- [x] T379 [P] Write RED test in `crates/gwt-tui/src/app.rs`: `Space` on the Branches list dispatches cleanup-selection toggle for the focused branch and is a no-op when the focused row is not selectable.
+- [x] T380 [P] Write RED test: `Shift+C` on the Branches list with at least one selection opens the Cleanup Confirm modal; `Shift+C` with zero selection is a no-op.
+- [x] T381 [P] Write RED test: `a` on the Branches list adds every visible cleanable branch to `cleanup_selected`.
+- [x] T382 [P] Write RED test: `Ctrl+C` on the Branches list and on the Branch Detail no longer dispatches `BranchesMessage::DeleteWorktree`. Update existing snapshot `branches_action_modal.snap` to drop the `Ctrl+C:delete` advertisement.
+- [x] T383 [P] Write RED test: dispatching `CleanupProgressMessage::Completed` records the final `Cleaned N, failed M` summary and `Dismiss` clears the selection, refreshes branches, and drops the progress modal.
+- [x] T384 Remove the `Ctrl+C` → `BranchesMessage::DeleteWorktree` routes (`route_key_to_branch_list`, `route_key_to_branch_detail`), `BranchesMessage::DeleteWorktree`, `pending_delete_worktree`, the `confirm` consumer that handled it, and the `Ctrl+C:delete` footer hints.
+- [x] T385 Wire the new keybindings (`Space`, `Shift+C`, `a`), open the confirm modal, run cleanup as a background job that revalidates protections per branch and emits `CleanupProgress` / `CleanupCompleted` messages over the existing app event channel.
+- [x] T386 Spawn merge-state detection as a background worker and drain it at most `MERGE_STATE_DRAIN_PER_TICK` events per tick so the Computing spinner stays visible on small repos.
+- [x] T387 Update Branches footer hints to advertise the new selection and cleanup affordances at full and `<= 80 col` widths, and differentiate the cleanup gutter glyphs (`●` / `✔` / spinner / `·` / `–` / blank).
+- [x] T388 Run `cargo test -p gwt-tui` and confirm Phase 59.4 RED tests turn green.
 
-- [x] T375 [P] Write RED test: probe CLI parsing supports `raw` / `redraw` / `ratatui`, configurable tick rate, and an optional output path.
-- [x] T376 [P] Write RED test: probe state keeps bounded recent events, handles committed text editing, and computes cursor columns using display width for wide glyphs.
-- [x] T377 Refactor `crates/gwt-tui/examples/keytest.rs` into layered IME probe modes backed by a shared helper module.
-- [x] T378 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the layered IME probe workflow.
+### 59.5 Verification
 
-## Phase 64: Idle Tick Redraw Suppression For Terminal Focus
+- [x] T389 `cargo test -p gwt-core -p gwt-git -p gwt-tui`
+- [x] T390 `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] T391 `cargo fmt --all`
+- [x] T392 Refresh `specs/SPEC-2/progress.md` with the Phase 59 implementation summary and verification log.
 
-- [x] T379 [P] Write RED test: main-loop render decision skips redraw on `Message::Tick` while `FocusPane::Terminal` owns input and no visible periodic UI surface is active.
-- [x] T380 [P] Write RED test: the same render decision still redraws on `Message::Tick` for non-terminal focus or visible overlay-driven periodic UI states.
-- [x] T381 Update `crates/gwt-tui/src/main.rs` so redraw is dirty-driven and idle terminal ticks do not repaint the TUI.
-- [x] T382 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the idle-tick redraw suppression fix.
+## Phase 60: Terminal Input Trace For IME Investigation
 
-## Phase 65: PTY Output Redraw Under Dirty-Driven Rendering
+- [x] T393 [P] Write RED test: `Ctrl+G,y` is no longer registered or bound after removing the explicit terminal IME mode workaround.
+- [x] T394 [P] Write RED test: opt-in input tracing appends JSONL records for keybind decisions and PTY-forwarded bytes.
+- [x] T395 [P] Write RED test: raw `crossterm` key events are serialized into the trace file with stable stage metadata.
+- [x] T396 Implement `GWT_INPUT_TRACE_PATH`-gated input tracing and remove terminal IME mode state, footer/help affordances, toggle notification, and key-guard logic from `crates/gwt-tui/src/input_trace.rs`, `crates/gwt-tui/src/event.rs`, `crates/gwt-tui/src/main.rs`, `crates/gwt-tui/src/app.rs`, `crates/gwt-tui/src/input/keybind.rs`, `crates/gwt-tui/src/message.rs`, `crates/gwt-tui/src/model.rs`, and `crates/gwt-tui/src/widgets/status_bar.rs`.
+- [x] T397 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the input-trace investigation contract.
 
-- [x] T383 [P] Write RED test: draining PTY output marks redraw dirty so terminal output does not appear one keypress late.
-- [x] T384 [P] Keep the idle-tick suppression tests green so the PTY fix does not reintroduce unconditional repainting.
-- [x] T385 Update `crates/gwt-tui/src/main.rs` so the shared PTY-drain path always requests redraw when bytes are applied to the model.
-- [x] T386 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the dirty-driven PTY redraw fix.
+## Phase 61: Always-On Minimal Kitty Keyboard Enhancements
+
+- [x] T398 [P] Write RED test: terminal enter ANSI sequence includes `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)`.
+- [x] T399 [P] Write RED test: terminal leave ANSI sequence includes `PopKeyboardEnhancementFlags`.
+- [x] T400 Update `crates/gwt-tui/src/main.rs` terminal enter/leave handling to request minimal kitty keyboard enhancements at startup and pop them at shutdown with fail-open behavior.
+- [x] T401 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the minimal kitty keyboard-enhancement contract.
+
+## Phase 62: Repeat-Key Delivery Under Kitty Event Types
+
+- [x] T402 [P] Write RED test: `translate_event()` maps `KeyEventKind::Repeat` into `Message::KeyInput`.
+- [x] T403 [P] Write RED test: `translate_event()` still ignores `KeyEventKind::Release`.
+- [x] T404 Update `crates/gwt-tui/src/event.rs` so `Repeat` follows the normal key-input path while `Release` remains filtered.
+- [x] T405 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the repeat-key routing contract.
+
+## Phase 63: Standalone Raw Crossterm Probe
+
+- [x] T406 [P] Write RED test: shared trace helper serializes a raw `Event::Key` probe record with stable event typing and key metadata.
+- [x] T407 [P] Write RED test: shared trace helper serializes non-key probe events such as `Paste` without losing the raw debug payload.
+- [x] T408 Upgrade `crates/gwt-tui/examples/keytest.rs` to log every raw `crossterm` event to JSONL via the shared helper while mirroring gwt's minimal keyboard-enhancement negotiation.
+- [x] T409 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the standalone raw `crossterm` probe workflow.
+
+## Phase 64: Intermediate IME Probe Modes
+
+- [x] T410 [P] Write RED test: probe CLI parsing supports `raw` / `redraw` / `ratatui`, configurable tick rate, and an optional output path.
+- [x] T411 [P] Write RED test: probe state keeps bounded recent events, handles committed text editing, and computes cursor columns using display width for wide glyphs.
+- [x] T412 Refactor `crates/gwt-tui/examples/keytest.rs` into layered IME probe modes backed by a shared helper module.
+- [x] T413 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the layered IME probe workflow.
+
+## Phase 65: Idle Tick Redraw Suppression For Terminal Focus
+
+- [x] T414 [P] Write RED test: main-loop render decision skips redraw on `Message::Tick` while `FocusPane::Terminal` owns input and no visible periodic UI surface is active.
+- [x] T415 [P] Write RED test: the same render decision still redraws on `Message::Tick` for non-terminal focus or visible overlay-driven periodic UI states.
+- [x] T416 Update `crates/gwt-tui/src/main.rs` so redraw is dirty-driven and idle terminal ticks do not repaint the TUI.
+- [x] T417 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the idle-tick redraw suppression fix.
+
+## Phase 66: PTY Output Redraw Under Dirty-Driven Rendering
+
+- [x] T418 [P] Write RED test: draining PTY output marks redraw dirty so terminal output does not appear one keypress late.
+- [x] T419 [P] Keep the idle-tick suppression tests green so the PTY fix does not reintroduce unconditional repainting.
+- [x] T420 Update `crates/gwt-tui/src/main.rs` so the shared PTY-drain path always requests redraw when bytes are applied to the model.
+- [x] T421 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the dirty-driven PTY redraw fix.

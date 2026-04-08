@@ -3,9 +3,10 @@
 //! Initializes the terminal, creates the Model, and runs the event loop.
 
 use std::{
+    collections::VecDeque,
     io,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -15,17 +16,19 @@ use crossterm::{
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    Command,
 };
 
-#[cfg(test)]
-use crossterm::Command;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use gwt_agent::reset_runtime_state_dir;
 #[cfg(test)]
 use gwt_agent::reset_runtime_state_dir_for_pid;
+use gwt_core::logging::{
+    init as init_logging, LogEvent as Notification, LogLevel as Severity, LoggingConfig,
+};
+use gwt_core::paths::gwt_logs_dir;
 use gwt_git::RepoType;
-use gwt_notification::{Notification, Severity};
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
@@ -35,10 +38,28 @@ use gwt_tui::{
 };
 
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
+const PTY_REDRAW_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const MAX_MOUSE_SCROLL_BURST_MESSAGES: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAlternateScrollMode;
+
+impl Command for DisableAlternateScrollMode {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        // Terminal.app can translate trackpad scrolling in the alternate screen
+        // into cursor keys unless alternate-scroll mode is explicitly disabled.
+        f.write_str("\u{1b}[?1007l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 fn drain_pty_output_into_model(model: &mut Model) -> bool {
     let mut drained = false;
-    for (session_id, data) in model.drain_pty_output() {
+    for (session_id, data) in coalesce_pty_output_chunks(model.drain_pty_output()) {
         app::update(model, Message::PtyOutput(session_id, data));
         drained = true;
     }
@@ -53,6 +74,151 @@ fn drain_pty_output_and_request_render(model: &mut Model, needs_render: &mut boo
     drained
 }
 
+fn coalesce_pty_output_chunks(chunks: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    let mut merged: Vec<(String, Vec<u8>)> = Vec::new();
+    for (session_id, data) in chunks {
+        // Merge by session within the current drain pass so snapshot capture
+        // follows the drawn frame boundary rather than PTY reader chunking.
+        if let Some((_, existing)) = merged.iter_mut().find(|(id, _)| *id == session_id) {
+            existing.extend_from_slice(&data);
+        } else {
+            merged.push((session_id, data));
+        }
+    }
+    merged
+}
+
+fn is_mouse_scroll_message(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::MouseInput(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp
+                | crossterm::event::MouseEventKind::ScrollDown,
+            ..
+        })
+    )
+}
+
+fn poll_immediate_message_for_scroll_burst(
+    deadline: Instant,
+    input_normalizer: &mut event::InputNormalizer,
+    terminal_focused: bool,
+) -> Option<Message> {
+    loop {
+        let now = Instant::now();
+        if let Some(msg) = input_normalizer.pop_pending(now) {
+            return Some(msg);
+        }
+
+        let raw = event::poll_event_slice(deadline, Duration::ZERO)?;
+        let now = Instant::now();
+        let Some(msg) = input_normalizer.normalize(raw, now, terminal_focused) else {
+            continue;
+        };
+        return Some(msg);
+    }
+}
+
+fn dispatch_post_normalized_message(
+    model: &mut Model,
+    keybinds: &mut KeybindRegistry,
+    msg: Message,
+    needs_render: &mut bool,
+) {
+    let msg = match msg {
+        Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
+            let terminal_focused = model.active_focus == gwt_tui::model::FocusPane::Terminal;
+            let routed = keybinds.process_key_with_focus(key, terminal_focused);
+            input_trace::trace_keybind_decision(key, terminal_focused, routed.as_ref());
+            routed.unwrap_or(Message::KeyInput(key))
+        }
+        other => other,
+    };
+
+    let was_tick = matches!(msg, Message::Tick);
+    app::update(model, msg);
+    if was_tick {
+        *needs_render |= should_render_after_tick(model);
+    } else {
+        *needs_render = true;
+    }
+}
+
+fn handle_post_normalized_message<F>(
+    model: &mut Model,
+    keybinds: &mut KeybindRegistry,
+    first: Message,
+    needs_render: &mut bool,
+    pending_messages: &mut VecDeque<Message>,
+    next_message: F,
+) where
+    F: FnMut() -> Option<Message>,
+{
+    let burst = drain_mouse_scroll_burst(first, pending_messages, next_message);
+    for msg in burst {
+        dispatch_post_normalized_message(model, keybinds, msg, needs_render);
+        if model.quit {
+            break;
+        }
+    }
+}
+
+fn drain_mouse_scroll_burst<F>(
+    first: Message,
+    pending_messages: &mut VecDeque<Message>,
+    mut next_message: F,
+) -> Vec<Message>
+where
+    F: FnMut() -> Option<Message>,
+{
+    let mut burst = vec![first];
+    if !is_mouse_scroll_message(&burst[0]) {
+        return burst;
+    }
+
+    while burst.len() < MAX_MOUSE_SCROLL_BURST_MESSAGES {
+        let Some(next) = next_message() else {
+            break;
+        };
+        if is_mouse_scroll_message(&next) {
+            burst.push(next);
+        } else {
+            pending_messages.push_back(next);
+            break;
+        }
+    }
+
+    burst
+}
+
+fn next_message_for_loop_iteration<F>(
+    pending_messages: &mut VecDeque<Message>,
+    deadline: Instant,
+    had_pty_output: bool,
+    last_draw_at: Option<Instant>,
+    mut poll_event: F,
+) -> Option<Message>
+where
+    F: FnMut(Instant, Duration) -> Option<Message>,
+{
+    if let Some(msg) = pending_messages.pop_front() {
+        return Some(msg);
+    }
+
+    let poll_slice = if had_pty_output {
+        last_draw_at.map_or(Duration::ZERO, |last_draw_at| {
+            pty_redraw_poll_slice(Instant::now(), last_draw_at)
+        })
+    } else {
+        PTY_OUTPUT_POLL_SLICE
+    };
+    poll_event(deadline, poll_slice)
+}
+
+fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
+    PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
+}
+
 fn should_render_after_tick(model: &Model) -> bool {
     app::tick_redraw_required(model)
 }
@@ -61,6 +227,7 @@ fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
     execute!(
         writer,
         EnterAlternateScreen,
+        DisableAlternateScrollMode,
         EnableMouseCapture,
         EnableBracketedPaste,
     )?;
@@ -102,6 +269,9 @@ fn terminal_enter_commands_ansi() -> String {
     EnterAlternateScreen
         .write_ansi(&mut ansi)
         .expect("enter alternate screen ansi");
+    DisableAlternateScrollMode
+        .write_ansi(&mut ansi)
+        .expect("disable alternate scroll ansi");
     EnableMouseCapture
         .write_ansi(&mut ansi)
         .expect("enable mouse capture ansi");
@@ -134,15 +304,52 @@ fn terminal_leave_commands_ansi() -> String {
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
-    // Install a panic hook that restores the terminal before printing the
-    // backtrace.  Without this, panics leave the terminal in raw/alt-screen
-    // mode and the error message is invisible.
+    // SPEC-6 Phase 5: initialize `tracing_subscriber` with a non-blocking
+    // JSONL file writer rolling daily, plus a UI forwarder layer. The
+    // returned handles MUST be kept alive for the lifetime of main so
+    // that the background writer thread stays up.
+    let logging_config = LoggingConfig::new(gwt_logs_dir());
+    let mut logging_handles = match init_logging(logging_config) {
+        Ok(h) => Some(h),
+        Err(err) => {
+            eprintln!("warning: structured logging disabled: {err}");
+            None
+        }
+    };
+
+    // Install a panic hook that:
+    //   1. restores the terminal (raw mode + alt screen) so panics are visible
+    //   2. emits the panic info as a `tracing::error!` so that the final
+    //      event lands in `gwt.log.YYYY-MM-DD`
+    //   3. delegates to the previous hook (which prints the standard
+    //      backtrace to stderr)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = leave_terminal(&mut io::stdout());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            target: "gwt_tui::panic",
+            panic = %info,
+            backtrace = %backtrace,
+            "TUI panic"
+        );
         default_hook(info);
     }));
+
+    tracing::info!(
+        target: "gwt_tui::main",
+        version = env!("CARGO_PKG_VERSION"),
+        "gwt-tui starting"
+    );
+
+    // Take the UI log receiver before we move into run_app — we will
+    // bridge it into a std::sync::mpsc channel that the synchronous
+    // event loop can drain.
+    let logging_ui_rx = logging_handles.as_mut().and_then(|h| h.take_ui_rx());
+    // Clone the reload handle so the Logs tab can cycle the global
+    // log level live (SPEC-6 FR-011).
+    let logging_reload_handle = logging_handles.as_ref().map(|h| h.reload_handle.clone());
 
     // Parse CLI args: optional repo path
     let repo_path = std::env::args()
@@ -158,7 +365,12 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let result = run_app(&mut terminal, repo_path);
+    let result = run_app(
+        &mut terminal,
+        repo_path,
+        logging_ui_rx,
+        logging_reload_handle,
+    );
 
     // Restore terminal
     disable_raw_mode()?;
@@ -166,8 +378,14 @@ fn main() -> io::Result<()> {
     terminal.show_cursor()?;
 
     if let Err(e) = result {
+        tracing::error!(target: "gwt_tui::main", error = %e, "gwt-tui exited with error");
         eprintln!("Error: {e}");
     }
+
+    tracing::info!(target: "gwt_tui::main", "gwt-tui shutdown");
+
+    // Dropping the logging handles flushes the non-blocking writer.
+    drop(logging_handles.take());
 
     Ok(())
 }
@@ -176,6 +394,8 @@ fn main() -> io::Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     repo_path: PathBuf,
+    mut logging_ui_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>,
+    logging_reload_handle: Option<gwt_core::logging::ReloadHandle>,
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
@@ -188,6 +408,61 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    // SPEC-6 Phase 5: spawn the Logs-tab file watcher so the
+    // `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL stream flows into
+    // `LogsState.entries`. Keeping the handle alive for the lifetime
+    // of run_app is enough — the watcher owns its own thread.
+    let (logs_tx, logs_rx) = std::sync::mpsc::channel();
+    let _logs_watcher_handle =
+        gwt_tui::logs_watcher::spawn(gwt_core::paths::gwt_logs_dir(), logs_tx);
+    model.set_logs_watcher_rx(logs_rx);
+
+    // Plumb the reload handle through so the Logs tab can cycle the
+    // tracing level live (SPEC-6 FR-011).
+    if let Some(handle) = logging_reload_handle {
+        model.set_log_reload_handle(handle);
+    }
+
+    // SPEC-6 FR-015 + reviewer comment B5: bridge the tokio
+    // UnboundedReceiver<LogEvent> from `logging::init` into a
+    // std::sync::mpsc channel so the synchronous TUI loop can drain
+    // UI log events without a tokio runtime.
+    //
+    // The bridge loop polls `try_recv` and watches an
+    // `Arc<AtomicBool>` shutdown flag instead of using
+    // `blocking_recv()`. The reason: the `UnboundedSender` produced
+    // by `logging::init` is cloned into the global tracing
+    // subscriber's `UiForwarderLayer` and there is no way to drop the
+    // global subscriber, so `blocking_recv()` would never see all
+    // senders dropped and the bridge thread would hang on shutdown.
+    let logs_bridge_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Some(mut ui_rx) = logging_ui_rx.take() {
+        let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Notification>();
+        let shutdown = std::sync::Arc::clone(&logs_bridge_shutdown);
+        std::thread::Builder::new()
+            .name("gwt-ui-log-bridge".into())
+            .spawn(move || {
+                use std::sync::atomic::Ordering;
+                while !shutdown.load(Ordering::Relaxed) {
+                    match ui_rx.try_recv() {
+                        Ok(event) => {
+                            if bridge_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("spawn ui log bridge thread");
+        model.set_ui_log_rx(bridge_rx);
+    }
+
     if let Some(warning) = reset_startup_runtime_state_with(&gwt_core::paths::gwt_sessions_dir()) {
         app::update(
             &mut model,
@@ -221,6 +496,16 @@ fn run_app(
         app::load_initial_data(&mut model);
     }
 
+    // Phase 8: bootstrap the index worker (reconcile + Issue refresh + watchers).
+    if model.active_layer != ActiveLayer::Initialization {
+        // Wire the notification bus first so log_event() entries flow into the
+        // Logs tab as well as `~/.gwt/logs/index.log`.
+        gwt_tui::index_worker::init_notification_bus(model.notification_bus_handle());
+        let repo_root = model.repo_path().to_path_buf();
+        let active_worktrees = model.active_worktree_paths();
+        gwt_tui::index_worker::bootstrap(&repo_root, &active_worktrees);
+    }
+
     // Spawn PTY for the default shell-0 session.
     if model.active_layer != ActiveLayer::Initialization {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
@@ -250,7 +535,10 @@ fn run_app(
     }
 
     let mut keybinds = KeybindRegistry::new();
+    let mut input_normalizer = event::InputNormalizer::default();
+    let mut pending_messages = VecDeque::new();
     let mut needs_render = true;
+    let mut last_draw_at = None;
 
     loop {
         drain_pty_output_and_request_render(&mut model, &mut needs_render);
@@ -260,6 +548,7 @@ fn run_app(
                 app::view(&model, frame);
             })?;
             needs_render = false;
+            last_draw_at = Some(Instant::now());
         }
 
         // Check quit
@@ -270,41 +559,65 @@ fn run_app(
         // Event: poll
         let deadline = event::next_tick_deadline();
         loop {
-            if drain_pty_output_and_request_render(&mut model, &mut needs_render) {
+            if let Some(msg) = input_normalizer.pop_pending(std::time::Instant::now()) {
+                handle_post_normalized_message(
+                    &mut model,
+                    &mut keybinds,
+                    msg,
+                    &mut needs_render,
+                    &mut pending_messages,
+                    || input_normalizer.pop_pending(std::time::Instant::now()),
+                );
                 break;
             }
 
-            let Some(msg) = event::poll_event_slice(deadline, PTY_OUTPUT_POLL_SLICE) else {
+            let had_pty_output = drain_pty_output_and_request_render(&mut model, &mut needs_render);
+
+            let Some(msg) = next_message_for_loop_iteration(
+                &mut pending_messages,
+                deadline,
+                had_pty_output,
+                last_draw_at,
+                event::poll_event_slice,
+            ) else {
+                if had_pty_output {
+                    break;
+                }
                 continue;
             };
 
-            // Route key events through keybind registry
-            // (skip keybind processing when in Initialization layer)
-            let msg = match msg {
-                Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
-                    let terminal_focused =
-                        model.active_focus == gwt_tui::model::FocusPane::Terminal;
-                    let routed = keybinds.process_key_with_focus(key, terminal_focused);
-                    input_trace::trace_keybind_decision(key, terminal_focused, routed.as_ref());
-                    routed.unwrap_or(Message::KeyInput(key))
-                }
-                other => other,
+            let terminal_focused = model.active_layer != ActiveLayer::Initialization
+                && model.active_focus == gwt_tui::model::FocusPane::Terminal;
+            let Some(msg) =
+                input_normalizer.normalize(msg, std::time::Instant::now(), terminal_focused)
+            else {
+                continue;
             };
 
-            // Update: process message
-            let was_tick = matches!(msg, Message::Tick);
-            app::update(&mut model, msg);
-            if was_tick {
-                needs_render |= should_render_after_tick(&model);
-            } else {
-                needs_render = true;
-            }
+            handle_post_normalized_message(
+                &mut model,
+                &mut keybinds,
+                msg,
+                &mut needs_render,
+                &mut pending_messages,
+                || {
+                    poll_immediate_message_for_scroll_burst(
+                        deadline,
+                        &mut input_normalizer,
+                        terminal_focused,
+                    )
+                },
+            );
             break;
         }
     }
 
     // Kill all live PTY processes on shutdown.
     model.kill_all_pty();
+
+    // Signal the UI log bridge thread to exit so it does not outlive
+    // `run_app` (reviewer comment B5).
+    logs_bridge_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
 
     if model.active_layer != ActiveLayer::Initialization {
         let session_state_path = Model::session_state_path(model.repo_path());
@@ -359,10 +672,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use gwt_tui::app;
     use gwt_tui::message::Message;
     use gwt_tui::model::{FocusPane, ManagementTab, SessionLayout};
     use gwt_tui::screens::docker_progress::{DockerProgressMessage, DockerStage};
+
+    fn scroll_message(kind: MouseEventKind) -> Message {
+        Message::MouseInput(MouseEvent {
+            kind,
+            column: 40,
+            row: 12,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn coalesce_pty_output_chunks_merges_each_session_in_first_seen_order() {
+        let merged = coalesce_pty_output_chunks(vec![
+            ("shell-0".to_string(), b"frame".to_vec()),
+            ("agent-1".to_string(), b"AA".to_vec()),
+            ("shell-0".to_string(), b"-1".to_vec()),
+            ("agent-1".to_string(), b"BB".to_vec()),
+            ("shell-0".to_string(), b"\n".to_vec()),
+        ]);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("shell-0".to_string(), b"frame-1\n".to_vec()),
+                ("agent-1".to_string(), b"AABB".to_vec()),
+            ]
+        );
+    }
 
     #[test]
     fn restore_startup_session_state_with_applies_saved_layout() {
@@ -557,6 +899,180 @@ mod tests {
     fn terminal_enter_commands_enable_bracketed_paste() {
         let ansi = terminal_enter_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004h"));
+    }
+
+    #[test]
+    fn drain_mouse_scroll_burst_collects_consecutive_scroll_messages() {
+        let first = scroll_message(MouseEventKind::ScrollUp);
+        let mut pending_messages = VecDeque::new();
+        let mut queued = VecDeque::from([
+            scroll_message(MouseEventKind::ScrollUp),
+            scroll_message(MouseEventKind::ScrollDown),
+            Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )),
+        ]);
+
+        let burst = drain_mouse_scroll_burst(first, &mut pending_messages, || queued.pop_front());
+
+        assert_eq!(burst.len(), 3);
+        assert!(burst.iter().all(is_mouse_scroll_message));
+        assert!(matches!(
+            pending_messages.pop_front(),
+            Some(Message::KeyInput(key)) if key.code == KeyCode::Esc
+        ));
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn drain_mouse_scroll_burst_preserves_non_scroll_first_message() {
+        let first = Message::Tick;
+        let mut pending_messages = VecDeque::new();
+        let mut queued = VecDeque::from([scroll_message(MouseEventKind::ScrollUp)]);
+
+        let burst = drain_mouse_scroll_burst(first, &mut pending_messages, || queued.pop_front());
+
+        assert!(matches!(burst.as_slice(), [Message::Tick]));
+        assert!(pending_messages.is_empty());
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(
+            queued.pop_front(),
+            Some(Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn next_message_for_loop_iteration_prioritizes_pending_queue_during_pty_updates() {
+        let mut pending_messages = VecDeque::from([Message::Tick]);
+        let mut polled = false;
+
+        let next = next_message_for_loop_iteration(
+            &mut pending_messages,
+            Instant::now(),
+            true,
+            Some(Instant::now()),
+            |_deadline, _slice| {
+                polled = true;
+                None
+            },
+        );
+
+        assert!(matches!(next, Some(Message::Tick)));
+        assert!(
+            !polled,
+            "queued input should be consumed before polling when PTY output is active"
+        );
+    }
+
+    #[test]
+    fn next_message_for_loop_iteration_uses_frame_budget_after_pty_output() {
+        let mut pending_messages = VecDeque::new();
+        let mut observed_slice = None;
+
+        let next = next_message_for_loop_iteration(
+            &mut pending_messages,
+            Instant::now(),
+            true,
+            Some(Instant::now()),
+            |_deadline, slice| {
+                observed_slice = Some(slice);
+                Some(Message::Tick)
+            },
+        );
+
+        assert!(matches!(next, Some(Message::Tick)));
+        let observed_slice = observed_slice.expect("observed slice");
+        assert!(observed_slice > Duration::from_millis(1));
+        assert!(observed_slice <= PTY_REDRAW_FRAME_INTERVAL);
+    }
+
+    #[test]
+    fn next_message_for_loop_iteration_uses_standard_slice_without_pty_output() {
+        let mut pending_messages = VecDeque::new();
+        let mut observed_slice = None;
+
+        let next = next_message_for_loop_iteration(
+            &mut pending_messages,
+            Instant::now(),
+            false,
+            None,
+            |_deadline, slice| {
+                observed_slice = Some(slice);
+                Some(Message::Tick)
+            },
+        );
+
+        assert!(matches!(next, Some(Message::Tick)));
+        assert_eq!(observed_slice, Some(PTY_OUTPUT_POLL_SLICE));
+    }
+
+    #[test]
+    fn pty_redraw_poll_slice_waits_for_remaining_frame_budget() {
+        let now = Instant::now();
+        let last_draw_at = now - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::from_millis(28));
+    }
+
+    #[test]
+    fn pty_redraw_poll_slice_returns_zero_after_frame_budget_is_spent() {
+        let now = Instant::now();
+        let last_draw_at = now - PTY_REDRAW_FRAME_INTERVAL - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::ZERO);
+    }
+
+    #[test]
+    fn dispatch_post_normalized_message_routes_pending_keys_through_keybinds() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::TabContent;
+        let mut keybinds = KeybindRegistry::new();
+        let mut needs_render = false;
+
+        dispatch_post_normalized_message(
+            &mut model,
+            &mut keybinds,
+            Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL,
+            )),
+            &mut needs_render,
+        );
+        dispatch_post_normalized_message(
+            &mut model,
+            &mut keybinds,
+            Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+            )),
+            &mut needs_render,
+        );
+
+        assert_eq!(
+            model.active_focus,
+            FocusPane::Terminal,
+            "pending normalized keys should still use the keybind dispatch path"
+        );
+        assert!(needs_render, "key dispatch should request a redraw");
+    }
+
+    #[test]
+    fn terminal_enter_commands_disable_alternate_scroll_mode() {
+        let ansi = terminal_enter_commands_ansi();
+        assert!(
+            ansi.contains("\u{1b}[?1007l"),
+            "terminal startup should disable alternate-scroll mode so Terminal.app delivers wheel events to gwt"
+        );
     }
 
     #[test]

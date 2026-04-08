@@ -5,8 +5,7 @@ description: "Semantic search over local SPEC files (specs/SPEC-{N}/) using vect
 
 # SPEC Search
 
-gwt maintains a vector search index of local SPEC files using ChromaDB embeddings.
-The index is automatically updated when files in `specs/` change (via file system watcher).
+gwt maintains a vector search index of local SPEC files using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is maintained by the gwt TUI's resident filesystem watcher. When invoked outside the TUI, the runner auto-builds the index on the first call.
 
 ## SPEC search first for spec integration
 
@@ -24,32 +23,44 @@ Minimum workflow:
 2. Pick the canonical existing spec if found
 3. Only fall back to creating a new spec when no suitable canonical spec exists
 
-## SPEC search command
+## Environment
 
-Search SPECs semantically:
+When the gwt TUI launches an agent pane, the following env vars are exported automatically:
+
+- `GWT_PROJECT_ROOT` — absolute path of the active worktree
+- `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
+- `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
+
+## SPEC search command
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action search-specs \
-  --db-path "$GWT_PROJECT_ROOT/.gwt/index" \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
   --query "your search query" \
   --n-results 10
 ```
 
-To manually re-index (normally handled by file watcher):
+If the SPEC index does not yet exist, the runner builds it inline (full mode) and emits NDJSON progress on stderr before returning the search result.
+
+To force a full re-index (normally handled by the watcher / auto-build):
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
   --action index-specs \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
   --project-root "$GWT_PROJECT_ROOT" \
-  --db-path "$GWT_PROJECT_ROOT/.gwt/index"
+  --mode full
 ```
 
 ## SPEC search output format
 
 ```json
 {"ok": true, "specResults": [
-  {"spec_id": "1579", "title": "gwt-spec system", "status": "open", "phase": "ready", "dir_name": "SPEC-1579", "distance": 0.08}
+  {"spec_id": "10", "title": "Project workspace", "status": "in-progress", "phase": "Implementation", "dir_name": "SPEC-10", "distance": 0.08}
 ]}
 ```
 
@@ -60,13 +71,10 @@ To manually re-index (normally handled by file watcher):
 - Duplicate check: verify no existing spec covers the same scope
 - Architecture understanding: discover how features are specified
 
-## Environment
-
-- `GWT_PROJECT_ROOT`: absolute path to the project root (set by gwt at pane launch)
-
 ## Notes
 
-- SPEC index is automatically maintained by the file system watcher (changes to `specs/` trigger re-indexing)
+- SPEC index is maintained by the TUI watcher; non-TUI sessions get an mtime+size diff per call
+- The runner auto-builds the index when missing (use `--no-auto-build` to suppress)
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - For file search, use `gwt-project-search` instead
