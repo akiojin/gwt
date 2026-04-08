@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{Event, KeyEvent};
 use serde::Serialize;
 
 use crate::message::Message;
@@ -25,6 +25,20 @@ struct InputTraceRecord {
     decision: Option<String>,
     session_id: Option<String>,
     bytes_hex: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProbeTraceRecord {
+    timestamp: String,
+    event_type: &'static str,
+    event_debug: String,
+    key_code: Option<String>,
+    modifiers: Option<String>,
+    kind: Option<String>,
+    state: Option<String>,
+    paste_text: Option<String>,
+    columns: Option<u16>,
+    rows: Option<u16>,
 }
 
 impl InputTraceRecord {
@@ -63,6 +77,43 @@ impl InputTraceRecord {
     }
 }
 
+impl ProbeTraceRecord {
+    fn from_event(event: &Event) -> Self {
+        let mut record = Self {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            event_type: probe_event_type(event),
+            event_debug: format!("{event:?}"),
+            key_code: None,
+            modifiers: None,
+            kind: None,
+            state: None,
+            paste_text: None,
+            columns: None,
+            rows: None,
+        };
+
+        match event {
+            Event::Key(key) => {
+                let (key_code, modifiers, kind, state) = key_fields(*key);
+                record.key_code = Some(key_code);
+                record.modifiers = Some(modifiers);
+                record.kind = Some(kind);
+                record.state = Some(state);
+            }
+            Event::Paste(text) => {
+                record.paste_text = Some(text.clone());
+            }
+            Event::Resize(columns, rows) => {
+                record.columns = Some(*columns);
+                record.rows = Some(*rows);
+            }
+            Event::FocusGained | Event::FocusLost | Event::Mouse(_) => {}
+        }
+
+        record
+    }
+}
+
 pub fn trace_crossterm_key(key: KeyEvent) {
     let _ = append_if_configured(&InputTraceRecord::from_key("crossterm_key", key));
 }
@@ -77,6 +128,10 @@ pub fn trace_keybind_decision(key: KeyEvent, terminal_focused: bool, decision: O
 
 pub fn trace_pty_forward(key: KeyEvent, session_id: &str, bytes: &[u8]) {
     let _ = append_if_configured(&InputTraceRecord::from_pty_forward(key, session_id, bytes));
+}
+
+pub fn append_probe_event_with_path(path: &Path, event: &Event) -> std::io::Result<()> {
+    append_probe_record_with_path(path, &ProbeTraceRecord::from_event(event))
 }
 
 fn append_if_configured(record: &InputTraceRecord) -> std::io::Result<()> {
@@ -104,13 +159,63 @@ fn append_record_with_path(path: &Path, record: &InputTraceRecord) -> std::io::R
     Ok(())
 }
 
+fn append_probe_record_with_path(path: &Path, record: &ProbeTraceRecord) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_string(record)
+        .map_err(|err| std::io::Error::other(format!("serialize probe trace: {err}")))?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{json}")?;
+    Ok(())
+}
+
 fn key_fields(key: KeyEvent) -> (String, String, String, String) {
     (
         format!("{:?}", key.code),
-        format!("{:?}", key.modifiers),
+        key_modifiers_string(key.modifiers),
         format!("{:?}", key.kind),
         format!("{:?}", key.state),
     )
+}
+
+fn key_modifiers_string(modifiers: crossterm::event::KeyModifiers) -> String {
+    if modifiers.is_empty() {
+        return "NONE".to_string();
+    }
+
+    let mut labels = Vec::new();
+    if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+        labels.push("SHIFT");
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+        labels.push("CONTROL");
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+        labels.push("ALT");
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+        labels.push("SUPER");
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::HYPER) {
+        labels.push("HYPER");
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::META) {
+        labels.push("META");
+    }
+    labels.join("|")
+}
+
+fn probe_event_type(event: &Event) -> &'static str {
+    match event {
+        Event::FocusGained => "focus_gained",
+        Event::FocusLost => "focus_lost",
+        Event::Key(_) => "key",
+        Event::Mouse(_) => "mouse",
+        Event::Paste(_) => "paste",
+        Event::Resize(_, _) => "resize",
+    }
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -162,5 +267,34 @@ mod tests {
         assert!(text.contains("\"stage\":\"pty_forward\""));
         assert!(text.contains("\"session_id\":\"shell-0\""));
         assert!(text.contains("\"bytes_hex\":\"1b5b41\""));
+    }
+
+    #[test]
+    fn append_probe_event_with_path_writes_key_event_jsonl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("probe-trace.jsonl");
+
+        append_probe_event_with_path(&path, &Event::Key(key(KeyCode::Tab, KeyModifiers::SHIFT)))
+            .expect("append probe trace");
+
+        let text = std::fs::read_to_string(&path).expect("read trace");
+        assert!(text.contains("\"event_type\":\"key\""));
+        assert!(text.contains("\"key_code\":\"Tab\""));
+        assert!(text.contains("\"modifiers\":\"SHIFT\""));
+        assert!(text.contains("\"kind\":\"Press\""));
+    }
+
+    #[test]
+    fn append_probe_event_with_path_writes_paste_event_jsonl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("probe-trace.jsonl");
+
+        append_probe_event_with_path(&path, &Event::Paste("nihongo".into()))
+            .expect("append probe trace");
+
+        let text = std::fs::read_to_string(&path).expect("read trace");
+        assert!(text.contains("\"event_type\":\"paste\""));
+        assert!(text.contains("\"event_debug\":\"Paste(\\\"nihongo\\\")\""));
+        assert!(text.contains("\"paste_text\":\"nihongo\""));
     }
 }

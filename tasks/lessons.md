@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: `REPORT_EVENT_TYPES` を有効化したら `Repeat` を `Press` と別経路で扱う
+
+### 事象
+
+IME 候補の最初の一覧表示は維持されたが、次ページへ送るタイミングで入力制御を
+失う症状が残った。
+
+### 原因
+
+- 起動時に `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)`
+  を有効化したことで、互換端末では `KeyEventKind::Repeat` が届くようになった。
+- しかし `event.rs` の翻訳層は `KeyEventKind::Press` だけを `Message::KeyInput` に
+  流し、`Repeat` を無条件で捨てていた。
+- そのため、ページ送りのような繰り返しキーに依存する入力経路が途中で途切れた。
+
+### 再発防止策
+
+1. `crossterm` の keyboard enhancement flag を増やしたら、対応する
+   `KeyEventKind` の downstream 契約まで必ず確認する。
+2. event loop の key filter 変更では `Press` だけでなく `Repeat` / `Release` の
+   扱いを RED テストで固定する。
+3. IME や端末依存の入力不具合では、flag 有効化そのものだけでなく、その後段の
+   イベント翻訳層が新しい event kind を落としていないかを先に疑う。
+
 ## 2026-04-08 — fix: 重い Cargo テストを並列実行すると flaky なタイムアウトを誘発しやすい
 
 ### 事象

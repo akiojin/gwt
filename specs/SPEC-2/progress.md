@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `366/366` checked in `tasks.md`
-- Artifact refresh: `2026-04-07T17:37:22Z`
+- Task progress: `374/374` checked in `tasks.md`
+- Artifact refresh: `2026-04-08T14:18:15Z`
 
 ## Done
 - Supporting artifacts were refreshed so they no longer describe the older shell shape.
@@ -78,6 +78,8 @@
 - Interactive Codex launches now also bootstrap a PID-scoped `Running` runtime sidecar immediately after PTY spawn succeeds, covering the product gap where interactive Codex does not emit `SessionStart` before the first prompt. Hook events still overwrite that bootstrap state as soon as they arrive.
 - Terminal IME investigation now uses an opt-in `GWT_INPUT_TRACE_PATH` JSONL trace instead of a runtime mode toggle. The trace captures raw `crossterm` key presses, keybind routing decisions, and PTY-forwarded bytes without changing normal terminal UX.
 - Terminal startup now always requests minimal kitty keyboard enhancements (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them during shutdown with fail-open handling, so compatible terminals expose less key ambiguity while unsupported terminals keep existing behavior.
+- The event loop now routes `KeyEventKind::Repeat` through the same `Message::KeyInput` path as `Press` while still ignoring `Release`, so compatible terminals do not drop repeated IME candidate-navigation keys during page changes.
+- The existing `cargo run -p gwt-tui --example keytest` probe now logs every raw `crossterm` event to JSONL, mirrors gwt's minimal keyboard-enhancement negotiation, and writes to `/tmp/gwt-crossterm-events.jsonl` by default so Terminal.app IME behavior can be compared against gwt's in-app trace without touching the main app.
 
 ## Next
 - Run the reviewer walkthrough in `quickstart.md` when manual UX evidence is needed again.

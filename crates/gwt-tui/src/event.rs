@@ -35,7 +35,12 @@ pub fn poll_event_slice(deadline: Instant, max_wait: Duration) -> Option<Message
 
 fn translate_event(event: Event) -> Option<Message> {
     match event {
-        Event::Key(key) if key.kind == event::KeyEventKind::Press => {
+        Event::Key(key)
+            if matches!(
+                key.kind,
+                event::KeyEventKind::Press | event::KeyEventKind::Repeat
+            ) =>
+        {
             input_trace::trace_crossterm_key(key);
             Some(Message::KeyInput(key))
         }
@@ -61,7 +66,16 @@ pub fn classify_key(key: KeyEvent) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::Event;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key_event(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind,
+            state: KeyEventState::empty(),
+        }
+    }
 
     #[test]
     fn next_tick_deadline_is_in_the_future() {
@@ -92,5 +106,21 @@ mod tests {
             msg,
             Some(Message::PasteInput(text)) if text == "git status\npwd"
         ));
+    }
+
+    #[test]
+    fn translate_event_maps_repeat_key_to_message() {
+        let msg = translate_event(Event::Key(key_event(KeyCode::Tab, KeyEventKind::Repeat)));
+        assert!(matches!(
+            msg,
+            Some(Message::KeyInput(key))
+                if key.code == KeyCode::Tab && key.kind == KeyEventKind::Repeat
+        ));
+    }
+
+    #[test]
+    fn translate_event_ignores_key_release() {
+        let msg = translate_event(Event::Key(key_event(KeyCode::Tab, KeyEventKind::Release)));
+        assert!(msg.is_none());
     }
 }

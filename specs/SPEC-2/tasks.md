@@ -575,3 +575,17 @@ banner in favor of pane-title chrome.
 - [x] T364 [P] Write RED test: terminal leave ANSI sequence includes `PopKeyboardEnhancementFlags`.
 - [x] T365 Update `crates/gwt-tui/src/main.rs` terminal enter/leave handling to request minimal kitty keyboard enhancements at startup and pop them at shutdown with fail-open behavior.
 - [x] T366 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the minimal kitty keyboard-enhancement contract.
+
+## Phase 61: Repeat-Key Delivery Under Kitty Event Types
+
+- [x] T367 [P] Write RED test: `translate_event()` maps `KeyEventKind::Repeat` into `Message::KeyInput`.
+- [x] T368 [P] Write RED test: `translate_event()` still ignores `KeyEventKind::Release`.
+- [x] T369 Update `crates/gwt-tui/src/event.rs` so `Repeat` follows the normal key-input path while `Release` remains filtered.
+- [x] T370 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the repeat-key routing contract.
+
+## Phase 62: Standalone Raw Crossterm Probe
+
+- [x] T371 [P] Write RED test: shared trace helper serializes a raw `Event::Key` probe record with stable event typing and key metadata.
+- [x] T372 [P] Write RED test: shared trace helper serializes non-key probe events such as `Paste` without losing the raw debug payload.
+- [x] T373 Upgrade `crates/gwt-tui/examples/keytest.rs` to log every raw `crossterm` event to JSONL via the shared helper while mirroring gwt's minimal keyboard-enhancement negotiation.
+- [x] T374 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the standalone raw `crossterm` probe workflow.

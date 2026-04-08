@@ -791,6 +791,41 @@ unsupported terminals fail-open.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the always-on minimal keyboard-enhancement contract.
 
+### Phase 56: Repeat-Key Delivery Under Kitty Event Types (4 tasks)
+Honor the downstream event contract implied by `REPORT_EVENT_TYPES` so repeated
+candidate-navigation keys keep flowing through the normal terminal input path.
+
+56.1: Event-loop contract (2 tasks)
+- Treat `KeyEventKind::Repeat` the same as `Press` at the event-translation
+  boundary so repeat events still reach keybind routing and PTY forwarding.
+- Continue ignoring `KeyEventKind::Release` so keyboard-enhancement negotiation
+  does not create duplicate actions for a single physical keypress.
+
+56.2: Verification and artifact sync (2 tasks)
+- Add RED coverage for `Repeat` delivery and `Release` filtering in
+  `crates/gwt-tui/src/event.rs`.
+- Re-run focused plus broad verification and refresh SPEC-2/README artifacts
+  with the repeat-key routing contract.
+
+### Phase 57: Standalone Raw Crossterm Probe (4 tasks)
+Strengthen the existing `keytest` example so IME triage can compare raw
+`crossterm` events against gwt's routed input trace without modifying the main
+application flow.
+
+57.1: Shared probe serialization (2 tasks)
+- Add RED coverage in the shared trace helper for serializing raw
+  `crossterm::event::Event` values into JSONL with stable event typing and key
+  metadata for key events.
+- Reuse the existing input-trace helper module instead of inventing a second
+  ad-hoc JSON schema for the example.
+
+57.2: Example upgrade and verification (2 tasks)
+- Update `crates/gwt-tui/examples/keytest.rs` to log every raw event, mirror
+  gwt's minimal keyboard-enhancement negotiation, and advertise a stable
+  default output path.
+- Re-run focused plus broad verification and refresh SPEC-2/README artifacts
+  with the standalone raw-probe workflow.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

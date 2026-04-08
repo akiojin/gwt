@@ -133,6 +133,43 @@ is reduced on compatible terminals without introducing a runtime mode switch.
    startup or shutdown proceeds, then gwt still runs and restores terminal state
    without surfacing a fatal error.
 
+### US-11: Route Repeat Key Events After Kitty Enhancement Negotiation (P2) -- IMPLEMENTED
+
+As a developer using IME candidate navigation in a compatible terminal, I want
+repeat key events emitted after keyboard-enhancement negotiation to stay on the
+normal input path so page-switch keys do not silently disappear.
+
+**Acceptance Scenarios**
+
+1. Given a compatible terminal emits `KeyEventKind::Repeat`, when gwt polls the
+   next input event, then it records and routes that key through the same
+   `Message::KeyInput` path used for `Press`.
+2. Given a terminal emits `KeyEventKind::Release`, when gwt polls the next
+   input event, then it ignores that release event so one physical keypress
+   does not trigger duplicate actions.
+
+### US-12: Standalone Raw Crossterm Probe For IME Triage (P2) -- IMPLEMENTED
+
+As a developer isolating whether Terminal.app or `gwt` routing is responsible
+for Japanese IME breakage, I want the existing `keytest` example to record raw
+`crossterm` events directly to JSONL so I can compare the terminal's native
+event stream against gwt's in-app trace.
+
+**Acceptance Scenarios**
+
+1. Given I run `cargo run -p gwt-tui --example keytest`, when `crossterm`
+   emits raw key, paste, mouse, focus, or resize events, then the example
+   appends a JSONL record with the event type, debug payload, and key metadata
+   when applicable.
+2. Given the example starts under the same terminal where gwt reproduces the
+   IME issue, when startup initialization runs, then it requests the same
+   minimal kitty keyboard enhancements as gwt and fail-open pops them on exit
+   so the probe matches the real app's terminal negotiation as closely as
+   possible.
+3. Given I do not pass an explicit output path, when the example starts, then
+   it writes to a stable default log file and prints that path in English so
+   the probe can be run without extra setup.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -153,6 +190,11 @@ is reduced on compatible terminals without introducing a runtime mode switch.
   opt-in and must not add a persistent UI mode or always-on logging.
 - Terminals that do not implement kitty keyboard protocol must keep startup and
   shutdown behavior unchanged via fail-open enhancement handling.
+- Terminals that do emit `KeyEventKind::Repeat` after keyboard-enhancement
+  negotiation must not lose candidate-navigation keys just because they are not
+  tagged as `Press`.
+- The standalone raw `crossterm` probe must stay debug-only and must not change
+  normal gwt startup, footer hints, or runtime input routing.
 
 ## Regression Guardrail: Hook-Driven Branch Visibility
 
@@ -194,6 +236,11 @@ This capability has regressed multiple times because "hooks are configured" is n
   KeyboardEnhancementFlags::REPORT_EVENT_TYPES` during terminal enter, and
   pops the enhancement level during terminal leave. Enhancement push/pop is
   fail-open so unsupported terminals continue with existing behavior.
+- **FR-004c**: The existing `crates/gwt-tui/examples/keytest.rs` example acts
+  as a standalone raw `crossterm` probe. It records every `crossterm::event::Event`
+  it reads to JSONL, includes full key metadata when the event is a key event,
+  and defaults to `/tmp/gwt-crossterm-events.jsonl` when no explicit output path
+  is passed.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.

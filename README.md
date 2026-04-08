@@ -84,9 +84,17 @@ launch gwt with `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl`. The JSONL
 trace records raw `crossterm` key events, keybind decisions, and forwarded PTY
 bytes without adding a runtime input-mode toggle.
 
+To compare that routed trace with raw terminal input, run
+`cargo run -p gwt-tui --example keytest` in the same terminal. The probe logs
+every raw `crossterm::event::Event` to `/tmp/gwt-crossterm-events.jsonl` by
+default, or to the first path argument you pass.
+
 gwt also requests minimal kitty keyboard enhancements during terminal startup
 (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them on shutdown.
-Unsupported terminals fail open and continue with existing behavior.
+Unsupported terminals fail open and continue with existing behavior. Repeated
+key events from compatible terminals now stay on the same input path as normal
+key presses, which matters when IME candidate navigation advances to another
+page.
 
 ## Environment and requirements
 
