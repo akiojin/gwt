@@ -16,10 +16,17 @@
 //! subsequent phases.
 
 pub mod body;
+pub mod cache;
+pub mod client;
 pub mod routing;
 pub mod sections;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
+pub use cache::{Cache, CacheEntry, CacheError, CacheMeta};
+pub use client::{
+    fake::FakeIssueClient, ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient,
+    IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
+};
 pub use routing::{decide_routing, Routing, ROUTING_PROMOTE_THRESHOLD_BYTES};
 pub use sections::{
     extract_sections, ExtractedSection, SectionName, SectionParseError, SectionPart,
