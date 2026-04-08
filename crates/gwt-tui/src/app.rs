@@ -11075,6 +11075,76 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_prunes_stale_gwt_assets_before_agent_process_starts() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-spec-42");
+        fs::create_dir_all(worktree.join(".claude/commands")).expect("create claude commands");
+        fs::create_dir_all(worktree.join(".codex/skills/gwt-agent-read"))
+            .expect("create stale codex skill");
+        fs::write(
+            worktree.join(".claude/commands/gwt-issue-search.md"),
+            "legacy command",
+        )
+        .expect("write stale command");
+        fs::write(
+            worktree.join(".codex/skills/gwt-agent-read/SKILL.md"),
+            "legacy skill",
+        )
+        .expect("write stale skill");
+        let marker = dir.path().join("cleanup-check.txt");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Custom("my-agent".to_string()),
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
+                "sh".to_string(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
+            display_name: "My Agent".to_string(),
+            color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let mut observed = None;
+        for _ in 0..50 {
+            if let Ok(value) = fs::read_to_string(&marker) {
+                if !value.is_empty() {
+                    observed = Some(value);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(observed.as_deref(), Some("pruned"));
+        assert!(
+            !worktree
+                .join(".claude/commands/gwt-issue-search.md")
+                .exists(),
+            "stale command should be removed before spawn"
+        );
+        assert!(
+            !worktree.join(".codex/skills/gwt-agent-read").exists(),
+            "stale skill should be removed before spawn"
+        );
+    }
+
+    #[test]
     fn materialize_pending_launch_with_bootstraps_running_runtime_sidecar_after_spawn() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-develop");
