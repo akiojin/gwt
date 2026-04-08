@@ -1,25 +1,28 @@
 # Lessons Learned
 
-## 2026-04-08 — fix: runtime distribution must prune stale gwt namespace entries, not just overwrite current assets
+## 2026-04-08 — fix: runtime distribution must prune stale managed asset paths, not just root entries
 
 ### 事象
 
 `distribute_to_worktree()` は current bundle を materialize できていたが、
-managed roots に残っている古い `gwt-*` skill / command / hook はそのまま残り、
-launch を重ねても過去の遺産が worktree に居座った。
+managed roots に残っている古い `gwt-*` skill / command / hook が残存した。
+さらに root entry だけを消す実装では、現行 bundle に残っている skill directory の内側に
+ぶら下がった stale file / subdirectory までは消えず、launch を重ねても過去の遺産が worktree に居座った。
 
 ### 原因
 
 - distribution は「今ある managed asset を書く」ことしかしておらず、
-  「今の bundle に存在しない gwt namespace entry を消す」責務を持っていなかった。
+  「今の bundle に存在しない managed path を消す」責務を持っていなかった。
+- 最初の cleanup は managed roots の root-level `gwt-*` entry にしか効かず、
+  retain される `gwt-*` directory の内部までは source tree と照合していなかった。
 - tracked-file 保護は current bundle の write skip には有効だったが、
   stale residue の pruning まで止める設計ではなかった。
 
 ### 再発防止策
 
-1. managed roots の root-level `gwt-*` entry は、write 前に embedded bundle manifest と突き合わせる。
-2. current bundle に存在しない `gwt-*` entry は tracked / untracked を問わず削除し、legacy residue を launch ごとに収束させる。
-3. cleanup は managed roots の root entry 単位に限定し、非 `gwt-*` ファイルや hook config (`settings.local.json`, `hooks.json`) には触れない。
+1. managed roots は write 前に embedded bundle source tree と照合し、current bundle に存在しない path を prune する。
+2. stale path の pruning は tracked / untracked を問わず、root entry だけでなく retained managed directory 配下の nested file / subdirectory まで適用する。
+3. recursive cleanup は current bundle が管理する tree に限定し、非 `gwt-*` root entry や hook config (`settings.local.json`, `hooks.json`) には触れない。
 
 ## 2026-04-08 — chore: managed gwt asset cleanup must distinguish source-of-truth from generated residue
 

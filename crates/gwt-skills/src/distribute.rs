@@ -100,8 +100,7 @@ fn sync_dir_assets(
     report: &mut DistributeReport,
     root_kind: RootEntryKind,
 ) -> io::Result<()> {
-    let desired_entries = desired_gwt_root_entries(source, root_kind);
-    remove_stale_gwt_root_entries(dest, &desired_entries, report)?;
+    prune_dir_against_source(source, dest, Some(root_kind), report)?;
     write_dir_assets(source, worktree, dest, tracked_paths, report)
 }
 
@@ -141,42 +140,54 @@ fn write_dir_assets(
     Ok(())
 }
 
-fn desired_gwt_root_entries(source: &Dir<'_>, root_kind: RootEntryKind) -> HashSet<String> {
-    match root_kind {
-        RootEntryKind::Directories => source
-            .dirs()
-            .filter_map(|dir| dir.path().file_name().and_then(|name| name.to_str()))
-            .filter(|name| name.starts_with("gwt-"))
-            .map(str::to_string)
-            .collect(),
-        RootEntryKind::Files => source
-            .files()
-            .filter_map(|file| file.path().file_name().and_then(|name| name.to_str()))
-            .filter(|name| name.starts_with("gwt-"))
-            .map(str::to_string)
-            .collect(),
-    }
-}
-
-fn remove_stale_gwt_root_entries(
+fn prune_dir_against_source(
+    source: &Dir<'_>,
     dest: &Path,
-    desired_entries: &HashSet<String>,
+    root_kind: Option<RootEntryKind>,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
     if !dest.exists() {
         return Ok(());
     }
 
+    let desired_file_names: HashSet<String> = source
+        .files()
+        .filter_map(|file| file.path().file_name().and_then(|name| name.to_str()))
+        .map(str::to_string)
+        .collect();
+    let desired_dir_names: HashSet<String> = source
+        .dirs()
+        .filter_map(|dir| dir.path().file_name().and_then(|name| name.to_str()))
+        .map(str::to_string)
+        .collect();
+
     for entry in fs::read_dir(dest)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("gwt-") || desired_entries.contains(name.as_ref()) {
+
+        if root_kind.is_some() && !name.starts_with("gwt-") {
             continue;
         }
 
-        remove_path(&entry.path())?;
-        report.paths_removed += 1;
+        let keep = match root_kind {
+            Some(RootEntryKind::Directories) => desired_dir_names.contains(name.as_ref()),
+            Some(RootEntryKind::Files) => desired_file_names.contains(name.as_ref()),
+            None => {
+                desired_file_names.contains(name.as_ref())
+                    || desired_dir_names.contains(name.as_ref())
+            }
+        };
+
+        if !keep {
+            remove_path(&entry.path())?;
+            report.paths_removed += 1;
+        }
+    }
+
+    for subdir in source.dirs() {
+        let subdir_name = subdir.path().file_name().unwrap_or_default();
+        prune_dir_against_source(subdir, &dest.join(subdir_name), None, report)?;
     }
 
     Ok(())
@@ -389,6 +400,43 @@ mod tests {
             !tracked_hook.exists(),
             "unexpected {}",
             tracked_hook.display()
+        );
+    }
+
+    #[test]
+    fn distribute_prunes_stale_nested_paths_inside_managed_skill_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        let tracked_skill = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
+        let stale_nested = dir
+            .path()
+            .join(".claude/skills/gwt-pr/references/legacy.md");
+        let stale_codex_nested = dir.path().join(".codex/skills/gwt-pr/legacy.txt");
+
+        fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
+        fs::create_dir_all(stale_nested.parent().unwrap()).unwrap();
+        fs::create_dir_all(stale_codex_nested.parent().unwrap()).unwrap();
+        fs::write(&tracked_skill, "tracked skill").unwrap();
+        fs::write(&stale_nested, "legacy nested file").unwrap();
+        fs::write(&stale_codex_nested, "legacy codex file").unwrap();
+
+        track_path(dir.path(), ".claude/skills/gwt-pr/SKILL.md");
+        track_path(dir.path(), ".claude/skills/gwt-pr/references/legacy.md");
+        track_path(dir.path(), ".codex/skills/gwt-pr/legacy.txt");
+
+        distribute_to_worktree(dir.path()).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked_skill).unwrap(), "tracked skill");
+        assert!(
+            !stale_nested.exists(),
+            "unexpected {}",
+            stale_nested.display()
+        );
+        assert!(
+            !stale_codex_nested.exists(),
+            "unexpected {}",
+            stale_codex_nested.display()
         );
     }
 

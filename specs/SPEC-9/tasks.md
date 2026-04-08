@@ -74,6 +74,8 @@
 - [x] **T-152**: Write RED test: `distribute_to_worktree()` removes stale tracked `gwt-*` root entries that are outside the current embedded bundle.
 - [x] **T-153**: Add bundle-manifest cleanup to `distribute_to_worktree()` so managed roots delete stale `gwt-*` residue before writing current assets.
 - [x] **T-154**: Refresh `SPEC-9` artifacts and rerun focused/runtime verification for stale managed-asset cleanup.
+- [x] **T-155**: Write RED test: `distribute_to_worktree()` prunes stale nested paths inside retained managed `gwt-*` skill trees before materializing the current bundle.
+- [x] **T-156**: Extend runtime cleanup to synchronize managed `gwt-*` asset trees recursively and rerun launch-path verification.
 
 ### 2b.2 Git Exclude Management
 
