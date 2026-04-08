@@ -30,7 +30,8 @@ use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::paths::{gwt_cache_dir, gwt_logs_dir, gwt_sessions_dir};
 use gwt_notification::{Notification, Severity};
 use gwt_skills::{
-    distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
+    distribute_to_worktree, generate_codex_hooks, generate_settings_local, prune_stale_gwt_assets,
+    update_git_exclude,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -1316,6 +1317,7 @@ where
         }
         model.branches.checked_out_branches = checked_out;
     }
+    prune_stale_gwt_assets_for_repo_worktrees(model);
 
     // Refresh the protection inputs the Cleanup gutter consults. The HEAD
     // branch tracks the gwt-tui process itself; active session branches are
@@ -1433,6 +1435,22 @@ fn load_git_view_with<S, C, B, P>(
             pr_link,
         },
     );
+}
+
+fn prune_stale_gwt_assets_for_repo_worktrees(model: &Model) {
+    let mut paths = std::collections::HashSet::new();
+    paths.insert(model.repo_path().to_path_buf());
+    paths.extend(model.active_worktree_paths());
+
+    for worktree in paths {
+        if let Err(error) = prune_stale_gwt_assets(&worktree) {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                error = %error,
+                "failed to prune stale gwt assets during initial data refresh"
+            );
+        }
+    }
 }
 
 fn git_view_divergence_summary(branches: &[gwt_git::Branch]) -> Option<String> {
@@ -9305,6 +9323,63 @@ mod tests {
         assert_eq!(
             docker_calls, 1,
             "branch detail preload should snapshot docker state exactly once per refresh cycle"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_prunes_stale_gwt_assets_from_repo_and_active_worktrees() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let worktree = dir.path().join("wt-feature-stale");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/stale",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+
+        let repo_stale = dir.path().join(".claude/commands/gwt-issue-search.md");
+        let worktree_stale = worktree.join(".codex/skills/gwt-agent-read/SKILL.md");
+        let unrelated_dir = dir.path().join("not-a-worktree");
+        let unrelated_stale = unrelated_dir.join(".claude/commands/gwt-issue-search.md");
+
+        fs::create_dir_all(repo_stale.parent().expect("repo stale parent"))
+            .expect("repo stale dir");
+        fs::create_dir_all(worktree_stale.parent().expect("worktree stale parent"))
+            .expect("worktree stale dir");
+        fs::create_dir_all(unrelated_stale.parent().expect("unrelated stale parent"))
+            .expect("unrelated stale dir");
+        fs::write(&repo_stale, "legacy repo command").expect("write repo stale asset");
+        fs::write(&worktree_stale, "legacy worktree skill").expect("write worktree stale asset");
+        fs::write(&unrelated_stale, "legacy unrelated command")
+            .expect("write unrelated stale asset");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        assert!(
+            !repo_stale.exists(),
+            "repo stale asset should be pruned during startup load"
+        );
+        assert!(
+            !worktree_stale.exists(),
+            "active worktree stale asset should be pruned during startup load"
+        );
+        assert!(
+            unrelated_stale.exists(),
+            "startup sweep should not touch non-worktree directories"
         );
     }
 

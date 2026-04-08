@@ -8,7 +8,7 @@ pub mod registry;
 pub mod settings_local;
 pub mod validate;
 
-pub use distribute::{distribute_to_worktree, DistributeReport};
+pub use distribute::{distribute_to_worktree, prune_stale_gwt_assets, DistributeReport};
 pub use git_exclude::update_git_exclude;
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,

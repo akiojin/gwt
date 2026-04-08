@@ -76,6 +76,8 @@
 - [x] **T-154**: Refresh `SPEC-9` artifacts and rerun focused/runtime verification for stale managed-asset cleanup.
 - [x] **T-155**: Write RED test: `distribute_to_worktree()` prunes stale nested paths inside retained managed `gwt-*` skill trees before materializing the current bundle.
 - [x] **T-156**: Extend runtime cleanup to synchronize managed `gwt-*` asset trees recursively and rerun launch-path verification.
+- [x] **T-157**: Write RED test: startup `load_initial_data()` prunes stale `gwt-*` assets from the repo root and active worktrees without touching unrelated directories.
+- [x] **T-158**: Add prune-only startup sweep for repo/worktree discovery and rerun focused plus broad verification.
 
 ### 2b.2 Git Exclude Management
 

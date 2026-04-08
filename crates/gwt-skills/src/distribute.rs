@@ -45,63 +45,94 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
 
+    prune_managed_asset_roots(worktree, &mut report)?;
+
     // Claude Code targets
-    sync_dir_assets(
+    write_dir_assets(
         &CLAUDE_SKILLS,
         worktree,
         &worktree.join(".claude/skills"),
         &tracked_paths,
         &mut report,
-        RootEntryKind::Directories,
     )?;
-    sync_dir_assets(
+    write_dir_assets(
         &CLAUDE_COMMANDS,
         worktree,
         &worktree.join(".claude/commands"),
         &tracked_paths,
         &mut report,
-        RootEntryKind::Files,
     )?;
-    sync_dir_assets(
+    write_dir_assets(
         &CLAUDE_HOOKS,
         worktree,
         &worktree.join(".claude/hooks/scripts"),
         &tracked_paths,
         &mut report,
-        RootEntryKind::Files,
     )?;
 
     // Codex targets
-    sync_dir_assets(
+    write_dir_assets(
         &CLAUDE_SKILLS,
         worktree,
         &worktree.join(".codex/skills"),
         &tracked_paths,
         &mut report,
-        RootEntryKind::Directories,
     )?;
-    sync_dir_assets(
+    write_dir_assets(
         &CODEX_HOOKS,
         worktree,
         &worktree.join(".codex/hooks/scripts"),
         &tracked_paths,
         &mut report,
-        RootEntryKind::Files,
     )?;
 
     Ok(report)
 }
 
-fn sync_dir_assets(
-    source: &Dir<'_>,
-    worktree: &Path,
-    dest: &Path,
-    tracked_paths: &HashSet<PathBuf>,
-    report: &mut DistributeReport,
-    root_kind: RootEntryKind,
-) -> io::Result<()> {
-    prune_dir_against_source(source, dest, Some(root_kind), report)?;
-    write_dir_assets(source, worktree, dest, tracked_paths, report)
+/// Remove stale gwt-managed asset paths from the target worktree without
+/// materializing the current bundle.
+pub fn prune_stale_gwt_assets(worktree: &Path) -> io::Result<usize> {
+    let mut report = DistributeReport::default();
+    prune_managed_asset_roots(worktree, &mut report)?;
+    Ok(report.paths_removed)
+}
+
+fn prune_managed_asset_roots(worktree: &Path, report: &mut DistributeReport) -> io::Result<()> {
+    // Claude Code targets
+    prune_dir_against_source(
+        &CLAUDE_SKILLS,
+        &worktree.join(".claude/skills"),
+        Some(RootEntryKind::Directories),
+        report,
+    )?;
+    prune_dir_against_source(
+        &CLAUDE_COMMANDS,
+        &worktree.join(".claude/commands"),
+        Some(RootEntryKind::Files),
+        report,
+    )?;
+    prune_dir_against_source(
+        &CLAUDE_HOOKS,
+        &worktree.join(".claude/hooks/scripts"),
+        Some(RootEntryKind::Files),
+        report,
+    )?;
+
+    // Codex targets use the same skill bundle as Claude.
+    prune_dir_against_source(
+        &CLAUDE_SKILLS,
+        &worktree.join(".codex/skills"),
+        Some(RootEntryKind::Directories),
+        report,
+    )?;
+    prune_dir_against_source(
+        &CODEX_HOOKS,
+        &worktree.join(".codex/hooks/scripts"),
+        Some(RootEntryKind::Files),
+        report,
+    )?;
+
+    Ok(())
 }
 
 fn write_dir_assets(
@@ -437,6 +468,37 @@ mod tests {
             !stale_codex_nested.exists(),
             "unexpected {}",
             stale_codex_nested.display()
+        );
+    }
+
+    #[test]
+    fn prune_stale_gwt_assets_removes_extras_without_materializing_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let stale_command = dir.path().join(".claude/commands/gwt-issue-search.md");
+        let stale_skill = dir.path().join(".codex/skills/gwt-agent-read/SKILL.md");
+
+        fs::create_dir_all(stale_command.parent().unwrap()).unwrap();
+        fs::create_dir_all(stale_skill.parent().unwrap()).unwrap();
+        fs::write(&stale_command, "legacy command").unwrap();
+        fs::write(&stale_skill, "legacy skill").unwrap();
+
+        let removed = prune_stale_gwt_assets(dir.path()).unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(
+            !stale_command.exists(),
+            "unexpected {}",
+            stale_command.display()
+        );
+        assert!(
+            !stale_skill.exists(),
+            "unexpected {}",
+            stale_skill.display()
+        );
+        assert!(
+            !dir.path().join(".claude/skills/gwt-pr/SKILL.md").exists(),
+            "prune-only sweep must not materialize bundle assets"
         );
     }
 
