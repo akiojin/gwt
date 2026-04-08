@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use gwt_notification::Severity;
+use gwt_core::logging::LogLevel as Severity;
 use gwt_tui::app;
 use gwt_tui::input::keybind::KeybindRegistry;
 use gwt_tui::message::Message;
@@ -151,6 +151,7 @@ fn sample_log_entries() -> Vec<LogEntry> {
             message: "Failed to connect".to_string(),
             detail: Some("connection timed out".to_string()),
             timestamp,
+            fields: Default::default(),
         },
         LogEntry {
             id: 2,
@@ -159,6 +160,7 @@ fn sample_log_entries() -> Vec<LogEntry> {
             message: "Slow render".to_string(),
             detail: None,
             timestamp,
+            fields: Default::default(),
         },
         LogEntry {
             id: 3,
@@ -167,6 +169,7 @@ fn sample_log_entries() -> Vec<LogEntry> {
             message: "Started session".to_string(),
             detail: None,
             timestamp,
+            fields: Default::default(),
         },
         LogEntry {
             id: 4,
@@ -175,6 +178,7 @@ fn sample_log_entries() -> Vec<LogEntry> {
             message: "Buffer flush".to_string(),
             detail: None,
             timestamp,
+            fields: Default::default(),
         },
     ]
 }
@@ -266,10 +270,10 @@ fn e2e_notifications_land_in_structured_log_for_all_severities() {
     model.management_tab = ManagementTab::Logs;
 
     let notifications = [
-        gwt_notification::Notification::new(Severity::Debug, "pty", "Buffer flush"),
-        gwt_notification::Notification::new(Severity::Info, "core", "Started session"),
-        gwt_notification::Notification::new(Severity::Warn, "tui", "Slow render"),
-        gwt_notification::Notification::new(Severity::Error, "core", "Failed to connect"),
+        gwt_core::logging::LogEvent::new(Severity::Debug, "pty", "Buffer flush"),
+        gwt_core::logging::LogEvent::new(Severity::Info, "core", "Started session"),
+        gwt_core::logging::LogEvent::new(Severity::Warn, "tui", "Slow render"),
+        gwt_core::logging::LogEvent::new(Severity::Error, "core", "Failed to connect"),
     ];
 
     for notification in notifications {
@@ -295,7 +299,7 @@ fn e2e_notifications_land_in_structured_log_for_all_severities() {
 #[test]
 fn e2e_info_notification_appears_in_status_bar_and_auto_dismisses() {
     let mut model = test_model();
-    let notification = gwt_notification::Notification::new(Severity::Info, "core", "Started");
+    let notification = gwt_core::logging::LogEvent::new(Severity::Info, "core", "Started");
 
     app::update(&mut model, Message::Notify(notification));
 

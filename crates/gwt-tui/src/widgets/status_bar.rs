@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use gwt_notification::{Notification, Severity};
+use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 
 use crate::input::voice;
 use crate::model::{ActiveLayer, Model, SessionLayout, SessionTabType};
@@ -231,7 +231,7 @@ mod tests {
     use crate::model::{AgentColor, SessionTab, SessionTabType, VtState};
     use crate::screens::branches::BranchCategory;
     use crate::screens::branches::BranchItem;
-    use gwt_notification::{Notification, Severity};
+    use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;

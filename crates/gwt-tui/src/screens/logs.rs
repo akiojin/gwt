@@ -1,6 +1,6 @@
 //! Logs viewer screen.
 
-use gwt_notification::Severity;
+use gwt_core::logging::LogLevel as Severity;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::theme;
 
-pub use gwt_notification::Notification as LogEntry;
+pub use gwt_core::logging::LogEvent as LogEntry;
 
 /// Log severity filter level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

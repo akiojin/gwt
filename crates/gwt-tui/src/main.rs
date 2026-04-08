@@ -21,8 +21,11 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use gwt_agent::reset_runtime_state_dir;
 #[cfg(test)]
 use gwt_agent::reset_runtime_state_dir_for_pid;
+use gwt_core::logging::{
+    init as init_logging, LogEvent as Notification, LogLevel as Severity, LoggingConfig,
+};
+use gwt_core::paths::gwt_logs_dir;
 use gwt_git::RepoType;
-use gwt_notification::{Notification, Severity};
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
@@ -91,15 +94,49 @@ fn terminal_leave_commands_ansi() -> String {
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
-    // Install a panic hook that restores the terminal before printing the
-    // backtrace.  Without this, panics leave the terminal in raw/alt-screen
-    // mode and the error message is invisible.
+    // SPEC-6 Phase 5: initialize `tracing_subscriber` with a non-blocking
+    // JSONL file writer rolling daily, plus a UI forwarder layer. The
+    // returned handles MUST be kept alive for the lifetime of main so
+    // that the background writer thread stays up.
+    let logging_config = LoggingConfig::new(gwt_logs_dir());
+    let mut logging_handles = match init_logging(logging_config) {
+        Ok(h) => Some(h),
+        Err(err) => {
+            eprintln!("warning: structured logging disabled: {err}");
+            None
+        }
+    };
+
+    // Install a panic hook that:
+    //   1. restores the terminal (raw mode + alt screen) so panics are visible
+    //   2. emits the panic info as a `tracing::error!` so that the final
+    //      event lands in `gwt.log.YYYY-MM-DD`
+    //   3. delegates to the previous hook (which prints the standard
+    //      backtrace to stderr)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = leave_terminal(&mut io::stdout());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            target: "gwt_tui::panic",
+            panic = %info,
+            backtrace = %backtrace,
+            "TUI panic"
+        );
         default_hook(info);
     }));
+
+    tracing::info!(
+        target: "gwt_tui::main",
+        version = env!("CARGO_PKG_VERSION"),
+        "gwt-tui starting"
+    );
+
+    // Take the UI log receiver before we move into run_app — we will
+    // bridge it into a std::sync::mpsc channel that the synchronous
+    // event loop can drain.
+    let logging_ui_rx = logging_handles.as_mut().and_then(|h| h.take_ui_rx());
 
     // Parse CLI args: optional repo path
     let repo_path = std::env::args()
@@ -115,7 +152,7 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let result = run_app(&mut terminal, repo_path);
+    let result = run_app(&mut terminal, repo_path, logging_ui_rx);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -123,8 +160,14 @@ fn main() -> io::Result<()> {
     terminal.show_cursor()?;
 
     if let Err(e) = result {
+        tracing::error!(target: "gwt_tui::main", error = %e, "gwt-tui exited with error");
         eprintln!("Error: {e}");
     }
+
+    tracing::info!(target: "gwt_tui::main", "gwt-tui shutdown");
+
+    // Dropping the logging handles flushes the non-blocking writer.
+    drop(logging_handles.take());
 
     Ok(())
 }
@@ -133,6 +176,7 @@ fn main() -> io::Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     repo_path: PathBuf,
+    mut logging_ui_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>,
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
@@ -145,6 +189,34 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    // SPEC-6 Phase 5: spawn the Logs-tab file watcher so the
+    // `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL stream flows into
+    // `LogsState.entries`. Keeping the handle alive for the lifetime
+    // of run_app is enough — the watcher owns its own thread.
+    let (logs_tx, logs_rx) = std::sync::mpsc::channel();
+    let _logs_watcher_handle =
+        gwt_tui::logs_watcher::spawn(gwt_core::paths::gwt_logs_dir(), logs_tx);
+    model.set_logs_watcher_rx(logs_rx);
+
+    // SPEC-6 FR-015: bridge the tokio UnboundedReceiver<LogEvent>
+    // from `logging::init` into a std::sync::mpsc channel so the
+    // synchronous TUI loop can drain UI log events (warn/error from
+    // any crate's `tracing::*!` call) without a tokio runtime.
+    if let Some(mut ui_rx) = logging_ui_rx.take() {
+        let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Notification>();
+        std::thread::Builder::new()
+            .name("gwt-ui-log-bridge".into())
+            .spawn(move || {
+                while let Some(event) = ui_rx.blocking_recv() {
+                    if bridge_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn ui log bridge thread");
+        model.set_ui_log_rx(bridge_rx);
+    }
+
     if let Some(warning) = reset_startup_runtime_state_with(&gwt_core::paths::gwt_sessions_dir()) {
         app::update(
             &mut model,
