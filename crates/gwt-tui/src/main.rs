@@ -45,6 +45,14 @@ fn drain_pty_output_into_model(model: &mut Model) -> bool {
     drained
 }
 
+fn drain_pty_output_and_request_render(model: &mut Model, needs_render: &mut bool) -> bool {
+    let drained = drain_pty_output_into_model(model);
+    if drained {
+        *needs_render = true;
+    }
+    drained
+}
+
 fn should_render_after_tick(model: &Model) -> bool {
     app::tick_redraw_required(model)
 }
@@ -245,9 +253,7 @@ fn run_app(
     let mut needs_render = true;
 
     loop {
-        if drain_pty_output_into_model(&mut model) {
-            needs_render = true;
-        }
+        drain_pty_output_and_request_render(&mut model, &mut needs_render);
 
         if needs_render {
             terminal.draw(|frame| {
@@ -264,7 +270,7 @@ fn run_app(
         // Event: poll
         let deadline = event::next_tick_deadline();
         loop {
-            if drain_pty_output_into_model(&mut model) {
+            if drain_pty_output_and_request_render(&mut model, &mut needs_render) {
                 break;
             }
 
@@ -510,6 +516,41 @@ mod tests {
             .screen()
             .contents()
             .contains("ready"));
+    }
+
+    #[test]
+    fn drain_pty_output_and_request_render_marks_dirty_after_output() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        let mut needs_render = false;
+
+        app::spawn_pty_for_session(
+            &mut model,
+            "shell-0",
+            gwt_terminal::pty::SpawnConfig {
+                command: "/bin/echo".to_string(),
+                args: vec!["ready".to_string()],
+                cols: 80,
+                rows: 24,
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+        )
+        .expect("spawn echo pty");
+
+        let mut drained = false;
+        for _ in 0..20 {
+            if drain_pty_output_and_request_render(&mut model, &mut needs_render) {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(drained, "pty output should eventually be drained");
+        assert!(
+            needs_render,
+            "draining PTY output must request a redraw so committed text appears immediately"
+        );
     }
 
     #[test]

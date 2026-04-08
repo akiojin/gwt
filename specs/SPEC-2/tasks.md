@@ -603,3 +603,10 @@ banner in favor of pane-title chrome.
 - [x] T380 [P] Write RED test: the same render decision still redraws on `Message::Tick` for non-terminal focus or visible overlay-driven periodic UI states.
 - [x] T381 Update `crates/gwt-tui/src/main.rs` so redraw is dirty-driven and idle terminal ticks do not repaint the TUI.
 - [x] T382 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the idle-tick redraw suppression fix.
+
+## Phase 65: PTY Output Redraw Under Dirty-Driven Rendering
+
+- [x] T383 [P] Write RED test: draining PTY output marks redraw dirty so terminal output does not appear one keypress late.
+- [x] T384 [P] Keep the idle-tick suppression tests green so the PTY fix does not reintroduce unconditional repainting.
+- [x] T385 Update `crates/gwt-tui/src/main.rs` so the shared PTY-drain path always requests redraw when bytes are applied to the model.
+- [x] T386 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the dirty-driven PTY redraw fix.

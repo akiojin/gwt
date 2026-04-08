@@ -24,6 +24,25 @@ probe は正常だった。さらに layered probe では `raw` は正常で `re
 3. main loop の描画は無条件 repaint ではなく dirty-driven にし、
    terminal focus 中の idle tick redraw は明示的な必要条件があるときだけ許可する。
 
+## 2026-04-09 — fix: dirty-driven redraw にしたら PTY drain の全経路で redraw dirty を立てる
+
+### 事象
+
+idle tick redraw を止めたあと、IME 確定文字だけでなく ASCII 入力も 1 文字遅れで
+表示され、次のキー入力でまとめて見えるようになった。
+
+### 原因
+
+- outer loop 冒頭で PTY output を drain した場合は redraw dirty を立てていたが、
+  poll loop 中に到着した PTY output を drain した場合は dirty flag を更新していなかった。
+- そのため model 自体は更新されていても、次の入力イベントまで描画が走らない経路が残った。
+
+### 再発防止策
+
+1. dirty-driven redraw への変更では、「どの経路が redraw を要求するか」を helper に集約し、複数ループで手書きしない。
+2. PTY output のような非入力イベントは「state が変わった」だけでなく「見た目を更新する必要がある」ことを RED テストで固定する。
+3. idle redraw suppression の修正後は、IME だけでなく plain ASCII / shell output でも 1 文字遅延がないかを必ず確認する。
+
 ## 2026-04-08 — fix: `REPORT_EVENT_TYPES` を有効化したら `Repeat` を `Press` と別経路で扱う
 
 ### 事象

@@ -104,6 +104,8 @@ key presses, which matters when IME candidate navigation advances to another
 page. While the terminal pane owns focus, idle 100 ms ticks now avoid repainting
 the TUI unless an overlay or other explicit periodic UI surface still needs
 animation, which reduces IME candidate interruption from background redraws.
+PTY output still requests an immediate redraw, so committed text and normal
+shell output are not delayed until the next keypress.
 
 ## Environment and requirements
 

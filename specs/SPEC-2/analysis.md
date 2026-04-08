@@ -10,7 +10,7 @@ Status: CLEAR
 ## Checks
 - Clarification completeness: no `[NEEDS CLARIFICATION]` markers remain in `spec.md`.
 - Artifact completeness: `spec.md`, `plan.md`, `tasks.md`, supporting docs, `checklists/*`, `progress.md`, and `analysis.md` are present.
-- Task traceability snapshot: `tasks.md` currently records `382/382` completed items after closing Phase 64 for the idle-tick redraw suppression fix.
+- Task traceability snapshot: `tasks.md` currently records `386/386` completed items after closing Phase 65 for the dirty-driven PTY redraw fix.
 - Notes: Core and supporting artifacts are present and internally usable for further work.
 - Notes: Help overlay is now reachable from `Ctrl+G,?`, grouped by category, and backed by the keybinding registry.
 - Notes: Git View is now backed by live repository status and recent-commit loading.
@@ -56,3 +56,4 @@ Status: CLEAR
 - Notes: Phase 62 upgrades the existing `keytest` example into a raw `crossterm` probe that records every event to JSONL with stable event typing while mirroring gwt's minimal keyboard-enhancement negotiation, making Terminal.app vs gwt event-path comparisons possible without instrumenting the main app further.
 - Notes: Phase 63 extends that same `keytest` example into a layered IME reproduction tool with `raw`, `redraw`, and `ratatui` modes backed by a shared probe state helper, including display-width cursor placement for wide glyphs and configurable redraw ticks.
 - Notes: Phase 64 applies the probe result back to the real app by making the main loop dirty-driven; idle ticks still run housekeeping, but they no longer repaint while terminal focus owns input unless a visible periodic UI surface such as docker progress or AI-suggest loading still needs redraw.
+- Notes: Phase 65 closes the immediate regression from that change by ensuring the shared PTY-drain path marks redraw dirty, so committed text and normal terminal output still repaint immediately even though idle ticks remain suppressed.

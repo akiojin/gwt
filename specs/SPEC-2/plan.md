@@ -860,6 +860,23 @@ main-loop fix to idle tick repaint behavior instead of broader input routing.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the idle-tick redraw suppression behavior.
 
+### Phase 60: PTY Output Redraw Under Dirty-Driven Rendering (4 tasks)
+Close the regression where idle-tick suppression accidentally lets terminal
+output appear one keypress late by forgetting to mark redraw dirty when PTY
+bytes are drained during the poll loop.
+
+60.1: PTY redraw contract (2 tasks)
+- Add RED coverage proving that draining PTY output marks redraw dirty even
+  when terminal focus owns input.
+- Keep the Phase 59 tick-redraw coverage intact so the fix does not regress
+  back into unconditional idle repainting.
+
+60.2: Main-loop correction (2 tasks)
+- Update the shared PTY-drain helper in `crates/gwt-tui/src/main.rs` so any
+  drained terminal output requests an immediate redraw.
+- Re-run focused plus broad verification and refresh SPEC-2/README artifacts
+  with the dirty-driven PTY redraw behavior.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

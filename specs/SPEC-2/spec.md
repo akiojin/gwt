@@ -241,6 +241,9 @@ candidate navigation is not interrupted by background redraws.
   and must not depend on PTY forwarding or the full gwt application loop.
 - The main gwt event loop must not repaint solely because of an idle tick while
   terminal focus owns input and no visible periodic animation is active.
+- Dirty-driven redraw must still repaint immediately when PTY output is drained,
+  even if the current focus is the terminal and the last processed message was
+  not a user key event.
 
 ## Regression Guardrail: Hook-Driven Branch Visibility
 
@@ -294,6 +297,9 @@ This capability has regressed multiple times because "hooks are configured" is n
 - **FR-004e**: In the main gwt event loop, `Message::Tick` must not trigger a
   terminal redraw when `FocusPane::Terminal` owns input and there is no visible
   overlay or periodic terminal-facing animation that depends on that tick.
+- **FR-004f**: In that same dirty-driven event loop, any drained PTY output
+  must request an immediate redraw so committed text and shell output are never
+  held until a later keypress.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.

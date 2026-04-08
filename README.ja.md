@@ -99,7 +99,8 @@ direct `crossterm` で周期再描画し、`ratatui` は同じ surface を同じ
 候補ページ送り時にイベントが途中で消えにくくなります。さらに terminal pane
 が focus を持つ間は、overlay など明示的に周期 UI が必要な場合を除いて、
 idle な 100 ms tick では TUI を再描画しないため、バックグラウンド redraw に
-よる IME 候補操作の中断を抑えます。
+よる IME 候補操作の中断を抑えます。一方で PTY output は即座に redraw を要求
+するため、確定文字や通常の shell 出力が次のキー入力まで遅延しません。
 
 ## 必要環境変数と前提
 
