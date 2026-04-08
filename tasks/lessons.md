@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: coalesced `home + repaint` payloads need frame segmentation before Codex row-history derivation
+
+### 事象
+
+Codex の inline mode でも、1 回の `PtyOutput` payload に複数の `home + repaint`
+full-screen redraw が畳まれるケースでは、scroll が 다시 page-sized snapshot fallback に落ちた。
+
+### 原因
+
+- `split_agent_snapshot_segments()` は `\x1b[2J\x1b[H` だけを redraw 境界としていた。
+- そのため `\x1b[H` で始まる full repaint が 1 payload に複数入っても最後の frame しか見えず、
+  `detect_vertical_redraw_shift()` が必要とする隣接 frame 間の shift が消えていた。
+- 結果として `max_scrollback == 0` のままになり、Codex pane が line-granular row history へ昇格できなかった。
+
+### 再発防止策
+
+1. agent redraw segmentation は `clear+home` だけでなく、「top rows を連続再描画する qualified home repaint」も frame 境界として扱う。
+2. `1 payload 内に 2 回の home repaint がある Codex 相当ケース` を model/app の RED テストで固定する。
+3. Codex inline mode 導入後も、大きい PTY payload は `multiple redraw frames per payload` を疑ってログとコードを照合する。
+
 ## 2026-04-08 — fix: runtime distribution must prune stale managed asset paths, not just root entries
 
 ### 事象

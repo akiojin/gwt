@@ -115,3 +115,5 @@
 - [x] T102 Rework live session render / selection / URL hit-testing paths to borrow the visible screen directly and cache URL-region extraction instead of rebuilding a parser and rescanning URLs every frame.
 - [x] T103 [P] Write RED tests: PTY-driven redraw waits only for the remaining frame budget after the last draw and redraws immediately once that budget is spent.
 - [x] T104 Pace PTY-triggered redraw in `main.rs` so continuous PTY output cannot drive the terminal above the configured frame budget while input polling remains responsive.
+- [x] T105 [P] Write RED tests: coalesced Codex-style `home + repaint` payloads are segmented into distinct redraw frames and derive each intermediate vertical shift into local row history.
+- [x] T106 Segment agent snapshot processing on qualified full-home repaint boundaries in `model.rs` so Codex wheel scrolling stays line-granular even when multiple repaint frames arrive in one payload.

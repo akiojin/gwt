@@ -1,10 +1,8 @@
 //! App — Update and View functions for the Elm Architecture.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write as _;
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -27,8 +25,8 @@ use gwt_agent::{
 };
 use gwt_ai::{suggest_branch_name, AIClient};
 use gwt_config::{AISettings, Settings, VoiceConfig};
-use gwt_core::paths::{gwt_cache_dir, gwt_logs_dir, gwt_sessions_dir};
-use gwt_notification::{Notification, Severity};
+use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
+use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, prune_stale_gwt_assets,
     update_git_exclude,
@@ -66,8 +64,6 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
-const AGENT_LAUNCH_LOG_FILENAME: &str = "agent-launch.jsonl";
-const REDACTED_ENV_VALUE: &str = "<redacted>";
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -96,24 +92,23 @@ fn spawn_pty_reader(
 
 /// Spawn a PTY process, start a reader thread, and register the handle on
 /// the model.  On failure the error is returned so the caller can notify.
+///
+/// **Logging policy:** This helper is shared between **shell** and
+/// **agent** spawn paths, so it intentionally does NOT log the agent
+/// launch event or the env map. Agent-specific spawns must call
+/// [`emit_agent_launch_event`] from the agent code path before calling
+/// this helper. The trace inside this function is limited to safe
+/// metadata (session_id, command name).
+#[tracing::instrument(
+    name = "spawn_pty",
+    skip(model, config),
+    fields(session_id = %session_id, command = %config.command)
+)]
 pub fn spawn_pty_for_session(
     model: &mut Model,
     session_id: &str,
     config: gwt_terminal::pty::SpawnConfig,
 ) -> Result<(), String> {
-    if let Err(err) = append_agent_launch_log(model.repo_path(), session_id, &config) {
-        tracing::warn!(
-            session_id = session_id,
-            error = %err,
-            "Failed to append agent launch audit log"
-        );
-    }
-    tracing::info!(
-        session_id = session_id,
-        command = %config.command,
-        args = ?config.args,
-        "Spawning PTY"
-    );
     let pty = gwt_terminal::PtyHandle::spawn(config).map_err(|e| {
         tracing::error!(session_id = session_id, error = %e, "PTY spawn failed");
         e.to_string()
@@ -128,81 +123,35 @@ pub fn spawn_pty_for_session(
     Ok(())
 }
 
-#[derive(serde::Serialize)]
-struct AgentLaunchAuditRecord {
-    timestamp: String,
-    repo_path: String,
-    session_id: String,
-    command: String,
-    args: Vec<String>,
-    cwd: Option<String>,
-    env: BTreeMap<String, String>,
-}
-
-fn append_agent_launch_log(
+/// Emit a structured agent-launch audit event (SPEC-6 FR-020 / FR-016 /
+/// reviewer comment B2).
+///
+/// Called from the agent-only code path right before
+/// [`spawn_pty_for_session`]. The event lands in
+/// `~/.gwt/logs/gwt.log.YYYY-MM-DD` alongside every other tracing event,
+/// and the Logs tab picks it up via the file watcher.
+///
+/// The env map is **not** included in the event. Custom-agent
+/// configurations may inject API keys / tokens into `pty_env` and the
+/// log file is world-readable on shared hosts (see B7 file permission
+/// hardening). Recording only a presence flag and a count is enough to
+/// audit that an agent was launched without persisting secrets.
+pub fn emit_agent_launch_event(
     repo_path: &Path,
     session_id: &str,
     config: &gwt_terminal::pty::SpawnConfig,
-) -> std::io::Result<()> {
-    append_agent_launch_log_with(&gwt_logs_dir(), repo_path, session_id, config)
-}
-
-fn append_agent_launch_log_with(
-    logs_dir: &Path,
-    repo_path: &Path,
-    session_id: &str,
-    config: &gwt_terminal::pty::SpawnConfig,
-) -> std::io::Result<()> {
-    std::fs::create_dir_all(logs_dir)?;
-    let log_path = logs_dir.join(AGENT_LAUNCH_LOG_FILENAME);
-
-    let record = AgentLaunchAuditRecord {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        repo_path: repo_path.display().to_string(),
-        session_id: session_id.to_string(),
-        command: config.command.clone(),
-        args: config.args.clone(),
-        cwd: config.cwd.as_ref().map(|path| path.display().to_string()),
-        env: redact_env_for_log(&config.env),
-    };
-    let json = serde_json::to_string(&record)
-        .map_err(|err| std::io::Error::other(format!("serialize audit record: {err}")))?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
-    writeln!(file, "{json}")?;
-    Ok(())
-}
-
-fn redact_env_for_log(env: &HashMap<String, String>) -> BTreeMap<String, String> {
-    env.iter()
-        .map(|(key, value)| {
-            let logged_value = if is_sensitive_env_key(key) {
-                REDACTED_ENV_VALUE.to_string()
-            } else {
-                value.clone()
-            };
-            (key.clone(), logged_value)
-        })
-        .collect()
-}
-
-fn is_sensitive_env_key(key: &str) -> bool {
-    let upper = key.to_ascii_uppercase();
-    [
-        "API_KEY",
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "PASS",
-        "AUTH",
-        "COOKIE",
-        "CREDENTIAL",
-        "PRIVATE_KEY",
-    ]
-    .iter()
-    .any(|needle| upper.contains(needle))
+) {
+    tracing::info!(
+        target: "gwt_tui::agent::launch",
+        repo_path = %repo_path.display(),
+        session_id = session_id,
+        command = %config.command,
+        args = ?config.args,
+        cwd = ?config.cwd.as_ref().map(|p| p.display().to_string()),
+        env_keys = config.env.len(),
+        custom_env = !config.env.is_empty(),
+        "agent launch"
+    );
 }
 
 /// Compute the session pane content size `(cols, rows)` for PTY/VtState
@@ -996,6 +945,8 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Tick => {
             drain_notification_bus(model);
+            model.drain_logs_watcher();
+            drain_ui_log_events(model);
             drain_docker_progress_events(model);
             drain_branch_detail_events(model);
             drain_cleanup_events(model);
@@ -2121,6 +2072,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     model.logs.filter_level,
                 ))),
                 KeyCode::Char('r') => Some(LogsMessage::Refresh),
+                KeyCode::Char('l') => Some(LogsMessage::CycleLogLevel),
                 KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => Some(
                     LogsMessage::SetFilter(next_logs_filter_level(model.logs.filter_level)),
                 ),
@@ -2130,7 +2082,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
-                screens::logs::update(&mut model.logs, m);
+                handle_logs_message(model, m);
             } else if key.code == KeyCode::Esc && model.logs.detail_view {
                 screens::logs::update(&mut model.logs, LogsMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
@@ -2512,12 +2464,23 @@ fn reset_active_session_scrollback_for_input(model: &mut Model) {
 }
 
 fn apply_notification(model: &mut Model, notification: Notification) {
-    model.notification_log.push(notification.clone());
-    let entries = notification_log_snapshot(model);
-    screens::logs::update(
-        &mut model.logs,
-        screens::logs::LogsMessage::SetEntries(entries),
-    );
+    // SPEC-6 Phase 5: when the Logs-tab file watcher is attached
+    // (production), the `notification_router::route()` call below
+    // emits a `tracing::*!` event that reaches `LogsState` via the
+    // file path. Mirroring into `notification_log` + `LogsState`
+    // synchronously would cause each notification to appear twice.
+    //
+    // In tests where no watcher is attached we still populate the
+    // in-memory mirror so that assertions on `model.logs.entries`
+    // remain valid without having to spawn a real file tail.
+    if model.logs_watcher_rx.is_none() {
+        model.notification_log.push(notification.clone());
+        let entries = notification_log_snapshot(model);
+        screens::logs::update(
+            &mut model.logs,
+            screens::logs::LogsMessage::SetEntries(entries),
+        );
+    }
 
     if let Some(msg) = crate::notification_router::route(&notification) {
         update(model, msg);
@@ -2542,12 +2505,7 @@ fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
 }
 
 fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
-    model
-        .notification_log
-        .entries()
-        .into_iter()
-        .cloned()
-        .collect()
+    model.notification_log.entries().to_vec()
 }
 
 fn tick_notification(model: &mut Model) {
@@ -3138,6 +3096,78 @@ fn drain_notification_bus(model: &mut Model) {
     }
 }
 
+/// Apply a `LogsMessage`, intercepting `CycleLogLevel` so the
+/// `tracing_subscriber::reload::Handle` is invoked alongside the
+/// state update (SPEC-6 FR-011).
+fn handle_logs_message(model: &mut Model, msg: screens::logs::LogsMessage) {
+    if matches!(msg, screens::logs::LogsMessage::CycleLogLevel) {
+        let next = screens::logs::next_log_level(model.logs.current_log_level);
+        match model.apply_log_level(next) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "gwt_tui::logging",
+                    from = %model.logs.current_log_level,
+                    to = %next,
+                    "log level changed"
+                );
+                screens::logs::update(
+                    &mut model.logs,
+                    screens::logs::LogsMessage::SetLogLevel(next),
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "gwt_tui::logging",
+                    error = %err,
+                    "log level change failed"
+                );
+            }
+        }
+        return;
+    }
+    screens::logs::update(&mut model.logs, msg);
+}
+
+/// Drain the UI log bridge channel and dispatch user-facing events
+/// as toast / error modal messages.
+///
+/// **Filter policy (reviewer comment B3):** the bridge ONLY forwards
+/// events whose `target` starts with `gwt_tui::ui::` — a dedicated
+/// namespace reserved for "this is intended for a user-visible
+/// notification surface". Internal traces (`gwt_tui::main`,
+/// `gwt_tui::agent::launch`, `gwt_tui::index`, etc.) are persisted to
+/// the file but are NOT pushed as toasts. This prevents the bridge
+/// from spamming the status bar with internal info logs and from
+/// double-firing notifications that the legacy `apply_notification`
+/// path already enqueues.
+///
+/// To surface a warn/error from any crate as a toast/modal **without**
+/// going through `apply_notification`, emit a tracing event with
+/// `target: "gwt_tui::ui::<area>"`.
+fn drain_ui_log_events(model: &mut Model) {
+    let Some(rx) = model.ui_log_rx.as_ref() else {
+        return;
+    };
+    let mut pending = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if !event.source.starts_with("gwt_tui::ui::") {
+            continue;
+        }
+        pending.push(event);
+    }
+    for event in pending {
+        match event.severity {
+            gwt_core::logging::LogLevel::Error => {
+                update(model, Message::PushErrorNotification(event));
+            }
+            gwt_core::logging::LogLevel::Warn | gwt_core::logging::LogLevel::Info => {
+                update(model, Message::ShowNotification(event));
+            }
+            gwt_core::logging::LogLevel::Debug => {}
+        }
+    }
+}
+
 fn push_input_to_active_session(model: &mut Model, bytes: Vec<u8>) {
     let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
         return;
@@ -3638,6 +3668,11 @@ fn materialize_pending_launch(model: &mut Model) {
     }
 }
 
+#[tracing::instrument(
+    name = "materialize_pending_launch",
+    skip(model, sessions_dir),
+    fields(repo_path = %model.repo_path().display())
+)]
 fn materialize_pending_launch_with(
     model: &mut Model,
     sessions_dir: &std::path::Path,
@@ -3725,6 +3760,10 @@ fn materialize_pending_launch_with(
         cwd: config.working_dir.clone(),
     };
     let repo_path_for_watcher = model.repo_path.clone();
+    // Emit the agent-launch audit event before delegating to the
+    // shared PTY helper. The helper itself logs only generic
+    // metadata (FR-020 / reviewer comment B2).
+    emit_agent_launch_event(&model.repo_path, &tab_id, &pty_config);
     if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
         apply_notification(
             model,
@@ -4097,7 +4136,7 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
         apply_notification(
             model,
             Notification::new(
-                gwt_notification::Severity::Warn,
+                gwt_core::logging::LogLevel::Warn,
                 "cleanup",
                 "No cleanable branches selected",
             ),
@@ -4148,9 +4187,9 @@ fn handle_cleanup_progress_message(
             .map(|run| run.failed())
             .unwrap_or(0);
         let severity = if failed > 0 {
-            gwt_notification::Severity::Warn
+            gwt_core::logging::LogLevel::Warn
         } else {
-            gwt_notification::Severity::Info
+            gwt_core::logging::LogLevel::Info
         };
         apply_notification(
             model,
@@ -6066,8 +6105,8 @@ mod tests {
         version_cache::VersionEntry,
         AgentId, CustomCodingAgent, DetectedAgent, VersionCache,
     };
+    use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
     use gwt_git::pr_status::PrState as GitPrState;
-    use gwt_notification::{Notification, Severity};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier};
@@ -7506,6 +7545,68 @@ mod tests {
         assert!(frozen.contains("line-1"));
         assert!(!frozen.contains("status-a"));
         assert!(!frozen.contains("line-5"));
+    }
+
+    #[test]
+    fn codex_coalesced_home_repaints_use_local_row_scrollback() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[2J\x1b[H\x1b[1;1Hheader\x1b[2;1Hline-1\x1b[3;1Hline-2\x1b[4;1Hline-3\x1b[5;1Hline-4\x1b[6;1Hline-5\x1b[7;1Hfooter".to_vec(),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                [
+                    b"\x1b[H\x1b[1;1Hheader\x1b[2;1Hline-2\x1b[3;1Hline-3\x1b[4;1Hprogress\x1b[5;1Hline-5\x1b[6;1Hline-6\x1b[7;1Hfooter".as_slice(),
+                    b"\x1b[H\x1b[1;1Hheader\x1b[2;1Hline-3\x1b[3;1Hprogress\x1b[4;1Hprogress\x1b[5;1Hline-6\x1b[6;1Hline-7\x1b[7;1Hfooter".as_slice(),
+                ]
+                .concat(),
+            ),
+        );
+
+        let session = model.active_session_tab().expect("active session");
+        assert!(
+            !session.vt.uses_snapshot_scrollback(),
+            "coalesced home-repaint redraws should still promote Codex panes into row-based local history"
+        );
+        assert_eq!(
+            session.vt.max_scrollback(),
+            2,
+            "each repaint shift inside one payload should contribute its own scrolled-off line"
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let frozen = render_model_text(&model, 24, 8);
+        assert!(frozen.contains("line-2"));
+        assert!(!frozen.contains("line-7"));
     }
 
     #[test]
@@ -10782,76 +10883,11 @@ CUSTOM_ENV = "enabled"
             .contains(&"--dangerously-skip-permissions".to_string()));
     }
 
-    #[test]
-    fn append_agent_launch_log_with_writes_record_and_redacts_sensitive_env() {
-        let dir = tempfile::tempdir().expect("temp log dir");
-        let repo_path = PathBuf::from("/tmp/repo");
-        let mut env = HashMap::new();
-        env.insert(
-            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
-            "1".to_string(),
-        );
-        env.insert("OPENAI_API_KEY".to_string(), "sk-test-secret".to_string());
-        env.insert("PATH".to_string(), "/usr/bin".to_string());
-        let config = gwt_terminal::pty::SpawnConfig {
-            command: "claude".to_string(),
-            args: vec!["--dangerously-skip-permissions".to_string()],
-            cols: 80,
-            rows: 24,
-            env,
-            cwd: Some(PathBuf::from("/tmp/repo/feature/demo")),
-        };
-
-        append_agent_launch_log_with(dir.path(), &repo_path, "sess-123", &config)
-            .expect("append launch log");
-
-        let path = dir.path().join(AGENT_LAUNCH_LOG_FILENAME);
-        let content = fs::read_to_string(path).expect("read launch log");
-        let line = content.lines().next().expect("one launch log line");
-        let value: serde_json::Value = serde_json::from_str(line).expect("parse launch log json");
-
-        assert_eq!(value["repo_path"], "/tmp/repo");
-        assert_eq!(value["session_id"], "sess-123");
-        assert_eq!(value["command"], "claude");
-        assert_eq!(
-            value["args"],
-            serde_json::json!(["--dangerously-skip-permissions"])
-        );
-        assert_eq!(value["cwd"], "/tmp/repo/feature/demo");
-        assert_eq!(value["env"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"], "1");
-        assert_eq!(value["env"]["OPENAI_API_KEY"], REDACTED_ENV_VALUE);
-        assert_eq!(value["env"]["PATH"], "/usr/bin");
-        assert!(value["timestamp"].as_str().is_some());
-    }
-
-    #[test]
-    fn append_agent_launch_log_with_appends_multiple_records() {
-        let dir = tempfile::tempdir().expect("temp log dir");
-        let repo_path = PathBuf::from("/tmp/repo");
-        let config = gwt_terminal::pty::SpawnConfig {
-            command: "claude".to_string(),
-            args: vec!["--dangerously-skip-permissions".to_string()],
-            cols: 80,
-            rows: 24,
-            env: HashMap::new(),
-            cwd: Some(PathBuf::from("/tmp/repo")),
-        };
-
-        append_agent_launch_log_with(dir.path(), &repo_path, "sess-1", &config)
-            .expect("append first");
-        append_agent_launch_log_with(dir.path(), &repo_path, "sess-2", &config)
-            .expect("append second");
-
-        let path = dir.path().join(AGENT_LAUNCH_LOG_FILENAME);
-        let content = fs::read_to_string(path).expect("read launch log");
-        let lines = content.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 2);
-
-        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("parse first");
-        let second: serde_json::Value = serde_json::from_str(lines[1]).expect("parse second");
-        assert_eq!(first["session_id"], "sess-1");
-        assert_eq!(second["session_id"], "sess-2");
-    }
+    // SPEC-6 Phase 5: `append_agent_launch_log_with` and its redaction
+    // helper were removed. Agent launches now emit a structured
+    // `tracing::info!(target: "gwt_tui::agent::launch", ...)` event
+    // that lands in `~/.gwt/logs/gwt.log.YYYY-MM-DD` alongside every
+    // other event. No redaction (FR-016).
 
     #[test]
     fn materialize_pending_launch_with_creates_agent_session_and_persists_metadata() {
@@ -13071,7 +13107,7 @@ CUSTOM_ENV = "enabled"
         let mut model = test_model();
         let notification = Notification::new(Severity::Info, "bus", "Queued");
 
-        assert!(model.notification_bus_handle().send(notification));
+        assert!(model.notification_bus_handle().send(notification).is_ok());
 
         update(&mut model, Message::Tick);
 

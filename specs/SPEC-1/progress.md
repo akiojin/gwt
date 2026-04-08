@@ -3,8 +3,8 @@
 ## Progress
 - Status: `done`
 - Phase: `Done`
-- Task progress: `104/104` checked in `tasks.md`
-- Artifact refresh: `2026-04-08T09:49:25Z`
+- Task progress: `106/106` checked in `tasks.md`
+- Artifact refresh: `2026-04-08T23:40:00+09:00`
 
 ## Done
 - Supporting artifacts now exist for planning, execution tracking, and review.
@@ -50,6 +50,7 @@
 - SGR leak normalization now uses inter-character inactivity timing, preventing delayed `[<...M` fragments from leaking into pane output while preserving mouse-wheel reconstruction.
 - SGR leak normalization now runs regardless of terminal-focus state, so leaked wheel sequences can still recover into mouse scrolling when focus handoff has not happened yet.
 - Snapshot capture now tolerates redraw churn by preserving any distinct visible frame, preventing history starvation on dynamic full-screen panes without overlap-score tuning.
+- Coalesced Codex-style `home + repaint` payloads are now segmented into qualified redraw frames before row-history derivation, so each intermediate vertical shift contributes its own scrolled-off line instead of collapsing back to page-sized snapshot scrolling.
 - Agent panes that already have normalized row-history scrollback now collapse snapshot storage to one live comparison baseline and reuse the current frame snapshot, eliminating the hidden full-surface snapshot churn that was driving high CPU.
 - Visible-line extraction for redraw-shift detection now walks `vt100::Screen::rows()` once instead of repeatedly calling `contents_between(...).nth(row)`, removing the hidden O(rows²) surface scan that kept the updated build hot.
 - Live session rendering now borrows the visible `vt100::Screen` directly and caches URL regions per unchanged surface, removing the per-frame parser rebuild plus full-screen URL rescan that had become the next CPU hot path.
