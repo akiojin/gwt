@@ -896,6 +896,7 @@ impl VtState {
         let previous_max_scrollback = self.max_scrollback;
         let previous_snapshot_count = self.snapshots.len();
         let mut synthetic_rows_appended = 0usize;
+        let mut last_snapshot = None;
         let segments = if matches!(
             self.scrollback_strategy,
             ScrollbackStrategy::AgentMemoryBacked
@@ -914,8 +915,9 @@ impl VtState {
             synthetic_rows_appended = synthetic_rows_appended.saturating_add(synthetic_rows.len());
             self.process_scrollback_bytes(segment, &synthetic_rows, &current_snapshot);
             if index + 1 < segments.len() {
-                self.capture_snapshot();
+                self.capture_snapshot_from(current_snapshot.clone());
             }
+            last_snapshot = Some(current_snapshot);
         }
         self.refresh_scrollback_metrics();
         if self.max_scrollback > 0 && self.follow_live {
@@ -931,7 +933,11 @@ impl VtState {
                     .min(self.max_scrollback),
             );
         }
-        let mut snapshot_outcome = self.capture_snapshot();
+        let mut snapshot_outcome = if let Some(snapshot) = last_snapshot {
+            self.capture_snapshot_from(snapshot)
+        } else {
+            self.capture_snapshot()
+        };
         snapshot_outcome.synthetic_rows_appended = synthetic_rows_appended;
         self.log_process_debug(
             bytes,
@@ -1434,16 +1440,23 @@ impl VtState {
     }
 
     fn capture_snapshot(&mut self) -> SnapshotCaptureOutcome {
+        let snapshot = ScreenSnapshot::from_screen(self.rows, self.cols, self.parser.screen());
+        self.capture_snapshot_from(snapshot)
+    }
+
+    fn capture_snapshot_from(&mut self, snapshot: ScreenSnapshot) -> SnapshotCaptureOutcome {
         let snapshot_count_before = self.snapshots.len();
-        let should_capture = match self.scrollback_strategy {
-            ScrollbackStrategy::Standard => self.uses_snapshot_scrollback(),
-            ScrollbackStrategy::AgentMemoryBacked => true,
-        };
-        if !should_capture {
-            return SnapshotCaptureOutcome::skipped(snapshot_count_before);
+        let keep_history = self.uses_snapshot_scrollback();
+        if !keep_history {
+            return match self.scrollback_strategy {
+                ScrollbackStrategy::Standard => {
+                    self.snapshots.clear();
+                    SnapshotCaptureOutcome::skipped(snapshot_count_before)
+                }
+                ScrollbackStrategy::AgentMemoryBacked => self.replace_snapshot_baseline(snapshot),
+            };
         }
 
-        let snapshot = ScreenSnapshot::from_screen(self.rows, self.cols, self.parser.screen());
         let surface_digest = visible_surface_digest(&snapshot.visible_lines);
         let top_preview = first_non_blank_preview(&snapshot.visible_lines);
         let bottom_preview = last_non_blank_preview(&snapshot.visible_lines);
@@ -1479,6 +1492,62 @@ impl VtState {
             appended: true,
             deduped: false,
             pruned_blank_prefix,
+            snapshot_count_after: self.snapshots.len(),
+            synthetic_rows_appended: 0,
+            surface_digest,
+            top_preview,
+            bottom_preview,
+        }
+    }
+
+    fn replace_snapshot_baseline(&mut self, snapshot: ScreenSnapshot) -> SnapshotCaptureOutcome {
+        let surface_digest = visible_surface_digest(&snapshot.visible_lines);
+        let top_preview = first_non_blank_preview(&snapshot.visible_lines);
+        let bottom_preview = last_non_blank_preview(&snapshot.visible_lines);
+
+        if self
+            .snapshots
+            .back()
+            .is_some_and(|existing| existing.same_visible_surface(&snapshot))
+        {
+            if self.snapshots.len() > 1 {
+                self.snapshots.clear();
+                self.snapshots.push_back(snapshot);
+                self.snapshot_cursor = None;
+                return SnapshotCaptureOutcome {
+                    attempted: true,
+                    appended: true,
+                    deduped: false,
+                    pruned_blank_prefix: 0,
+                    snapshot_count_after: self.snapshots.len(),
+                    synthetic_rows_appended: 0,
+                    surface_digest,
+                    top_preview,
+                    bottom_preview,
+                };
+            }
+
+            return SnapshotCaptureOutcome {
+                attempted: true,
+                appended: false,
+                deduped: true,
+                pruned_blank_prefix: 0,
+                snapshot_count_after: self.snapshots.len(),
+                synthetic_rows_appended: 0,
+                surface_digest,
+                top_preview,
+                bottom_preview,
+            };
+        }
+
+        self.snapshots.clear();
+        self.snapshots.push_back(snapshot);
+        self.snapshot_cursor = None;
+        SnapshotCaptureOutcome {
+            attempted: true,
+            appended: true,
+            deduped: false,
+            pruned_blank_prefix: 0,
             snapshot_count_after: self.snapshots.len(),
             synthetic_rows_appended: 0,
             surface_digest,
@@ -2507,6 +2576,39 @@ mod tests {
         let contents = vt.visible_screen_parser().screen().contents();
         assert!(contents.contains("line-1"));
         assert!(!contents.contains("line-6"));
+    }
+
+    #[test]
+    fn agent_row_history_mode_keeps_only_latest_snapshot_baseline() {
+        let mut vt = VtState::new(5, 20);
+        vt.set_scrollback_strategy(ScrollbackStrategy::AgentMemoryBacked);
+
+        vt.process(&full_screen_frame(&[
+            "line-1", "line-2", "line-3", "line-4", "line-5",
+        ]));
+        vt.process(&home_repaint_frame(&[
+            "line-2", "line-3", "line-4", "line-5", "line-6",
+        ]));
+
+        assert_eq!(vt.max_scrollback(), 1);
+        assert!(!vt.uses_snapshot_scrollback());
+        assert_eq!(
+            vt.snapshot_count(),
+            1,
+            "once agent output is normalized into row history, snapshot storage should collapse to a single live comparison baseline"
+        );
+
+        vt.process(&home_repaint_frame(&[
+            "line-3", "line-4", "line-5", "line-6", "line-7",
+        ]));
+
+        assert_eq!(vt.max_scrollback(), 2);
+        assert!(!vt.uses_snapshot_scrollback());
+        assert_eq!(
+            vt.snapshot_count(),
+            1,
+            "subsequent row-history updates should reuse the latest baseline instead of growing snapshot history"
+        );
     }
 
     #[test]

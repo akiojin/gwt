@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-08 — fix: live redraw comparison state must not double as user-visible snapshot history
+
+### 事象
+
+`AgentMemoryBacked` scrollback が row history へ正規化できているのに、
+`gwt-tui` が依然として高 CPU のまま張り付き、`sample` では
+`VtState::capture_snapshot()` -> `ScreenSnapshot::from_screen()` が hot path になっていた。
+
+### 原因
+
+- redraw shift を検出するための「最新フレーム比較用 snapshot」と、
+  ユーザーが scrollback で辿る「snapshot history」を同じ `snapshots` deque で兼用していた。
+- そのため `uses_snapshot_scrollback() == false` に切り替わった後も、agent pane は
+  各 PTY chunk ごとに full-surface snapshot を append / dedupe し続けていた。
+- `process()` 末尾の `capture_snapshot()` は、同じ更新サイクル内で一度作った `current_snapshot`
+  を再利用せず、`ScreenSnapshot::from_screen()` をもう一度実行していた。
+
+### 再発防止策
+
+1. full-screen redraw の比較用 state と user-visible history を分離し、row history が有効な間は snapshot storage を最新 1 枚の baseline に潰す。
+2. `process()` の更新サイクルで既に構築した current frame snapshot を、最終 capture に再利用して二重構築を禁止する。
+3. 「row history mode では snapshot_count が 1 のまま増えない」RED テストを model に固定する。
+
 ## 2026-04-08 — fix: abandoning SGR parsing must replay buffered input in original order
 
 ### 事象

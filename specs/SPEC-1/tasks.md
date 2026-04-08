@@ -107,3 +107,5 @@
 - [x] T094 [P] Write RED tests: Terminal.app right-drag anchor state clears on outside mouse-up and session/focus changes, while transcript-ignore tests exercise real transcript discovery/parsing first.
 - [x] T095 Implement ordered SGR-normalization fallback replay, share post-normalization dispatch for pending/polled messages, and make the transcript-ignore helper exercise real discovery/parsing without hydrating runtime history.
 - [x] T096 Implement lazy scroll-debug logging and clear Terminal.app right-drag anchor state whenever terminal ownership changes or the drag ends outside the session pane.
+- [x] T097 [P] Write RED test: once `AgentMemoryBacked` redraws are normalized into row history, snapshot storage collapses to a single live comparison baseline instead of growing hidden snapshot history.
+- [x] T098 Rework `VtState` snapshot capture so agent panes reuse the current frame snapshot and keep only the latest live baseline whenever row-history scrollback is active.
