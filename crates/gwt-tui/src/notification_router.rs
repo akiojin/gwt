@@ -1,28 +1,59 @@
 //! Notification router — routes notifications by severity.
 
 use crate::message::Message;
-use gwt_notification::{Notification, Severity};
+use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 
 /// Route a notification to the appropriate UI message.
 ///
 /// Returns `Some(Message)` for notifications that need UI action,
 /// `None` for debug-level (log-only).
+///
+/// All severities emit a matching `tracing::*!` event so the
+/// structured log file (`~/.gwt/logs/gwt.log.YYYY-MM-DD`) and the
+/// Logs tab (via the file watcher) pick up the event. The UI message
+/// path remains for toast / error modal surfaces until the tracing
+/// UI forwarder Layer is fully wired in Step 3.
 pub fn route(notification: &Notification) -> Option<Message> {
+    let detail = notification.detail.as_deref().unwrap_or("");
     match notification.severity {
         Severity::Debug => {
-            tracing::debug!("{}", notification.message);
+            tracing::debug!(
+                target: "gwt_tui::notify",
+                source = %notification.source,
+                detail = %detail,
+                "{}",
+                notification.message
+            );
             None
         }
         Severity::Info => {
-            tracing::info!("{}", notification.message);
+            tracing::info!(
+                target: "gwt_tui::notify",
+                source = %notification.source,
+                detail = %detail,
+                "{}",
+                notification.message
+            );
             Some(Message::ShowNotification(notification.clone()))
         }
         Severity::Warn => {
-            tracing::warn!("{}", notification.message);
+            tracing::warn!(
+                target: "gwt_tui::notify",
+                source = %notification.source,
+                detail = %detail,
+                "{}",
+                notification.message
+            );
             Some(Message::ShowNotification(notification.clone()))
         }
         Severity::Error => {
-            tracing::error!("{}", notification.message);
+            tracing::error!(
+                target: "gwt_tui::notify",
+                source = %notification.source,
+                detail = %detail,
+                "{}",
+                notification.message
+            );
             Some(Message::PushErrorNotification(notification.clone()))
         }
     }

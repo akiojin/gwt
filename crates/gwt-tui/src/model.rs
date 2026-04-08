@@ -28,7 +28,46 @@ use crate::screens::service_select::ServiceSelectState;
 use crate::screens::settings::SettingsState;
 use crate::screens::versions::VersionsState;
 use crate::screens::wizard::WizardState;
-use gwt_notification::{Notification, NotificationBus, NotificationReceiver, StructuredLog};
+use gwt_core::logging::LogEvent as Notification;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+/// In-memory buffer of log events surfaced in the Logs tab.
+///
+/// Replaces the old `gwt_notification::StructuredLog` ring buffer. The
+/// file on disk (`~/.gwt/logs/gwt.log.YYYY-MM-DD`) is the authoritative
+/// record; this in-memory copy only feeds the UI filter/render pipeline
+/// so that the Logs tab can display events without parsing the file.
+#[derive(Debug, Default, Clone)]
+pub struct NotificationLog {
+    entries: Vec<Notification>,
+}
+
+impl NotificationLog {
+    const CAPACITY: usize = 10_000;
+
+    pub fn push(&mut self, entry: Notification) {
+        if self.entries.len() >= Self::CAPACITY {
+            let drop_count = self.entries.len() - Self::CAPACITY + 1;
+            self.entries.drain(0..drop_count);
+        }
+        self.entries.push(entry);
+    }
+
+    /// Borrow the underlying entries as a slice. Avoids the per-call
+    /// allocation that the previous `Vec<&Notification>` signature
+    /// incurred (reviewer nitpick on PR #1916).
+    pub fn entries(&self) -> &[Notification] {
+        &self.entries
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 type BoxedVoiceBackend = Box<dyn VoiceBackend + Send>;
 
@@ -1570,12 +1609,14 @@ pub struct Model {
     pub(crate) current_notification: Option<Notification>,
     /// Remaining lifetime for auto-dismissing status notifications.
     pub(crate) current_notification_ttl: Option<Duration>,
-    /// Structured notification log.
-    pub(crate) notification_log: StructuredLog,
-    /// Sender side of the notification bus.
-    pub(crate) _notification_bus: NotificationBus,
-    /// Receiver side of the notification bus.
-    pub(crate) notification_receiver: NotificationReceiver,
+    /// Structured notification log (in-memory mirror of file-based log).
+    pub(crate) notification_log: NotificationLog,
+    /// Sender side of the in-process bus used by legacy call sites that
+    /// dispatch `Notification`s directly rather than going through
+    /// `tracing::*!`. New code should emit `tracing` events instead.
+    pub(crate) _notification_bus: UnboundedSender<Notification>,
+    /// Receiver side of the in-process bus. Drained each tick.
+    pub(crate) notification_receiver: UnboundedReceiver<Notification>,
     /// Which layer has focus.
     pub active_layer: ActiveLayer,
     /// Which pane has keyboard focus.
@@ -1657,6 +1698,23 @@ pub struct Model {
     pub(crate) pty_output_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
     /// Receiver for PTY output drained in the event loop.
     pub(crate) pty_output_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    /// Receiver for Logs tab packets produced by the background file
+    /// tail watcher. `None` in contexts without a spawned watcher
+    /// (most unit tests).
+    pub(crate) logs_watcher_rx:
+        Option<std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>>,
+    /// Receiver for `tracing::warn!` / `tracing::error!` / `tracing::info!`
+    /// events that should surface as toasts or error modal entries.
+    /// Fed by a bridge thread that drains the tokio
+    /// `UnboundedReceiver<LogEvent>` returned by `logging::init` and
+    /// forwards into this std::sync::mpsc channel so the synchronous
+    /// event loop can drain it without a tokio runtime. `None` in
+    /// tests.
+    pub(crate) ui_log_rx: Option<std::sync::mpsc::Receiver<Notification>>,
+    /// Live tracing-subscriber reload handle (SPEC-6 FR-011). When
+    /// present, the Logs tab can cycle the global log level at
+    /// runtime via `LogsMessage::CycleLogLevel`.
+    pub(crate) log_reload_handle: Option<gwt_core::logging::ReloadHandle>,
     /// Initialization screen state (present when ActiveLayer::Initialization).
     pub(crate) initialization: Option<InitializationState>,
 }
@@ -1688,12 +1746,12 @@ impl Model {
             vt: VtState::new(24, 80),
             created_at: std::time::Instant::now(),
         };
-        let (notification_bus, notification_receiver) = NotificationBus::new();
+        let (notification_bus, notification_receiver) = unbounded_channel::<Notification>();
         let (pty_output_tx, pty_output_rx) = std::sync::mpsc::channel();
         Self {
             current_notification: None,
             current_notification_ttl: None,
-            notification_log: StructuredLog::default(),
+            notification_log: NotificationLog::default(),
             _notification_bus: notification_bus,
             notification_receiver,
             active_layer: ActiveLayer::Management,
@@ -1737,8 +1795,79 @@ impl Model {
             terminal_trackpad_scroll_row: None,
             pty_output_tx,
             pty_output_rx,
+            logs_watcher_rx: None,
+            ui_log_rx: None,
+            log_reload_handle: None,
             initialization: None,
         }
+    }
+
+    /// Attach a logs-watcher receiver produced by
+    /// [`crate::logs_watcher::spawn`]. Called exactly once from `main`.
+    pub fn set_logs_watcher_rx(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>,
+    ) {
+        self.logs_watcher_rx = Some(rx);
+    }
+
+    /// Attach a UI log event receiver (SPEC-6 FR-015).
+    ///
+    /// The receiver is drained each tick; `Warn`/`Error` events
+    /// produced by **any** crate's `tracing::warn!` / `tracing::error!`
+    /// call become toasts / error modal entries automatically.
+    pub fn set_ui_log_rx(&mut self, rx: std::sync::mpsc::Receiver<Notification>) {
+        self.ui_log_rx = Some(rx);
+    }
+
+    /// Attach a tracing-subscriber reload handle (SPEC-6 FR-011).
+    /// Enables live log level toggling from the Logs tab.
+    pub fn set_log_reload_handle(&mut self, handle: gwt_core::logging::ReloadHandle) {
+        self.log_reload_handle = Some(handle);
+    }
+
+    /// Apply a new log level via the reload handle. Returns an error
+    /// string if the handle is missing or the reload fails.
+    ///
+    /// Delegates to `gwt_core::logging::apply_log_level_to_handle` so
+    /// the EnvFilter parsing logic stays in lockstep with
+    /// `LoggingHandles::set_level` (reviewer nitpick on PR #1916).
+    pub(crate) fn apply_log_level(&self, level: gwt_core::logging::LogLevel) -> Result<(), String> {
+        let handle = self
+            .log_reload_handle
+            .as_ref()
+            .ok_or_else(|| "log reload handle not attached".to_string())?;
+        gwt_core::logging::apply_log_level_to_handle(handle, level)
+    }
+
+    /// Drain pending logs-watcher packets into `LogsState`. Returns the
+    /// number of events applied (0 when the receiver is absent or
+    /// empty).
+    pub(crate) fn drain_logs_watcher(&mut self) -> usize {
+        use crate::logs_watcher::LogsWatcherPacket;
+        use crate::screens::logs::{update as logs_update, LogsMessage};
+        let Some(rx) = self.logs_watcher_rx.as_ref() else {
+            return 0;
+        };
+        let mut total = 0usize;
+        while let Ok(packet) = rx.try_recv() {
+            match packet {
+                LogsWatcherPacket::SetEntries(entries) => {
+                    total += entries.len();
+                    logs_update(&mut self.logs, LogsMessage::SetEntries(entries));
+                }
+                LogsWatcherPacket::AppendEntries(entries) => {
+                    total += entries.len();
+                    // Route through the screen update fn so
+                    // `clamp_selected()` runs after the push (reviewer
+                    // comment B4 — `selected` could otherwise drift
+                    // past the filtered view length when the active
+                    // filter hides the new tail).
+                    logs_update(&mut self.logs, LogsMessage::AppendEntries(entries));
+                }
+            }
+        }
+        total
     }
 
     /// Create a new Model in Initialization layer (no repo detected).
@@ -1820,10 +1949,9 @@ impl Model {
         }
     }
 
-    /// Cloneable handle for sending notifications into the TUI.
-    /// Public clone of the notification bus sender. Used by `index_worker`
-    /// to publish lifecycle events into the Logs tab.
-    pub fn notification_bus_handle(&self) -> NotificationBus {
+    /// Cloneable handle for sending notifications into the TUI. Used by
+    /// `index_worker` to publish lifecycle events into the Logs tab.
+    pub fn notification_bus_handle(&self) -> UnboundedSender<Notification> {
         self._notification_bus.clone()
     }
 
@@ -1845,7 +1973,11 @@ impl Model {
 
     /// Drain queued notifications from the in-process bus.
     pub(crate) fn drain_notifications(&mut self) -> Vec<Notification> {
-        self.notification_receiver.drain()
+        let mut out = Vec::new();
+        while let Ok(n) = self.notification_receiver.try_recv() {
+            out.push(n);
+        }
+        out
     }
 
     /// Get a mutable reference to the initialization state.
@@ -2036,11 +2168,14 @@ mod tests {
         assert!(model.error_queue.is_empty());
         assert!(!model.quit);
         assert!(model.drain_notifications().is_empty());
-        assert!(model.notification_bus_handle().send(Notification::new(
-            gwt_notification::Severity::Info,
-            "test",
-            "queued",
-        )));
+        assert!(model
+            .notification_bus_handle()
+            .send(Notification::new(
+                gwt_core::logging::LogLevel::Info,
+                "test",
+                "queued",
+            ))
+            .is_ok());
     }
 
     #[test]

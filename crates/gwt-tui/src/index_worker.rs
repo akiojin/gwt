@@ -31,12 +31,17 @@ use gwt_core::index::runtime::{
     ReconcileOptions, RefreshDecision, RefreshIssuesOptions,
 };
 use gwt_core::index::watcher::{start_watcher, WatcherConfig};
+use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 use gwt_core::paths::{gwt_logs_dir, gwt_project_index_venv_dir, gwt_runtime_runner_path};
 use gwt_core::repo_hash::{compute_repo_hash, RepoHash};
 use gwt_core::worktree_hash::{compute_worktree_hash, WorktreeHash};
-use gwt_notification::{Notification, NotificationBus, Severity};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
+
+/// Type alias for the in-process notification sender used by index_worker
+/// (SPEC-6 Phase 5: replaces the deleted `gwt_notification::NotificationBus`).
+pub type NotificationBus = UnboundedSender<Notification>;
 
 const ISSUE_REFRESH_TTL_MINUTES: u64 = 15;
 /// Maximum number of concurrent runner subprocesses (each loads e5-base
@@ -84,11 +89,21 @@ pub fn init_notification_bus(bus: NotificationBus) {
     let _ = notification_bus().set(bus);
 }
 
-/// Append a single timestamped line to `~/.gwt/logs/index.log` and publish
-/// a `Severity::Debug` notification (source `"index"`) so the entry shows
-/// up in the TUI Logs tab. Failures are silently ignored — logging must
-/// never block index lifecycle work.
+/// Publish an index lifecycle event.
+///
+/// SPEC-6 Phase 5: this used to write to a dedicated `~/.gwt/logs/index.log`
+/// file and push to the notification bus. Both have been replaced by a
+/// `tracing::debug!(target: "gwt_tui::index", ...)` call so the event lands
+/// in the unified `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL file alongside
+/// every other tracing event. The Logs tab picks it up via the file
+/// watcher.
+///
+/// The legacy `~/.gwt/logs/index.log` writer is preserved as a best-effort
+/// secondary sink for shell-friendly tail-ability; it can be removed once
+/// downstream tooling is migrated.
 pub fn log_event(message: &str) {
+    tracing::debug!(target: "gwt_tui::index", "{}", message);
+
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
     let line = format!("[{ts}] {message}\n");
     if let Some(parent) = index_log_path().parent() {
@@ -102,6 +117,8 @@ pub fn log_event(message: &str) {
         let _ = f.write_all(line.as_bytes());
     }
 
+    // Best-effort notification bus push for the legacy in-memory mirror
+    // (only useful in tests where the file watcher is not running).
     if let Some(bus) = notification_bus().get() {
         let _ = bus.send(Notification::new(
             Severity::Debug,
@@ -180,6 +197,11 @@ pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
 
 /// Reconcile + start background Issue refresh + start watchers for the
 /// active worktrees of `repo_root`. Called once at TUI startup.
+#[tracing::instrument(
+    name = "index_worker_bootstrap",
+    skip(active_worktrees),
+    fields(repo_root = %repo_root.display(), worktrees = active_worktrees.len())
+)]
 pub fn bootstrap(repo_root: &Path, active_worktrees: &[PathBuf]) {
     log_event(&format!(
         "bootstrap start: repo_root={} active_worktrees={}",
