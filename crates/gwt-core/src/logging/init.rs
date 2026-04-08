@@ -52,18 +52,31 @@ impl LoggingHandles {
     }
 
     /// Change the runtime log level by replacing the `EnvFilter`
-    /// directive.
-    ///
-    /// Returns an error if the filter string is invalid — callers
-    /// should surface this via a `tracing::warn!` event.
+    /// directive. Thin wrapper around [`apply_log_level_to_handle`]
+    /// for callers that own a full `LoggingHandles`.
     pub fn set_level(&self, level: LogLevel) -> Result<(), String> {
-        let directive = level.to_env_directive();
-        let filter = EnvFilter::try_new(directive)
-            .map_err(|err| format!("invalid filter directive {directive:?}: {err}"))?;
-        self.reload_handle
-            .reload(filter)
-            .map_err(|err| format!("reload failed: {err}"))
+        apply_log_level_to_handle(&self.reload_handle, level)
     }
+}
+
+/// Apply a `LogLevel` to a tracing-subscriber reload handle.
+///
+/// Shared by [`LoggingHandles::set_level`] and any caller that holds
+/// only a cloned `ReloadHandle` (for example `gwt_tui::model::Model`,
+/// which receives the handle via `set_log_reload_handle` and does not
+/// own the rest of the `LoggingHandles` struct).
+///
+/// Returns a human-readable error string if the directive cannot be
+/// parsed or the reload fails. Callers should surface failures via a
+/// `tracing::warn!` event so the user has a signal that the level
+/// change was ignored.
+pub fn apply_log_level_to_handle(handle: &ReloadHandle, level: LogLevel) -> Result<(), String> {
+    let directive = level.to_env_directive();
+    let filter = EnvFilter::try_new(directive)
+        .map_err(|err| format!("invalid filter directive {directive:?}: {err}"))?;
+    handle
+        .reload(filter)
+        .map_err(|err| format!("reload failed: {err}"))
 }
 
 /// Initialize the global `tracing` subscriber.

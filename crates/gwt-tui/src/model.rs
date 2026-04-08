@@ -53,8 +53,11 @@ impl NotificationLog {
         self.entries.push(entry);
     }
 
-    pub fn entries(&self) -> Vec<&Notification> {
-        self.entries.iter().collect()
+    /// Borrow the underlying entries as a slice. Avoids the per-call
+    /// allocation that the previous `Vec<&Notification>` signature
+    /// incurred (reviewer nitpick on PR #1916).
+    pub fn entries(&self) -> &[Notification] {
+        &self.entries
     }
 
     pub fn clear(&mut self) {
@@ -1825,17 +1828,16 @@ impl Model {
 
     /// Apply a new log level via the reload handle. Returns an error
     /// string if the handle is missing or the reload fails.
+    ///
+    /// Delegates to `gwt_core::logging::apply_log_level_to_handle` so
+    /// the EnvFilter parsing logic stays in lockstep with
+    /// `LoggingHandles::set_level` (reviewer nitpick on PR #1916).
     pub(crate) fn apply_log_level(&self, level: gwt_core::logging::LogLevel) -> Result<(), String> {
         let handle = self
             .log_reload_handle
             .as_ref()
             .ok_or_else(|| "log reload handle not attached".to_string())?;
-        let directive = level.to_env_directive();
-        let filter = tracing_subscriber::filter::EnvFilter::try_new(directive)
-            .map_err(|e| format!("invalid filter directive {directive:?}: {e}"))?;
-        handle
-            .reload(filter)
-            .map_err(|e| format!("reload failed: {e}"))
+        gwt_core::logging::apply_log_level_to_handle(handle, level)
     }
 
     /// Drain pending logs-watcher packets into `LogsState`. Returns the

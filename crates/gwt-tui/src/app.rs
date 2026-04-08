@@ -2487,12 +2487,7 @@ fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
 }
 
 fn notification_log_snapshot(model: &Model) -> Vec<screens::logs::LogEntry> {
-    model
-        .notification_log
-        .entries()
-        .into_iter()
-        .cloned()
-        .collect()
+    model.notification_log.entries().to_vec()
 }
 
 fn tick_notification(model: &mut Model) {

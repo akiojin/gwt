@@ -29,5 +29,5 @@ pub mod writer;
 pub use config::{LogLevel, LoggingConfig};
 pub use event::LogEvent;
 pub use housekeep::{housekeep, HousekeepReport};
-pub use init::{init, LoggingHandles, ReloadHandle};
+pub use init::{apply_log_level_to_handle, init, LoggingHandles, ReloadHandle};
 pub use writer::{current_log_file, log_file_for_date, LOG_FILE_BASENAME};
