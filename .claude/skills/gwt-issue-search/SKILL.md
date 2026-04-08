@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-search
-description: "Semantic search over all GitHub Issues using vector embeddings. Use when searching for existing issues, finding related issues, checking for duplicate issues, or determining which issue owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. Use when user says 'search issues', 'find related issues', 'check for duplicates', or asks which issue owns a scope."
+description: "Semantic search over all GitHub Issues using vector embeddings. Use when searching for existing issues, finding related issues, checking for duplicate issues, or determining which issue owns a scope. Mandatory preflight before creating a new Issue or mapping work to an existing Issue."
 ---
 
 # Issue Search

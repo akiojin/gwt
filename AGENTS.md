@@ -78,25 +78,25 @@
 
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
-- `gwt-spec-design` を使って DDD ベースの SPEC 設計を行う（ドメイン分析 → SPEC 登録 → 仕様明確化）
+- DDD ベースで `specs/SPEC-{N}/spec.md` を作成し、ドメイン分析・仕様明確化の結果を記録する
 - SPEC ディレクトリ内の `spec.md` に最低限以下を含める:
   - ユーザーシナリオとテスト（受け入れシナリオ）
   - 機能要件（FR-\*）
   - 成功基準
-- `gwt-spec-plan` で `plan.md`、`tasks.md` も策定してから実装に入る
+- `plan.md`、`tasks.md` も策定してから実装に入る
 - 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
 - 現在のコンバセーションでは SPEC 登録までで完了とする
 
 ##### 共通ルール
 
-- 通常の GitHub Issue から開始する場合は、`gwt-issue` により直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
+- 通常の GitHub Issue から開始する場合は、Issue 本文・既存 SPEC・既存 Issue を確認し、直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
 - 仕様策定時のユーザーインタビューでは以下を遵守する:
   - 表面的・ありきたりな質問を避け、技術実装・UX・トレードオフに踏み込んだ質問をする
   - 1回で終わらず、仕様が十分に詰まるまで継続的にインタビューする
 
 #### 2. TDD（テストファースト）
 
-- `gwt-spec-build` を使って TDD ベースで実装する（SPEC モードまたはスタンドアロンモード）
+- TDD ベースで実装する（SPEC モードまたはスタンドアロンモード）
 - 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
 - Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
 - テストが RED（失敗）状態であることを確認してから実装に進む
@@ -241,28 +241,16 @@
 Skills are located in `.claude/skills/<name>/SKILL.md`.
 Commands can be invoked as `/gwt:<command-name>`.
 
-### SPEC Lifecycle (DDD / SDD / TDD)
+### Search
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-spec-design | `/gwt:gwt-spec-design` | Drive SPEC design from intake to planning-ready with DDD methodology. Runs preflight search, one-question-at-a-time interview, domain discovery (Bounded Context, Ubiquitous Language), SPEC registration, and clarification. |
-| gwt-spec-plan | `/gwt:gwt-spec-plan` | Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Produces research.md, data-model.md, quickstart.md, contracts/*. Runs CLEAR/AUTO-FIXABLE/NEEDS-DECISION analysis. |
-| gwt-spec-build | `/gwt:gwt-spec-build` | Implement code using test-first TDD methodology. Works in SPEC mode (tasks.md-driven) or standalone mode (no SPEC needed). Red-Green-Refactor loop, verification, PR flow, completion gate. |
-| gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-spec-design. |
-
-### Issue & PR Management
-
-| Skill | Command | Description |
-|-------|---------|-------------|
-| gwt-issue | `/gwt:gwt-issue` | Unified GitHub Issue lifecycle. Auto-detects mode: no Issue number → register (search first, create Issue or SPEC); Issue number/URL → resolve (analyze, decide direct fix vs SPEC path). |
-| gwt-pr | `/gwt:gwt-pr` | Unified GitHub PR lifecycle. Auto-detects mode: no PR → create; PR exists → check status; CI failures/reviews → fix. REST-first `gh api` flows. |
-
-### Search & Agent Management
-
-| Skill | Command | Description |
-|-------|---------|-------------|
-| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-spec-design and gwt-issue. |
-| gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; pane ID + message → send input; stop/close + pane ID → stop pane. |
+| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, and `--files` filters. |
+| gwt-spec-search | `/gwt:gwt-spec-search` | Semantic search over local SPEC files (`specs/SPEC-{N}/`) using vector embeddings. |
+| gwt-issue-search | `/gwt:gwt-issue-search` | Semantic search over GitHub Issues using vector embeddings. |
+| gwt-project-search | `/gwt:gwt-project-search` | Semantic search over project implementation files using vector embeddings. |
+| gwt-file-search | `/gwt:gwt-file-search` | Compatibility alias for semantic search over project implementation files. |
+| gwt-project-index | `/gwt:gwt-project-index` | Compatibility-oriented reference to the project file index; prefer `gwt-project-search` for standalone search. |
 
 ### TUI Design
 
@@ -270,18 +258,8 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal user interfaces with ratatui, crossterm, and xterm.js. |
 
-### Recommended Workflow
+### Notes
 
-```
-gwt-spec-design → gwt-spec-plan → gwt-spec-build → gwt-arch-review
-     ↑                                    |
-     └────────────────────────────────────┘
-```
-
-1. **Design a feature** → `gwt-spec-design` (DDD intake → SPEC creation)
-2. **Plan implementation** → `gwt-spec-plan` (SDD architecture → tasks)
-3. **Build with TDD** → `gwt-spec-build` (Red-Green-Refactor → PR)
-4. **Review architecture** → `gwt-arch-review` (analysis → improvement proposals)
-5. **Manage issues** → `gwt-issue` (register or resolve)
-6. **Manage PRs** → `gwt-pr` (create, check, or fix)
+1. `gwt-*` スキル群は埋め込み検索系のみ保持する。
+2. 新規 SPEC / Issue / PR の運用は通常のリポジトリワークフローとして手動で行う。
 <!-- END gwt managed skills -->
