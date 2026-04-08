@@ -658,6 +658,10 @@ pub struct Model {
     /// event loop can drain it without a tokio runtime. `None` in
     /// tests.
     pub(crate) ui_log_rx: Option<std::sync::mpsc::Receiver<Notification>>,
+    /// Live tracing-subscriber reload handle (SPEC-6 FR-011). When
+    /// present, the Logs tab can cycle the global log level at
+    /// runtime via `LogsMessage::CycleLogLevel`.
+    pub(crate) log_reload_handle: Option<gwt_core::logging::ReloadHandle>,
     /// Initialization screen state (present when ActiveLayer::Initialization).
     pub(crate) initialization: Option<InitializationState>,
 }
@@ -731,6 +735,7 @@ impl Model {
             pty_output_rx,
             logs_watcher_rx: None,
             ui_log_rx: None,
+            log_reload_handle: None,
             initialization: None,
         }
     }
@@ -751,6 +756,27 @@ impl Model {
     /// call become toasts / error modal entries automatically.
     pub fn set_ui_log_rx(&mut self, rx: std::sync::mpsc::Receiver<Notification>) {
         self.ui_log_rx = Some(rx);
+    }
+
+    /// Attach a tracing-subscriber reload handle (SPEC-6 FR-011).
+    /// Enables live log level toggling from the Logs tab.
+    pub fn set_log_reload_handle(&mut self, handle: gwt_core::logging::ReloadHandle) {
+        self.log_reload_handle = Some(handle);
+    }
+
+    /// Apply a new log level via the reload handle. Returns an error
+    /// string if the handle is missing or the reload fails.
+    pub(crate) fn apply_log_level(&self, level: gwt_core::logging::LogLevel) -> Result<(), String> {
+        let handle = self
+            .log_reload_handle
+            .as_ref()
+            .ok_or_else(|| "log reload handle not attached".to_string())?;
+        let directive = level.to_env_directive();
+        let filter = tracing_subscriber::filter::EnvFilter::try_new(directive)
+            .map_err(|e| format!("invalid filter directive {directive:?}: {e}"))?;
+        handle
+            .reload(filter)
+            .map_err(|e| format!("reload failed: {e}"))
     }
 
     /// Drain pending logs-watcher packets into `LogsState`. Returns the

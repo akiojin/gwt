@@ -80,6 +80,11 @@ fn spawn_pty_reader(
 
 /// Spawn a PTY process, start a reader thread, and register the handle on
 /// the model.  On failure the error is returned so the caller can notify.
+#[tracing::instrument(
+    name = "spawn_pty",
+    skip(model, config),
+    fields(session_id = %session_id, command = %config.command)
+)]
 pub fn spawn_pty_for_session(
     model: &mut Model,
     session_id: &str,
@@ -1443,6 +1448,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     model.logs.filter_level,
                 ))),
                 KeyCode::Char('r') => Some(LogsMessage::Refresh),
+                KeyCode::Char('l') => Some(LogsMessage::CycleLogLevel),
                 KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => Some(
                     LogsMessage::SetFilter(next_logs_filter_level(model.logs.filter_level)),
                 ),
@@ -1452,7 +1458,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
-                screens::logs::update(&mut model.logs, m);
+                handle_logs_message(model, m);
             } else if key.code == KeyCode::Esc && model.logs.detail_view {
                 screens::logs::update(&mut model.logs, LogsMessage::ToggleDetail);
             } else if key.code == KeyCode::Esc {
@@ -2321,6 +2327,38 @@ fn drain_notification_bus(model: &mut Model) {
     }
 }
 
+/// Apply a `LogsMessage`, intercepting `CycleLogLevel` so the
+/// `tracing_subscriber::reload::Handle` is invoked alongside the
+/// state update (SPEC-6 FR-011).
+fn handle_logs_message(model: &mut Model, msg: screens::logs::LogsMessage) {
+    if matches!(msg, screens::logs::LogsMessage::CycleLogLevel) {
+        let next = screens::logs::next_log_level(model.logs.current_log_level);
+        match model.apply_log_level(next) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "gwt_tui::logging",
+                    from = %model.logs.current_log_level,
+                    to = %next,
+                    "log level changed"
+                );
+                screens::logs::update(
+                    &mut model.logs,
+                    screens::logs::LogsMessage::SetLogLevel(next),
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "gwt_tui::logging",
+                    error = %err,
+                    "log level change failed"
+                );
+            }
+        }
+        return;
+    }
+    screens::logs::update(&mut model.logs, msg);
+}
+
 /// Drain the UI log bridge channel and dispatch warn/error/info
 /// events as toast / error modal messages.
 ///
@@ -2851,6 +2889,11 @@ fn materialize_pending_launch(model: &mut Model) {
     }
 }
 
+#[tracing::instrument(
+    name = "materialize_pending_launch",
+    skip(model, sessions_dir),
+    fields(repo_path = %model.repo_path().display())
+)]
 fn materialize_pending_launch_with(
     model: &mut Model,
     sessions_dir: &std::path::Path,

@@ -93,6 +93,11 @@ pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
 
 /// Reconcile + start background Issue refresh + start watchers for the
 /// active worktrees of `repo_root`. Called once at TUI startup.
+#[tracing::instrument(
+    name = "index_worker_bootstrap",
+    skip(active_worktrees),
+    fields(repo_root = %repo_root.display(), worktrees = active_worktrees.len())
+)]
 pub fn bootstrap(repo_root: &Path, active_worktrees: &[PathBuf]) {
     let Some(repo_hash) = detect_repo_hash(repo_root) else {
         tracing::debug!("no origin remote configured; skipping index bootstrap");

@@ -87,6 +87,10 @@ pub struct LogsState {
     pub(crate) filter_level: FilterLevel,
     pub(crate) detail_view: bool,
     pub(crate) show_debug: bool,
+    /// Current effective tracing level. Cycled live via the `l`
+    /// keybind in the Logs tab; mirrors what the
+    /// `tracing_subscriber::reload::Handle` last applied.
+    pub(crate) current_log_level: Severity,
 }
 
 impl Default for LogsState {
@@ -97,6 +101,7 @@ impl Default for LogsState {
             filter_level: FilterLevel::default(),
             detail_view: false,
             show_debug: true,
+            current_log_level: Severity::Info,
         }
     }
 }
@@ -143,6 +148,14 @@ pub enum LogsMessage {
     SetFilter(FilterLevel),
     Refresh,
     SetEntries(Vec<LogEntry>),
+    /// Cycle the global tracing log level (Info → Debug → Warn →
+    /// Error → Info). Handled by the app update fn so that the
+    /// `tracing_subscriber::reload::Handle` is invoked alongside the
+    /// state update.
+    CycleLogLevel,
+    /// Apply a specific tracing log level (used by the cycle handler
+    /// after the reload succeeded so the visible label stays in sync).
+    SetLogLevel(Severity),
 }
 
 /// Update logs state in response to a message.
@@ -178,6 +191,29 @@ pub fn update(state: &mut LogsState, msg: LogsMessage) {
             state.entries = entries;
             state.clamp_selected();
         }
+        LogsMessage::CycleLogLevel => {
+            // The actual reload::Handle::reload happens in the app
+            // update fn (which has access to `Model.log_reload_handle`).
+            // The pure state update only mirrors the resulting label.
+            state.current_log_level = next_log_level(state.current_log_level);
+        }
+        LogsMessage::SetLogLevel(level) => {
+            state.current_log_level = level;
+        }
+    }
+}
+
+/// Cycle order: `Info → Debug → Warn → Error → Info`.
+///
+/// Starts from `Info` because that is the default at startup; the
+/// "next" step lowers the floor to `Debug` (most useful for live
+/// diagnosis) before tightening it again.
+pub fn next_log_level(current: Severity) -> Severity {
+    match current {
+        Severity::Info => Severity::Debug,
+        Severity::Debug => Severity::Warn,
+        Severity::Warn => Severity::Error,
+        Severity::Error => Severity::Info,
     }
 }
 
@@ -191,11 +227,13 @@ pub fn render(state: &LogsState, frame: &mut Frame, area: Rect) {
         .unwrap_or(0);
     let labels: Vec<&str> = FilterLevel::ALL.iter().map(|f| f.label()).collect();
     let mut tab_title = super::build_tab_title(&labels, active_idx);
-    // Append debug visibility indicator
+    // Append debug visibility indicator and current tracing level.
     tab_title.spans.push(Span::raw(format!(
-        " {} Debug: {}",
+        " {} Debug: {} {} Level: {}",
         theme::icon::SEPARATOR_VERT,
-        if state.show_debug { "on" } else { "off" }
+        if state.show_debug { "on" } else { "off" },
+        theme::icon::SEPARATOR_VERT,
+        state.current_log_level,
     )));
 
     let chunks = Layout::default()
@@ -636,6 +674,54 @@ mod tests {
             .join("\n");
         assert!(text.contains("Warn+"));
         assert!(text.contains("Debug: on"));
+    }
+
+    #[test]
+    fn cycle_log_level_progresses_info_debug_warn_error_info() {
+        let mut state = LogsState::default();
+        assert_eq!(state.current_log_level, Severity::Info);
+        update(&mut state, LogsMessage::CycleLogLevel);
+        assert_eq!(state.current_log_level, Severity::Debug);
+        update(&mut state, LogsMessage::CycleLogLevel);
+        assert_eq!(state.current_log_level, Severity::Warn);
+        update(&mut state, LogsMessage::CycleLogLevel);
+        assert_eq!(state.current_log_level, Severity::Error);
+        update(&mut state, LogsMessage::CycleLogLevel);
+        assert_eq!(state.current_log_level, Severity::Info);
+    }
+
+    #[test]
+    fn set_log_level_updates_state_directly() {
+        let mut state = LogsState::default();
+        update(&mut state, LogsMessage::SetLogLevel(Severity::Warn));
+        assert_eq!(state.current_log_level, Severity::Warn);
+    }
+
+    #[test]
+    fn next_log_level_helper_matches_cycle_message() {
+        assert_eq!(next_log_level(Severity::Info), Severity::Debug);
+        assert_eq!(next_log_level(Severity::Debug), Severity::Warn);
+        assert_eq!(next_log_level(Severity::Warn), Severity::Error);
+        assert_eq!(next_log_level(Severity::Error), Severity::Info);
+    }
+
+    #[test]
+    fn render_header_shows_current_log_level() {
+        let mut state = LogsState::default();
+        state.current_log_level = Severity::Debug;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(row.contains("Level: DEBUG"), "header missing level: {row}");
     }
 
     #[test]

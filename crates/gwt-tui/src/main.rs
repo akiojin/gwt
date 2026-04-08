@@ -137,6 +137,9 @@ fn main() -> io::Result<()> {
     // bridge it into a std::sync::mpsc channel that the synchronous
     // event loop can drain.
     let logging_ui_rx = logging_handles.as_mut().and_then(|h| h.take_ui_rx());
+    // Clone the reload handle so the Logs tab can cycle the global
+    // log level live (SPEC-6 FR-011).
+    let logging_reload_handle = logging_handles.as_ref().map(|h| h.reload_handle.clone());
 
     // Parse CLI args: optional repo path
     let repo_path = std::env::args()
@@ -152,7 +155,12 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let result = run_app(&mut terminal, repo_path, logging_ui_rx);
+    let result = run_app(
+        &mut terminal,
+        repo_path,
+        logging_ui_rx,
+        logging_reload_handle,
+    );
 
     // Restore terminal
     disable_raw_mode()?;
@@ -177,6 +185,7 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     repo_path: PathBuf,
     mut logging_ui_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>,
+    logging_reload_handle: Option<gwt_core::logging::ReloadHandle>,
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
@@ -197,6 +206,12 @@ fn run_app(
     let _logs_watcher_handle =
         gwt_tui::logs_watcher::spawn(gwt_core::paths::gwt_logs_dir(), logs_tx);
     model.set_logs_watcher_rx(logs_rx);
+
+    // Plumb the reload handle through so the Logs tab can cycle the
+    // tracing level live (SPEC-6 FR-011).
+    if let Some(handle) = logging_reload_handle {
+        model.set_log_reload_handle(handle);
+    }
 
     // SPEC-6 FR-015: bridge the tokio UnboundedReceiver<LogEvent>
     // from `logging::init` into a std::sync::mpsc channel so the
