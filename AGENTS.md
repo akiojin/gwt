@@ -47,7 +47,7 @@
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
 - **完了報告前のセルフチェックリスト（必須）:**
-  - [ ] 対象の SPEC（`specs/SPEC-{N}/`）が最新状態に更新されているか
+  - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
@@ -173,7 +173,7 @@
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
-- 仕様・要件は `specs/SPEC-{N}/` のローカルファイルに記載する。`metadata.json` の status で管理
+- 仕様・要件は **GitHub Issue (`gwt-spec` ラベル)** に記載する。読み書きは `gwt issue spec <n>` CLI 経由、ローカルキャッシュは `~/.gwt/cache/issues/`
 
 ### README.md / README.ja.md に必ず記載する内容
 
@@ -182,7 +182,7 @@
 - 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`cargo test` など）
 - 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
 - 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
-- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{N}/` ディレクトリへの参照）
+- 変更が設計判断を必要とする場合の案内: 重要仕様の所在 (GitHub Issue `gwt-spec` ラベル、`gwt issue spec <n>` でアクセス)
 - `CLAUDE.md` の運用ルールや内部実装ガイドは README に入れない
 - 英語版/日本語版の内容は同等レベルを保つ（順序・見出しは対応させる）
 
@@ -229,11 +229,16 @@
 ├── Cargo.toml          # ワークスペース設定
 ├── crates/
 │   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
-│   └── gwt-tui/        # ratatui TUI フロントエンド
-├── specs/              # ローカル SPEC 管理（SPEC-{N}/）
-│   └── SPEC-*/         # 各 SPEC のアーティファクト（spec.md, plan.md, tasks.md 等）
+│   ├── gwt-github/     # GitHub Issue SOT for SPEC 管理 (SPEC-12)
+│   └── gwt-tui/        # ratatui TUI フロントエンド + CLI (`gwt issue spec ...`)
 └── package.json        # 開発用スクリプト
 ```
+
+**SPEC 管理**: SPEC は `gwt-spec` ラベル付き GitHub Issue として格納される (#1930 SPEC-12 参照)。
+読み取りは `gwt issue spec <n> [--section <name>]`、書き込みは
+`gwt issue spec <n> --edit <section> -f <file>`、一覧は `gwt issue spec list`。
+ローカルキャッシュは `~/.gwt/cache/issues/` で UI レイヤーの唯一の真実
+(一方向フロー: GitHub API → cache → UI、SPEC-12 FR-022)。
 
 <!-- BEGIN gwt managed skills -->
 ## Available Skills & Commands (gwt)
