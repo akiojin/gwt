@@ -156,12 +156,105 @@ fn registry() -> &'static Mutex<WatcherRegistry> {
 #[derive(Default)]
 struct WorktreeBuildState {
     in_flight: bool,
-    dirty: bool,
+    pending_scopes: ScopeMask,
 }
 
 fn build_states() -> &'static Mutex<HashMap<String, WorktreeBuildState>> {
     static STATES: OnceLock<Mutex<HashMap<String, WorktreeBuildState>>> = OnceLock::new();
     STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+type ScopeMask = u8;
+
+const SCOPE_FILES: ScopeMask = 1 << 0;
+const SCOPE_FILES_DOCS: ScopeMask = 1 << 1;
+const SCOPE_SPECS: ScopeMask = 1 << 2;
+const SCOPE_ALL: ScopeMask = SCOPE_FILES | SCOPE_FILES_DOCS | SCOPE_SPECS;
+
+const DOC_FILE_EXTENSIONS: &[&str] = &["md", "mdx", "rst", "adoc", "txt"];
+const SKIP_FILE_EXTENSIONS: &[&str] = &["snap"];
+const SCOPE_SKIP_PREFIXES: &[&str] = &[
+    ".git",
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".gwt",
+    "specs-archive",
+    "tasks",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+];
+
+fn scope_names_from_mask(mask: ScopeMask) -> Vec<&'static str> {
+    let mut scopes = Vec::new();
+    if mask & SCOPE_FILES != 0 {
+        scopes.push("files");
+    }
+    if mask & SCOPE_FILES_DOCS != 0 {
+        scopes.push("files-docs");
+    }
+    if mask & SCOPE_SPECS != 0 {
+        scopes.push("specs");
+    }
+    scopes
+}
+
+fn scopes_for_changed_paths(project_root: &Path, changed_paths: &[PathBuf]) -> ScopeMask {
+    if changed_paths.is_empty() {
+        return SCOPE_ALL;
+    }
+
+    changed_paths.iter().fold(0, |mask, path| {
+        mask | scope_for_changed_path(project_root, path)
+    })
+}
+
+fn scope_for_changed_path(project_root: &Path, path: &Path) -> ScopeMask {
+    let rel = path.strip_prefix(project_root).unwrap_or(path);
+    let first = rel
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str());
+    if let Some(name) = first {
+        if name == "specs" {
+            return SCOPE_SPECS;
+        }
+        if SCOPE_SKIP_PREFIXES.contains(&name) {
+            return 0;
+        }
+        if name == "docs" {
+            return SCOPE_FILES_DOCS;
+        }
+    }
+
+    let file_name = rel
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase());
+    if let Some(file_name) = file_name.as_deref() {
+        if file_name.starts_with("readme") {
+            return SCOPE_FILES_DOCS;
+        }
+    }
+
+    let extension = rel
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+    if let Some(extension) = extension.as_deref() {
+        if SKIP_FILE_EXTENSIONS.contains(&extension) {
+            return 0;
+        }
+        if DOC_FILE_EXTENSIONS.contains(&extension) {
+            return SCOPE_FILES_DOCS;
+        }
+    }
+
+    SCOPE_FILES
 }
 
 fn make_runner_spawner() -> PythonRunnerSpawner {
@@ -328,16 +421,19 @@ pub fn ensure_watcher(repo_root: &Path, worktree_path: &Path) {
                         .take(3)
                         .map(|p| p.display().to_string())
                         .collect();
+                    let scopes = scopes_for_changed_paths(&worktree_path, &batch.changed_paths);
                     log_event(&format!(
-                        "watcher batch: wt_hash={} paths={} sample={:?}",
+                        "watcher batch: wt_hash={} paths={} scopes={:?} sample={:?}",
                         wt_hash,
                         batch.changed_paths.len(),
+                        scope_names_from_mask(scopes),
                         sample
                     ));
                     schedule_incremental_index(
                         repo_hash.clone(),
                         wt_hash.clone(),
                         worktree_path.clone(),
+                        scopes,
                     );
                 }
             }
@@ -383,13 +479,25 @@ pub fn shutdown_and_remove(repo_root: &Path, worktree_path: &Path) -> Result<()>
     Ok(())
 }
 
-/// Kick a background full/incremental rebuild for the three scopes
-/// (files, files-docs, specs) on the worker runtime. Returns immediately;
-/// the actual subprocess execution is throttled by `runner_semaphore` and
-/// coalesced per-worktree: if a build is already in flight for the
-/// worktree, this call only marks the state dirty so that the in-flight
-/// task runs one more cycle when it finishes.
-fn schedule_incremental_index(repo_hash: RepoHash, wt_hash: WorktreeHash, project_root: PathBuf) {
+/// Kick a background full/incremental rebuild for the requested scopes on
+/// the worker runtime. Returns immediately; the actual subprocess execution
+/// is throttled by `runner_semaphore` and coalesced per-worktree: if a build
+/// is already in flight for the worktree, newly requested scopes are merged
+/// into the pending follow-up pass.
+fn schedule_incremental_index(
+    repo_hash: RepoHash,
+    wt_hash: WorktreeHash,
+    project_root: PathBuf,
+    scopes: ScopeMask,
+) {
+    if scopes == 0 {
+        log_event(&format!(
+            "schedule_incremental_index: skipped (no relevant scopes) wt_hash={}",
+            wt_hash
+        ));
+        return;
+    }
+
     let python = gwt_project_index_venv_dir().join(if cfg!(windows) {
         "Scripts/python.exe"
     } else {
@@ -412,40 +520,51 @@ fn schedule_incremental_index(repo_hash: RepoHash, wt_hash: WorktreeHash, projec
         let mut states = build_states().lock().unwrap();
         let state = states.entry(wt_key.clone()).or_default();
         if state.in_flight {
-            state.dirty = true;
+            state.pending_scopes |= scopes;
             log_event(&format!(
-                "schedule: coalesced (build in flight, marking dirty) wt_hash={}",
-                wt_hash
+                "schedule: coalesced wt_hash={} pending_scopes={:?}",
+                wt_hash,
+                scope_names_from_mask(state.pending_scopes)
             ));
             return;
         }
         state.in_flight = true;
-        state.dirty = false;
+        state.pending_scopes = 0;
     }
 
     let wt_hash_loop = wt_hash.clone();
     worker_runtime().spawn(async move {
+        let mut next_scopes = scopes;
         loop {
-            run_three_scopes(&python, &runner, &repo_hash, &wt_hash_loop, &project_root).await;
+            run_scopes(
+                &python,
+                &runner,
+                &repo_hash,
+                &wt_hash_loop,
+                &project_root,
+                next_scopes,
+            )
+            .await;
 
-            // Check dirty flag before releasing in_flight. If dirty,
-            // run one more pass.
-            let should_loop = {
+            let maybe_follow_up = {
                 let mut states = build_states().lock().unwrap();
                 let state = states.entry(wt_key.clone()).or_default();
-                if state.dirty {
-                    state.dirty = false;
-                    true
+                if state.pending_scopes != 0 {
+                    let pending_scopes = state.pending_scopes;
+                    state.pending_scopes = 0;
+                    Some(pending_scopes)
                 } else {
                     state.in_flight = false;
-                    false
+                    None
                 }
             };
-            if should_loop {
+            if let Some(pending_scopes) = maybe_follow_up {
                 log_event(&format!(
-                    "schedule: running coalesced follow-up pass wt_hash={}",
-                    wt_hash_loop
+                    "schedule: running coalesced follow-up pass wt_hash={} scopes={:?}",
+                    wt_hash_loop,
+                    scope_names_from_mask(pending_scopes)
                 ));
+                next_scopes = pending_scopes;
                 continue;
             }
             break;
@@ -453,14 +572,15 @@ fn schedule_incremental_index(repo_hash: RepoHash, wt_hash: WorktreeHash, projec
     });
 }
 
-async fn run_three_scopes(
+async fn run_scopes(
     python: &Path,
     runner: &Path,
     repo_hash: &RepoHash,
     wt_hash: &WorktreeHash,
     project_root: &Path,
+    scopes: ScopeMask,
 ) {
-    for scope in ["files", "files-docs", "specs"] {
+    for scope in scope_names_from_mask(scopes) {
         let action = if scope == "specs" {
             "index-specs"
         } else {
@@ -546,7 +666,7 @@ pub fn kick_initial_build_for_worktree(repo_root: &Path, worktree_path: &Path) {
         "kick_initial_build: queueing integrity build for wt_hash={}",
         wt_hash
     ));
-    schedule_incremental_index(repo_hash, wt_hash, worktree_path.to_path_buf());
+    schedule_incremental_index(repo_hash, wt_hash, worktree_path.to_path_buf(), SCOPE_ALL);
 }
 
 // =====================================================================
@@ -600,5 +720,41 @@ impl gwt_core::index::runtime::RunnerSpawner for LoggingRunnerSpawner {
         }
         cmd.stdin(std::process::Stdio::null());
         cmd.spawn().map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_paths_classify_code_without_docs_or_specs() {
+        let root = Path::new("/repo");
+        let mask = scopes_for_changed_paths(root, &[root.join("crates/gwt-tui/src/app.rs")]);
+
+        assert_eq!(scope_names_from_mask(mask), vec!["files"]);
+    }
+
+    #[test]
+    fn changed_paths_classify_docs_and_specs_separately() {
+        let root = Path::new("/repo");
+        let mask = scopes_for_changed_paths(
+            root,
+            &[
+                root.join("README.md"),
+                root.join("docs/guide/overview.md"),
+                root.join("specs/SPEC-10/spec.md"),
+            ],
+        );
+
+        assert_eq!(scope_names_from_mask(mask), vec!["files-docs", "specs"]);
+    }
+
+    #[test]
+    fn changed_paths_skip_snapshot_noise() {
+        let root = Path::new("/repo");
+        let mask = scopes_for_changed_paths(root, &[root.join("crates/gwt-tui/tests/ui.snap")]);
+
+        assert!(scope_names_from_mask(mask).is_empty());
     }
 }

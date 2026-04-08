@@ -28,7 +28,8 @@ use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
-    distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
+    distribute_to_worktree, generate_codex_hooks, generate_settings_local, prune_stale_gwt_assets,
+    update_git_exclude,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -1267,6 +1268,7 @@ where
         }
         model.branches.checked_out_branches = checked_out;
     }
+    prune_stale_gwt_assets_for_repo_worktrees(model);
 
     // Refresh the protection inputs the Cleanup gutter consults. The HEAD
     // branch tracks the gwt-tui process itself; active session branches are
@@ -1384,6 +1386,22 @@ fn load_git_view_with<S, C, B, P>(
             pr_link,
         },
     );
+}
+
+fn prune_stale_gwt_assets_for_repo_worktrees(model: &Model) {
+    let mut paths = std::collections::HashSet::new();
+    paths.insert(model.repo_path().to_path_buf());
+    paths.extend(model.active_worktree_paths());
+
+    for worktree in paths {
+        if let Err(error) = prune_stale_gwt_assets(&worktree) {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                error = %error,
+                "failed to prune stale gwt assets during initial data refresh"
+            );
+        }
+    }
 }
 
 fn git_view_divergence_summary(branches: &[gwt_git::Branch]) -> Option<String> {
@@ -4958,8 +4976,9 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
     }
 
     let session = model.active_session_tab()?;
-    let parser = session.vt.visible_screen_parser();
-    crate::renderer::collect_url_regions(parser.screen(), Rect::new(0, 0, area.width, area.height))
+    session
+        .vt
+        .visible_url_regions(Rect::new(0, 0, area.width, area.height))
         .into_iter()
         .find(|region| {
             let row = area.y + region.row;
@@ -5094,10 +5113,10 @@ fn queue_active_session_mouse_scroll(
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     let selection = session.vt.selection()?;
     let (start, end) = normalize_selection(selection);
-    let parser = session.vt.visible_screen_parser();
-    let screen = parser.screen();
-    let end_col = end.col.saturating_add(1).min(screen.size().1);
-    Some(screen.contents_between(start.row, start.col, end.row, end_col))
+    session.vt.with_visible_screen(|screen| {
+        let end_col = end.col.saturating_add(1).min(screen.size().1);
+        Some(screen.contents_between(start.row, start.col, end.row, end_col))
+    })
 }
 
 fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
@@ -5306,80 +5325,85 @@ fn render_session_surface(
     show_cursor: bool,
 ) {
     let text_area = session_text_area(session, area);
-    let parser = session.vt.visible_screen_parser();
-    let screen = parser.screen();
-    if screen.contents().trim().is_empty() {
-        match &session.tab_type {
-            crate::model::SessionTabType::Agent { agent_id, color } => {
-                // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
-                const SPINNER: [char; 6] = [
-                    '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
-                ];
-                let elapsed = session.created_at.elapsed().as_millis() as usize;
-                let ch = SPINNER[(elapsed / 200) % SPINNER.len()];
-                let agent_fg = agent_color_to_ratatui(*color);
+    session.vt.with_visible_screen(|screen| {
+        if screen.contents().trim().is_empty() {
+            match &session.tab_type {
+                crate::model::SessionTabType::Agent { agent_id, color } => {
+                    // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
+                    const SPINNER: [char; 6] = [
+                        '\u{280B}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
+                    ];
+                    let elapsed = session.created_at.elapsed().as_millis() as usize;
+                    let ch = SPINNER[(elapsed / 200) % SPINNER.len()];
+                    let agent_fg = agent_color_to_ratatui(*color);
 
-                // Center the startup display vertically
-                let top_pad = area.height.saturating_sub(5) / 2;
-                let mut lines: Vec<Line<'_>> = Vec::new();
-                for _ in 0..top_pad {
+                    // Center the startup display vertically
+                    let top_pad = area.height.saturating_sub(5) / 2;
+                    let mut lines: Vec<Line<'_>> = Vec::new();
+                    for _ in 0..top_pad {
+                        lines.push(Line::from(""));
+                    }
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{} ", theme::icon::SESSION_AGENT),
+                            Style::default().fg(agent_fg),
+                        ),
+                        Span::styled(
+                            session.name.clone(),
+                            Style::default().fg(agent_fg).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
                     lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{ch} "), Style::default().fg(agent_fg)),
+                        Span::styled(
+                            format!("Starting {agent_id}..."),
+                            Style::default().fg(theme::color::TEXT_SECONDARY),
+                        ),
+                    ]));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "Waiting for agent output",
+                        Style::default().fg(theme::color::TEXT_DISABLED),
+                    )));
+                    let paragraph =
+                        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+                    frame.render_widget(paragraph, text_area);
                 }
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} ", theme::icon::SESSION_AGENT),
-                        Style::default().fg(agent_fg),
-                    ),
-                    Span::styled(
-                        session.name.clone(),
-                        Style::default().fg(agent_fg).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{ch} "), Style::default().fg(agent_fg)),
-                    Span::styled(
-                        format!("Starting {agent_id}..."),
-                        Style::default().fg(theme::color::TEXT_SECONDARY),
-                    ),
-                ]));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Waiting for agent output",
-                    Style::default().fg(theme::color::TEXT_DISABLED),
-                )));
-                let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-                frame.render_widget(paragraph, text_area);
+                _ => {
+                    let placeholder = Paragraph::new(format!(
+                        "Session: {} ({}x{})",
+                        session.name,
+                        session.vt.cols(),
+                        session.vt.rows()
+                    ))
+                    .style(Style::default().fg(theme::color::TEXT_DISABLED));
+                    frame.render_widget(placeholder, text_area);
+                }
             }
-            _ => {
-                let placeholder = Paragraph::new(format!(
-                    "Session: {} ({}x{})",
-                    session.name,
-                    session.vt.cols(),
-                    session.vt.rows()
-                ))
-                .style(Style::default().fg(theme::color::TEXT_DISABLED));
-                frame.render_widget(placeholder, text_area);
-            }
+        } else {
+            let url_regions =
+                session
+                    .vt
+                    .visible_url_regions(Rect::new(0, 0, text_area.width, text_area.height));
+            crate::renderer::render_vt_screen_with_selection_and_urls(
+                screen,
+                frame.buffer_mut(),
+                text_area,
+                session.vt.selection(),
+                &url_regions,
+            );
         }
-    } else {
-        let _ = crate::renderer::render_vt_screen_with_selection(
-            screen,
-            frame.buffer_mut(),
-            text_area,
-            session.vt.selection(),
-        );
-    }
 
-    // Show the vt100 cursor when this session has terminal focus.
-    if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let x = text_area.x + cursor_col;
-        let y = text_area.y + cursor_row;
-        if x < text_area.right() && y < text_area.bottom() {
-            frame.set_cursor_position((x, y));
+        if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
+            let (cursor_row, cursor_col) = screen.cursor_position();
+            let x = text_area.x + cursor_col;
+            let y = text_area.y + cursor_row;
+            if x < text_area.right() && y < text_area.bottom() {
+                frame.set_cursor_position((x, y));
+            }
         }
-    }
+    });
 }
 
 /// Render the full UI (Elm: view).
@@ -9404,6 +9428,63 @@ mod tests {
     }
 
     #[test]
+    fn load_initial_data_prunes_stale_gwt_assets_from_repo_and_active_worktrees() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let worktree = dir.path().join("wt-feature-stale");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/stale",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+
+        let repo_stale = dir.path().join(".claude/commands/gwt-issue-search.md");
+        let worktree_stale = worktree.join(".codex/skills/gwt-agent-read/SKILL.md");
+        let unrelated_dir = dir.path().join("not-a-worktree");
+        let unrelated_stale = unrelated_dir.join(".claude/commands/gwt-issue-search.md");
+
+        fs::create_dir_all(repo_stale.parent().expect("repo stale parent"))
+            .expect("repo stale dir");
+        fs::create_dir_all(worktree_stale.parent().expect("worktree stale parent"))
+            .expect("worktree stale dir");
+        fs::create_dir_all(unrelated_stale.parent().expect("unrelated stale parent"))
+            .expect("unrelated stale dir");
+        fs::write(&repo_stale, "legacy repo command").expect("write repo stale asset");
+        fs::write(&worktree_stale, "legacy worktree skill").expect("write worktree stale asset");
+        fs::write(&unrelated_stale, "legacy unrelated command")
+            .expect("write unrelated stale asset");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        assert!(
+            !repo_stale.exists(),
+            "repo stale asset should be pruned during startup load"
+        );
+        assert!(
+            !worktree_stale.exists(),
+            "active worktree stale asset should be pruned during startup load"
+        );
+        assert!(
+            unrelated_stale.exists(),
+            "startup sweep should not touch non-worktree directories"
+        );
+    }
+
+    #[test]
     fn load_git_view_with_populates_divergence_and_pr_link_metadata() {
         let mut model = test_model();
 
@@ -11102,6 +11183,89 @@ CUSTOM_ENV = "enabled"
         }
 
         assert_eq!(observed.as_deref(), Some("present"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_prunes_stale_gwt_assets_before_agent_process_starts() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-spec-42");
+        fs::create_dir_all(worktree.join(".claude/commands")).expect("create claude commands");
+        fs::create_dir_all(worktree.join(".codex/skills/gwt-agent-read"))
+            .expect("create stale codex skill");
+        fs::create_dir_all(worktree.join(".claude/skills/gwt-pr/references"))
+            .expect("create stale nested claude skill path");
+        fs::write(
+            worktree.join(".claude/commands/gwt-issue-search.md"),
+            "legacy command",
+        )
+        .expect("write stale command");
+        fs::write(
+            worktree.join(".codex/skills/gwt-agent-read/SKILL.md"),
+            "legacy skill",
+        )
+        .expect("write stale skill");
+        fs::write(
+            worktree.join(".claude/skills/gwt-pr/references/legacy.md"),
+            "legacy nested skill file",
+        )
+        .expect("write stale nested skill file");
+        let marker = dir.path().join("cleanup-check.txt");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Custom("my-agent".to_string()),
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ] && [ ! -e .claude/skills/gwt-pr/references/legacy.md ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
+                "sh".to_string(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
+            display_name: "My Agent".to_string(),
+            color: AgentId::Custom("my-agent".to_string()).default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let mut observed = None;
+        for _ in 0..50 {
+            if let Ok(value) = fs::read_to_string(&marker) {
+                if !value.is_empty() {
+                    observed = Some(value);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(observed.as_deref(), Some("pruned"));
+        assert!(
+            !worktree
+                .join(".claude/commands/gwt-issue-search.md")
+                .exists(),
+            "stale command should be removed before spawn"
+        );
+        assert!(
+            !worktree.join(".codex/skills/gwt-agent-read").exists(),
+            "stale skill should be removed before spawn"
+        );
+        assert!(
+            !worktree
+                .join(".claude/skills/gwt-pr/references/legacy.md")
+                .exists(),
+            "stale nested skill file should be removed before spawn"
+        );
     }
 
     #[test]
