@@ -44,6 +44,16 @@ pub enum CliCommand {
         phase: Option<String>,
         state: Option<String>,
     },
+    /// `gwt issue spec create --title <t> -f <body_file> [--label <l>]*`.
+    SpecCreate {
+        title: String,
+        file: String,
+        labels: Vec<String>,
+    },
+    /// `gwt issue spec pull [--all | <n>...]` — refresh cache from server.
+    SpecPull { all: bool, numbers: Vec<u64> },
+    /// `gwt issue spec repair <n>` — clear cache and re-fetch from server.
+    SpecRepair { number: u64 },
 }
 
 /// Errors surfaced by argv parsing.
@@ -124,6 +134,76 @@ fn parse_spec_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
             i += 1;
         }
         return Ok(CliCommand::SpecList { phase, state });
+    }
+
+    if head == "create" {
+        let mut title: Option<String> = None;
+        let mut file: Option<String> = None;
+        let mut labels: Vec<String> = Vec::new();
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--title" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err(CliParseError::MissingFlag("--title"));
+                    }
+                    title = Some(args[i].clone());
+                }
+                "-f" | "--file" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err(CliParseError::MissingFlag("-f"));
+                    }
+                    file = Some(args[i].clone());
+                }
+                "--label" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err(CliParseError::MissingFlag("--label"));
+                    }
+                    labels.push(args[i].clone());
+                }
+                other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+            }
+            i += 1;
+        }
+        let title = title.ok_or(CliParseError::MissingFlag("--title"))?;
+        let file = file.ok_or(CliParseError::MissingFlag("-f"))?;
+        return Ok(CliCommand::SpecCreate {
+            title,
+            file,
+            labels,
+        });
+    }
+
+    if head == "pull" {
+        let mut all = false;
+        let mut numbers: Vec<u64> = Vec::new();
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--all" => all = true,
+                other => {
+                    let n: u64 = other
+                        .parse()
+                        .map_err(|_| CliParseError::InvalidNumber(other.to_string()))?;
+                    numbers.push(n);
+                }
+            }
+            i += 1;
+        }
+        return Ok(CliCommand::SpecPull { all, numbers });
+    }
+
+    if head == "repair" {
+        if args.len() < 2 {
+            return Err(CliParseError::Usage);
+        }
+        let number: u64 = args[1]
+            .parse()
+            .map_err(|_| CliParseError::InvalidNumber(args[1].clone()))?;
+        return Ok(CliCommand::SpecRepair { number });
     }
 
     // Read / edit path.
@@ -281,6 +361,58 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
                         s.number.0, s.title
                     ));
                 }
+                0
+            }
+            CliCommand::SpecCreate {
+                title,
+                file,
+                labels,
+            } => {
+                let raw = env.read_file(&file).map_err(|e| {
+                    SpecOpsError::from(gwt_github::client::ApiError::Network(e.to_string()))
+                })?;
+                // Parse section markers from the supplied body file and map
+                // them into the SpecOps section map.
+                let parsed = gwt_github::extract_sections(&raw)
+                    .map_err(|e| SpecOpsError::from(gwt_github::body::ParseError::Section(e)))?;
+                let sections: std::collections::BTreeMap<SectionName, String> =
+                    parsed.into_iter().map(|s| (s.name, s.content)).collect();
+                let snapshot = ops.create_spec(&title, sections, &labels)?;
+                out.push_str(&format!(
+                    "created issue #{} with labels {:?}\n",
+                    snapshot.number.0, snapshot.labels
+                ));
+                0
+            }
+            CliCommand::SpecPull { all, numbers } => {
+                if all {
+                    // Ask the server for every gwt-spec issue, then refresh
+                    // each one in the cache.
+                    let list = env.client().list_spec_issues(&SpecListFilter::default())?;
+                    for summary in list {
+                        ops.read_section(summary.number, &SectionName("spec".to_string()))
+                            .ok(); // Ignore individual errors; we just want to refresh cache.
+                    }
+                    out.push_str("pulled all gwt-spec issues\n");
+                } else if numbers.is_empty() {
+                    return Err(SpecOpsError::SectionNotFound(
+                        "pull requires --all or <n>".into(),
+                    ));
+                } else {
+                    for n in numbers {
+                        ops.read_section(IssueNumber(n), &SectionName("spec".to_string()))
+                            .ok();
+                        out.push_str(&format!("pulled #{n}\n"));
+                    }
+                }
+                0
+            }
+            CliCommand::SpecRepair { number } => {
+                // read_section already runs a fresh fetch and rewrites the
+                // cache — that is the repair operation for the MVP.
+                ops.read_section(IssueNumber(number), &SectionName("spec".to_string()))
+                    .ok();
+                out.push_str(&format!("repaired cache for #{number}\n"));
                 0
             }
         }

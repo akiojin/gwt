@@ -2190,6 +2190,35 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 fallback_management_escape(model);
             }
         }
+        ManagementTab::Specs => {
+            // SPEC-12 Phase 9: Specs tab is cache-only. `r` triggers a
+            // local cache reload from `~/.gwt/cache/issues/`.
+            match key.code {
+                KeyCode::Char('r') => {
+                    model.specs.reload_from_cache();
+                }
+                KeyCode::Down => {
+                    let len = model.specs.items.len();
+                    if len > 0 {
+                        model.specs.selected = (model.specs.selected + 1) % len;
+                    }
+                }
+                KeyCode::Up => {
+                    let len = model.specs.items.len();
+                    if len > 0 {
+                        model.specs.selected = if model.specs.selected == 0 {
+                            len - 1
+                        } else {
+                            model.specs.selected - 1
+                        };
+                    }
+                }
+                KeyCode::Esc => {
+                    fallback_management_escape(model);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -5567,6 +5596,7 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
         ManagementTab::Versions => screens::versions::render(&model.versions, frame, area),
         ManagementTab::Settings => screens::settings::render(&model.settings, frame, area),
         ManagementTab::Logs => screens::logs::render(&model.logs, frame, area),
+        ManagementTab::Specs => screens::specs::render(&model.specs, frame, area),
     }
 }
 
@@ -5755,6 +5785,13 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
         ManagementTab::Profiles => profiles_hint_text(model, compact),
         ManagementTab::GitView => git_view_hint_text(compact),
         ManagementTab::Versions => versions_hint_text(compact),
+        ManagementTab::Specs => {
+            if compact {
+                "↑↓ sel  r rfsh  Esc back".to_string()
+            } else {
+                "↑↓:select  r:reload from cache  Esc:back".to_string()
+            }
+        }
     }
 }
 
@@ -8330,7 +8367,9 @@ mod tests {
 
         assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
-        assert!(!first_line.contains("Specs"));
+        // SPEC-12 Phase 9: the Specs tab is now a top-level peer, so the
+        // extra-wide tab strip should include it.
+        assert!(first_line.contains("Specs"));
     }
 
     fn shell_tab(id: &str, name: &str) -> crate::model::SessionTab {
