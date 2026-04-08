@@ -18,6 +18,7 @@
 //! TDD cycle).
 
 pub mod fake;
+pub mod http;
 
 use std::fmt;
 

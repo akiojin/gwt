@@ -776,6 +776,7 @@ version = "8.17.2"
 dependencies = [
  "fs2",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
