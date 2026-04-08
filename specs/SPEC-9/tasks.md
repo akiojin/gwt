@@ -70,6 +70,10 @@
 - [x] **T-097**: Write test: tracked `.claude/*` gwt asset files are preserved during distribution while untracked targets are still written.
 - [x] **T-098**: Update `distribute_to_worktree()` to skip tracked gwt asset paths in Git worktrees.
 - [x] **T-099**: Verify focused `gwt-skills` distribution tests pass after tracked-file preservation change.
+- [x] **T-151**: Write RED test: `distribute_to_worktree()` removes stale untracked `gwt-*` root entries from managed skill / command / hook roots before materializing the current bundle.
+- [x] **T-152**: Write RED test: `distribute_to_worktree()` removes stale tracked `gwt-*` root entries that are outside the current embedded bundle.
+- [x] **T-153**: Add bundle-manifest cleanup to `distribute_to_worktree()` so managed roots delete stale `gwt-*` residue before writing current assets.
+- [x] **T-154**: Refresh `SPEC-9` artifacts and rerun focused/runtime verification for stale managed-asset cleanup.
 
 ### 2b.2 Git Exclude Management
 

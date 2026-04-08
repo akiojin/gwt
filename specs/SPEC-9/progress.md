@@ -4,14 +4,15 @@
 
 - Status: `in-progress`
 - Phase: `Implementation`
-- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 41/41, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 14/20, Phase 6: 11/11
-- Artifact refresh: `2026-04-07T07:45:00Z`
+- Task progress: Phase 1: 21/21, Phase 2: 13/13, Phase 2b: 45/45, Phase 2c: 11/11, Phase 3: 31/31, Phase 4: 11/11, Phase 5: 14/20, Phase 6: 11/11
+- Artifact refresh: `2026-04-08T11:58:35Z`
 
 ## Done
 
 - Phase 1 (Docker UI): All screens implemented and tested.
 - Phase 2 (Build-Time Bundling): `BuiltinSkill` enum removed, `include_dir` bundling, build.rs YAML validation, validate module with tests.
 - Phase 2b (Runtime Distribution): `distribute_to_worktree()`, `update_git_exclude()`, `generate_settings_local()`, and `generate_codex_hooks()` are implemented and tested. Agent launch integration is wired, tracked `.codex/hooks.json` files are preserved by default but tracked legacy gwt runtime forward-hook files are migrated in place, and Claude/Codex live-state hooks now write `GWT_SESSION_RUNTIME_PATH` without a Node runtime forwarder.
+- Runtime distribution now also prunes stale `gwt-*` root entries from managed skill / command / hook roots before materializing the current embedded bundle, so legacy residue no longer survives agent launch even when the stale entries are Git-tracked.
 - Codex launch configs now explicitly enable `codex_hooks`, matching the current OpenAI Codex hooks contract so gwt-managed Codex sessions actually execute available `hooks.json` files.
 - Codex launch configs now also add the current runtime PID namespace directory as an explicit writable root, so runtime hooks can still write `~/.gwt/sessions/runtime/<pid>/...` while Codex is sandboxed with `workspace-write`.
 - Because the persisted session id is only known during launch materialization, `app.rs` now appends the effective Codex runtime writable root after the session record is created, keeping the final spawned argv aligned with the injected `GWT_SESSION_RUNTIME_PATH`.
