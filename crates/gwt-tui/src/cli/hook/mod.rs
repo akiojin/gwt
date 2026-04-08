@@ -11,7 +11,14 @@
 //! Individual hook handlers (runtime-state, block-*, forward) will live in
 //! sibling files and consume these types.
 
+pub mod block_cd_command;
+pub mod block_file_ops;
+pub mod block_git_branch_ops;
+pub mod block_git_dir_override;
+pub mod forward;
 pub mod runtime_state;
+pub mod segments;
+pub mod worktree;
 
 use std::io::{self, Read};
 

@@ -28,6 +28,7 @@ ratatui = "0.30"
 crossterm = "0.29"
 tokio = { workspace = true }
 vt100 = "0.15"
+regex = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

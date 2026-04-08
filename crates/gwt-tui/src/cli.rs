@@ -474,17 +474,43 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
 /// handlers exit 1 with the error chain on stderr; they are never turned
 /// into `decision=block` to avoid false positives under partial outages.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{runtime_state, HookKind};
+    use crate::cli::hook::{
+        block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, forward,
+        runtime_state, BlockDecision, HookKind,
+    };
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
         return Ok(2);
     };
 
+    // Every block hook returns `Result<Option<BlockDecision>, HookError>`.
+    // `emit_block_decision` serializes a decision to stdout and yields
+    // the block exit code (2). `emit_hook_error` reports a handler
+    // error on stderr and yields 1.
+    fn emit_block_decision<E: CliEnv>(env: &mut E, decision: &BlockDecision) -> i32 {
+        match serde_json::to_vec(decision) {
+            Ok(bytes) => {
+                let _ = env.stdout().write_all(&bytes);
+                let _ = env.stdout().flush();
+                2
+            }
+            Err(err) => {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwt hook: failed to serialize decision: {err}"
+                );
+                1
+            }
+        }
+    }
+    fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
+        let _ = writeln!(env.stderr(), "gwt hook {name}: {err}");
+        1
+    }
+
     match kind {
         HookKind::RuntimeState => {
-            // runtime-state takes the event name as its first positional argument
-            // and does not consume stdin.
             let Some(event) = rest.first() else {
                 let _ = writeln!(
                     env.stderr(),
@@ -494,27 +520,33 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
             };
             match runtime_state::handle(event) {
                 Ok(()) => Ok(0),
-                Err(err) => {
-                    let _ = writeln!(env.stderr(), "gwt hook runtime-state: {err}");
-                    Ok(1)
-                }
+                Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
-        HookKind::BlockGitBranchOps
-        | HookKind::BlockCdCommand
-        | HookKind::BlockFileOps
-        | HookKind::BlockGitDirOverride
-        | HookKind::Forward => {
-            // Handlers for these hooks are ported in subsequent tasks
-            // (T-030 onward). Until then they are fail-open no-ops so
-            // that wiring them into settings_local.rs does not regress
-            // behaviour compared to the existing Node scripts.
-            let _ = writeln!(
-                env.stderr(),
-                "gwt hook {name}: handler not yet ported, allowing"
-            );
-            Ok(0)
-        }
+        HookKind::BlockGitBranchOps => match block_git_branch_ops::handle() {
+            Ok(None) => Ok(0),
+            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::BlockCdCommand => match block_cd_command::handle() {
+            Ok(None) => Ok(0),
+            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::BlockFileOps => match block_file_ops::handle() {
+            Ok(None) => Ok(0),
+            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::BlockGitDirOverride => match block_git_dir_override::handle() {
+            Ok(None) => Ok(0),
+            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::Forward => match forward::handle() {
+            Ok(()) => Ok(0),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
     }
 }
 
