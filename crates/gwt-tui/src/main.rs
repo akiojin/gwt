@@ -243,6 +243,14 @@ fn terminal_leave_commands_ansi() -> String {
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
+    // SPEC-12 Phase 6: argv-driven dispatch. When invoked as
+    // `gwt issue ...`, hand off to the CLI entry point without touching the
+    // terminal. Any other argv shape keeps the legacy TUI behaviour below.
+    let argv: Vec<String> = std::env::args().collect();
+    if gwt_tui::cli::should_dispatch_cli(&argv) {
+        return run_cli(&argv);
+    }
+
     // Install a panic hook that restores the terminal before printing the
     // backtrace.  Without this, panics leave the terminal in raw/alt-screen
     // mode and the error message is invisible.
@@ -279,6 +287,107 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// SPEC-12 Phase 6: CLI entry point.
+///
+/// This is reached when argv[1] == "issue". We resolve the repository
+/// coordinates from the current git remote, build the production
+/// [`DefaultCliEnv`], and dispatch the subcommand.
+#[cfg(not(tarpaulin_include))]
+fn run_cli(argv: &[String]) -> io::Result<()> {
+    let (owner, repo) = match resolve_repo_coordinates() {
+        Some(coords) => coords,
+        None => {
+            eprintln!("gwt issue: could not resolve GitHub owner/repo from the current git remote");
+            std::process::exit(2);
+        }
+    };
+    let mut env = match gwt_tui::cli::DefaultCliEnv::new(&owner, &repo) {
+        Ok(env) => env,
+        Err(e) => {
+            eprintln!("gwt issue: {e}");
+            std::process::exit(1);
+        }
+    };
+    let code = gwt_tui::cli::dispatch(&mut env, argv);
+    std::process::exit(code);
+}
+
+/// Parse the `origin` remote URL and return `(owner, repo)` when the remote
+/// points at github.com. Supports both HTTPS and SSH URLs. Returns `None`
+/// when the remote cannot be resolved (e.g. not in a git repo) or when the
+/// host is not github.com.
+fn resolve_repo_coordinates() -> Option<(String, String)> {
+    use std::process::Command;
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_github_remote_url(&url)
+}
+
+fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
+    // SSH: git@github.com:owner/repo(.git)?
+    if let Some(rest) = url.strip_prefix("git@github.com:") {
+        let trimmed = rest.trim_end_matches(".git");
+        let mut parts = trimmed.splitn(2, '/');
+        let owner = parts.next()?.to_string();
+        let repo = parts.next()?.to_string();
+        return Some((owner, repo));
+    }
+    // HTTPS: https://github.com/owner/repo(.git)?
+    for prefix in [
+        "https://github.com/",
+        "http://github.com/",
+        "git://github.com/",
+    ] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            let trimmed = rest.trim_end_matches(".git").trim_end_matches('/');
+            let mut parts = trimmed.splitn(2, '/');
+            let owner = parts.next()?.to_string();
+            let repo = parts.next()?.to_string();
+            return Some((owner, repo));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod main_tests {
+    use super::parse_github_remote_url;
+
+    #[test]
+    fn parses_ssh_url() {
+        assert_eq!(
+            parse_github_remote_url("git@github.com:akiojin/gwt.git"),
+            Some(("akiojin".into(), "gwt".into()))
+        );
+    }
+
+    #[test]
+    fn parses_https_url() {
+        assert_eq!(
+            parse_github_remote_url("https://github.com/akiojin/gwt"),
+            Some(("akiojin".into(), "gwt".into()))
+        );
+        assert_eq!(
+            parse_github_remote_url("https://github.com/akiojin/gwt.git"),
+            Some(("akiojin".into(), "gwt".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_non_github_url() {
+        assert_eq!(
+            parse_github_remote_url("https://example.com/owner/repo"),
+            None
+        );
+    }
 }
 
 #[cfg(not(tarpaulin_include))]
