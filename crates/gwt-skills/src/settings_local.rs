@@ -40,13 +40,6 @@ impl ManagedHookTarget {
             Self::Codex => worktree.join(CODEX_HOOKS_PATH),
         }
     }
-
-    fn script_root(self) -> &'static str {
-        match self {
-            Self::Claude => ".claude/hooks/scripts",
-            Self::Codex => ".codex/hooks/scripts",
-        }
-    }
 }
 
 /// Generate `.claude/settings.local.json` in the target worktree.
@@ -338,27 +331,28 @@ fn runtime_hook(event: &str, shell: HookShell) -> Value {
     })
 }
 
-fn bash_blockers_hook(target: ManagedHookTarget) -> Value {
+fn bash_blockers_hook(_target: ManagedHookTarget) -> Value {
+    // SPEC #1942 (CORE-CLI): dispatch every bash blocker through the
+    // `gwt hook ...` CLI surface. `target` is retained as a parameter
+    // only to keep the call sites consistent across Claude and Codex;
+    // the emitted commands are identical for both.
     json!({
         "matcher": "Bash",
         "hooks": [
             {
-                "command": format!("node {}/gwt-block-git-branch-ops.mjs", target.script_root()),
+                "command": "gwt hook block-git-branch-ops",
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             },
             {
-                "command": format!("node {}/gwt-block-cd-command.mjs", target.script_root()),
+                "command": "gwt hook block-cd-command",
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             },
             {
-                "command": format!("node {}/gwt-block-file-ops.mjs", target.script_root()),
+                "command": "gwt hook block-file-ops",
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             },
             {
-                "command": format!(
-                    "node {}/gwt-block-git-dir-override.mjs",
-                    target.script_root()
-                ),
+                "command": "gwt hook block-git-dir-override",
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -374,30 +368,31 @@ fn managed_hook_shell() -> HookShell {
 }
 
 fn runtime_hook_command(event: &str, shell: HookShell) -> String {
-    let status = runtime_status_for_event(event);
     match shell {
-        HookShell::Posix => posix_runtime_hook_command(event, status),
-        HookShell::PowerShell => powershell_runtime_hook_command(event, status),
+        HookShell::Posix => posix_runtime_hook_command(event),
+        HookShell::PowerShell => powershell_runtime_hook_command(event),
     }
 }
 
-fn runtime_status_for_event(event: &str) -> &'static str {
-    match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => "Running",
-        "Stop" => "WaitingInput",
-        other => panic!("unsupported runtime hook event: {other}"),
-    }
-}
-
-fn posix_runtime_hook_command(event: &str, status: &str) -> String {
+/// Emit the POSIX-shell form of the runtime-state hook. The previous
+/// inline `sh -lc '...'` one-liner that wrote JSON directly is replaced
+/// by a single `gwt hook runtime-state <event>` dispatch. The
+/// `GWT_MANAGED_HOOK=runtime-state` env-var prefix is retained so that
+/// [`is_gwt_managed_command`] continues to identify managed entries for
+/// idempotent replace on regeneration.
+fn posix_runtime_hook_command(event: &str) -> String {
     format!(
-        "{GWT_MANAGED_RUNTIME_MARKER}={GWT_MANAGED_RUNTIME_KIND} sh -lc 'runtime_path=\"${{GWT_SESSION_RUNTIME_PATH:-}}\"; [ -n \"$runtime_path\" ] || exit 0; runtime_dir=$(dirname \"$runtime_path\"); mkdir -p \"$runtime_dir\" || exit 0; now=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\"); tmp=\"${{runtime_path}}.tmp.$$\"; printf \"{{\\\"status\\\":\\\"%s\\\",\\\"updated_at\\\":\\\"%s\\\",\\\"last_activity_at\\\":\\\"%s\\\",\\\"source_event\\\":\\\"%s\\\"}}\" \"{status}\" \"$now\" \"$now\" \"{event}\" > \"$tmp\" && mv \"$tmp\" \"$runtime_path\"' || true"
+        "{GWT_MANAGED_RUNTIME_MARKER}={GWT_MANAGED_RUNTIME_KIND} gwt hook runtime-state {event}"
     )
 }
 
-fn powershell_runtime_hook_command(event: &str, status: &str) -> String {
+/// Emit the PowerShell form of the runtime-state hook. Windows Claude
+/// Code runs the hook through `powershell -NoProfile -Command`, so we
+/// keep that wrapper to be able to set the detection env-var, then
+/// invoke the same `gwt hook runtime-state` CLI.
+fn powershell_runtime_hook_command(event: &str) -> String {
     format!(
-        "powershell -NoProfile -Command \"& {{ $env:{GWT_MANAGED_RUNTIME_MARKER} = '{GWT_MANAGED_RUNTIME_KIND}'; if ($env:GWT_SESSION_RUNTIME_PATH) {{ $runtimePath = $env:GWT_SESSION_RUNTIME_PATH; $runtimeDir = Split-Path -Parent $runtimePath; New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null; $now = (Get-Date).ToUniversalTime().ToString('o'); $tmp = \\\"$runtimePath.tmp.$PID\\\"; $payload = @{{ status = '{status}'; updated_at = $now; last_activity_at = $now; source_event = '{event}' }} | ConvertTo-Json -Compress; Set-Content -Path $tmp -Value $payload -NoNewline; Move-Item -Force $tmp $runtimePath }} }}\""
+        "powershell -NoProfile -Command \"& {{ $env:{GWT_MANAGED_RUNTIME_MARKER} = '{GWT_MANAGED_RUNTIME_KIND}'; gwt hook runtime-state {event} }}\""
     )
 }
 
@@ -443,6 +438,89 @@ mod tests {
             value["hooks"]["PreToolUse"][1]["matcher"],
             Value::String("Bash".to_string())
         );
+    }
+
+    // T-080 / T-082 (SPEC #1942): the Claude settings.local.json must
+    // dispatch every managed hook through the `gwt hook ...` CLI surface,
+    // not through `node .../gwt-*.mjs`. The runtime hook keeps the
+    // `GWT_MANAGED_HOOK=runtime-state` env-var prefix so the detection
+    // logic in `is_gwt_managed_command` still recognises it as managed.
+    #[test]
+    fn managed_hooks_dispatch_through_gwt_hook_cli_not_node_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_settings_local(dir.path()).unwrap();
+
+        let path = dir.path().join(".claude/settings.local.json");
+        let content = fs::read_to_string(&path).unwrap();
+
+        // No leftover references to the old Node scripts.
+        assert!(
+            !content.contains("gwt-block-"),
+            "settings.local.json must not reference Node block scripts, got: {content}"
+        );
+        assert!(
+            !content.contains(".mjs"),
+            "settings.local.json must not reference any .mjs file, got: {content}"
+        );
+
+        let value: Value = serde_json::from_str(&content).unwrap();
+
+        // T-082: runtime hooks now invoke `gwt hook runtime-state <event>`
+        // and still carry the GWT_MANAGED_HOOK marker for replace
+        // detection. The inline POSIX shell one-liner is gone.
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            let cmd = value["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("runtime command missing for event {event}"));
+            assert!(
+                cmd.contains("gwt hook runtime-state"),
+                "runtime hook for {event} must call `gwt hook runtime-state`, got: {cmd}"
+            );
+            assert!(
+                cmd.contains(event),
+                "runtime hook for {event} must pass the event name, got: {cmd}"
+            );
+            assert!(
+                cmd.contains("GWT_MANAGED_HOOK"),
+                "runtime hook must carry the GWT_MANAGED_HOOK marker, got: {cmd}"
+            );
+            assert!(
+                !cmd.contains("mkdir"),
+                "runtime hook must not shell out to mkdir anymore, got: {cmd}"
+            );
+            assert!(
+                !cmd.contains("printf"),
+                "runtime hook must not shell out to printf anymore, got: {cmd}"
+            );
+        }
+
+        // T-080: bash-blocker hooks now dispatch through `gwt hook block-*`.
+        let pre_tool_block_hooks = value["hooks"]["PreToolUse"][1]["hooks"]
+            .as_array()
+            .expect("bash blockers array");
+        let expected_commands = [
+            "gwt hook block-git-branch-ops",
+            "gwt hook block-cd-command",
+            "gwt hook block-file-ops",
+            "gwt hook block-git-dir-override",
+        ];
+        let actual: Vec<&str> = pre_tool_block_hooks
+            .iter()
+            .map(|h| h["command"].as_str().unwrap_or(""))
+            .collect();
+        for expected in expected_commands {
+            assert!(
+                actual.contains(&expected),
+                "bash blocker hooks must include {expected:?}, got: {actual:?}"
+            );
+        }
     }
 
     #[test]
@@ -757,8 +835,8 @@ mod tests {
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let foreign_managed_command = match managed_hook_shell() {
-            HookShell::Posix => powershell_runtime_hook_command("SessionStart", "Running"),
-            HookShell::PowerShell => posix_runtime_hook_command("SessionStart", "Running"),
+            HookShell::Posix => powershell_runtime_hook_command("SessionStart"),
+            HookShell::PowerShell => posix_runtime_hook_command("SessionStart"),
         };
         fs::write(
             &path,
@@ -807,31 +885,47 @@ mod tests {
         assert_eq!(session_start_command, expected);
     }
 
-    #[cfg(not(windows))]
+    // SPEC #1942 T-083: the inline POSIX shell JSON writer has been
+    // replaced by a single `gwt hook runtime-state <event>` CLI call.
+    // The sidecar-write behaviour is now covered end-to-end by
+    // `crates/gwt-tui/tests/hook_runtime_state_test.rs`, which exercises
+    // the Rust implementation directly without requiring `gwt` to be on
+    // PATH at test time.
     #[test]
-    fn posix_runtime_hook_command_writes_runtime_sidecar() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime_path = dir
-            .path()
-            .join("runtime")
-            .join("999")
-            .join("session-123.json");
-        let command = posix_runtime_hook_command("SessionStart", "Running");
+    fn posix_runtime_hook_command_dispatches_through_gwt_hook_cli() {
+        let command = posix_runtime_hook_command("SessionStart");
+        assert!(
+            command.starts_with("GWT_MANAGED_HOOK=runtime-state"),
+            "posix runtime hook must keep the managed marker prefix, got: {command}"
+        );
+        assert!(
+            command.contains("gwt hook runtime-state SessionStart"),
+            "posix runtime hook must invoke the gwt CLI with the event name, got: {command}"
+        );
+        assert!(
+            !command.contains("sh -lc"),
+            "posix runtime hook must no longer wrap the call in an inline shell, got: {command}"
+        );
+        assert!(
+            !command.contains("printf"),
+            "posix runtime hook must no longer shell out to printf, got: {command}"
+        );
+    }
 
-        assert!(Command::new("sh")
-            .arg("-lc")
-            .arg(&command)
-            .env("GWT_SESSION_RUNTIME_PATH", &runtime_path)
-            .status()
-            .unwrap()
-            .success());
-
-        let content = fs::read_to_string(&runtime_path).unwrap();
-        let value: Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["status"], Value::String("Running".to_string()));
-        assert_eq!(
-            value["source_event"],
-            Value::String("SessionStart".to_string())
+    #[test]
+    fn powershell_runtime_hook_command_dispatches_through_gwt_hook_cli() {
+        let command = powershell_runtime_hook_command("Stop");
+        assert!(
+            command.contains("$env:GWT_MANAGED_HOOK = 'runtime-state'"),
+            "powershell runtime hook must set the managed env var, got: {command}"
+        );
+        assert!(
+            command.contains("gwt hook runtime-state Stop"),
+            "powershell runtime hook must invoke the gwt CLI with the event name, got: {command}"
+        );
+        assert!(
+            !command.contains("ConvertTo-Json"),
+            "powershell runtime hook must no longer format JSON inline, got: {command}"
         );
     }
 }
