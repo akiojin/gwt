@@ -39,7 +39,7 @@
 
 ### 2.1 Remove Legacy BuiltinSkill System
 
-- [x] **T-022**: Write test: `CLAUDE_SKILLS` static contains all expected skill directories (gwt-pr, gwt-agent-discover, etc.).
+- [x] **T-022**: Write test: `CLAUDE_SKILLS` static contains all expected skill directories (gwt-pr, gwt-agent, etc.).
 - [x] **T-023**: Write test: `CLAUDE_COMMANDS` static contains all expected command files.
 - [x] **T-024**: Write test: `CLAUDE_HOOKS` static contains all expected hook scripts.
 - [x] **T-025**: Remove `BuiltinSkill` enum, `register_builtins()`, `to_embedded()`, `all()` from `crates/gwt-skills/src/registry.rs`.

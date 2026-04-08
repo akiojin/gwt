@@ -23,7 +23,7 @@ Use this command to run semantic search against the project file index.
    - relevance summary
    - next file(s) to inspect
 4. If index is missing or outdated, explain that and provide the shortest recovery action.
-5. For Issue search, use `/gwt:gwt-issue-search` instead.
+5. For Issue search, use `/gwt:gwt-search --issues` instead.
 
 ## Examples
 

@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-08 — chore: managed gwt asset cleanup must distinguish source-of-truth from generated residue
+
+### 事象
+
+`gwt-*` の削除整理で、「埋め込み/managed かどうか」を search embedding と混同し、
+さらに `repo-tracked` の有無だけで削除可否を判断しかけた。
+その結果、source-of-truth の managed asset、broken symlink の tracked residue、
+ignored な generated residue が同じバケツに入っていた。
+
+### 原因
+
+- 判定基準を `crates/gwt-skills` の bundle/distribution 契約ではなく、名前や追跡状態に寄せてしまった。
+- `.codex/skills/*` のように「tracked でも source-of-truth ではないもの」と、
+  `.claude/commands/gwt-file-search.md` のように「untracked だが local residue として削除すべきもの」を分けていなかった。
+
+### 再発防止策
+
+1. `gwt-*` の削除前に、`assets.rs` / `distribute.rs` / `SPEC-9` / `AGENTS.md` を照合して managed contract を確定する。
+2. 削除対象は `tracked stale residue` と `untracked unmanaged residue` に分け、source-of-truth と generated copy を混同しない。
+3. local residue を削除する場合は、対応する tracked command/skill docs の参照先も同時に正規 surface へ揃える。
+
 ## 2026-04-08 — fix: PTY output must signal dirty state, not permission to redraw immediately
 
 ### 事象

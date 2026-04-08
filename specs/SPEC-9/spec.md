@@ -120,7 +120,7 @@ Runtime-hook regressions repeatedly occurred when only one layer (config generat
   - PR management: gwt-pr, gwt-pr-check, gwt-pr-fix
   - SPEC workflow: gwt-spec-brainstorm, gwt-spec-ops, gwt-spec-register, gwt-spec-implement, gwt-spec-clarify, gwt-spec-deepen, gwt-spec-plan, gwt-spec-tasks, gwt-spec-analyze, gwt-spec-search
   - Issue management: gwt-issue-register, gwt-issue-resolve, gwt-issue-search
-  - Agent pane management: gwt-agent-discover, gwt-agent-read, gwt-agent-send, gwt-agent-lifecycle
+  - Agent pane management: gwt-agent
   - Utilities: gwt-project-search, gwt-project-index, gwt-spec-to-issue-migration
 - **FR-010**: `build.rs` validates YAML frontmatter of every `SKILL.md` at compile time using `serde_yaml`. Malformed YAML causes a build failure with file path and error details.
 - **FR-011**: The `BuiltinSkill` enum, `SKILL_CATALOG` constant, `register_builtins()` function, and `skill_fields()` in the TUI Settings screen are removed. Skill interpretation is the responsibility of Claude Code / Codex, not gwt.
