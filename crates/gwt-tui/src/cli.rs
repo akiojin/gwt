@@ -54,6 +54,11 @@ pub enum CliCommand {
     SpecPull { all: bool, numbers: Vec<u64> },
     /// `gwt issue spec repair <n>` — clear cache and re-fetch from server.
     SpecRepair { number: u64 },
+    /// `gwt hook <name> [args...]` — dispatch to an in-binary hook handler.
+    ///
+    /// See SPEC #1942 (CORE-CLI) — replaces `.claude/hooks/scripts/gwt-*.mjs`
+    /// and inline shell hooks in `.claude/settings.local.json`.
+    Hook { name: String, rest: Vec<String> },
 }
 
 /// Errors surfaced by argv parsing.
@@ -83,10 +88,12 @@ impl std::error::Error for CliParseError {}
 
 /// Determine whether the given argv (starting at the program name) should be
 /// handled as a CLI invocation. Returns `true` when argv[1..] begins with
-/// `issue`. The TUI launcher keeps its legacy behaviour (positional repo
-/// path) for any other shape.
+/// `issue` or `hook`. The TUI launcher keeps its legacy behaviour (positional
+/// repo path) for any other shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
-    args.get(1).map(|s| s == "issue").unwrap_or(false)
+    args.get(1)
+        .map(|s| matches!(s.as_str(), "issue" | "hook"))
+        .unwrap_or(false)
 }
 
 /// Parse an argv slice into a [`CliCommand`]. The slice should start from
@@ -99,6 +106,29 @@ pub fn parse_issue_args(args: &[String]) -> Result<CliCommand, CliParseError> {
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
         None => Err(CliParseError::Usage),
     }
+}
+
+/// Parse the tail of a `gwt hook ...` argv slice into a [`CliCommand::Hook`].
+///
+/// SPEC #1942 (CORE-CLI): `gwt hook <name> [args...]` is the single entry
+/// point for every in-binary hook handler. The known hook names are:
+///
+/// - `runtime-state <event>`
+/// - `block-git-branch-ops`
+/// - `block-cd-command`
+/// - `block-file-ops`
+/// - `block-git-dir-override`
+/// - `forward <target>`
+///
+/// Unknown names still parse (we don't maintain an allowlist here) so that
+/// newly added hooks don't need parser changes. Validation happens in
+/// [`run_hook`].
+pub fn parse_hook_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
+    Ok(CliCommand::Hook {
+        name: head.clone(),
+        rest: rest.to_vec(),
+    })
 }
 
 fn parse_spec_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
@@ -415,10 +445,36 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
                 out.push_str(&format!("repaired cache for #{number}\n"));
                 0
             }
+            CliCommand::Hook { name, rest } => {
+                // Hooks never touch the SPEC cache — break out of the ops
+                // scope and delegate to a standalone handler.
+                drop(ops);
+                return run_hook(env, &name, &rest);
+            }
         }
     };
     let _ = env.stdout().write_all(out.as_bytes());
     Ok(code)
+}
+
+/// Dispatch a `gwt hook <name> [args...]` invocation.
+///
+/// SPEC #1942 (CORE-CLI) scope: this is the single entry point for every
+/// in-binary hook handler. Each handler reads stdin (usually JSON), performs
+/// its judgment, and either:
+///
+/// - exits 0 (allow / success, stdout empty or a human-readable status)
+/// - exits 2 with a `{"decision":"block",...}` JSON on stdout (block)
+///
+/// At the skeleton stage every handler is a no-op stub that allows the
+/// event and prints "not yet implemented" on stderr. Individual handlers
+/// (runtime-state, block-*, forward) are ported in follow-up commits.
+pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, _rest: &[String]) -> Result<i32, SpecOpsError> {
+    let _ = writeln!(
+        env.stderr(),
+        "gwt hook {name}: not yet implemented (SPEC #1942 scaffold), allowing"
+    );
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -541,18 +597,27 @@ impl CliEnv for DefaultCliEnv {
 /// Convenience for tests and the main entry point: take a raw argv slice,
 /// parse the subcommand, and run it. Returns the process exit code.
 pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
-    // Skip args[0] (program name) and args[1] ("issue").
+    // args[0] is the program name. args[1] is the top-level verb we already
+    // matched in `should_dispatch_cli` — `issue` or `hook`.
+    let top_verb = args.get(1).map(String::as_str).unwrap_or("");
     let rest: Vec<String> = args.iter().skip(2).cloned().collect();
-    match parse_issue_args(&rest) {
+
+    let parse_result = match top_verb {
+        "issue" => parse_issue_args(&rest),
+        "hook" => parse_hook_args(&rest),
+        _ => Err(CliParseError::UnknownSubcommand(top_verb.to_string())),
+    };
+
+    match parse_result {
         Ok(cmd) => match run(env, cmd) {
             Ok(code) => code,
             Err(e) => {
-                let _ = writeln!(env.stderr(), "gwt issue: {e}");
+                let _ = writeln!(env.stderr(), "gwt {top_verb}: {e}");
                 1
             }
         },
         Err(e) => {
-            let _ = writeln!(env.stderr(), "gwt issue: {e}");
+            let _ = writeln!(env.stderr(), "gwt {top_verb}: {e}");
             2
         }
     }

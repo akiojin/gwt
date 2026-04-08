@@ -19,11 +19,71 @@ fn argv(parts: &[&str]) -> Vec<String> {
 // -----------------------------------------------------------------
 
 #[test]
-fn red_70_should_dispatch_cli_when_first_arg_is_issue() {
+fn red_70_should_dispatch_cli_when_first_arg_is_issue_or_hook() {
     assert!(should_dispatch_cli(&argv(&["gwt", "issue"])));
     assert!(should_dispatch_cli(&argv(&["gwt", "issue", "spec", "42"])));
+    assert!(should_dispatch_cli(&argv(&[
+        "gwt",
+        "hook",
+        "runtime-state",
+        "PreToolUse"
+    ])));
+    assert!(should_dispatch_cli(&argv(&[
+        "gwt",
+        "hook",
+        "block-git-branch-ops"
+    ])));
     assert!(!should_dispatch_cli(&argv(&["gwt"])));
     assert!(!should_dispatch_cli(&argv(&["gwt", "/some/repo/path"])));
+}
+
+#[test]
+fn red_90_parse_hook_runtime_state() {
+    use gwt_tui::cli::parse_hook_args;
+    let cmd = parse_hook_args(&[s("runtime-state"), s("PreToolUse")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Hook {
+            name: "runtime-state".to_string(),
+            rest: vec!["PreToolUse".to_string()],
+        }
+    );
+}
+
+#[test]
+fn red_91_parse_hook_block_without_args() {
+    use gwt_tui::cli::parse_hook_args;
+    let cmd = parse_hook_args(&[s("block-git-branch-ops")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Hook {
+            name: "block-git-branch-ops".to_string(),
+            rest: vec![],
+        }
+    );
+}
+
+#[test]
+fn red_92_parse_hook_empty_is_usage_error() {
+    use gwt_tui::cli::{parse_hook_args, CliParseError};
+    let err = parse_hook_args(&[]).unwrap_err();
+    assert!(matches!(err, CliParseError::Usage));
+}
+
+#[test]
+fn red_93_dispatch_hook_stub_returns_success() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "hook", "runtime-state", "PreToolUse"]),
+    );
+    assert_eq!(code, 0, "hook skeleton should allow (exit 0)");
+    let err_text = String::from_utf8(env.stderr.clone()).unwrap();
+    assert!(
+        err_text.contains("not yet implemented"),
+        "stub should advertise its scaffold state"
+    );
 }
 
 #[test]
