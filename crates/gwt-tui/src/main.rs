@@ -45,6 +45,10 @@ fn drain_pty_output_into_model(model: &mut Model) -> bool {
     drained
 }
 
+fn should_render_after_tick(model: &Model) -> bool {
+    app::tick_redraw_required(model)
+}
+
 fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
     execute!(
         writer,
@@ -238,14 +242,19 @@ fn run_app(
     }
 
     let mut keybinds = KeybindRegistry::new();
+    let mut needs_render = true;
 
     loop {
-        drain_pty_output_into_model(&mut model);
+        if drain_pty_output_into_model(&mut model) {
+            needs_render = true;
+        }
 
-        // View: render
-        terminal.draw(|frame| {
-            app::view(&model, frame);
-        })?;
+        if needs_render {
+            terminal.draw(|frame| {
+                app::view(&model, frame);
+            })?;
+            needs_render = false;
+        }
 
         // Check quit
         if model.quit {
@@ -277,7 +286,13 @@ fn run_app(
             };
 
             // Update: process message
+            let was_tick = matches!(msg, Message::Tick);
             app::update(&mut model, msg);
+            if was_tick {
+                needs_render |= should_render_after_tick(&model);
+            } else {
+                needs_render = true;
+            }
             break;
         }
     }
@@ -339,7 +354,9 @@ where
 mod tests {
     use super::*;
     use gwt_tui::app;
-    use gwt_tui::model::{ManagementTab, SessionLayout};
+    use gwt_tui::message::Message;
+    use gwt_tui::model::{FocusPane, ManagementTab, SessionLayout};
+    use gwt_tui::screens::docker_progress::{DockerProgressMessage, DockerStage};
 
     #[test]
     fn restore_startup_session_state_with_applies_saved_layout() {
@@ -525,5 +542,53 @@ mod tests {
             .write_ansi(&mut expected)
             .expect("keyboard enhancement pop ansi");
         assert!(ansi.contains(expected.as_str()));
+    }
+
+    #[test]
+    fn should_render_after_tick_skips_idle_terminal_focus() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            !should_render_after_tick(&model),
+            "idle terminal ticks should not repaint the TUI"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_keeps_non_terminal_focus_redrawing() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            should_render_after_tick(&model),
+            "management-focused ticks should keep rendering"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_keeps_visible_docker_overlay_redrawing() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        app::update(
+            &mut model,
+            Message::DockerProgress(DockerProgressMessage::SetStage {
+                stage: DockerStage::BuildingImage,
+                message: "Building image".to_string(),
+            }),
+        );
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            should_render_after_tick(&model),
+            "visible overlays that depend on tick-driven updates should still redraw"
+        );
     }
 }

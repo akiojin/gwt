@@ -194,6 +194,24 @@ causes the regression.
    rather than byte length so IME candidate anchoring is not skewed by
    full-width glyphs.
 
+### US-14: Suppress Idle Tick Redraw While Terminal Owns IME (P1)
+
+As a developer using Japanese IME inside gwt's terminal pane, I want idle tick
+processing to avoid repainting the TUI when the terminal keeps focus so IME
+candidate navigation is not interrupted by background redraws.
+
+**Acceptance Scenarios**
+
+1. Given terminal focus is active and no PTY output or user-visible overlay
+   animation requires repainting, when the 100 ms tick fires, then gwt updates
+   its internal housekeeping without issuing a terminal redraw.
+2. Given management focus or a visible overlay still depends on periodic UI
+   feedback, when the tick fires, then gwt continues to redraw so status
+   notifications, overlay progress, and non-terminal animations remain visible.
+3. Given PTY output arrives or a real input event is processed while terminal
+   focus is active, when the next loop iteration runs, then gwt redraws
+   immediately so terminal content and explicit UI actions remain responsive.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -221,6 +239,8 @@ causes the regression.
   normal gwt startup, footer hints, or runtime input routing.
 - The intermediate IME probe must isolate redraw behavior one layer at a time
   and must not depend on PTY forwarding or the full gwt application loop.
+- The main gwt event loop must not repaint solely because of an idle tick while
+  terminal focus owns input and no visible periodic animation is active.
 
 ## Regression Guardrail: Hook-Driven Branch Visibility
 
@@ -271,6 +291,9 @@ This capability has regressed multiple times because "hooks are configured" is n
   `raw`, `redraw`, and `ratatui`. `redraw` and `ratatui` render the same small
   committed-text surface on a configurable tick, differing only in whether the
   redraw path uses direct `crossterm` commands or ratatui.
+- **FR-004e**: In the main gwt event loop, `Message::Tick` must not trigger a
+  terminal redraw when `FocusPane::Terminal` owns input and there is no visible
+  overlay or periodic terminal-facing animation that depends on that tick.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.

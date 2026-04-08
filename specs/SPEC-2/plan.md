@@ -843,6 +843,23 @@ periodic redraw behavior before touching the full gwt event loop again.
 - Re-run focused plus broad verification and refresh SPEC-2/README artifacts
   with the layered IME probe workflow.
 
+### Phase 59: Idle Tick Redraw Suppression For Terminal Focus (4 tasks)
+Use the probe result (`raw` works; `redraw` and `ratatui` fail) to narrow the
+main-loop fix to idle tick repaint behavior instead of broader input routing.
+
+59.1: Render-decision contract (2 tasks)
+- Add RED coverage for a render-decision helper that suppresses redraw after
+  `Message::Tick` while `FocusPane::Terminal` owns input and no visible overlay
+  or periodic terminal-facing animation requires repainting.
+- Add RED coverage that the same helper still redraws on tick for
+  non-terminal focus and other explicitly visible periodic UI states.
+
+59.2: Main-loop integration (2 tasks)
+- Update `crates/gwt-tui/src/main.rs` so the outer render loop becomes
+  dirty-driven instead of unconditionally repainting every iteration.
+- Re-run focused plus broad verification and refresh SPEC-2/README artifacts
+  with the idle-tick redraw suppression behavior.
+
 ## Dependencies
 
 - SPEC-3 (Agent Management): Agent detection for agent launch action

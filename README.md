@@ -101,7 +101,9 @@ gwt also requests minimal kitty keyboard enhancements during terminal startup
 Unsupported terminals fail open and continue with existing behavior. Repeated
 key events from compatible terminals now stay on the same input path as normal
 key presses, which matters when IME candidate navigation advances to another
-page.
+page. While the terminal pane owns focus, idle 100 ms ticks now avoid repainting
+the TUI unless an overlay or other explicit periodic UI surface still needs
+animation, which reduces IME candidate interruption from background redraws.
 
 ## Environment and requirements
 

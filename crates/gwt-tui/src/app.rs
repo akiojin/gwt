@@ -1172,6 +1172,26 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
     }
 }
 
+/// Whether a periodic `Tick` still needs a terminal redraw after state updates.
+///
+/// This keeps non-terminal surfaces animated while allowing terminal-focused
+/// IME composition to proceed without idle repaints.
+pub fn tick_redraw_required(model: &Model) -> bool {
+    if model.active_focus != FocusPane::Terminal {
+        return true;
+    }
+
+    model
+        .wizard
+        .as_ref()
+        .is_some_and(|wizard| wizard.ai_suggest.loading)
+        || model
+            .docker_progress
+            .as_ref()
+            .is_some_and(|progress| progress.visible)
+        || model.voice.is_active()
+}
+
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
     if model.help_visible {
         if key.code == KeyCode::Esc {

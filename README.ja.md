@@ -96,7 +96,10 @@ direct `crossterm` で周期再描画し、`ratatui` は同じ surface を同じ
 (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) を要求し、終了時に pop します。
 非対応端末では fail-open で従来挙動を維持します。互換端末で発生する
 繰り返しキーイベントも通常の key press と同じ入力経路に残るため、IME の
-候補ページ送り時にイベントが途中で消えにくくなります。
+候補ページ送り時にイベントが途中で消えにくくなります。さらに terminal pane
+が focus を持つ間は、overlay など明示的に周期 UI が必要な場合を除いて、
+idle な 100 ms tick では TUI を再描画しないため、バックグラウンド redraw に
+よる IME 候補操作の中断を抑えます。
 
 ## 必要環境変数と前提
 

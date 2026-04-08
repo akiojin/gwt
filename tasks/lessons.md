@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-09 — fix: IME 切り分けで `raw` だけ正常なら「入力解釈」ではなく idle redraw を先に疑う
+
+### 事象
+
+`gwt` では日本語 IME 候補選択が壊れる一方、同じ terminal で raw `crossterm`
+probe は正常だった。さらに layered probe では `raw` は正常で `redraw` /
+`ratatui` が同様に壊れた。
+
+### 原因
+
+- 問題の本体は `crossterm` の raw event 解釈ではなく、周期 redraw が
+  composition 中の IME UI を中断していたことだった。
+- `gwt` の main loop は outer loop ごとに無条件で `terminal.draw(...)`
+  しており、tick ベースの idle repaint が terminal focus 中でも止まらなかった。
+
+### 再発防止策
+
+1. terminal/IME の不具合で raw probe だけ正常な場合、まず「event routing」より
+   先に「idle redraw / cursor reset / clear」を疑う。
+2. 再現 probe は `raw` / `redraw` / `ratatui` のように 1 変数ずつ増やし、
+   redraw そのものと rendering stack を分離して検証する。
+3. main loop の描画は無条件 repaint ではなく dirty-driven にし、
+   terminal focus 中の idle tick redraw は明示的な必要条件があるときだけ許可する。
+
 ## 2026-04-08 — fix: `REPORT_EVENT_TYPES` を有効化したら `Repeat` を `Press` と別経路で扱う
 
 ### 事象

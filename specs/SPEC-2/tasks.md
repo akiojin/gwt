@@ -596,3 +596,10 @@ banner in favor of pane-title chrome.
 - [x] T376 [P] Write RED test: probe state keeps bounded recent events, handles committed text editing, and computes cursor columns using display width for wide glyphs.
 - [x] T377 Refactor `crates/gwt-tui/examples/keytest.rs` into layered IME probe modes backed by a shared helper module.
 - [x] T378 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the layered IME probe workflow.
+
+## Phase 64: Idle Tick Redraw Suppression For Terminal Focus
+
+- [x] T379 [P] Write RED test: main-loop render decision skips redraw on `Message::Tick` while `FocusPane::Terminal` owns input and no visible periodic UI surface is active.
+- [x] T380 [P] Write RED test: the same render decision still redraws on `Message::Tick` for non-terminal focus or visible overlay-driven periodic UI states.
+- [x] T381 Update `crates/gwt-tui/src/main.rs` so redraw is dirty-driven and idle terminal ticks do not repaint the TUI.
+- [x] T382 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the idle-tick redraw suppression fix.
