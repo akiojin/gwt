@@ -262,3 +262,91 @@
 - [x] **T-139**: Split `index-files` into code/docs collections and add `search-files-docs` while keeping `search-files` implementation-focused.
 - [x] **T-140**: Update `gwt-search`, `gwt-project-search`, and `gwt-project-index` docs to describe implementation-focused `search-files` behavior and the separate docs collection.
 - [x] **T-141**: Refresh SPEC-9 artifacts and rerun Python + Cargo verification for the new code/docs file-index contract.
+
+> Note: T-131~T-141 under Phase 6 collide numerically with T-131~T-149 under Phase 2b.5. Treat the Phase 2b.5 IDs as canonical when referring to hook-generation work; Phase 6 IDs are search-runtime work that shares the same numeric slots historically. New tasks below use T-200+ to avoid further collision.
+
+## Phase 2b.6: Unified Node-Based Managed Runtime Hook (US-9 / US-10)
+
+> All tasks in this phase MUST follow the Red→Green→Refactor order. RED tasks write failing tests first; implementation tasks only run after the RED task is confirmed failing. A single implementation task may close multiple RED tasks when the same code change satisfies all of them.
+
+### 2b.6a: Spec & Contract Alignment (documentation, no code)
+
+- [x] **T-200**: Update `specs/SPEC-9/spec.md` to add US-9 (PreToolUse Bash guard hooks, formalization), US-10 (unified Node-based managed runtime hook), FR-050 ~ FR-058, SC-031 ~ SC-037, the Regression Guardrail clarification, and the Managed Hook Config Schema rewrite. _(Done as part of this plan invocation.)_
+- [x] **T-201**: Update `specs/SPEC-9/plan.md` with the Phase 2b.6 section (motivation, approach, key changes, constitution impact, risk mitigation). _(Done as part of this plan invocation.)_
+- [x] **T-202**: Update `specs/SPEC-9/research.md` with the 2026-04-08 decision block distinguishing "subprocess spawn" from ".mjs for write-side logic". _(Done as part of this plan invocation.)_
+- [x] **T-203**: Update `specs/SPEC-9/data-model.md` with `ManagedRuntimeHookEntry`, `BashGuardHookEntry`, and `LegacyRuntimeHookShape` entities. _(Done as part of this plan invocation.)_
+- [x] **T-204**: Update `specs/SPEC-9/quickstart.md` with the US-9 / US-10 focused evidence block. _(Done as part of this plan invocation.)_
+- [x] **T-205**: Create `specs/SPEC-9/contracts/runtime-state-hook-cli.md` with the full CLI, env, sidecar, exit-code, and subprocess-invariant contract. _(Done as part of this plan invocation.)_
+
+### 2b.6b: New Runtime-State Hook Script (RED → GREEN)
+
+- [ ] **T-210**: [RED] Add failing test `gwt_skills::tests::gwt_runtime_state_mjs_exists_in_bundled_assets` that asserts `CLAUDE_HOOKS` and `CODEX_HOOKS` contain `gwt-runtime-state.mjs`. `crates/gwt-skills/src/lib.rs` or `crates/gwt-skills/tests/`.
+- [ ] **T-211**: [RED] Add failing test `gwt_runtime_state_mjs_source_contains_no_child_process_token` that greps the bundled script source for the literal token `child_process` and asserts zero matches. Enforces FR-055 subprocess invariant statically.
+- [ ] **T-212**: [RED] Add failing integration test `gwt_runtime_state_mjs_writes_sidecar_atomically` under `crates/gwt-skills/tests/runtime_hook_script.rs`. Preconditions: `which node` succeeds. Test body: copy the bundled script to a temp dir, set `GWT_SESSION_RUNTIME_PATH=<tempdir>/sidecar.json`, spawn `node gwt-runtime-state.mjs SessionStart`, assert exit code 0, assert sidecar JSON matches the contract shape, assert the spawned Node process reported zero child PIDs during its lifetime (use `process.pidtree` equivalent or `ps --ppid`).
+- [ ] **T-213**: [RED] Add failing test `gwt_runtime_state_mjs_exits_zero_when_runtime_path_unset` that spawns the script with `GWT_SESSION_RUNTIME_PATH` unset and asserts exit code 0 and no file creation.
+- [ ] **T-214**: [RED] Add failing test `gwt_runtime_state_mjs_ignores_unknown_event_name` that spawns the script with `<event>` = `BogusEvent` and asserts exit code 0 and no file creation.
+- [ ] **T-215**: [RED] Add failing test `gwt_runtime_state_mjs_survives_unwritable_sidecar_dir` that points `GWT_SESSION_RUNTIME_PATH` at a path whose parent is chmod 0555 (POSIX) or read-only (Windows), asserts exit 0, and asserts no partial file at the final path.
+- [ ] **T-216**: Create `.claude/hooks/scripts/gwt-runtime-state.mjs` implementing the contract in `specs/SPEC-9/contracts/runtime-state-hook-cli.md`. Pure Node, no imports from `node:child_process`. Use `node:fs/promises` for atomic temp-file + rename. Use `process.argv[2]` for event. Use `process.env.GWT_SESSION_RUNTIME_PATH`. Always exit 0.
+- [ ] **T-217**: Copy the same script to `.codex/hooks/scripts/gwt-runtime-state.mjs` (identical content) and add a build-time check in `crates/gwt-skills/build.rs` (or equivalent existing bundler validator) that asserts the two files are byte-identical. Prevents drift.
+- [ ] **T-218**: Verify T-210 ~ T-215 now GREEN.
+
+### 2b.6c: Generator Refactor (RED → GREEN)
+
+- [ ] **T-220**: [RED] Add failing test `node_runtime_hook_command_is_byte_identical_across_platforms` in `crates/gwt-skills/src/settings_local.rs` tests. Calls the new generator twice — once with a mocked `cfg!(windows)=false` context, once with `=true` — and asserts the returned command strings are byte-identical for the same worktree path.
+- [ ] **T-221**: [RED] Add failing test `generated_settings_local_runtime_entries_point_at_gwt_runtime_state_mjs` that generates `.claude/settings.local.json` in a temp dir and asserts every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` gwt-managed entry contains the substring `gwt-runtime-state.mjs` and does not contain `sh -lc `, `powershell `, or `gwt-forward-hook.mjs`.
+- [ ] **T-222**: [RED] Add failing test `generated_codex_hooks_runtime_entries_point_at_gwt_runtime_state_mjs` — same assertion for `.codex/hooks.json`.
+- [ ] **T-223**: [RED] Add failing test `pretooluse_bash_blockers_match_spec_order` that asserts the PreToolUse `Bash` matcher contains exactly four entries pointing at `gwt-block-git-branch-ops.mjs`, `gwt-block-cd-command.mjs`, `gwt-block-file-ops.mjs`, `gwt-block-git-dir-override.mjs` in that exact order, in addition to the runtime-state entry in a separate matcher block.
+- [ ] **T-224**: Implement `node_runtime_hook_command(event, script_root)` in `crates/gwt-skills/src/settings_local.rs`. Delete `posix_runtime_hook_command`, `powershell_runtime_hook_command`, `managed_hook_shell`, `command_shell_mismatch`, `contains_managed_runtime_shell_mismatch`. Update `managed_hooks()` callers.
+- [ ] **T-225**: Flip the existing assertions in `settings_local.rs` inline tests at the previous no-Node lines (`assert!(!command.contains("node"))` occurrences at 439, 570, 750 based on the 2026-04-08 survey) to the new positive form: `assert!(command.contains("gwt-runtime-state.mjs")) && assert!(!command.contains(" sh -lc ") && !command.contains("powershell "))`. Update the existing `posix_runtime_hook_command_writes_runtime_sidecar` test to target the bundled script via `node` spawn (shares helper with T-212 if practical).
+- [ ] **T-226**: Verify T-220 ~ T-223 now GREEN. Run `cargo test -p gwt-skills -- --nocapture` and resolve any regression from the assertion flip.
+
+### 2b.6d: Legacy Detection Extension (RED → GREEN)
+
+- [ ] **T-230**: [RED] Add failing test `contains_legacy_runtime_shell_command_matches_posix_sh` that constructs a tracked `.codex/hooks.json` containing one `sh -lc '...GWT_MANAGED_HOOK=runtime-state...'` entry plus an unrelated user hook, calls the new detector, and asserts it returns true.
+- [ ] **T-231**: [RED] Add failing test `contains_legacy_runtime_shell_command_matches_windows_powershell` — same assertion for a PowerShell-shape entry.
+- [ ] **T-232**: [RED] Add failing test `contains_node_runtime_hook_returns_true_for_unified_form` that constructs a hooks.json whose managed entries already use `node .../gwt-runtime-state.mjs` and asserts `tracked_codex_hooks_need_runtime_migration()` returns `false` (short-circuit: already on the unified shape).
+- [ ] **T-233**: [RED] Add failing test `migration_replaces_posix_shell_runtime_with_node_form` that starts with a tracked hooks.json containing a `sh -lc` managed entry + a user hook, runs the migration, and asserts the managed entry is now `node .../gwt-runtime-state.mjs <event>` while the user hook is unchanged.
+- [ ] **T-234**: [RED] Add failing test `migration_replaces_powershell_runtime_with_node_form` — same assertion for a PowerShell-shape starting point.
+- [ ] **T-235**: [RED] Add failing test `migration_replaces_legacy_forward_hook_with_node_form` — keeps coverage of the existing `gwt-forward-hook.mjs` legacy path under the new migration writer.
+- [ ] **T-236**: Implement `contains_legacy_runtime_shell_command`, `contains_node_runtime_hook`, and update `tracked_codex_hooks_need_runtime_migration` in `crates/gwt-skills/src/settings_local.rs` to OR all three legacy detectors (forwarder, sh, powershell) and short-circuit when `contains_node_runtime_hook` is true. Update the migration writer to replace any matched legacy entry with `node_runtime_hook_command(event, script_root)`.
+- [ ] **T-237**: Verify T-230 ~ T-235 now GREEN.
+
+### 2b.6e: Distribution Hygiene (RED → GREEN)
+
+- [ ] **T-240**: [RED] Add failing test `distribute_to_worktree_does_not_write_gwt_forward_hook` that runs `distribute_to_worktree()` against an empty temp dir and asserts `.claude/hooks/scripts/gwt-forward-hook.mjs` is NOT created while `gwt-runtime-state.mjs` IS created (plus the four `gwt-block-*.mjs` scripts).
+- [ ] **T-241**: [RED] Add failing test `distribute_to_worktree_preserves_tracked_gwt_forward_hook` that stages a tracked repo containing `.claude/hooks/scripts/gwt-forward-hook.mjs`, runs `distribute_to_worktree()`, and asserts the tracked file is left untouched (no write, no delete).
+- [ ] **T-242**: Remove `gwt-forward-hook.mjs` from the bundled asset list in `crates/gwt-skills/src/assets.rs` (or wherever `include_dir` targets are declared). Keep the string literal `"gwt-forward-hook.mjs"` inside the legacy detector module under a clearly-named constant (e.g. `LEGACY_FORWARD_SCRIPT_NAME`).
+- [ ] **T-243**: Delete `.claude/hooks/scripts/gwt-forward-hook.mjs` and `.codex/hooks/scripts/gwt-forward-hook.mjs` from the source tree. The legacy detector no longer needs the file on disk — it only needs to match the string in foreign `hooks.json` content.
+- [ ] **T-244**: Verify T-240 and T-241 GREEN. Run `cargo test -p gwt-skills -- --nocapture` and a broad `cargo test --workspace` to catch any downstream reference to the deleted file.
+
+### 2b.6f: Guard Hook Test Coverage (new unit tests; existing scripts unchanged)
+
+- [ ] **T-250**: Add Rust integration test `gwt_block_cd_command_blocks_paths_outside_worktree` that spawns `node gwt-block-cd-command.mjs` with stdin JSON `{tool_input:{command:"cd /tmp"}}` inside a temp git worktree, asserts exit code 2 and a JSON block body; repeats with `"cd ./src"` and asserts exit code 0.
+- [ ] **T-251**: Add integration test `gwt_block_file_ops_blocks_outside_worktree` — `rm -rf ../outside` → exit 2; `mkdir ./sub` → exit 0.
+- [ ] **T-252**: Add integration test `gwt_block_git_branch_ops_allows_readonly_queries` — `git checkout main` → 2; `git branch --show-current` → 0; `git status` → 0; `git branch -D foo` → 2.
+- [ ] **T-253**: Add integration test `gwt_block_git_dir_override_blocks_env_prefix` — `GIT_DIR=/tmp/repo git status` → 2; `git status` → 0; `export GIT_DIR=/tmp/repo` → 2.
+- [ ] **T-254**: Gate T-250 ~ T-253 behind a `gwt_skills::tests::node_integration` cfg helper that skips the tests cleanly when `which node` fails, so the suite stays runnable on minimal CI runners.
+
+### 2b.6g: Metadata & Completion
+
+- [ ] **T-260**: Update `specs/SPEC-9/metadata.json` to reflect US-9 / US-10 (new user stories, status `in-progress` → remains `in-progress`, phase remains `Implementation`).
+- [ ] **T-261**: Update `specs/SPEC-9/progress.md` Phase 2b.6 subsection with the new work summary once implementation completes.
+- [ ] **T-262**: Final verification: `cargo test -p gwt-skills -- --nocapture`, `cargo test -p gwt-tui settings -- --nocapture`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt -- --check`. Re-run the quickstart manual smoke block from `specs/SPEC-9/quickstart.md` and record results in `progress.md`.
+- [ ] **T-263**: Follow-up: reference FR-050 ~ FR-058 and SC-031 ~ SC-037 from the PR description when Phase 2b.6 implementation is submitted.
+
+### Parallelism Guide
+
+- T-200 ~ T-205 all write to `specs/SPEC-9/*` — done in-session, non-parallel.
+- T-210 ~ T-215 (script RED tests), T-220 ~ T-223 (generator RED tests), T-230 ~ T-235 (legacy detection RED tests), T-240 ~ T-241 (distribution RED tests), T-250 ~ T-253 (guard hook tests) may be authored in parallel [P] **only if** each is placed in a distinct test module file, because shared `#[cfg(test)]` modules serialize file writes.
+- T-216 ~ T-217 write the bundled script: must run before T-220 (generator tests depend on the script existing).
+- T-224 ~ T-226 edit `settings_local.rs`: must run sequentially because they touch the same file region.
+- T-236 and T-242 touch non-overlapping file regions and can run in parallel [P] after T-224 lands.
+- T-243 (delete `gwt-forward-hook.mjs`) must run after T-242 to avoid breaking the bundler.
+- T-260 ~ T-263 run last.
+
+### Traceability
+
+| User Story | Acceptance Scenarios | FRs | SCs | Tasks |
+|---|---|---|---|---|
+| US-9 | 1–6 | FR-050, FR-051, FR-052, FR-053, FR-054, FR-057, FR-058 | SC-031, SC-032, SC-033, SC-034 | T-223, T-250, T-251, T-252, T-253 |
+| US-10 | 1–7 | FR-019, FR-020, FR-021, FR-022, FR-023, FR-055, FR-056, FR-057, FR-058 | SC-009, SC-010, SC-013, SC-021, SC-035, SC-036, SC-037 | T-210–T-218, T-220–T-226, T-230–T-237, T-240–T-244 |
