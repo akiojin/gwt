@@ -141,3 +141,5 @@
 - [x] T-IDX-048 Run `cargo fmt` and commit any formatting changes
 - [ ] T-IDX-049 Manual e2e (5 scenarios from `specs/SPEC-10/quickstart.md` Phase 8 additions) — pending user verification
 - [x] T-IDX-050 Open `bugfix/not-work-index → develop` PR with structured commit history per phase
+- [x] T-IDX-051 [P] Write RED tests: watcher batch scope selection queues only the touched `files` / `files-docs` / `specs` buckets and ignores `.snap` noise.
+- [x] T-IDX-052 Scope watcher-driven incremental rebuilds by changed path bucket and merge pending work as scope masks so code-only edits do not spawn unnecessary `index-specs` / docs Python runners.

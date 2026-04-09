@@ -39,7 +39,7 @@
 
 ### 2.1 Remove Legacy BuiltinSkill System
 
-- [x] **T-022**: Write test: `CLAUDE_SKILLS` static contains all expected skill directories (gwt-pr, gwt-agent-discover, etc.).
+- [x] **T-022**: Write test: `CLAUDE_SKILLS` static contains all expected skill directories (gwt-pr, gwt-agent, etc.).
 - [x] **T-023**: Write test: `CLAUDE_COMMANDS` static contains all expected command files.
 - [x] **T-024**: Write test: `CLAUDE_HOOKS` static contains all expected hook scripts.
 - [x] **T-025**: Remove `BuiltinSkill` enum, `register_builtins()`, `to_embedded()`, `all()` from `crates/gwt-skills/src/registry.rs`.
@@ -70,6 +70,14 @@
 - [x] **T-097**: Write test: tracked `.claude/*` gwt asset files are preserved during distribution while untracked targets are still written.
 - [x] **T-098**: Update `distribute_to_worktree()` to skip tracked gwt asset paths in Git worktrees.
 - [x] **T-099**: Verify focused `gwt-skills` distribution tests pass after tracked-file preservation change.
+- [x] **T-151**: Write RED test: `distribute_to_worktree()` removes stale untracked `gwt-*` root entries from managed skill / command / hook roots before materializing the current bundle.
+- [x] **T-152**: Write RED test: `distribute_to_worktree()` removes stale tracked `gwt-*` root entries that are outside the current embedded bundle.
+- [x] **T-153**: Add bundle-manifest cleanup to `distribute_to_worktree()` so managed roots delete stale `gwt-*` residue before writing current assets.
+- [x] **T-154**: Refresh `SPEC-9` artifacts and rerun focused/runtime verification for stale managed-asset cleanup.
+- [x] **T-155**: Write RED test: `distribute_to_worktree()` prunes stale nested paths inside retained managed `gwt-*` skill trees before materializing the current bundle.
+- [x] **T-156**: Extend runtime cleanup to synchronize managed `gwt-*` asset trees recursively and rerun launch-path verification.
+- [x] **T-157**: Write RED test: startup `load_initial_data()` prunes stale `gwt-*` assets from the repo root and active worktrees without touching unrelated directories.
+- [x] **T-158**: Add prune-only startup sweep for repo/worktree discovery and rerun focused plus broad verification.
 
 ### 2b.2 Git Exclude Management
 

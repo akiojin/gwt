@@ -10,7 +10,10 @@ use std::{
 };
 
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     Command,
@@ -21,17 +24,21 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use gwt_agent::reset_runtime_state_dir;
 #[cfg(test)]
 use gwt_agent::reset_runtime_state_dir_for_pid;
+use gwt_core::logging::{
+    init as init_logging, LogEvent as Notification, LogLevel as Severity, LoggingConfig,
+};
+use gwt_core::paths::gwt_logs_dir;
 use gwt_git::RepoType;
-use gwt_notification::{Notification, Severity};
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
+    input_trace,
     message::Message,
     model::{ActiveLayer, Model},
 };
 
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
-const PTY_OUTPUT_INPUT_GRACE_SLICE: Duration = Duration::from_millis(1);
+const PTY_REDRAW_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MAX_MOUSE_SCROLL_BURST_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +62,14 @@ fn drain_pty_output_into_model(model: &mut Model) -> bool {
     for (session_id, data) in coalesce_pty_output_chunks(model.drain_pty_output()) {
         app::update(model, Message::PtyOutput(session_id, data));
         drained = true;
+    }
+    drained
+}
+
+fn drain_pty_output_and_request_render(model: &mut Model, needs_render: &mut bool) -> bool {
+    let drained = drain_pty_output_into_model(model);
+    if drained {
+        *needs_render = true;
     }
     drained
 }
@@ -108,24 +123,32 @@ fn dispatch_post_normalized_message(
     model: &mut Model,
     keybinds: &mut KeybindRegistry,
     msg: Message,
+    needs_render: &mut bool,
 ) {
     let msg = match msg {
         Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
             let terminal_focused = model.active_focus == gwt_tui::model::FocusPane::Terminal;
-            keybinds
-                .process_key_with_focus(key, terminal_focused)
-                .unwrap_or(Message::KeyInput(key))
+            let routed = keybinds.process_key_with_focus(key, terminal_focused);
+            input_trace::trace_keybind_decision(key, terminal_focused, routed.as_ref());
+            routed.unwrap_or(Message::KeyInput(key))
         }
         other => other,
     };
 
+    let was_tick = matches!(msg, Message::Tick);
     app::update(model, msg);
+    if was_tick {
+        *needs_render |= should_render_after_tick(model);
+    } else {
+        *needs_render = true;
+    }
 }
 
 fn handle_post_normalized_message<F>(
     model: &mut Model,
     keybinds: &mut KeybindRegistry,
     first: Message,
+    needs_render: &mut bool,
     pending_messages: &mut VecDeque<Message>,
     next_message: F,
 ) where
@@ -133,7 +156,7 @@ fn handle_post_normalized_message<F>(
 {
     let burst = drain_mouse_scroll_burst(first, pending_messages, next_message);
     for msg in burst {
-        dispatch_post_normalized_message(model, keybinds, msg);
+        dispatch_post_normalized_message(model, keybinds, msg, needs_render);
         if model.quit {
             break;
         }
@@ -172,6 +195,7 @@ fn next_message_for_loop_iteration<F>(
     pending_messages: &mut VecDeque<Message>,
     deadline: Instant,
     had_pty_output: bool,
+    last_draw_at: Option<Instant>,
     mut poll_event: F,
 ) -> Option<Message>
 where
@@ -182,11 +206,21 @@ where
     }
 
     let poll_slice = if had_pty_output {
-        PTY_OUTPUT_INPUT_GRACE_SLICE
+        last_draw_at.map_or(Duration::ZERO, |last_draw_at| {
+            pty_redraw_poll_slice(Instant::now(), last_draw_at)
+        })
     } else {
         PTY_OUTPUT_POLL_SLICE
     };
     poll_event(deadline, poll_slice)
+}
+
+fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
+    PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
+}
+
+fn should_render_after_tick(model: &Model) -> bool {
+    app::tick_redraw_required(model)
 }
 
 fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
@@ -196,16 +230,37 @@ fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
         DisableAlternateScrollMode,
         EnableMouseCapture,
         EnableBracketedPaste,
-    )
+    )?;
+    enable_keyboard_enhancements(writer);
+    Ok(())
 }
 
 fn leave_terminal(writer: &mut impl io::Write) -> io::Result<()> {
+    disable_keyboard_enhancements(writer);
     execute!(
         writer,
         LeaveAlternateScreen,
         DisableMouseCapture,
         DisableBracketedPaste,
     )
+}
+
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+}
+
+fn enable_keyboard_enhancements(writer: &mut impl io::Write) {
+    // Fail-open: keep startup working even when the host terminal ignores or rejects kitty flags.
+    let _ = execute!(
+        writer,
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+    );
+}
+
+fn disable_keyboard_enhancements(writer: &mut impl io::Write) {
+    // Fail-open: shutdown should restore the terminal even if keyboard enhancement pop fails.
+    let _ = execute!(writer, PopKeyboardEnhancementFlags);
 }
 
 #[cfg(test)]
@@ -223,12 +278,18 @@ fn terminal_enter_commands_ansi() -> String {
     EnableBracketedPaste
         .write_ansi(&mut ansi)
         .expect("enable bracketed paste ansi");
+    PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+        .write_ansi(&mut ansi)
+        .expect("enable keyboard enhancement ansi");
     ansi
 }
 
 #[cfg(test)]
 fn terminal_leave_commands_ansi() -> String {
     let mut ansi = String::new();
+    PopKeyboardEnhancementFlags
+        .write_ansi(&mut ansi)
+        .expect("disable keyboard enhancement ansi");
     LeaveAlternateScreen
         .write_ansi(&mut ansi)
         .expect("leave alternate screen ansi");
@@ -243,15 +304,52 @@ fn terminal_leave_commands_ansi() -> String {
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
-    // Install a panic hook that restores the terminal before printing the
-    // backtrace.  Without this, panics leave the terminal in raw/alt-screen
-    // mode and the error message is invisible.
+    // SPEC-6 Phase 5: initialize `tracing_subscriber` with a non-blocking
+    // JSONL file writer rolling daily, plus a UI forwarder layer. The
+    // returned handles MUST be kept alive for the lifetime of main so
+    // that the background writer thread stays up.
+    let logging_config = LoggingConfig::new(gwt_logs_dir());
+    let mut logging_handles = match init_logging(logging_config) {
+        Ok(h) => Some(h),
+        Err(err) => {
+            eprintln!("warning: structured logging disabled: {err}");
+            None
+        }
+    };
+
+    // Install a panic hook that:
+    //   1. restores the terminal (raw mode + alt screen) so panics are visible
+    //   2. emits the panic info as a `tracing::error!` so that the final
+    //      event lands in `gwt.log.YYYY-MM-DD`
+    //   3. delegates to the previous hook (which prints the standard
+    //      backtrace to stderr)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = leave_terminal(&mut io::stdout());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            target: "gwt_tui::panic",
+            panic = %info,
+            backtrace = %backtrace,
+            "TUI panic"
+        );
         default_hook(info);
     }));
+
+    tracing::info!(
+        target: "gwt_tui::main",
+        version = env!("CARGO_PKG_VERSION"),
+        "gwt-tui starting"
+    );
+
+    // Take the UI log receiver before we move into run_app — we will
+    // bridge it into a std::sync::mpsc channel that the synchronous
+    // event loop can drain.
+    let logging_ui_rx = logging_handles.as_mut().and_then(|h| h.take_ui_rx());
+    // Clone the reload handle so the Logs tab can cycle the global
+    // log level live (SPEC-6 FR-011).
+    let logging_reload_handle = logging_handles.as_ref().map(|h| h.reload_handle.clone());
 
     // Parse CLI args: optional repo path
     let repo_path = std::env::args()
@@ -267,7 +365,12 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let result = run_app(&mut terminal, repo_path);
+    let result = run_app(
+        &mut terminal,
+        repo_path,
+        logging_ui_rx,
+        logging_reload_handle,
+    );
 
     // Restore terminal
     disable_raw_mode()?;
@@ -275,8 +378,14 @@ fn main() -> io::Result<()> {
     terminal.show_cursor()?;
 
     if let Err(e) = result {
+        tracing::error!(target: "gwt_tui::main", error = %e, "gwt-tui exited with error");
         eprintln!("Error: {e}");
     }
+
+    tracing::info!(target: "gwt_tui::main", "gwt-tui shutdown");
+
+    // Dropping the logging handles flushes the non-blocking writer.
+    drop(logging_handles.take());
 
     Ok(())
 }
@@ -285,6 +394,8 @@ fn main() -> io::Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     repo_path: PathBuf,
+    mut logging_ui_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>,
+    logging_reload_handle: Option<gwt_core::logging::ReloadHandle>,
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
@@ -297,6 +408,61 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    // SPEC-6 Phase 5: spawn the Logs-tab file watcher so the
+    // `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL stream flows into
+    // `LogsState.entries`. Keeping the handle alive for the lifetime
+    // of run_app is enough — the watcher owns its own thread.
+    let (logs_tx, logs_rx) = std::sync::mpsc::channel();
+    let _logs_watcher_handle =
+        gwt_tui::logs_watcher::spawn(gwt_core::paths::gwt_logs_dir(), logs_tx);
+    model.set_logs_watcher_rx(logs_rx);
+
+    // Plumb the reload handle through so the Logs tab can cycle the
+    // tracing level live (SPEC-6 FR-011).
+    if let Some(handle) = logging_reload_handle {
+        model.set_log_reload_handle(handle);
+    }
+
+    // SPEC-6 FR-015 + reviewer comment B5: bridge the tokio
+    // UnboundedReceiver<LogEvent> from `logging::init` into a
+    // std::sync::mpsc channel so the synchronous TUI loop can drain
+    // UI log events without a tokio runtime.
+    //
+    // The bridge loop polls `try_recv` and watches an
+    // `Arc<AtomicBool>` shutdown flag instead of using
+    // `blocking_recv()`. The reason: the `UnboundedSender` produced
+    // by `logging::init` is cloned into the global tracing
+    // subscriber's `UiForwarderLayer` and there is no way to drop the
+    // global subscriber, so `blocking_recv()` would never see all
+    // senders dropped and the bridge thread would hang on shutdown.
+    let logs_bridge_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Some(mut ui_rx) = logging_ui_rx.take() {
+        let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Notification>();
+        let shutdown = std::sync::Arc::clone(&logs_bridge_shutdown);
+        std::thread::Builder::new()
+            .name("gwt-ui-log-bridge".into())
+            .spawn(move || {
+                use std::sync::atomic::Ordering;
+                while !shutdown.load(Ordering::Relaxed) {
+                    match ui_rx.try_recv() {
+                        Ok(event) => {
+                            if bridge_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("spawn ui log bridge thread");
+        model.set_ui_log_rx(bridge_rx);
+    }
+
     if let Some(warning) = reset_startup_runtime_state_with(&gwt_core::paths::gwt_sessions_dir()) {
         app::update(
             &mut model,
@@ -371,14 +537,19 @@ fn run_app(
     let mut keybinds = KeybindRegistry::new();
     let mut input_normalizer = event::InputNormalizer::default();
     let mut pending_messages = VecDeque::new();
+    let mut needs_render = true;
+    let mut last_draw_at = None;
 
     loop {
-        drain_pty_output_into_model(&mut model);
+        drain_pty_output_and_request_render(&mut model, &mut needs_render);
 
-        // View: render
-        terminal.draw(|frame| {
-            app::view(&model, frame);
-        })?;
+        if needs_render {
+            terminal.draw(|frame| {
+                app::view(&model, frame);
+            })?;
+            needs_render = false;
+            last_draw_at = Some(Instant::now());
+        }
 
         // Check quit
         if model.quit {
@@ -393,19 +564,22 @@ fn run_app(
                     &mut model,
                     &mut keybinds,
                     msg,
+                    &mut needs_render,
                     &mut pending_messages,
                     || input_normalizer.pop_pending(std::time::Instant::now()),
                 );
                 break;
             }
 
-            let had_pty_output = drain_pty_output_into_model(&mut model);
+            let had_pty_output = drain_pty_output_and_request_render(&mut model, &mut needs_render);
 
-            let Some(msg) =
-                next_message_for_loop_iteration(&mut pending_messages, deadline, had_pty_output, {
-                    |deadline, slice| event::poll_event_slice(deadline, slice)
-                })
-            else {
+            let Some(msg) = next_message_for_loop_iteration(
+                &mut pending_messages,
+                deadline,
+                had_pty_output,
+                last_draw_at,
+                event::poll_event_slice,
+            ) else {
                 if had_pty_output {
                     break;
                 }
@@ -424,6 +598,7 @@ fn run_app(
                 &mut model,
                 &mut keybinds,
                 msg,
+                &mut needs_render,
                 &mut pending_messages,
                 || {
                     poll_immediate_message_for_scroll_burst(
@@ -439,6 +614,10 @@ fn run_app(
 
     // Kill all live PTY processes on shutdown.
     model.kill_all_pty();
+
+    // Signal the UI log bridge thread to exit so it does not outlive
+    // `run_app` (reviewer comment B5).
+    logs_bridge_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
 
     if model.active_layer != ActiveLayer::Initialization {
         let session_state_path = Model::session_state_path(model.repo_path());
@@ -495,7 +674,9 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use gwt_tui::app;
+    use gwt_tui::message::Message;
     use gwt_tui::model::{FocusPane, ManagementTab, SessionLayout};
+    use gwt_tui::screens::docker_progress::{DockerProgressMessage, DockerStage};
 
     fn scroll_message(kind: MouseEventKind) -> Message {
         Message::MouseInput(MouseEvent {
@@ -680,6 +861,41 @@ mod tests {
     }
 
     #[test]
+    fn drain_pty_output_and_request_render_marks_dirty_after_output() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        let mut needs_render = false;
+
+        app::spawn_pty_for_session(
+            &mut model,
+            "shell-0",
+            gwt_terminal::pty::SpawnConfig {
+                command: "/bin/echo".to_string(),
+                args: vec!["ready".to_string()],
+                cols: 80,
+                rows: 24,
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+        )
+        .expect("spawn echo pty");
+
+        let mut drained = false;
+        for _ in 0..20 {
+            if drain_pty_output_and_request_render(&mut model, &mut needs_render) {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(drained, "pty output should eventually be drained");
+        assert!(
+            needs_render,
+            "draining PTY output must request a redraw so committed text appears immediately"
+        );
+    }
+
+    #[test]
     fn terminal_enter_commands_enable_bracketed_paste() {
         let ansi = terminal_enter_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004h"));
@@ -738,6 +954,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             true,
+            Some(Instant::now()),
             |_deadline, _slice| {
                 polled = true;
                 None
@@ -752,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn next_message_for_loop_iteration_uses_grace_slice_after_pty_output() {
+    fn next_message_for_loop_iteration_uses_frame_budget_after_pty_output() {
         let mut pending_messages = VecDeque::new();
         let mut observed_slice = None;
 
@@ -760,6 +977,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             true,
+            Some(Instant::now()),
             |_deadline, slice| {
                 observed_slice = Some(slice);
                 Some(Message::Tick)
@@ -767,7 +985,9 @@ mod tests {
         );
 
         assert!(matches!(next, Some(Message::Tick)));
-        assert_eq!(observed_slice, Some(PTY_OUTPUT_INPUT_GRACE_SLICE));
+        let observed_slice = observed_slice.expect("observed slice");
+        assert!(observed_slice > Duration::from_millis(1));
+        assert!(observed_slice <= PTY_REDRAW_FRAME_INTERVAL);
     }
 
     #[test]
@@ -779,6 +999,7 @@ mod tests {
             &mut pending_messages,
             Instant::now(),
             false,
+            None,
             |_deadline, slice| {
                 observed_slice = Some(slice);
                 Some(Message::Tick)
@@ -790,12 +1011,33 @@ mod tests {
     }
 
     #[test]
+    fn pty_redraw_poll_slice_waits_for_remaining_frame_budget() {
+        let now = Instant::now();
+        let last_draw_at = now - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::from_millis(28));
+    }
+
+    #[test]
+    fn pty_redraw_poll_slice_returns_zero_after_frame_budget_is_spent() {
+        let now = Instant::now();
+        let last_draw_at = now - PTY_REDRAW_FRAME_INTERVAL - Duration::from_millis(5);
+
+        let slice = pty_redraw_poll_slice(now, last_draw_at);
+
+        assert_eq!(slice, Duration::ZERO);
+    }
+
+    #[test]
     fn dispatch_post_normalized_message_routes_pending_keys_through_keybinds() {
         let mut model = Model::new(PathBuf::from("/tmp/repo"));
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Settings;
         model.active_focus = FocusPane::TabContent;
         let mut keybinds = KeybindRegistry::new();
+        let mut needs_render = false;
 
         dispatch_post_normalized_message(
             &mut model,
@@ -804,6 +1046,7 @@ mod tests {
                 KeyCode::Char('g'),
                 KeyModifiers::CONTROL,
             )),
+            &mut needs_render,
         );
         dispatch_post_normalized_message(
             &mut model,
@@ -812,6 +1055,7 @@ mod tests {
                 KeyCode::Tab,
                 KeyModifiers::NONE,
             )),
+            &mut needs_render,
         );
 
         assert_eq!(
@@ -819,6 +1063,7 @@ mod tests {
             FocusPane::Terminal,
             "pending normalized keys should still use the keybind dispatch path"
         );
+        assert!(needs_render, "key dispatch should request a redraw");
     }
 
     #[test]
@@ -834,5 +1079,73 @@ mod tests {
     fn terminal_leave_commands_disable_bracketed_paste() {
         let ansi = terminal_leave_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004l"));
+    }
+
+    #[test]
+    fn terminal_enter_commands_enable_keyboard_enhancement_flags() {
+        let ansi = terminal_enter_commands_ansi();
+        let mut expected = String::new();
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+            .write_ansi(&mut expected)
+            .expect("keyboard enhancement push ansi");
+        assert!(ansi.contains(expected.as_str()));
+    }
+
+    #[test]
+    fn terminal_leave_commands_pop_keyboard_enhancement_flags() {
+        let ansi = terminal_leave_commands_ansi();
+        let mut expected = String::new();
+        PopKeyboardEnhancementFlags
+            .write_ansi(&mut expected)
+            .expect("keyboard enhancement pop ansi");
+        assert!(ansi.contains(expected.as_str()));
+    }
+
+    #[test]
+    fn should_render_after_tick_skips_idle_terminal_focus() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            !should_render_after_tick(&model),
+            "idle terminal ticks should not repaint the TUI"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_keeps_non_terminal_focus_redrawing() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            should_render_after_tick(&model),
+            "management-focused ticks should keep rendering"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_keeps_visible_docker_overlay_redrawing() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        app::update(
+            &mut model,
+            Message::DockerProgress(DockerProgressMessage::SetStage {
+                stage: DockerStage::BuildingImage,
+                message: "Building image".to_string(),
+            }),
+        );
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            should_render_after_tick(&model),
+            "visible overlays that depend on tick-driven updates should still redraw"
+        );
     }
 }

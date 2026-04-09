@@ -470,6 +470,14 @@ mod tests {
     }
 
     #[test]
+    fn prefix_y_is_unbound() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn all_bindings_include_registered_shortcuts() {
         let reg = KeybindRegistry::new();
         let registered: Vec<&str> = reg
@@ -501,5 +509,6 @@ mod tests {
             .map(|binding| binding.keys.as_str())
             .collect();
         assert!(!registered.contains(&"Ctrl+G, y"));
+        assert!(!registered.contains(&"Ctrl+G, p"));
     }
 }

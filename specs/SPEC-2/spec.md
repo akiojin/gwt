@@ -116,6 +116,120 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 9. Given two gwt processes are running at the same time, when their agents emit hook events, then each TUI reads only its own PID-scoped runtime sidecars and their branch indicators do not overwrite each other.
 10. Given an interactive Codex session is launched and Codex has not emitted any runtime hook event yet, when the PTY spawn succeeds, then gwt bootstraps that session's PID-scoped runtime sidecar to `Running` so the branch spinner appears before the first prompt is sent.
 
+### US-9: Trace Terminal Input For IME Investigation (P2) -- IMPLEMENTED
+
+As a developer investigating Japanese IME behavior in a shell or agent
+terminal, I want gwt to record the terminal input path to JSONL on demand so
+that I can determine whether candidate-navigation keys reach `crossterm`,
+become gwt shortcuts, or get forwarded to the PTY.
+
+**Acceptance Scenarios**
+
+1. Given `GWT_INPUT_TRACE_PATH` points to a writable file, when a terminal key
+   press reaches `crossterm`, then gwt appends a JSONL record for the raw key
+   event.
+2. Given `GWT_INPUT_TRACE_PATH` is set, when gwt classifies a terminal key
+   through the `Ctrl+G` registry or forwards it to the PTY, then the trace
+   records the routing decision and any forwarded bytes.
+3. Given `GWT_INPUT_TRACE_PATH` is unset, when the footer and help overlay
+   render, then no extra IME-specific toggle or indicator is shown.
+
+### US-10: Enable Minimal Kitty Keyboard Enhancements By Default (P2) -- IMPLEMENTED
+
+As a developer troubleshooting terminal input ambiguity, I want gwt to request
+the minimal kitty keyboard enhancement flags at startup so escape-key ambiguity
+is reduced on compatible terminals without introducing a runtime mode switch.
+
+**Acceptance Scenarios**
+
+1. Given gwt enters terminal mode, when startup initialization runs, then gwt
+   requests `DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES` via
+   `PushKeyboardEnhancementFlags`.
+2. Given gwt leaves terminal mode, when shutdown cleanup runs, then gwt issues
+   `PopKeyboardEnhancementFlags` before restoring the rest of terminal state.
+3. Given the host terminal ignores or rejects kitty enhancement commands, when
+   startup or shutdown proceeds, then gwt still runs and restores terminal state
+   without surfacing a fatal error.
+
+### US-11: Route Repeat Key Events After Kitty Enhancement Negotiation (P2) -- IMPLEMENTED
+
+As a developer using IME candidate navigation in a compatible terminal, I want
+repeat key events emitted after keyboard-enhancement negotiation to stay on the
+normal input path so page-switch keys do not silently disappear.
+
+**Acceptance Scenarios**
+
+1. Given a compatible terminal emits `KeyEventKind::Repeat`, when gwt polls the
+   next input event, then it records and routes that key through the same
+   `Message::KeyInput` path used for `Press`.
+2. Given a terminal emits `KeyEventKind::Release`, when gwt polls the next
+   input event, then it ignores that release event so one physical keypress
+   does not trigger duplicate actions.
+
+### US-12: Standalone Raw Crossterm Probe For IME Triage (P2) -- IMPLEMENTED
+
+As a developer isolating whether Terminal.app or `gwt` routing is responsible
+for Japanese IME breakage, I want the existing `keytest` example to record raw
+`crossterm` events directly to JSONL so I can compare the terminal's native
+event stream against gwt's in-app trace.
+
+**Acceptance Scenarios**
+
+1. Given I run `cargo run -p gwt-tui --example keytest`, when `crossterm`
+   emits raw key, paste, mouse, focus, or resize events, then the example
+   appends a JSONL record with the event type, debug payload, and key metadata
+   when applicable.
+2. Given the example starts under the same terminal where gwt reproduces the
+   IME issue, when startup initialization runs, then it requests the same
+   minimal kitty keyboard enhancements as gwt and fail-open pops them on exit
+   so the probe matches the real app's terminal negotiation as closely as
+   possible.
+3. Given I do not pass an explicit output path, when the example starts, then
+   it writes to a stable default log file and prints that path in English so
+   the probe can be run without extra setup.
+
+### US-13: Intermediate IME Probe With Controlled Redraw Modes (P2) -- IMPLEMENTED
+
+As a developer isolating why gwt breaks IME candidate navigation while the raw
+probe does not, I want a tiny standalone example that can independently enable
+periodic redraw and ratatui rendering so I can identify which rendering layer
+causes the regression.
+
+**Acceptance Scenarios**
+
+1. Given I run `cargo run -p gwt-tui --example keytest -- --mode raw`, when I
+   type in the probe, then it behaves like the existing raw event logger with
+   no periodic redraw loop.
+2. Given I run the same example with `--mode redraw`, when the probe is active,
+   then it redraws a fixed input surface on a configurable periodic tick
+   without involving ratatui.
+3. Given I run the same example with `--mode ratatui`, when the probe is
+   active, then it redraws the same input surface through ratatui on the same
+   periodic tick so the effect of the rendering stack can be compared against
+   `raw` and `redraw`.
+4. Given the probe renders committed text and an input cursor, when wide
+   characters are present, then the cursor column is derived from display width
+   rather than byte length so IME candidate anchoring is not skewed by
+   full-width glyphs.
+
+### US-14: Suppress Idle Tick Redraw While Terminal Owns IME (P1)
+
+As a developer using Japanese IME inside gwt's terminal pane, I want idle tick
+processing to avoid repainting the TUI when the terminal keeps focus so IME
+candidate navigation is not interrupted by background redraws.
+
+**Acceptance Scenarios**
+
+1. Given terminal focus is active and no PTY output or user-visible overlay
+   animation requires repainting, when the 100 ms tick fires, then gwt updates
+   its internal housekeeping without issuing a terminal redraw.
+2. Given management focus or a visible overlay still depends on periodic UI
+   feedback, when the tick fires, then gwt continues to redraw so status
+   notifications, overlay progress, and non-terminal animations remain visible.
+3. Given PTY output arrives or a real input event is processed while terminal
+   focus is active, when the next loop iteration runs, then gwt redraws
+   immediately so terminal content and explicit UI actions remain responsive.
+
 ## Edge Cases
 
 - Ctrl+G pressed while a modal dialog (e.g., unsaved changes warning) is active.
@@ -132,6 +246,22 @@ As a developer, I want the Branches list to show hook-derived live agent presenc
 - A session has emitted `Stop` (waiting for input) but the user closes the PTY before another hook event arrives.
 - Branch rows at narrow widths must keep the branch label and `◆` / `◇` / `▸` legible even when the live session indicator cannot fit.
 - Interactive Codex launches may not emit `SessionStart` before the first user prompt, but the branch list must still show the session as live immediately after spawn.
+- IME investigation on terminals that do not expose composition state must stay
+  opt-in and must not add a persistent UI mode or always-on logging.
+- Terminals that do not implement kitty keyboard protocol must keep startup and
+  shutdown behavior unchanged via fail-open enhancement handling.
+- Terminals that do emit `KeyEventKind::Repeat` after keyboard-enhancement
+  negotiation must not lose candidate-navigation keys just because they are not
+  tagged as `Press`.
+- The standalone raw `crossterm` probe must stay debug-only and must not change
+  normal gwt startup, footer hints, or runtime input routing.
+- The intermediate IME probe must isolate redraw behavior one layer at a time
+  and must not depend on PTY forwarding or the full gwt application loop.
+- The main gwt event loop must not repaint solely because of an idle tick while
+  terminal focus owns input and no visible periodic animation is active.
+- Dirty-driven redraw must still repaint immediately when PTY output is drained,
+  even if the current focus is the terminal and the last processed message was
+  not a user key event.
 
 ## Regression Guardrail: Hook-Driven Branch Visibility
 
@@ -164,6 +294,30 @@ This capability has regressed multiple times because "hooks are configured" is n
 - **FR-002a**: Split/grid mode pane titles preserve session identity by showing each pane's stable `n:` shortcut position plus the session-type icon alongside the session name, so the old-TUI numeric muscle memory still applies when multiple panes are visible.
 - **FR-003**: Toggle between tab and split with Ctrl+G,z.
 - **FR-004**: Ctrl+G prefix key system with a 2-second timeout; state machine in `keybind.rs`.
+- **FR-004a**: Setting `GWT_INPUT_TRACE_PATH` enables an opt-in JSONL trace for
+  shell and agent terminal input. The trace records raw `crossterm` key
+  events, post-prefix routing decisions, and PTY-forwarded bytes without adding
+  a runtime toggle or footer affordance.
+- **FR-004b**: gwt always requests kitty keyboard protocol enhancements with
+  `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES |
+  KeyboardEnhancementFlags::REPORT_EVENT_TYPES` during terminal enter, and
+  pops the enhancement level during terminal leave. Enhancement push/pop is
+  fail-open so unsupported terminals continue with existing behavior.
+- **FR-004c**: The existing `crates/gwt-tui/examples/keytest.rs` example acts
+  as a standalone raw `crossterm` probe. It records every `crossterm::event::Event`
+  it reads to JSONL, includes full key metadata when the event is a key event,
+  and defaults to `/tmp/gwt-crossterm-events.jsonl` when no explicit output path
+  is passed.
+- **FR-004d**: That same example also supports explicit IME probe modes:
+  `raw`, `redraw`, and `ratatui`. `redraw` and `ratatui` render the same small
+  committed-text surface on a configurable tick, differing only in whether the
+  redraw path uses direct `crossterm` commands or ratatui.
+- **FR-004e**: In the main gwt event loop, `Message::Tick` must not trigger a
+  terminal redraw when `FocusPane::Terminal` owns input and there is no visible
+  overlay or periodic terminal-facing animation that depends on that tick.
+- **FR-004f**: In that same dirty-driven event loop, any drained PTY output
+  must request an immediate redraw so committed text and shell output are never
+  held until a later keypress.
 - **FR-005**: Management panel toggles visibility with Ctrl+G,g.
 - **FR-005a**: Ctrl+G,g treats the management panel as a supplemental surface: showing it does not steal terminal focus, and hiding it normalizes focus back to Terminal so the main layer never advertises stale management-only hints.
 - **FR-005b**: Ctrl+G,g immediately recalculates the visible session pane geometry and resizes all live PTYs and vt100 parsers to the new content area in the same update cycle.
@@ -232,6 +386,10 @@ This capability has regressed multiple times because "hooks are configured" is n
 - **FR-014a**: Session PTY geometry is initialized from the actual visible session-pane size at startup. The default shell must not stay on the stale `80x24` model default until a later terminal resize event arrives.
 - **FR-015**: Focus system: Branches exposes 3 focusable panes (`TabContent`, `BranchDetail`, `Terminal`) cycled with `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab`, while every other management tab exposes only `TabContent` and `Terminal`. Focused pane has blue (Cyan) border, unfocused has white (Gray) border. Reverse focus cycling must work whether the terminal reports `Shift+Tab` as `BackTab` or as `Tab` with the Shift modifier.
 - **FR-015a**: The prefixed focus shortcuts remain available even when a session PTY owns `Tab`. When the management panel is hidden, `Ctrl+G, Tab` / `Ctrl+G, Shift+Tab` first reveal it and then land on the next logical focus target.
+- **FR-015b**: When `GWT_INPUT_TRACE_PATH` is set, each terminal key press that
+  reaches `crossterm` is recorded before routing, and any subsequent `Ctrl+G`
+  prefix classification or PTY forwarding outcome is appended as a separate
+  JSONL record for the same input path.
 - **FR-016**: Arrow keys (↑↓←→) replace vim-style j/k/h/l for all navigation. No vim keybindings.
 - **FR-017**: Overlays (Wizard, Confirm, Error) capture all keyboard input when visible, preventing focus pane from receiving keys.
 - **FR-018**: Branch Cleanup — multi-select bulk deletion of merged local branches and their worktrees, ported from the old TUI/GUI `CleanupModal` flow. Owns the canonical branch removal surface for `Branches` and replaces the single-branch `Ctrl+C` delete-worktree shortcut.

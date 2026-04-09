@@ -21,7 +21,7 @@ Use this command to run semantic search against the local SPEC index.
    - spec_id, title, status, phase
    - relevance summary
    - next spec(s) to inspect
-3. For Issue search, use `/gwt:gwt-issue-search` instead.
+3. For Issue search, use `/gwt:gwt-search --issues` instead.
 4. For file search, use `/gwt:gwt-project-search` instead.
 
 ## Examples

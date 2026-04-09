@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod index;
+pub mod logging;
 pub mod paths;
 pub mod process;
 pub mod repo_hash;

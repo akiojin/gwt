@@ -107,3 +107,13 @@
 - [x] T094 [P] Write RED tests: Terminal.app right-drag anchor state clears on outside mouse-up and session/focus changes, while transcript-ignore tests exercise real transcript discovery/parsing first.
 - [x] T095 Implement ordered SGR-normalization fallback replay, share post-normalization dispatch for pending/polled messages, and make the transcript-ignore helper exercise real discovery/parsing without hydrating runtime history.
 - [x] T096 Implement lazy scroll-debug logging and clear Terminal.app right-drag anchor state whenever terminal ownership changes or the drag ends outside the session pane.
+- [x] T097 [P] Write RED test: once `AgentMemoryBacked` redraws are normalized into row history, snapshot storage collapses to a single live comparison baseline instead of growing hidden snapshot history.
+- [x] T098 Rework `VtState` snapshot capture so agent panes reuse the current frame snapshot and keep only the latest live baseline whenever row-history scrollback is active.
+- [x] T099 [P] Add a regression test covering visible row extraction semantics before replacing per-row selection reads with a single-pass scan.
+- [x] T100 Replace `screen_visible_lines()` with a single-pass `vt100::Screen::rows()` walk so redraw-shift detection no longer pays the hidden O(rows²) `contents_between(...).nth(row)` cost on every frame.
+- [x] T101 [P] Write RED tests: unchanged live surfaces reuse cached visible URL regions and invalidate the cache when the rendered VT surface changes.
+- [x] T102 Rework live session render / selection / URL hit-testing paths to borrow the visible screen directly and cache URL-region extraction instead of rebuilding a parser and rescanning URLs every frame.
+- [x] T103 [P] Write RED tests: PTY-driven redraw waits only for the remaining frame budget after the last draw and redraws immediately once that budget is spent.
+- [x] T104 Pace PTY-triggered redraw in `main.rs` so continuous PTY output cannot drive the terminal above the configured frame budget while input polling remains responsive.
+- [x] T105 [P] Write RED tests: coalesced Codex-style `home + repaint` payloads are segmented into distinct redraw frames and derive each intermediate vertical shift into local row history.
+- [x] T106 Segment agent snapshot processing on qualified full-home repaint boundaries in `model.rs` so Codex wheel scrolling stays line-granular even when multiple repaint frames arrive in one payload.

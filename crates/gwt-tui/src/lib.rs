@@ -6,8 +6,11 @@
 pub mod app;
 pub(crate) mod custom_agents;
 pub mod event;
+pub mod ime_probe;
 pub mod index_worker;
 pub mod input;
+pub mod input_trace;
+pub mod logs_watcher;
 pub mod message;
 pub mod model;
 pub mod notification_router;
