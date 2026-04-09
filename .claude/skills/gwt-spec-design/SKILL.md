@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-design
-description: "MUST invoke before any feat/refactor implementation. Use proactively when conversation moves toward new functionality or architectural changes. Runs DDD intake, domain discovery, SPEC registration, and clarification. Triggers: 'design', 'brainstorm', 'create a spec', 'clarify spec'."
+description: "MUST invoke before any feat/refactor implementation when the decision to create or update a SPEC has already been made. Runs DDD intake, domain discovery, SPEC registration, and clarification. Triggers: 'design', 'create a spec', 'clarify spec', 'SPEC登録'. For rough ideas or pre-SPEC discussion, use gwt-spec-brainstorm instead."
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 argument-hint: "[rough idea or request | --deepen SPEC-N]"
 ---
@@ -117,8 +117,17 @@ Routing rules:
 | NEW-SPEC | Continue to Phase 2 |
 | ISSUE | Hand off to `gwt-issue-register` |
 | TOO-BROAD-SPLIT-FIRST | Ask user to pick first slice, restart Phase 1 |
+| NO-ACTION | End with documented rationale (no SPEC or Issue needed) |
 
 Do not ask "should I proceed?" after the decision.
+
+### Skip condition
+
+If invoked from `gwt-spec-brainstorm` with an Intake Memo already
+prepared, skip the search and interview steps in Phase 1. Validate the
+memo against the search results brainstorm already ran, then proceed
+directly to Phase 2 (Domain Discovery). This avoids duplicate search
+and interview when transitioning from brainstorm to design.
 
 ---
 
