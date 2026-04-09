@@ -4848,6 +4848,209 @@ fn is_in_text_input_mode(model: &Model) -> bool {
     }
 }
 
+fn workspace_main_area(model: &Model) -> Option<Rect> {
+    if model.active_layer == ActiveLayer::Initialization {
+        return None;
+    }
+
+    let (width, height) = model.terminal_size;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some(Rect::new(0, 0, width, height.saturating_sub(1)))
+}
+
+fn visible_management_area(model: &Model) -> Option<Rect> {
+    if model.active_layer != ActiveLayer::Management {
+        return None;
+    }
+    Some(management_split(workspace_main_area(model)?)[0])
+}
+
+fn visible_session_area(model: &Model) -> Option<Rect> {
+    let main_area = workspace_main_area(model)?;
+    Some(if model.active_layer == ActiveLayer::Management {
+        management_split(main_area)[1]
+    } else {
+        main_area
+    })
+}
+
+fn mouse_hits_rect(mouse: MouseEvent, rect: Rect) -> bool {
+    mouse.column >= rect.x
+        && mouse.column < rect.right()
+        && mouse.row >= rect.y
+        && mouse.row < rect.bottom()
+}
+
+fn title_hit_label_index(
+    title: &Line<'_>,
+    labels: &[&str],
+    area: Rect,
+    mouse: MouseEvent,
+) -> Option<usize> {
+    if mouse.row != area.y {
+        return None;
+    }
+
+    let mut x = area.x.saturating_add(1);
+    for span in &title.spans {
+        let content = span.content.as_ref();
+        let width = content.chars().count() as u16;
+        if mouse.column >= x && mouse.column < x.saturating_add(width) {
+            let trimmed = content.trim();
+            return labels.iter().position(|label| *label == trimmed);
+        }
+        x = x.saturating_add(width);
+    }
+
+    None
+}
+
+fn grid_session_pane_area(area: Rect, count: usize, target_index: usize) -> Option<Rect> {
+    if count == 0 || target_index >= count {
+        return None;
+    }
+
+    let cols = (count as f64).sqrt().ceil() as usize;
+    let rows = count.div_ceil(cols);
+    let row_constraints: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Ratio(1, rows as u32))
+        .collect();
+    let row_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(area);
+
+    let target_row = target_index / cols;
+    let start = target_row * cols;
+    let end = (start + cols).min(count);
+    let n = end - start;
+    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let col_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(col_constraints)
+        .split(row_chunks[target_row]);
+
+    col_chunks.get(target_index - start).copied()
+}
+
+fn handle_management_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
+    let Some(management_area) = visible_management_area(model) else {
+        return false;
+    };
+    if !mouse_hits_rect(mouse, management_area) {
+        return false;
+    }
+
+    let management_labels: Vec<&str> = ManagementTab::ALL.iter().map(|tab| tab.label()).collect();
+
+    if model.management_tab == ManagementTab::Branches {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(management_area);
+        let list_pane = chunks[0];
+        let detail_pane = chunks[1];
+
+        if mouse_hits_rect(mouse, list_pane) {
+            let title = management_tab_title(model, list_pane.width);
+            if let Some(tab_idx) =
+                title_hit_label_index(&title, &management_labels, list_pane, mouse)
+            {
+                update(
+                    model,
+                    Message::SwitchManagementTab(ManagementTab::ALL[tab_idx]),
+                );
+                model.active_focus = FocusPane::TabContent;
+                return true;
+            }
+
+            let list_inner = pane_block(title, false).inner(list_pane);
+            let list_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(list_inner);
+            let list_area = list_chunks[1];
+            if mouse_hits_rect(mouse, list_area) {
+                let row = mouse.row.saturating_sub(list_area.y) as usize;
+                model.branches.select_filtered_index(row);
+            }
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
+
+        if mouse_hits_rect(mouse, detail_pane) {
+            let detail_title = branch_detail_title(model);
+            if let Some(section_idx) = title_hit_label_index(
+                &detail_title,
+                screens::branches::detail_section_labels(),
+                detail_pane,
+                mouse,
+            ) {
+                model.branches.detail_section = section_idx;
+            }
+            model.active_focus = FocusPane::BranchDetail;
+            return true;
+        }
+
+        return false;
+    }
+
+    let title = management_tab_title(model, management_area.width);
+    if let Some(tab_idx) = title_hit_label_index(&title, &management_labels, management_area, mouse)
+    {
+        update(
+            model,
+            Message::SwitchManagementTab(ManagementTab::ALL[tab_idx]),
+        );
+    }
+    model.active_focus = FocusPane::TabContent;
+    true
+}
+
+fn handle_session_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
+    let Some(session_area) = visible_session_area(model) else {
+        return false;
+    };
+
+    match model.session_layout {
+        SessionLayout::Tab => {
+            if !mouse_hits_rect(mouse, session_area) {
+                return false;
+            }
+            if active_session_content_area(model).is_some_and(|area| mouse_hits_rect(mouse, area)) {
+                return false;
+            }
+            model.active_focus = FocusPane::Terminal;
+            true
+        }
+        SessionLayout::Grid => {
+            for session_idx in 0..model.sessions.len() {
+                let Some(pane_area) =
+                    grid_session_pane_area(session_area, model.sessions.len(), session_idx)
+                else {
+                    continue;
+                };
+                if !mouse_hits_rect(mouse, pane_area) {
+                    continue;
+                }
+                if session_idx == model.active_session
+                    && active_session_content_area(model)
+                        .is_some_and(|area| mouse_hits_rect(mouse, area))
+                {
+                    return false;
+                }
+                model.active_session = session_idx;
+                model.active_focus = FocusPane::Terminal;
+                return true;
+            }
+            false
+        }
+    }
+}
+
 fn handle_mouse_input(model: &mut Model, mouse: MouseEvent) {
     // FR-018g: cleanup modals capture all input, including mouse events —
     // swallow here so clicks cannot fall through to the panes behind a
@@ -4887,6 +5090,12 @@ where
     F: FnMut(&str) -> Result<(), String>,
     G: FnMut(&str) -> Result<(), String>,
 {
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && (handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse))
+    {
+        return Ok(true);
+    }
+
     let hits_active_session = mouse_hits_active_session(model, mouse);
     crate::scroll_debug::log_lazy(|| {
         format!(
@@ -6288,6 +6497,62 @@ mod tests {
             .collect::<String>()
     }
 
+    fn title_label_click_x(title: &Line<'_>, area_x: u16, label: &str) -> u16 {
+        let mut x = area_x + 1;
+        for span in &title.spans {
+            let content = span.content.as_ref();
+            let width = content.chars().count() as u16;
+            if content.trim() == label {
+                return x + width.saturating_sub(1).min(1);
+            }
+            x = x.saturating_add(width);
+        }
+        panic!("label `{label}` not found in title `{}`", line_text(title));
+    }
+
+    fn test_main_area(model: &Model) -> Rect {
+        let (width, height) = model.terminal_size;
+        Rect::new(0, 0, width, height.saturating_sub(1))
+    }
+
+    fn branches_management_areas(model: &Model) -> (Rect, Rect, Rect) {
+        let management = management_split(test_main_area(model))[0];
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(management);
+        let top = split[0];
+        let list_inner = pane_block(management_tab_title(model, top.width), false).inner(top);
+        let list_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(list_inner);
+        (top, split[1], list_chunks[1])
+    }
+
+    fn grid_session_area(area: Rect, count: usize, target_index: usize) -> Rect {
+        let cols = (count as f64).sqrt().ceil() as usize;
+        let rows = count.div_ceil(cols);
+        let row_constraints: Vec<Constraint> = (0..rows)
+            .map(|_| Constraint::Ratio(1, rows as u32))
+            .collect();
+        let row_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(row_constraints)
+            .split(area);
+        let target_row = target_index / cols;
+        let start = target_row * cols;
+        let end = (start + cols).min(count);
+        let n = end - start;
+        let col_constraints: Vec<Constraint> =
+            (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+        let col_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints)
+            .split(row_chunks[target_row]);
+        col_chunks[target_index - start]
+    }
+
     fn persist_agent_tab(
         sessions_dir: &Path,
         branch: &str,
@@ -6802,6 +7067,147 @@ mod tests {
                 > 0,
             "session mouse scroll should move the viewport away from live follow mode"
         );
+    }
+
+    #[test]
+    fn mouse_click_management_tab_switches_tab_and_focuses_management_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(120, 30));
+
+        let (top, _, _) = branches_management_areas(&model);
+        let title = management_tab_title(&model, top.width);
+        let issues_x = title_label_click_x(&title, top.x, "Issues");
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: issues_x,
+                row: top.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Issues);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn mouse_click_branch_list_row_selects_branch_and_focuses_list() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(120, 30));
+        screens::branches::update(
+            &mut model.branches,
+            screens::branches::BranchesMessage::SetBranches(vec![
+                screens::branches::BranchItem {
+                    name: "feature/one".to_string(),
+                    is_head: false,
+                    is_local: true,
+                    category: screens::branches::BranchCategory::Feature,
+                    worktree_path: None,
+                },
+                screens::branches::BranchItem {
+                    name: "feature/two".to_string(),
+                    is_head: false,
+                    is_local: true,
+                    category: screens::branches::BranchCategory::Feature,
+                    worktree_path: None,
+                },
+            ]),
+        );
+
+        let (_, _, list_area) = branches_management_areas(&model);
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: list_area.x + 2,
+                row: list_area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model
+                .branches
+                .selected_branch()
+                .expect("selected branch")
+                .name,
+            "feature/two"
+        );
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn mouse_click_branch_detail_title_switches_section_and_focuses_detail() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        update(&mut model, Message::Resize(120, 30));
+        screens::branches::update(
+            &mut model.branches,
+            screens::branches::BranchesMessage::SetBranches(vec![screens::branches::BranchItem {
+                name: "feature/one".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+            }]),
+        );
+
+        let (_, detail_area, _) = branches_management_areas(&model);
+        let title = branch_detail_title(&model);
+        let git_x = title_label_click_x(&title, detail_area.x, "Git");
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: git_x,
+                row: detail_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(model.branches.detail_section, 1);
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
+    }
+
+    #[test]
+    fn mouse_click_grid_session_switches_active_session_and_focuses_terminal() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::TabContent;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions.push(crate::model::SessionTab {
+            id: "shell-1".to_string(),
+            name: "Shell 2".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        update(&mut model, Message::Resize(120, 30));
+
+        let second_area = grid_session_area(test_main_area(&model), model.sessions.len(), 1);
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: second_area.x + 2,
+                row: second_area.y + 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(model.active_session, 1);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
     }
 
     #[test]
