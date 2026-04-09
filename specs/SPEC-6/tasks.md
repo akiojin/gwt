@@ -100,11 +100,11 @@
 - [ ] TEST: Integration test (tempdir): `init` returns a `reload_handle` whose `reload(EnvFilter::new("debug"))` immediately allows a subsequent `tracing::debug!` to reach the file.
   - File: `crates/gwt-core/tests/logging_reload.rs`
 - [ ] IMPL: Create `crates/gwt-core/src/logging/mod.rs` exposing `init`, `LoggingConfig`, `LoggingHandles`, `UiLogEvent`, `LogLevel`.
-- [ ] IMPL: `crates/gwt-core/src/logging/writer.rs` — build `tracing_appender::rolling::Builder` in local timezone, daily rotation, `gwt.log` basename, produce a `non_blocking` writer + `WorkerGuard`.
+- [ ] IMPL: `crates/gwt-core/src/logging/writer.rs` — build `tracing_appender::rolling::Builder` with the crate's UTC-dated daily rotation, `gwt.log` basename, produce a `non_blocking` writer + `WorkerGuard`.
 - [ ] IMPL: `crates/gwt-core/src/logging/fmt_layer.rs` — JSONL format layer (`tracing_subscriber::fmt::layer().json().with_writer(non_blocking)`) with RFC3339 local timestamps.
 - [ ] IMPL: `crates/gwt-core/src/logging/reload.rs` — build `Registry::default().with(reloadable_env_filter).with(fmt_layer).with(ui_forwarder_layer)`; return `reload::Handle`.
 - [ ] IMPL: `crates/gwt-core/src/logging/ui_forwarder.rs` — `Layer<S>` impl; `on_event` visits fields into a `serde_json::Map`, builds `UiLogEvent`, and `sender.send` on a `tokio::sync::mpsc::UnboundedSender`; silently drops on `SendError`.
-- [ ] IMPL: `crates/gwt-core/src/logging/housekeep.rs` — glob `gwt.log.*`, parse suffix as `chrono::NaiveDate` (local), compare to `today - 7 days`, remove stale, collect errors into a summary warning returned to caller.
+- [ ] IMPL: `crates/gwt-core/src/logging/housekeep.rs` — glob `gwt.log.*`, parse suffix as `chrono::NaiveDate` (UTC file date), compare to `today - 7 days`, remove stale, collect errors into a summary warning returned to caller.
 - [ ] IMPL: Add `tracing`, `tracing-subscriber = { features = ["env-filter", "json", "fmt", "registry", "std"] }`, `tracing-appender`, `time` (for rolling), `serde_json`, `chrono` dependencies to `gwt-core/Cargo.toml`; update workspace as needed.
 
 ### 5.2 gwt-notification Removal (compile-breaking step — do it first)

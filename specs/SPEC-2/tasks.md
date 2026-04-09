@@ -612,3 +612,53 @@ banner in favor of pane-title chrome.
 - [x] T390 `cargo clippy --all-targets --all-features -- -D warnings`
 - [x] T391 `cargo fmt --all`
 - [x] T392 Refresh `specs/SPEC-2/progress.md` with the Phase 59 implementation summary and verification log.
+
+## Phase 60: Terminal Input Trace For IME Investigation
+
+- [x] T393 [P] Write RED test: `Ctrl+G,y` is no longer registered or bound after removing the explicit terminal IME mode workaround.
+- [x] T394 [P] Write RED test: opt-in input tracing appends JSONL records for keybind decisions and PTY-forwarded bytes.
+- [x] T395 [P] Write RED test: raw `crossterm` key events are serialized into the trace file with stable stage metadata.
+- [x] T396 Implement `GWT_INPUT_TRACE_PATH`-gated input tracing and remove terminal IME mode state, footer/help affordances, toggle notification, and key-guard logic from `crates/gwt-tui/src/input_trace.rs`, `crates/gwt-tui/src/event.rs`, `crates/gwt-tui/src/main.rs`, `crates/gwt-tui/src/app.rs`, `crates/gwt-tui/src/input/keybind.rs`, `crates/gwt-tui/src/message.rs`, `crates/gwt-tui/src/model.rs`, and `crates/gwt-tui/src/widgets/status_bar.rs`.
+- [x] T397 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the input-trace investigation contract.
+
+## Phase 61: Always-On Minimal Kitty Keyboard Enhancements
+
+- [x] T398 [P] Write RED test: terminal enter ANSI sequence includes `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)`.
+- [x] T399 [P] Write RED test: terminal leave ANSI sequence includes `PopKeyboardEnhancementFlags`.
+- [x] T400 Update `crates/gwt-tui/src/main.rs` terminal enter/leave handling to request minimal kitty keyboard enhancements at startup and pop them at shutdown with fail-open behavior.
+- [x] T401 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the minimal kitty keyboard-enhancement contract.
+
+## Phase 62: Repeat-Key Delivery Under Kitty Event Types
+
+- [x] T402 [P] Write RED test: `translate_event()` maps `KeyEventKind::Repeat` into `Message::KeyInput`.
+- [x] T403 [P] Write RED test: `translate_event()` still ignores `KeyEventKind::Release`.
+- [x] T404 Update `crates/gwt-tui/src/event.rs` so `Repeat` follows the normal key-input path while `Release` remains filtered.
+- [x] T405 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the repeat-key routing contract.
+
+## Phase 63: Standalone Raw Crossterm Probe
+
+- [x] T406 [P] Write RED test: shared trace helper serializes a raw `Event::Key` probe record with stable event typing and key metadata.
+- [x] T407 [P] Write RED test: shared trace helper serializes non-key probe events such as `Paste` without losing the raw debug payload.
+- [x] T408 Upgrade `crates/gwt-tui/examples/keytest.rs` to log every raw `crossterm` event to JSONL via the shared helper while mirroring gwt's minimal keyboard-enhancement negotiation.
+- [x] T409 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the standalone raw `crossterm` probe workflow.
+
+## Phase 64: Intermediate IME Probe Modes
+
+- [x] T410 [P] Write RED test: probe CLI parsing supports `raw` / `redraw` / `ratatui`, configurable tick rate, and an optional output path.
+- [x] T411 [P] Write RED test: probe state keeps bounded recent events, handles committed text editing, and computes cursor columns using display width for wide glyphs.
+- [x] T412 Refactor `crates/gwt-tui/examples/keytest.rs` into layered IME probe modes backed by a shared helper module.
+- [x] T413 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the layered IME probe workflow.
+
+## Phase 65: Idle Tick Redraw Suppression For Terminal Focus
+
+- [x] T414 [P] Write RED test: main-loop render decision skips redraw on `Message::Tick` while `FocusPane::Terminal` owns input and no visible periodic UI surface is active.
+- [x] T415 [P] Write RED test: the same render decision still redraws on `Message::Tick` for non-terminal focus or visible overlay-driven periodic UI states.
+- [x] T416 Update `crates/gwt-tui/src/main.rs` so redraw is dirty-driven and idle terminal ticks do not repaint the TUI.
+- [x] T417 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the idle-tick redraw suppression fix.
+
+## Phase 66: PTY Output Redraw Under Dirty-Driven Rendering
+
+- [x] T418 [P] Write RED test: draining PTY output marks redraw dirty so terminal output does not appear one keypress late.
+- [x] T419 [P] Keep the idle-tick suppression tests green so the PTY fix does not reintroduce unconditional repainting.
+- [x] T420 Update `crates/gwt-tui/src/main.rs` so the shared PTY-drain path always requests redraw when bytes are applied to the model.
+- [x] T421 Refresh `SPEC-2` artifacts and README docs, then rerun focused plus broad verification for the dirty-driven PTY redraw fix.

@@ -126,10 +126,10 @@ As a developer using the TUI, I want the Logs tab to stream new events as they a
 
 **Acceptance Scenarios:**
 
-- AC-6.1: Opening the Logs tab shows every event from today's `gwt.log` file (today = from local midnight)
+- AC-6.1: Opening the Logs tab shows every event from today's `gwt.log` file (today = current UTC day)
 - AC-6.2: New `tracing` events emitted while the Logs tab is open appear within 500 ms of being written to the file (notify-crate driven; TUI tick fallback only if notify fails to start)
 - AC-6.3: Existing filter UX (`FilterLevel::{All,ErrorOnly,WarnUp,InfoUp,DebugUp}` and Debug toggle) continues to work against the file-backed stream
-- AC-6.4: Rotation at local midnight is observed: Logs tab keeps showing the new day's file from the moment it is created
+- AC-6.4: Rotation at UTC midnight is observed: Logs tab keeps showing the new day's file from the moment it is created
 
 ### US-7 (P0): Warn/Error Events Still Surface in UI
 
@@ -161,8 +161,8 @@ As a developer, I want the log file to rotate automatically so that disk usage s
 
 **Acceptance Scenarios:**
 
-- AC-9.1: Rotation occurs at local midnight (00:00) via `tracing_appender::rolling::daily` configured with the local timezone
-- AC-9.2: Rotated files are named `gwt.log.YYYY-MM-DD` using the local date
+- AC-9.1: Rotation occurs at UTC midnight (00:00Z) via `tracing_appender::rolling::daily`
+- AC-9.2: Rotated files are named `gwt.log.YYYY-MM-DD` using the UTC date
 - AC-9.3: On TUI startup a housekeeping pass deletes any `gwt.log.*` entry older than seven days (keeps at most today + 7 historical files)
 - AC-9.4: Housekeeping failures do not prevent TUI startup (logged as `warn` and continue)
 
@@ -182,15 +182,15 @@ As a developer, I want agent-launch events to land in the same log file as every
 
 | ID     | Requirement                                                                                                                                                                               | Priority | Status          |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | --------------- |
-| FR-009 | Initialize `tracing_subscriber` in `gwt-tui` `main` with a non-blocking JSONL file writer rolling daily (local timezone) at `~/.gwt/logs/gwt.log`                                         | P0       | Not Implemented |
+| FR-009 | Initialize `tracing_subscriber` in `gwt-tui` `main` with a non-blocking JSONL file writer rolling daily (UTC boundary) at `~/.gwt/logs/gwt.log`                                            | P0       | Not Implemented |
 | FR-010 | Default `EnvFilter` is `info` for all crates; `RUST_LOG` overrides at startup                                                                                                             | P0       | Not Implemented |
 | FR-011 | `reload::Handle` exposed to the app model so the Settings screen can change the level at runtime                                                                                          | P1       | Not Implemented |
 | FR-012 | `std::panic::set_hook` forces a synchronous flush of the non-blocking writer before re-panicking; must compose with existing ratatui terminal restoration                                 | P0       | Not Implemented |
 | FR-013 | Logs tab watches `~/.gwt/logs/gwt.log` via `notify` crate, parses each appended line as JSONL into `LogEntry`, and appends to `LogsState.entries` (existing filter logic stays untouched) | P0       | Not Implemented |
-| FR-014 | Logs tab performs an initial read of today's file (from local midnight) on TUI startup, not when the tab is first opened                                                                  | P0       | Not Implemented |
+| FR-014 | Logs tab performs an initial read of today's file (current UTC day) on TUI startup, not when the tab is first opened                                                                      | P0       | Not Implemented |
 | FR-015 | A dedicated `tracing_subscriber::Layer` forwards `Warn` and `Error` events over a `tokio::sync::mpsc::UnboundedSender<UiLogEvent>` to the main TUI loop, which drives toasts/error modal  | P0       | Not Implemented |
 | FR-016 | No redaction layer: JSONL lines contain raw field values. `~/.gwt/logs/` is hardened on Unix to dir `0700` / files `0600` so only the owning user can read structured logs (revised after reviewer comment B7) | P1       | Implemented |
-| FR-017 | Housekeeping: on startup delete `gwt.log.YYYY-MM-DD` files older than 7 days relative to today (local date)                                                                               | P1       | Not Implemented |
+| FR-017 | Housekeeping: on startup delete `gwt.log.YYYY-MM-DD` files older than 7 days relative to today's UTC date                                                                                 | P1       | Not Implemented |
 | FR-018 | `gwt-notification` crate is deleted. `Notification`, `NotificationBus`, `NotificationRouter`, `NotificationLog`, `notification_log` field on `Model`, and every call site are removed     | P0       | Not Implemented |
 | FR-019 | `LogEntry` (formerly `pub use gwt_notification::Notification as LogEntry`) is redefined locally in `crates/gwt-tui/src/screens/logs.rs` as `{timestamp, level, target, message, fields}`  | P0       | Not Implemented |
 | FR-020 | `append_agent_launch_log_with` is deleted; `agent_launch.log` file is no longer written                                                                                                   | P1       | Not Implemented |

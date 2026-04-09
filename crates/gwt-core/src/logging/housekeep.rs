@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, NaiveDate};
+use chrono::{NaiveDate, Utc};
 
 use super::writer::LOG_FILE_BASENAME;
 
@@ -17,14 +17,14 @@ pub struct HousekeepReport {
     pub errors: Vec<(PathBuf, String)>,
 }
 
-/// Delete rotated log files older than `retention_days` relative to today
-/// (local date). Returns a `HousekeepReport` describing what was done.
+/// Delete rotated log files older than `retention_days` relative to today's
+/// UTC date. Returns a `HousekeepReport` describing what was done.
 ///
 /// `retention_days == 0` disables housekeeping entirely. The active file
 /// (`gwt.log`) and files whose date suffix cannot be parsed are left
 /// untouched.
 pub fn housekeep(log_dir: &Path, retention_days: u32) -> HousekeepReport {
-    housekeep_at(log_dir, retention_days, Local::now().date_naive())
+    housekeep_at(log_dir, retention_days, Utc::now().date_naive())
 }
 
 /// Deterministic version of `housekeep` that lets tests pin `today`.

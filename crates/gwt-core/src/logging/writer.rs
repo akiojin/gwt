@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
+use chrono::Utc;
 use tracing_appender::{
     non_blocking::{NonBlocking, WorkerGuard},
     rolling,
@@ -19,13 +19,13 @@ use tracing_appender::{
 pub const LOG_FILE_BASENAME: &str = "gwt.log";
 
 /// Return the path of today's active log file
-/// (`{log_dir}/gwt.log.YYYY-MM-DD`, local date).
+/// (`{log_dir}/gwt.log.YYYY-MM-DD`, UTC date).
 pub fn current_log_file(log_dir: &Path) -> PathBuf {
-    let today = Local::now().date_naive();
+    let today = Utc::now().date_naive();
     log_dir.join(format!("{LOG_FILE_BASENAME}.{today}"))
 }
 
-/// Return the path for the log file of a specific local date. Used by
+/// Return the path for the log file of a specific UTC date. Used by
 /// the file watcher when a date rollover is observed.
 pub fn log_file_for_date(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
     log_dir.join(format!("{LOG_FILE_BASENAME}.{date}"))
@@ -49,12 +49,10 @@ pub fn build(log_dir: &Path) -> std::io::Result<(NonBlocking, WorkerGuard)> {
     std::fs::create_dir_all(log_dir)?;
     tighten_log_dir_permissions(log_dir);
 
-    // `rolling::daily` uses the system timezone for boundary detection in
-    // recent `tracing-appender` versions; older versions use UTC. We accept
-    // the library's behaviour here and document the contract via
-    // `specs/SPEC-6/plan.md` Phase 5 — the acceptance test in
-    // `crates/gwt-core/tests/logging_init.rs` verifies end-to-end
-    // behaviour regardless of exact timezone.
+    // `tracing_appender 0.2.4` rotates `rolling::daily` files on UTC
+    // boundaries and names files with the UTC date. Keep the helper
+    // contract aligned with that behavior so tests, housekeeping, and
+    // the Logs watcher all point at the same file.
     let file_appender = rolling::daily(log_dir, LOG_FILE_BASENAME);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     Ok((non_blocking, guard))

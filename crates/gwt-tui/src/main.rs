@@ -10,7 +10,10 @@ use std::{
 };
 
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     Command,
@@ -29,6 +32,7 @@ use gwt_git::RepoType;
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
+    input_trace,
     message::Message,
     model::{ActiveLayer, Model},
 };
@@ -58,6 +62,14 @@ fn drain_pty_output_into_model(model: &mut Model) -> bool {
     for (session_id, data) in coalesce_pty_output_chunks(model.drain_pty_output()) {
         app::update(model, Message::PtyOutput(session_id, data));
         drained = true;
+    }
+    drained
+}
+
+fn drain_pty_output_and_request_render(model: &mut Model, needs_render: &mut bool) -> bool {
+    let drained = drain_pty_output_into_model(model);
+    if drained {
+        *needs_render = true;
     }
     drained
 }
@@ -111,24 +123,32 @@ fn dispatch_post_normalized_message(
     model: &mut Model,
     keybinds: &mut KeybindRegistry,
     msg: Message,
+    needs_render: &mut bool,
 ) {
     let msg = match msg {
         Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
             let terminal_focused = model.active_focus == gwt_tui::model::FocusPane::Terminal;
-            keybinds
-                .process_key_with_focus(key, terminal_focused)
-                .unwrap_or(Message::KeyInput(key))
+            let routed = keybinds.process_key_with_focus(key, terminal_focused);
+            input_trace::trace_keybind_decision(key, terminal_focused, routed.as_ref());
+            routed.unwrap_or(Message::KeyInput(key))
         }
         other => other,
     };
 
+    let was_tick = matches!(msg, Message::Tick);
     app::update(model, msg);
+    if was_tick {
+        *needs_render |= should_render_after_tick(model);
+    } else {
+        *needs_render = true;
+    }
 }
 
 fn handle_post_normalized_message<F>(
     model: &mut Model,
     keybinds: &mut KeybindRegistry,
     first: Message,
+    needs_render: &mut bool,
     pending_messages: &mut VecDeque<Message>,
     next_message: F,
 ) where
@@ -136,7 +156,7 @@ fn handle_post_normalized_message<F>(
 {
     let burst = drain_mouse_scroll_burst(first, pending_messages, next_message);
     for msg in burst {
-        dispatch_post_normalized_message(model, keybinds, msg);
+        dispatch_post_normalized_message(model, keybinds, msg, needs_render);
         if model.quit {
             break;
         }
@@ -199,6 +219,10 @@ fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
     PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
 }
 
+fn should_render_after_tick(model: &Model) -> bool {
+    app::tick_redraw_required(model)
+}
+
 fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
     execute!(
         writer,
@@ -206,16 +230,37 @@ fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
         DisableAlternateScrollMode,
         EnableMouseCapture,
         EnableBracketedPaste,
-    )
+    )?;
+    enable_keyboard_enhancements(writer);
+    Ok(())
 }
 
 fn leave_terminal(writer: &mut impl io::Write) -> io::Result<()> {
+    disable_keyboard_enhancements(writer);
     execute!(
         writer,
         LeaveAlternateScreen,
         DisableMouseCapture,
         DisableBracketedPaste,
     )
+}
+
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+}
+
+fn enable_keyboard_enhancements(writer: &mut impl io::Write) {
+    // Fail-open: keep startup working even when the host terminal ignores or rejects kitty flags.
+    let _ = execute!(
+        writer,
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+    );
+}
+
+fn disable_keyboard_enhancements(writer: &mut impl io::Write) {
+    // Fail-open: shutdown should restore the terminal even if keyboard enhancement pop fails.
+    let _ = execute!(writer, PopKeyboardEnhancementFlags);
 }
 
 #[cfg(test)]
@@ -233,12 +278,18 @@ fn terminal_enter_commands_ansi() -> String {
     EnableBracketedPaste
         .write_ansi(&mut ansi)
         .expect("enable bracketed paste ansi");
+    PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+        .write_ansi(&mut ansi)
+        .expect("enable keyboard enhancement ansi");
     ansi
 }
 
 #[cfg(test)]
 fn terminal_leave_commands_ansi() -> String {
     let mut ansi = String::new();
+    PopKeyboardEnhancementFlags
+        .write_ansi(&mut ansi)
+        .expect("disable keyboard enhancement ansi");
     LeaveAlternateScreen
         .write_ansi(&mut ansi)
         .expect("leave alternate screen ansi");
@@ -486,15 +537,19 @@ fn run_app(
     let mut keybinds = KeybindRegistry::new();
     let mut input_normalizer = event::InputNormalizer::default();
     let mut pending_messages = VecDeque::new();
+    let mut needs_render = true;
+    let mut last_draw_at = None;
 
     loop {
-        drain_pty_output_into_model(&mut model);
+        drain_pty_output_and_request_render(&mut model, &mut needs_render);
 
-        // View: render
-        terminal.draw(|frame| {
-            app::view(&model, frame);
-        })?;
-        let last_draw_at = Instant::now();
+        if needs_render {
+            terminal.draw(|frame| {
+                app::view(&model, frame);
+            })?;
+            needs_render = false;
+            last_draw_at = Some(Instant::now());
+        }
 
         // Check quit
         if model.quit {
@@ -509,19 +564,20 @@ fn run_app(
                     &mut model,
                     &mut keybinds,
                     msg,
+                    &mut needs_render,
                     &mut pending_messages,
                     || input_normalizer.pop_pending(std::time::Instant::now()),
                 );
                 break;
             }
 
-            let had_pty_output = drain_pty_output_into_model(&mut model);
+            let had_pty_output = drain_pty_output_and_request_render(&mut model, &mut needs_render);
 
             let Some(msg) = next_message_for_loop_iteration(
                 &mut pending_messages,
                 deadline,
                 had_pty_output,
-                Some(last_draw_at),
+                last_draw_at,
                 event::poll_event_slice,
             ) else {
                 if had_pty_output {
@@ -542,6 +598,7 @@ fn run_app(
                 &mut model,
                 &mut keybinds,
                 msg,
+                &mut needs_render,
                 &mut pending_messages,
                 || {
                     poll_immediate_message_for_scroll_burst(
@@ -617,7 +674,9 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use gwt_tui::app;
+    use gwt_tui::message::Message;
     use gwt_tui::model::{FocusPane, ManagementTab, SessionLayout};
+    use gwt_tui::screens::docker_progress::{DockerProgressMessage, DockerStage};
 
     fn scroll_message(kind: MouseEventKind) -> Message {
         Message::MouseInput(MouseEvent {
@@ -802,6 +861,41 @@ mod tests {
     }
 
     #[test]
+    fn drain_pty_output_and_request_render_marks_dirty_after_output() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        let mut needs_render = false;
+
+        app::spawn_pty_for_session(
+            &mut model,
+            "shell-0",
+            gwt_terminal::pty::SpawnConfig {
+                command: "/bin/echo".to_string(),
+                args: vec!["ready".to_string()],
+                cols: 80,
+                rows: 24,
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+        )
+        .expect("spawn echo pty");
+
+        let mut drained = false;
+        for _ in 0..20 {
+            if drain_pty_output_and_request_render(&mut model, &mut needs_render) {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(drained, "pty output should eventually be drained");
+        assert!(
+            needs_render,
+            "draining PTY output must request a redraw so committed text appears immediately"
+        );
+    }
+
+    #[test]
     fn terminal_enter_commands_enable_bracketed_paste() {
         let ansi = terminal_enter_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004h"));
@@ -943,6 +1037,7 @@ mod tests {
         model.management_tab = ManagementTab::Settings;
         model.active_focus = FocusPane::TabContent;
         let mut keybinds = KeybindRegistry::new();
+        let mut needs_render = false;
 
         dispatch_post_normalized_message(
             &mut model,
@@ -951,6 +1046,7 @@ mod tests {
                 KeyCode::Char('g'),
                 KeyModifiers::CONTROL,
             )),
+            &mut needs_render,
         );
         dispatch_post_normalized_message(
             &mut model,
@@ -959,6 +1055,7 @@ mod tests {
                 KeyCode::Tab,
                 KeyModifiers::NONE,
             )),
+            &mut needs_render,
         );
 
         assert_eq!(
@@ -966,6 +1063,7 @@ mod tests {
             FocusPane::Terminal,
             "pending normalized keys should still use the keybind dispatch path"
         );
+        assert!(needs_render, "key dispatch should request a redraw");
     }
 
     #[test]
@@ -981,5 +1079,73 @@ mod tests {
     fn terminal_leave_commands_disable_bracketed_paste() {
         let ansi = terminal_leave_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004l"));
+    }
+
+    #[test]
+    fn terminal_enter_commands_enable_keyboard_enhancement_flags() {
+        let ansi = terminal_enter_commands_ansi();
+        let mut expected = String::new();
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+            .write_ansi(&mut expected)
+            .expect("keyboard enhancement push ansi");
+        assert!(ansi.contains(expected.as_str()));
+    }
+
+    #[test]
+    fn terminal_leave_commands_pop_keyboard_enhancement_flags() {
+        let ansi = terminal_leave_commands_ansi();
+        let mut expected = String::new();
+        PopKeyboardEnhancementFlags
+            .write_ansi(&mut expected)
+            .expect("keyboard enhancement pop ansi");
+        assert!(ansi.contains(expected.as_str()));
+    }
+
+    #[test]
+    fn should_render_after_tick_skips_idle_terminal_focus() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            !should_render_after_tick(&model),
+            "idle terminal ticks should not repaint the TUI"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_keeps_non_terminal_focus_redrawing() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            should_render_after_tick(&model),
+            "management-focused ticks should keep rendering"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_keeps_visible_docker_overlay_redrawing() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        app::update(
+            &mut model,
+            Message::DockerProgress(DockerProgressMessage::SetStage {
+                stage: DockerStage::BuildingImage,
+                message: "Building image".to_string(),
+            }),
+        );
+        app::update(&mut model, Message::Tick);
+
+        assert!(
+            should_render_after_tick(&model),
+            "visible overlays that depend on tick-driven updates should still redraw"
+        );
     }
 }

@@ -46,6 +46,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 use crate::{
     custom_agents::load_custom_agents,
     input::voice::VoiceInputMessage,
+    input_trace,
     message::Message,
     model::{
         ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
@@ -1674,6 +1675,26 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
     }
 }
 
+/// Whether a periodic `Tick` still needs a terminal redraw after state updates.
+///
+/// This keeps non-terminal surfaces animated while allowing terminal-focused
+/// IME composition to proceed without idle repaints.
+pub fn tick_redraw_required(model: &Model) -> bool {
+    if model.active_focus != FocusPane::Terminal {
+        return true;
+    }
+
+    model
+        .wizard
+        .as_ref()
+        .is_some_and(|wizard| wizard.ai_suggest.loading)
+        || model
+            .docker_progress
+            .as_ref()
+            .is_some_and(|progress| progress.visible)
+        || model.voice.is_active()
+}
+
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
     if model.help_visible {
         if key.code == KeyCode::Esc {
@@ -2450,7 +2471,13 @@ fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEv
     let Some(bytes) = key_event_to_bytes(key) else {
         return;
     };
-    push_input_to_active_session(model, bytes);
+    let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
+        return;
+    };
+    input_trace::trace_pty_forward(key, &session_id, &bytes);
+    model
+        .pending_pty_inputs
+        .push_back(crate::model::PendingPtyInput { session_id, bytes });
 }
 
 fn reset_active_session_scrollback_for_input(model: &mut Model) {
@@ -6121,6 +6148,7 @@ mod tests {
     use tempfile::TempDir;
 
     static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static INPUT_TRACE_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
@@ -13345,8 +13373,6 @@ CUSTOM_ENV = "enabled"
                 binding.description
             );
         }
-
-        assert!(!text.contains("Ctrl+G, y"));
     }
 
     #[test]
@@ -14246,6 +14272,41 @@ CUSTOM_ENV = "enabled"
         );
 
         assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn update_key_input_terminal_tab_still_forwards_to_pty() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        forward_key_to_active_session(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+
+        let forwarded = model.pending_pty_inputs().back().unwrap();
+        assert_eq!(forwarded.session_id, "shell-0");
+        assert_eq!(forwarded.bytes, b"\t".to_vec());
+    }
+
+    #[test]
+    fn forward_key_to_active_session_appends_opt_in_trace_record() {
+        let _guard = INPUT_TRACE_ENV_TEST_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input-trace.jsonl");
+        let previous = std::env::var_os(crate::input_trace::INPUT_TRACE_PATH_ENV);
+        std::env::set_var(crate::input_trace::INPUT_TRACE_PATH_ENV, &path);
+
+        let mut model = test_model();
+        forward_key_to_active_session(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        match previous {
+            Some(value) => std::env::set_var(crate::input_trace::INPUT_TRACE_PATH_ENV, value),
+            None => std::env::remove_var(crate::input_trace::INPUT_TRACE_PATH_ENV),
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read trace file");
+        assert!(text.contains("\"stage\":\"pty_forward\""));
+        assert!(text.contains("\"session_id\":\"shell-0\""));
+        assert!(text.contains("\"bytes_hex\":\"0d\""));
     }
 
     #[test]

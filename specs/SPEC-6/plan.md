@@ -128,7 +128,7 @@ Key invariant: **the file is the single source of truth**. The Logs tab does not
 | Notification model     | **Abolished**. `gwt-notification` crate deleted                      | The only remaining coordinates are tracing events + LogEntry (file-derived)   |
 | Warn/Error UI          | dedicated `Layer` forwards to UI channel                             | Preserves existing UX without keeping `Notification` alive                     |
 | File watching          | `notify` crate (event-driven)                                        | Latency < 500 ms; no polling cost                                              |
-| Initial read           | Today's full file from local midnight                                | Matches rotation boundary; bounded read cost                                   |
+| Initial read           | Current UTC day's full file                                          | Matches appender rotation boundary; bounded read cost                          |
 | Redaction              | **None**                                                             | User's directory, user's responsibility. Combined with restrictive 0700/0600 file perms (revised after reviewer comment B7) |
 | tracing depth          | Subscriber init + `#[instrument]` on major user actions              | Span context is a big uplift for post-mortem debug                             |
 | Multi-instance         | Trust POSIX `O_APPEND`, single file                                  | Realistically rare; line-buffered JSONL is robust to interleaving              |
@@ -137,7 +137,7 @@ Key invariant: **the file is the single source of truth**. The Logs tab does not
 | `agent_launch.log`     | Collapsed into `gwt.log` via `target: "gwt_tui::agent::launch"`      | One file to search                                                             |
 | Default level          | `info` for all crates                                                | Balanced default; `RUST_LOG` escape hatch                                      |
 | File permissions       | Restrictive on Unix (dir `0700`, file `0600`); Windows ACL default | Reviewer comment B7 — combined with no-redaction, the previous `0644` default exposed tokens to other local users on shared hosts. Tightened in `crates/gwt-core/src/logging/writer.rs::tighten_log_dir_permissions`. |
-| Rotation boundary      | Local midnight                                                       | Matches "yesterday" mental model                                               |
+| Rotation boundary      | UTC midnight                                                         | Matches `tracing_appender 0.2.4` file naming and watcher behavior              |
 | UI channel             | `tokio::sync::mpsc::unbounded_channel`                               | tracing must never block background threads                                    |
 | Removal plan           | Single PR, no staged deprecation                                     | Avoid a transient mixed-world                                                  |
 
@@ -176,7 +176,7 @@ Key invariant: **the file is the single source of truth**. The Logs tab does not
    6. First green: `cargo build -p gwt-tui` succeeds.
 2. **Step 2 — Logs tab file backing:**
    1. New `logs_watcher` task with a tempdir E2E test that emits a `tracing::info!` and asserts the `LogsState` observes the entry within 500 ms.
-   2. Initial read of today's file from local midnight.
+   2. Initial read of today's file for the current UTC day.
    3. Implement `r` refresh.
 3. **Step 3 — UI forwarder + Settings level selector:**
    1. Tempdir E2E: emit `tracing::error!`, observe that the error modal queue receives the event.
