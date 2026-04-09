@@ -1825,6 +1825,10 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     let msg = match key.code {
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
+        KeyCode::Char(' ') => {
+            toggle_cleanup_selection_for_selected_branch(model);
+            return;
+        }
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 && model.branches.detail_section != 3
@@ -1909,6 +1913,26 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     }
 }
 
+fn toggle_cleanup_selection_for_selected_branch(model: &mut Model) {
+    let Some(name) = model
+        .branches
+        .selected_branch()
+        .map(|branch| branch.name.clone())
+    else {
+        return;
+    };
+    match model.branches.toggle_cleanup_selection(&name) {
+        screens::branches::CleanupSelectionToggle::Selected
+        | screens::branches::CleanupSelectionToggle::Deselected => {}
+        screens::branches::CleanupSelectionToggle::Blocked(reason) => {
+            apply_notification(
+                model,
+                Notification::new(Severity::Info, "cleanup", reason.toast_message()),
+            );
+        }
+    }
+}
+
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
@@ -1961,22 +1985,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 // short-lived Info toast that explains why cleanup selection
                 // is not currently allowed.
                 KeyCode::Char(' ') => {
-                    if let Some(name) = model.branches.selected_branch().map(|b| b.name.clone()) {
-                        match model.branches.toggle_cleanup_selection(&name) {
-                            screens::branches::CleanupSelectionToggle::Selected
-                            | screens::branches::CleanupSelectionToggle::Deselected => {}
-                            screens::branches::CleanupSelectionToggle::Blocked(reason) => {
-                                apply_notification(
-                                    model,
-                                    Notification::new(
-                                        Severity::Info,
-                                        "cleanup",
-                                        reason.toast_message(),
-                                    ),
-                                );
-                            }
-                        }
-                    }
+                    toggle_cleanup_selection_for_selected_branch(model);
                     return;
                 }
                 // Shift+C: open the Cleanup Confirm modal (FR-018e).
@@ -6061,9 +6070,11 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
             })
             .unwrap_or("");
         return match model.branches.detail_section {
-            0 => format!("←→ sec  ↵ act{direct_action_hints}{docker_hints}  mvf?  C-g↔P  Esc←"),
-            3 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  C-g↔P  Esc←".to_string(),
-            _ => format!("←→ sec  ↵ act{direct_action_hints}  mvf?  C-g↔P  Esc←"),
+            0 => format!(
+                "←→ sec  ↵ act{direct_action_hints}{docker_hints}  Sp sel  mvf?  C-g↔P  Esc←"
+            ),
+            3 => "↑↓ ses  ←→ sec  ↵ focus  Sp sel  mvf?  C-g↔P  Esc←".to_string(),
+            _ => format!("←→ sec  ↵ act{direct_action_hints}  Sp sel  mvf?  C-g↔P  Esc←"),
         };
     }
     match model.branches.detail_section {
@@ -6081,14 +6092,14 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
                 })
                 .unwrap_or("");
             format!(
-                "←→:section  Enter:launch{direct_action_hints}{docker_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+                "←→:section  Enter:launch{direct_action_hints}{docker_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
             )
         }
         3 => format!(
-            "↑↓:session  ←→:section  Enter:focus{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+            "↑↓:session  ←→:section  Enter:focus  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
         _ => format!(
-            "←→:section  Enter:launch{direct_action_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+            "←→:section  Enter:launch{direct_action_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
     }
 }
@@ -14075,6 +14086,7 @@ CUSTOM_ENV = "enabled"
         }];
 
         let rendered = render_model_text(&model, 220, 24);
+        assert!(rendered.contains("Space:select"));
         assert!(rendered.contains("m:view"));
         assert!(rendered.contains("v:git"));
         assert!(rendered.contains("f:search"));
@@ -14129,6 +14141,42 @@ CUSTOM_ENV = "enabled"
             model.current_notification_ttl,
             Some(std::time::Duration::from_secs(5))
         );
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_space_on_unmerged_branch_keeps_detail_focus_and_shows_info_toast()
+    {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-not-merged")),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
+        assert!(!model.branches.is_cleanup_selected("feature/not-merged"));
+        let notification = model
+            .current_notification
+            .as_ref()
+            .expect("cleanup selection info toast from detail");
+        assert_eq!(notification.severity, Severity::Info);
+        assert_eq!(notification.source, "cleanup");
+        assert_eq!(notification.message, "Cannot select: not merged");
     }
 
     #[test]
