@@ -2244,6 +2244,7 @@ mod tests {
                 state: "open".to_string(),
                 labels: vec!["bug".to_string(), "auth".to_string()],
                 body: "Login fails on Safari".to_string(),
+                linked_branches: vec![],
             },
             crate::screens::issues::IssueItem {
                 number: 1776,
@@ -2251,6 +2252,7 @@ mod tests {
                 state: "closed".to_string(),
                 labels: vec!["ux".to_string()],
                 body: "Wizard should link branches to issues".to_string(),
+                linked_branches: vec![],
             },
         ]
     }
