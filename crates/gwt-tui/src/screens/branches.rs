@@ -496,6 +496,21 @@ impl BranchesState {
             && !self.detail_cache.contains_key(&branch_name)
     }
 
+    /// Select a branch row by its visible index in `filtered_branches()`.
+    ///
+    /// Returns `true` when the index was valid and the selection changed or
+    /// was reaffirmed. The visible detail payload is synchronized from cache
+    /// so mouse-driven selection stays consistent with keyboard routing.
+    pub(crate) fn select_filtered_index(&mut self, index: usize) -> bool {
+        if index >= self.filtered_branches().len() {
+            return false;
+        }
+        self.selected = index;
+        self.detail_session_selected = 0;
+        self.sync_selected_detail_from_cache(true);
+        true
+    }
+
     pub(crate) fn knows_branch(&self, branch_name: &str) -> bool {
         self.branches
             .iter()
