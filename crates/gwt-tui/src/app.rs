@@ -3913,7 +3913,13 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
 
     let main_repo_path =
         gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = existing_worktree_for_branch(&main_repo_path, &branch_name)? {
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let worktrees = manager.list().map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
+        .map(|worktree| worktree.path.clone())
+    {
         config.working_dir = Some(existing_worktree.clone());
         config.env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
@@ -3928,7 +3934,6 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
 
     manager
         .fetch_origin()
@@ -3959,7 +3964,20 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
             .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
     }
 
-    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let preferred_worktree_path =
+        gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
+        .ok_or_else(|| {
+            format!("failed to resolve available worktree path for branch {branch_name}")
+        })?;
+    if worktree_path != preferred_worktree_path {
+        tracing::warn!(
+            branch = branch_name,
+            preferred = %preferred_worktree_path.display(),
+            selected = %worktree_path.display(),
+            "preferred worktree path is occupied; using suffixed fallback"
+        );
+    }
     if local_branch_exists(&main_repo_path, &branch_name)? {
         manager
             .create(&branch_name, &worktree_path)
@@ -3978,6 +3996,48 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
     Ok(())
 }
 
+fn first_available_worktree_path(
+    preferred_path: &Path,
+    worktrees: &[gwt_git::WorktreeInfo],
+) -> Option<PathBuf> {
+    if !worktree_path_is_occupied(preferred_path, worktrees) && !preferred_path.exists() {
+        return Some(preferred_path.to_path_buf());
+    }
+
+    for suffix in 2usize.. {
+        let candidate = suffixed_worktree_path(preferred_path, suffix)?;
+        if !worktree_path_is_occupied(&candidate, worktrees) && !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(format!("{file_name}-{suffix}"));
+    Some(candidate)
+}
+
+fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
+    worktrees
+        .iter()
+        .any(|worktree| same_worktree_path(&worktree.path, path))
+}
+
+fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
@@ -3986,22 +4046,6 @@ fn origin_remote_ref(branch_name: &str) -> String {
     } else {
         format!("origin/{branch_name}")
     }
-}
-
-fn existing_worktree_for_branch(
-    repo_path: &Path,
-    branch_name: &str,
-) -> Result<Option<PathBuf>, String> {
-    let manager = gwt_git::WorktreeManager::new(repo_path);
-    manager
-        .list()
-        .map_err(|err| err.to_string())
-        .map(|worktrees| {
-            worktrees
-                .into_iter()
-                .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
-                .map(|worktree| worktree.path)
-        })
 }
 
 fn current_git_branch(repo_path: &Path) -> Result<String, String> {
@@ -12465,6 +12509,76 @@ CUSTOM_ENV = "enabled"
         let persisted = AgentSession::load(&session_entry).expect("load persisted session");
         assert_eq!(persisted.branch, "feature/test");
         assert_eq!(persisted.worktree_path, stale_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_occupied_preferred_worktree_path_uses_suffixed_fallback() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        git_checkout_branch_or_create(&repo_path, "main");
+        git_push_branch(&repo_path, "main");
+        git_checkout_branch_or_create(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
+        git_checkout_branch_or_create(&repo_path, "main");
+
+        let occupied_path = workspace_dir.path().join("develop");
+        let occupied_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "dependabot/npm_and_yarn/test",
+                occupied_path.to_str().expect("occupied worktree path"),
+                "develop",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add occupied path");
+        assert!(
+            occupied_output.status.success(),
+            "git worktree add occupied path failed: {}",
+            String::from_utf8_lossy(&occupied_output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "develop".to_string(),
+            worktree_path: Some(repo_path.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(repo_path);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch with occupied preferred path");
+
+        let expected_worktree = workspace_dir.path().join("develop-2");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize fallback worktree");
+        assert!(
+            expected_worktree.exists(),
+            "launch should create a suffixed fallback path when the canonical branch path is occupied by another worktree"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "develop");
+        assert_eq!(persisted.worktree_path, expected_worktree);
     }
 
     #[test]
