@@ -28,7 +28,7 @@ fn main() -> std::io::Result<()> {
     ];
     let gwt_tui = candidates
         .iter()
-        .map(|p| std::path::PathBuf::from(p))
+        .map(std::path::PathBuf::from)
         .find(|p| p.exists())
         .and_then(|p| p.canonicalize().ok())
         .expect(

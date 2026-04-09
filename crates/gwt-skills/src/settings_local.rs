@@ -267,7 +267,30 @@ fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
         || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell())
         || contains_legacy_node_bash_blockers(hooks)
         || contains_inline_shell_runtime_hook(hooks)
-        || contains_pathless_gwt_hook_command(hooks))
+        || contains_pathless_gwt_hook_command(hooks)
+        || contains_stale_binary_path(hooks))
+}
+
+/// SPEC #1942 amendment: detect tracked hook files where the embedded
+/// binary path does not match the current `gwt_hook_bin_path()`. This
+/// catches the case where a previous regeneration ran from a different
+/// binary (e.g. the `regenerate_hook_settings` example, a dev build
+/// that has since been replaced, or a bun upgrade on Linux).
+fn contains_stale_binary_path(existing: Option<&Value>) -> bool {
+    let current = gwt_hook_bin_path();
+    let quoted = posix_shell_quote(&current);
+    any_managed_command(existing, |command| {
+        // Only check commands that look like our managed hook form.
+        if !MANAGED_HOOK_SUBCMD_SUFFIXES
+            .iter()
+            .any(|s| command.contains(s))
+        {
+            return false;
+        }
+        // The command IS a managed hook, but does it embed the
+        // current binary? If not, it's stale and needs migration.
+        !command.contains(&quoted)
+    })
 }
 
 /// SPEC #1942 amendment: detect tracked hook files that still dispatch
