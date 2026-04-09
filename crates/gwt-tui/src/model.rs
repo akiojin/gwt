@@ -1950,7 +1950,9 @@ impl Model {
                     .join(".gwt")
                     .join("cache")
                     .join("issues");
-                crate::screens::specs::SpecsState::new(cache_root)
+                let mut specs = crate::screens::specs::SpecsState::new(cache_root);
+                specs.reload_from_cache();
+                specs
             },
             wizard: None,
             docker_progress: None,
