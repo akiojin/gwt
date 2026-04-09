@@ -125,11 +125,12 @@ shell output are not delayed until the next keypress.
   gwt bootstraps `~/.gwt/runtime/chroma-venv` automatically, then reuses that managed runtime.
   On Windows, make sure either `python` or `py -3` works in Command Prompt or PowerShell.
 - Vector index data (SPECs / Issues / source files) is stored under `~/.gwt/index/<repo-hash>/`.
-  Issues are repo-scoped and shared across worktrees; SPECs and source files are worktree-scoped.
+  Issues and SPECs are repo-scoped and shared across worktrees; source files are worktree-scoped.
   The TUI runs a per-Worktree filesystem watcher and refreshes the Issue index asynchronously
   (15-minute TTL) at startup. The first search after a fresh install downloads the
-  `intfloat/multilingual-e5-base` embedding model (~440 MB) into `~/.cache/huggingface/`. See
-  [SPEC-10](specs/SPEC-10/spec.md) for the full lifecycle.
+  `intfloat/multilingual-e5-base` embedding model (~440 MB) into `~/.cache/huggingface/`.
+  SPECs live as GitHub Issues labeled `gwt-spec` and are cached locally at
+  `~/.gwt/cache/issues/`; use `gwt issue spec <n>` to read and `gwt issue spec <n> --edit <section> -f <file>` to write.
 
 ### GitHub Token (PAT) requirements
 
@@ -207,8 +208,8 @@ cargo fmt
 ├── Cargo.toml          # Workspace configuration
 ├── crates/
 │   ├── gwt-core/       # Core library (Git operations, PTY management, config)
-│   └── gwt-tui/        # ratatui TUI frontend
-├── specs/              # Local SPEC management (SPEC-{N}/)
+│   ├── gwt-github/     # GitHub Issue SOT for SPEC management (SPEC-12)
+│   └── gwt-tui/        # ratatui TUI frontend + CLI dispatch (`gwt issue spec ...`)
 └── package.json        # Development scripts
 ```
 

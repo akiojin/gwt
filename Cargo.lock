@@ -783,6 +783,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwt-github"
+version = "8.17.2"
+dependencies = [
+ "fs2",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gwt-skills"
 version = "8.17.2"
 dependencies = [
@@ -818,6 +832,7 @@ dependencies = [
  "base64",
  "chrono",
  "crossterm",
+ "dirs",
  "gwt-agent",
  "gwt-ai",
  "gwt-clipboard",
@@ -825,6 +840,7 @@ dependencies = [
  "gwt-core",
  "gwt-docker",
  "gwt-git",
+ "gwt-github",
  "gwt-skills",
  "gwt-terminal",
  "gwt-voice",
@@ -832,9 +848,11 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
  "tracing",

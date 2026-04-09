@@ -488,6 +488,10 @@ mod tests {
             .collect();
         assert!(dirs.contains(&"gwt-pr"), "missing gwt-pr skill dir");
         assert!(
+            dirs.contains(&"gwt-spec-brainstorm"),
+            "missing gwt-spec-brainstorm skill dir"
+        );
+        assert!(
             dirs.contains(&"gwt-spec-design"),
             "missing gwt-spec-design skill dir"
         );
@@ -553,26 +557,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn spec_9_uses_unified_gwt_agent_contract() {
-        let spec = include_str!("../../../specs/SPEC-9/spec.md");
-        assert!(
-            spec.contains("Agent pane management: gwt-agent"),
-            "expected unified gwt-agent contract in SPEC-9"
-        );
-
-        for legacy in [
-            "gwt-agent-discover",
-            "gwt-agent-read",
-            "gwt-agent-send",
-            "gwt-agent-lifecycle",
-        ] {
-            assert!(
-                !spec.contains(legacy),
-                "unexpected legacy split agent contract {legacy} in SPEC-9"
-            );
-        }
-    }
+    // SPEC-12 migration: the legacy `spec_9_uses_unified_gwt_agent_contract`
+    // test referenced `specs/SPEC-9/spec.md` via `include_str!`. That file was
+    // deleted when SPEC-9 migrated to GitHub Issue #1927 (then split into
+    // #1932 BUILD / #1935 DESIGN-SKILLS / #1936 DOCKER / #1939 SEARCH). The
+    // "unified gwt-agent contract" invariant it asserted is now enforced by
+    // the actual skill filesystem layout, not by a static SPEC markdown file,
+    // and is covered by `repo_does_not_keep_unmanaged_local_search_assets`
+    // below plus the runtime distribution sweeps in `distribute.rs`.
 
     #[test]
     fn repo_does_not_keep_unmanaged_local_search_assets() {

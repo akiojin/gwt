@@ -43,8 +43,12 @@
   design decisions. Link Issues to their parent SPEC when applicable.
 - **No duplicate scope:** Before creating a SPEC, search existing SPECs (`gwt-spec-search`)
   and Issues (`gwt-issue-search`). Reuse an existing owner when one clearly fits.
-- **SPEC categories:** CORE-TUI, AGENT, GIT, DOCKER, GITHUB, CONFIG, ASSISTANT, SEARCH,
-  BUILD, NOTIFICATION, VOICE, DESIGN. Each SPEC belongs to exactly one category.
+- **SPEC categories:** CORE-TUI, CORE-CLI, AGENT, GIT, DOCKER, GITHUB, CONFIG, ASSISTANT,
+  SEARCH, BUILD, NOTIFICATION, VOICE, DESIGN. Each SPEC belongs to exactly one category.
+  CORE-TUI covers the ratatui interactive surface of the `gwt` binary when invoked with no
+  arguments. CORE-CLI covers the argv-dispatched subcommand surface of the same binary
+  (e.g. `gwt issue spec ...`, `gwt hook ...`). Both are peer interface layers on top of the
+  shared gwt-core / gwt-github / gwt-skills logic crates.
 
 ### 7. File Size Rule
 

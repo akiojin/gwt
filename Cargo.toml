@@ -8,6 +8,7 @@ members = [
     "crates/gwt-core",
     "crates/gwt-docker",
     "crates/gwt-git",
+    "crates/gwt-github",
     "crates/gwt-skills",
     "crates/gwt-terminal",
     "crates/gwt-tui",
@@ -33,6 +34,7 @@ gwt-config = { path = "crates/gwt-config" }
 gwt-core = { path = "crates/gwt-core" }
 gwt-docker = { path = "crates/gwt-docker" }
 gwt-git = { path = "crates/gwt-git" }
+gwt-github = { path = "crates/gwt-github" }
 gwt-skills = { path = "crates/gwt-skills" }
 gwt-terminal = { path = "crates/gwt-terminal" }
 gwt-voice = { path = "crates/gwt-voice" }
@@ -126,6 +128,9 @@ ignore = "0.4"
 
 # Hex encoding for hash values
 hex = "0.4"
+
+# Regex (used by gwt-github section parser)
+regex = "1"
 
 [profile.release]
 lto = true

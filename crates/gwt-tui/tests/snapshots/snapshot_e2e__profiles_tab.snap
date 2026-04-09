@@ -1,8 +1,9 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 329
 expression: output
 ---
-┌...│ PRs │ Profiles │ Git View │...───┐┌ › Shell ─────────────────────────────┐
+┌...│ Specs │ Profiles │ Git View │...─┐┌ › Shell ─────────────────────────────┐
 │Profiles                              ││Session: Shell (80x24)                │
 │No profiles. Press 'c' to create one. ││                                      │
 │                                      ││                                      │

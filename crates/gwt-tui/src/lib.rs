@@ -4,6 +4,7 @@
 //! Built with ratatui + crossterm.
 
 pub mod app;
+pub mod cli;
 pub(crate) mod custom_agents;
 pub mod event;
 pub mod ime_probe;

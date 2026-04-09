@@ -10,6 +10,15 @@
 - **Subagent Strategy:** 独立した調査、分析、実装、テスト整備はサブエージェントに分割し、メインのコンテキストを不要な詳細で汚さない。担当範囲、完了条件、検証観点を明示して責務を重複させない。
 - **Demand Elegance:** 非自明な変更では、力技で実装する前に 2〜3 のアプローチを比較し、もっともシンプルで保守しやすい案を選ぶ。単純な修正では過剰設計しない。
 - **Autonomous Bug Fixing:** バグ対応では、まず再現手順、ログ、失敗テスト、関連コードを自律的に調査し、原因特定、修正、再発防止確認まで進める。不可逆な仕様判断やプロダクト判断だけをユーザーに確認する。
+- **Investigation-First Discussion:** 実装中に以下のシグナルを検知した場合、実装を一時停止して調査と議論に入る:
+  - generator やテンプレートを変更したが、生成される実ファイル（settings.local.json 等）を実際に確認していない
+  - SPEC の acceptance scenario と実装の実際の挙動が一致しない
+  - 実装が tasks.md に記載されていないファイルに触れようとしている
+  - テストが通ったが、手動で検証すると期待と異なる結果になる
+  - migration / 互換性パスの条件分岐が新形式を網羅していない
+  - 変更の下流影響（何が壊れるか）、上流前提（何が先に必要か）、同時変更境界（何を一緒に変えないと中間状態で壊れるか）を分析していない
+
+  調査手順: コードを読む → 依存関係を洗い出す → 実行して試す → 結果をユーザーに提示 → 判断を仰ぐ。「進めて」と言われるまでは議論を続ける。明示的に壁打ちモードに入りたい場合は `gwt-spec-brainstorm` を使用する。
 
 ## 開発指針
 
@@ -47,7 +56,7 @@
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
 - **完了報告前のセルフチェックリスト（必須）:**
-  - [ ] 対象の SPEC（`specs/SPEC-{N}/`）が最新状態に更新されているか
+  - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
@@ -173,7 +182,7 @@
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
-- 仕様・要件は `specs/SPEC-{N}/` のローカルファイルに記載する。`metadata.json` の status で管理
+- 仕様・要件は **GitHub Issue (`gwt-spec` ラベル)** に記載する。読み書きは `gwt issue spec <n>` CLI 経由、ローカルキャッシュは `~/.gwt/cache/issues/`
 
 ### README.md / README.ja.md に必ず記載する内容
 
@@ -182,7 +191,7 @@
 - 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`cargo test` など）
 - 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
 - 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
-- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{N}/` ディレクトリへの参照）
+- 変更が設計判断を必要とする場合の案内: 重要仕様の所在 (GitHub Issue `gwt-spec` ラベル、`gwt issue spec <n>` でアクセス)
 - `CLAUDE.md` の運用ルールや内部実装ガイドは README に入れない
 - 英語版/日本語版の内容は同等レベルを保つ（順序・見出しは対応させる）
 
@@ -229,11 +238,16 @@
 ├── Cargo.toml          # ワークスペース設定
 ├── crates/
 │   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
-│   └── gwt-tui/        # ratatui TUI フロントエンド
-├── specs/              # ローカル SPEC 管理（SPEC-{N}/）
-│   └── SPEC-*/         # 各 SPEC のアーティファクト（spec.md, plan.md, tasks.md 等）
+│   ├── gwt-github/     # GitHub Issue SOT for SPEC 管理 (SPEC-12)
+│   └── gwt-tui/        # ratatui TUI フロントエンド + CLI (`gwt issue spec ...`)
 └── package.json        # 開発用スクリプト
 ```
+
+**SPEC 管理**: SPEC は `gwt-spec` ラベル付き GitHub Issue として格納される (#1930 SPEC-12 参照)。
+読み取りは `gwt issue spec <n> [--section <name>]`、書き込みは
+`gwt issue spec <n> --edit <section> -f <file>`、一覧は `gwt issue spec list`。
+ローカルキャッシュは `~/.gwt/cache/issues/` で UI レイヤーの唯一の真実
+(一方向フロー: GitHub API → cache → UI、SPEC-12 FR-022)。
 
 <!-- BEGIN gwt managed skills -->
 ## Available Skills & Commands (gwt)

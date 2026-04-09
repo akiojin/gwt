@@ -195,15 +195,6 @@ impl CleanupRunState {
     }
 }
 
-/// A SPEC entry loaded from a branch worktree.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DetailSpecItem {
-    pub id: String,
-    pub title: String,
-    pub phase: String,
-    pub status: String,
-}
-
 /// A lightweight summary of an active session associated with the selected branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailSessionSummary {
@@ -244,7 +235,6 @@ pub struct PendingDockerAction {
 /// Cached detail payload for a branch.
 #[derive(Debug, Clone, Default)]
 pub struct BranchDetailData {
-    pub specs: Vec<DetailSpecItem>,
     pub files: Vec<String>,
     pub commits: Vec<String>,
     pub docker_containers: Vec<gwt_docker::ContainerInfo>,
@@ -259,11 +249,14 @@ pub struct BranchDetailLoadResult {
 }
 
 /// Number of detail sections in the branch detail view.
-const DETAIL_SECTION_COUNT: usize = 4;
+///
+/// SPEC-12 Phase 9: the old `SPECs` section was removed now that SPECs live
+/// as GitHub Issues (Specs tab) rather than worktree-local files. Branch
+/// Detail now has 3 sections: Overview, Git, Sessions.
+const DETAIL_SECTION_COUNT: usize = 3;
 
 /// Labels for the detail sections.
-const DETAIL_SECTION_LABELS: [&str; DETAIL_SECTION_COUNT] =
-    ["Overview", "SPECs", "Git", "Sessions"];
+const DETAIL_SECTION_LABELS: [&str; DETAIL_SECTION_COUNT] = ["Overview", "Git", "Sessions"];
 
 /// Public accessor for detail section labels (used by app.rs for pane titles).
 pub fn detail_section_labels() -> &'static [&'static str] {
@@ -279,7 +272,7 @@ pub struct BranchesState {
     pub(crate) view_mode: ViewMode,
     pub(crate) search_query: String,
     pub(crate) search_active: bool,
-    /// Active detail section: 0=Overview, 1=SPECs, 2=Git, 3=Sessions.
+    /// Active detail section: 0=Overview, 1=Git, 2=Sessions.
     pub(crate) detail_section: usize,
     /// Selected row within the Sessions detail section.
     pub(crate) detail_session_selected: usize,
@@ -312,8 +305,6 @@ pub struct BranchesState {
     /// branch is still in `MergeState::Computing`. Drives the animated
     /// `⋯` glyph in the Branch Cleanup gutter.
     pub(crate) merge_spinner_tick: usize,
-    /// SPECs loaded from the selected branch worktree.
-    pub(crate) detail_specs: Vec<DetailSpecItem>,
     /// Git status files for the selected branch worktree.
     pub(crate) detail_files: Vec<String>,
     /// Recent commits for the selected branch worktree.
@@ -409,7 +400,6 @@ impl BranchesState {
     }
 
     fn apply_detail_data(&mut self, data: &BranchDetailData, reset_docker_selection: bool) {
-        self.detail_specs = data.specs.clone();
         self.detail_files = data.files.clone();
         self.detail_commits = data.commits.clone();
         self.docker_containers = data.docker_containers.clone();
@@ -421,7 +411,6 @@ impl BranchesState {
     }
 
     fn clear_visible_detail(&mut self) {
-        self.detail_specs.clear();
         self.detail_files.clear();
         self.detail_commits.clear();
         self.docker_containers.clear();
@@ -801,7 +790,10 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
     }
 }
 
-/// Load detail data (SPECs, git status, commits, docker state) for the branch.
+/// Load detail data (git status, commits, docker state) for the branch.
+///
+/// SPEC-12 Phase 9: worktree-local SPECs loading was removed — SPECs now
+/// live as GitHub Issues and are rendered from the top-level Specs tab.
 ///
 /// Best-effort: all errors are silently ignored.
 pub fn load_branch_detail(
@@ -816,58 +808,6 @@ pub fn load_branch_detail(
     let Some(wt_path) = branch.worktree_path.clone() else {
         return detail;
     };
-
-    // Load SPECs from worktree specs/ directory
-    if let Ok(entries) = std::fs::read_dir(wt_path.join("specs")) {
-        let mut specs = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if !dir_name.starts_with("SPEC-") {
-                continue;
-            }
-            let metadata_path = path.join("metadata.json");
-            let Ok(content) = std::fs::read_to_string(&metadata_path) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-                continue;
-            };
-            let id = value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(dir_name)
-                .to_string();
-            let title = value
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let phase = value
-                .get("phase")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let status = value
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            specs.push(DetailSpecItem {
-                id,
-                title,
-                phase,
-                status,
-            });
-        }
-        specs.sort_by(|a, b| spec_sort_key(&a.id).cmp(&spec_sort_key(&b.id)));
-        detail.specs = specs;
-    }
 
     // Load git status
     if let Ok(entries) = gwt_git::diff::get_status(&wt_path) {
@@ -893,14 +833,6 @@ pub fn load_branch_detail(
     }
 
     detail
-}
-
-fn spec_sort_key(spec_id: &str) -> (u64, String) {
-    let numeric = spec_id
-        .strip_prefix("SPEC-")
-        .and_then(|suffix| suffix.parse::<u64>().ok())
-        .unwrap_or(u64::MAX);
-    (numeric, spec_id.to_string())
 }
 
 /// Which sub-pane of the branches screen is focused.
@@ -941,9 +873,8 @@ pub fn render_detail_content(
 ) {
     match state.detail_section {
         0 => render_detail_overview(state, frame, area),
-        1 => render_detail_specs(state, frame, area),
-        2 => render_detail_git_status(state, frame, area),
-        3 => render_detail_sessions(frame, area, sessions, state.detail_session_selected),
+        1 => render_detail_git_status(state, frame, area),
+        2 => render_detail_sessions(frame, area, sessions, state.detail_session_selected),
         _ => {}
     }
 }
@@ -1208,55 +1139,6 @@ fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
         | gwt_docker::ContainerStatus::Stopped
         | gwt_docker::ContainerStatus::Exited => "Up/Down select  S start  R restart",
     }
-}
-
-/// SPECs section: list loaded from the worktree.
-fn render_detail_specs(state: &BranchesState, frame: &mut Frame, area: Rect) {
-    if state.selected_branch().is_none() {
-        let paragraph = Paragraph::new(" No branch selected").style(theme::style::muted_text());
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    if state.detail_specs.is_empty() {
-        if state.selected_detail_loading() {
-            let paragraph = Paragraph::new(" Loading branch details...")
-                .style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(paragraph, area);
-            return;
-        }
-        let has_worktree = state
-            .selected_branch()
-            .and_then(|b| b.worktree_path.as_ref())
-            .is_some();
-        let msg = if has_worktree {
-            " No SPECs found in worktree"
-        } else {
-            " No worktree (no SPECs available)"
-        };
-        let paragraph = Paragraph::new(msg).style(theme::style::muted_text());
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let items: Vec<ListItem> = state
-        .detail_specs
-        .iter()
-        .map(|spec| {
-            let line = Line::from(vec![
-                Span::styled(format!(" {} ", spec.id), theme::style::header()),
-                Span::styled(&spec.title, Style::default().fg(theme::color::TEXT_PRIMARY)),
-                Span::styled(
-                    format!("  [{}]", spec.status),
-                    Style::default().fg(theme::color::ACTIVE),
-                ),
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
-
-    let list = List::new(items);
-    frame.render_widget(list, area);
 }
 
 /// Git Status section: files and recent commits from the worktree.
@@ -1898,8 +1780,9 @@ mod tests {
 
     #[test]
     fn next_detail_section_cycles_through_all() {
+        // SPEC-12 Phase 9: 3 detail sections (Overview, Git, Sessions).
         let mut state = BranchesState::default();
-        for expected in 1..=3 {
+        for expected in 1..=2 {
             update(&mut state, BranchesMessage::NextDetailSection);
             assert_eq!(state.detail_section, expected);
         }
@@ -1913,15 +1796,16 @@ mod tests {
         let mut state = BranchesState::default();
         assert_eq!(state.detail_section, 0);
         update(&mut state, BranchesMessage::PrevDetailSection);
-        assert_eq!(state.detail_section, 3);
+        // SPEC-12 Phase 9: wraps to the last section (index 2 = Sessions).
+        assert_eq!(state.detail_section, 2);
     }
 
     #[test]
     fn prev_detail_section_decrements() {
         let mut state = BranchesState::default();
-        state.detail_section = 3;
+        state.detail_section = 2;
         update(&mut state, BranchesMessage::PrevDetailSection);
-        assert_eq!(state.detail_section, 2);
+        assert_eq!(state.detail_section, 1);
     }
 
     #[test]
@@ -2176,7 +2060,7 @@ mod tests {
     fn render_detail_sessions_shows_typed_session_rows_and_active_marker() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
-        state.detail_section = 3;
+        state.detail_section = 2;
         let sessions = vec![
             DetailSessionSummary {
                 kind: "Agent",
@@ -2224,7 +2108,7 @@ mod tests {
     fn render_detail_sessions_preserves_empty_state() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
-        state.detail_section = 3;
+        state.detail_section = 2;
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2246,7 +2130,7 @@ mod tests {
     fn render_detail_sessions_shows_selection_marker_for_current_row() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
-        state.detail_section = 3;
+        state.detail_section = 2;
         state.detail_session_selected = 1;
         let sessions = vec![
             DetailSessionSummary {
@@ -2394,13 +2278,11 @@ mod tests {
 
     #[test]
     fn detail_section_labels_are_correct() {
-        // Detail section tab labels are now rendered by app.rs in the pane border.
-        // Verify the labels returned by detail_section_labels().
+        // SPEC-12 Phase 9: Branch Detail has 3 sections (Overview, Git,
+        // Sessions). SPECs was removed because SPECs now live as GitHub
+        // Issues and are rendered by the top-level Specs tab.
         let labels = detail_section_labels();
-        assert!(labels.contains(&"Overview"));
-        assert!(labels.contains(&"SPECs"));
-        assert!(labels.contains(&"Git"));
-        assert!(labels.contains(&"Sessions"));
+        assert_eq!(labels, &["Overview", "Git", "Sessions"]);
     }
 
     #[test]

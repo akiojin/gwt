@@ -304,6 +304,15 @@ fn terminal_leave_commands_ansi() -> String {
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> io::Result<()> {
+    // SPEC-12 Phase 6 (CORE-CLI / #1942): argv-driven dispatch. When invoked
+    // as `gwt issue ...` or `gwt hook ...`, hand off to the CLI entry point
+    // without touching the terminal or initializing the TUI tracing
+    // subscriber. Any other argv shape keeps the legacy TUI behaviour below.
+    let argv: Vec<String> = std::env::args().collect();
+    if gwt_tui::cli::should_dispatch_cli(&argv) {
+        return run_cli(&argv);
+    }
+
     // SPEC-6 Phase 5: initialize `tracing_subscriber` with a non-blocking
     // JSONL file writer rolling daily, plus a UI forwarder layer. The
     // returned handles MUST be kept alive for the lifetime of main so
@@ -388,6 +397,101 @@ fn main() -> io::Result<()> {
     drop(logging_handles.take());
 
     Ok(())
+}
+
+/// SPEC-12 Phase 6 (CORE-CLI / #1942): CLI entry point.
+///
+/// This is reached when argv[1] is a known CLI verb (`issue` or `hook`).
+/// We resolve the repository coordinates from the current git remote,
+/// build the production [`DefaultCliEnv`], and dispatch the subcommand
+/// without initializing the TUI tracing subscriber (CLI invocations are
+/// short-lived and must not interfere with concurrent TUI sessions writing
+/// to the same log directory).
+#[cfg(not(tarpaulin_include))]
+fn run_cli(argv: &[String]) -> io::Result<()> {
+    // For `gwt hook ...` we can run even outside a GitHub-linked repo,
+    // because hooks don't need owner/repo for local atomic writes and
+    // stdin judgement. For `gwt issue ...` we need the remote coordinates.
+    let needs_repo = argv.get(1).map(String::as_str) == Some("issue");
+
+    if needs_repo {
+        let (owner, repo) = match resolve_repo_coordinates() {
+            Some(coords) => coords,
+            None => {
+                eprintln!(
+                    "gwt issue: could not resolve GitHub owner/repo from the current git remote"
+                );
+                std::process::exit(2);
+            }
+        };
+        let mut env = match gwt_tui::cli::DefaultCliEnv::new(&owner, &repo) {
+            Ok(env) => env,
+            Err(e) => {
+                eprintln!("gwt issue: {e}");
+                std::process::exit(1);
+            }
+        };
+        let code = gwt_tui::cli::dispatch(&mut env, argv);
+        std::process::exit(code);
+    }
+
+    // `gwt hook ...` path: hooks never touch GitHub, so we deliberately
+    // skip the `gh auth token` resolution that `DefaultCliEnv::new`
+    // performs. `new_for_hooks` constructs an env with an inert
+    // HttpIssueClient (empty token / owner / repo) — attempting to call
+    // the client would fail loudly, but the hook code paths route
+    // through `run_hook` and never touch it.
+    let mut env = match gwt_tui::cli::DefaultCliEnv::new_for_hooks() {
+        Ok(env) => env,
+        Err(e) => {
+            eprintln!("gwt hook: {e}");
+            std::process::exit(1);
+        }
+    };
+    let code = gwt_tui::cli::dispatch(&mut env, argv);
+    std::process::exit(code);
+}
+
+/// Parse the `origin` remote URL and return `(owner, repo)` when the remote
+/// points at github.com. Supports both HTTPS and SSH URLs. Returns `None`
+/// when the remote cannot be resolved or the host is not github.com.
+fn resolve_repo_coordinates() -> Option<(String, String)> {
+    use std::process::Command;
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_github_remote_url(&url)
+}
+
+fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
+    // SSH: git@github.com:owner/repo(.git)?
+    if let Some(rest) = url.strip_prefix("git@github.com:") {
+        let trimmed = rest.trim_end_matches(".git");
+        let mut parts = trimmed.splitn(2, '/');
+        let owner = parts.next()?.to_string();
+        let repo = parts.next()?.to_string();
+        return Some((owner, repo));
+    }
+    // HTTPS: https://github.com/owner/repo(.git)?
+    for prefix in [
+        "https://github.com/",
+        "http://github.com/",
+        "git://github.com/",
+    ] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            let trimmed = rest.trim_end_matches(".git").trim_end_matches('/');
+            let mut parts = trimmed.splitn(2, '/');
+            let owner = parts.next()?.to_string();
+            let repo = parts.next()?.to_string();
+            return Some((owner, repo));
+        }
+    }
+    None
 }
 
 #[cfg(not(tarpaulin_include))]

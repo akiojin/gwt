@@ -15,7 +15,7 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘│                                      │
-┌ Overview │ SPECs │ Git │ Sessions  · ┐│                                      │
+┌ Overview │ Git │ Sessions  · No branc┐│                                      │
 │ No branch selected                   ││                                      │
 │                                      ││                                      │
 │ Docker status                        ││                                      │

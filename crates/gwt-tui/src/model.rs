@@ -196,6 +196,10 @@ pub enum ManagementTab {
     Branches,
     Issues,
     PrDashboard,
+    /// SPEC-12 Phase 9: dedicated Specs tab backed by `~/.gwt/cache/issues/`.
+    /// Displayed as a top-level peer of Branches/Issues/PRs now that SPECs
+    /// live as GitHub Issues rather than worktree-local files.
+    Specs,
     Profiles,
     GitView,
     Versions,
@@ -205,10 +209,11 @@ pub enum ManagementTab {
 
 impl ManagementTab {
     /// All tabs in display order.
-    pub const ALL: [ManagementTab; 8] = [
+    pub const ALL: [ManagementTab; 9] = [
         ManagementTab::Branches,
         ManagementTab::Issues,
         ManagementTab::PrDashboard,
+        ManagementTab::Specs,
         ManagementTab::Profiles,
         ManagementTab::GitView,
         ManagementTab::Versions,
@@ -222,6 +227,7 @@ impl ManagementTab {
             Self::Branches => "Branches",
             Self::Issues => "Issues",
             Self::PrDashboard => "PRs",
+            Self::Specs => "Specs",
             Self::Profiles => "Profiles",
             Self::GitView => "Git View",
             Self::Versions => "Versions",
@@ -1818,6 +1824,8 @@ pub struct Model {
     pub(crate) logs: LogsState,
     /// Versions screen state.
     pub(crate) versions: VersionsState,
+    /// Specs screen state (SPEC-12 Phase 9 — GitHub Issue SPEC list).
+    pub(crate) specs: crate::screens::specs::SpecsState,
     /// Wizard overlay state (None when not active).
     pub(crate) wizard: Option<WizardState>,
     /// Docker progress overlay state.
@@ -1936,6 +1944,14 @@ impl Model {
             settings: SettingsState::default(),
             logs: LogsState::default(),
             versions: VersionsState::default(),
+            specs: {
+                let cache_root = dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join(".gwt")
+                    .join("cache")
+                    .join("issues");
+                crate::screens::specs::SpecsState::new(cache_root)
+            },
             wizard: None,
             docker_progress: None,
             docker_progress_events: None,
@@ -2358,8 +2374,8 @@ mod tests {
                 .map(|tab| tab.label())
                 .collect::<Vec<_>>(),
             vec![
-                "Branches", "Issues", "PRs", "Profiles", "Git View", "Versions", "Settings",
-                "Logs",
+                "Branches", "Issues", "PRs", "Specs", "Profiles", "Git View", "Versions",
+                "Settings", "Logs",
             ]
         );
         assert_eq!(ManagementTab::Settings.label(), "Settings");
@@ -2367,8 +2383,9 @@ mod tests {
     }
 
     #[test]
-    fn management_tab_all_has_eight_entries() {
-        assert_eq!(ManagementTab::ALL.len(), 8);
+    fn management_tab_all_has_nine_entries() {
+        // SPEC-12 Phase 9: Specs tab raises the count from 8 to 9.
+        assert_eq!(ManagementTab::ALL.len(), 9);
     }
 
     #[test]

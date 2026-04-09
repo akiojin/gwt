@@ -20,6 +20,13 @@ pub const LOG_FILE_BASENAME: &str = "gwt.log";
 
 /// Return the path of today's active log file
 /// (`{log_dir}/gwt.log.YYYY-MM-DD`, UTC date).
+///
+/// **Timezone policy**: `tracing_appender::rolling::daily` rolls files by
+/// UTC date (verified empirically and documented in upstream). If we
+/// use local time here, consumers near the day boundary end up looking
+/// at a filename that does not exist yet (or a stale one) because the
+/// writer is one day off. Always use UTC to stay in sync with the
+/// writer.
 pub fn current_log_file(log_dir: &Path) -> PathBuf {
     let today = Utc::now().date_naive();
     log_dir.join(format!("{LOG_FILE_BASENAME}.{today}"))

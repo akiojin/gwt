@@ -31,23 +31,19 @@ fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
     );
     tracing::warn!(target: "gwt_core::logging::test", "warning sample");
 
-    // Wait for the non-blocking writer to flush. `WorkerGuard` flushes
-    // on drop, but we drop `handles` after the loop so here we poll the
-    // dated file that tracing_appender actually writes to.
+    // Drop the handles BEFORE reading the log file. `WorkerGuard::drop`
+    // sends a shutdown signal to the non-blocking writer thread and
+    // joins it, which guarantees that every event emitted above has been
+    // flushed to disk by the time this line returns. Polling the file
+    // afterwards is redundant but kept as a short safety window in case
+    // the filesystem itself takes a moment to make the write visible.
+    drop(handles);
+
     let log_path = current_log_file(dir.path());
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut content = String::new();
-    while Instant::now() < deadline {
-        if log_path.exists() {
-            content = std::fs::read_to_string(&log_path).unwrap_or_default();
-            if content.contains("hello from test") {
-                break;
-            }
-        }
+    let mut content = std::fs::read_to_string(&log_path).unwrap_or_default();
+    while !content.contains("hello from test") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
-    }
-    drop(handles);
-    if !content.contains("hello from test") {
         content = std::fs::read_to_string(&log_path).unwrap_or_default();
     }
 
