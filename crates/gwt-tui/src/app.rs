@@ -1684,6 +1684,13 @@ pub fn tick_redraw_required(model: &Model) -> bool {
         return true;
     }
 
+    if model.active_layer == ActiveLayer::Management
+        && model.management_tab == ManagementTab::Branches
+        && model.branches.has_running_live_sessions()
+    {
+        return true;
+    }
+
     model
         .wizard
         .as_ref()
@@ -10870,10 +10877,15 @@ mod tests {
             .chars()
             .filter(|ch| matches!(ch, '◐' | '◓' | '◑' | '◒'))
             .count();
+        let waiting_count = rendered.chars().filter(|ch| *ch == '●').count();
 
         assert_eq!(
-            spinner_count, 2,
-            "one live branch row should keep one spinner per live agent session"
+            spinner_count, 1,
+            "one live branch row should animate only the running agent session"
+        );
+        assert_eq!(
+            waiting_count, 1,
+            "one live branch row should keep the waiting agent visible with a static dot"
         );
         assert!(
             !rendered.contains("run ") && !rendered.contains("wait "),
@@ -10882,7 +10894,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_live_session_rendering_uses_agent_colors_for_each_spinner() {
+    fn branch_live_session_rendering_uses_agent_colors_for_running_and_waiting_indicators() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let repo_path = dir.path().join("repo");
         let selected_worktree = repo_path.join("wt-feature-test");
@@ -10946,19 +10958,63 @@ mod tests {
             })
             .expect("draw branches");
 
-        let spinner_colors: Vec<Color> = terminal
+        let indicator_colors: Vec<Color> = terminal
             .backend()
             .buffer()
             .content
             .iter()
-            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒" | "●"))
             .map(|cell| cell.fg)
             .collect();
 
         assert_eq!(
-            spinner_colors,
+            indicator_colors,
             vec![Color::Cyan, Color::Yellow],
-            "spinner indicators should keep per-agent colors so multiple agents remain distinguishable"
+            "running and waiting indicators should keep per-agent colors so multiple agents remain distinguishable"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_terminal_focus_animating_for_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+
+        assert!(
+            tick_redraw_required(&model),
+            "Branches should keep redrawing while a running live-session indicator is visible, even when terminal focus owns input"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_waiting_branch_indicators_static_under_terminal_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Yellow,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "waiting-only live-session indicators should stay static and must not re-enable idle redraws under terminal focus"
         );
     }
 

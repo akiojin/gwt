@@ -633,6 +633,17 @@ impl BranchesState {
         self.merge_spinner_tick = self.merge_spinner_tick.wrapping_add(1);
     }
 
+    /// Returns true when at least one visible live-session indicator is in
+    /// the animated `Running` state.
+    pub fn has_running_live_sessions(&self) -> bool {
+        self.live_session_summaries.values().any(|summary| {
+            summary
+                .indicators
+                .iter()
+                .any(|indicator| indicator.status == AgentStatus::Running)
+        })
+    }
+
     /// Current spinner glyph for the `⋯` gutter slot. Cycles through a
     /// short Braille pattern so the gutter visibly animates while merge
     /// detection is running.
@@ -1048,14 +1059,14 @@ fn build_branch_live_summary(
         return None;
     }
 
-    let spinner = running_spinner_frame(animation_tick);
     let visible_indicators = summary.indicators.iter().take(available_width);
     let spans: Vec<Span<'static>> = visible_indicators
-        .map(|indicator| {
-            Span::styled(
-                spinner.to_string(),
+        .filter_map(|indicator| {
+            let glyph = branch_live_indicator_glyph(indicator.status, animation_tick)?;
+            Some(Span::styled(
+                glyph.to_string(),
                 Style::default().fg(branch_live_indicator_color(indicator.color)),
-            )
+            ))
         })
         .collect();
 
@@ -1063,6 +1074,14 @@ fn build_branch_live_summary(
         None
     } else {
         Some(spans)
+    }
+}
+
+fn branch_live_indicator_glyph(status: AgentStatus, animation_tick: usize) -> Option<char> {
+    match status {
+        AgentStatus::Running => Some(running_spinner_frame(animation_tick)),
+        AgentStatus::WaitingInput => Some('●'),
+        AgentStatus::Unknown | AgentStatus::Stopped => None,
     }
 }
 
@@ -2250,9 +2269,12 @@ mod tests {
         let lines = buffer_to_lines(terminal.backend().buffer());
         assert!(
             lines.iter().any(|line| line.contains("feature/wait"))
-                && lines.iter().any(|line| line.contains("◐"))
+                && lines.iter().any(|line| line.contains("●"))
+                && !lines
+                    .iter()
+                    .any(|line| line.contains("◐") || line.contains("◓") || line.contains("◑") || line.contains("◒"))
                 && !lines.iter().any(|line| line.contains(" wait ")),
-            "waiting rows should keep a spinner-only indicator instead of a textual wait label"
+            "waiting rows should stay visible with a static dot indicator instead of an animated spinner or textual wait label"
         );
     }
 
