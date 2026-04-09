@@ -10,6 +10,12 @@ use std::process::Command;
 const GWT_FORWARD_SCRIPT: &str = "gwt-forward-hook.mjs";
 const GWT_BLOCK_SCRIPT_PREFIX: &str = "gwt-block-";
 const GWT_MANAGED_RUNTIME_MARKER: &str = "GWT_MANAGED_HOOK";
+/// SPEC #1942 (CORE-CLI): every managed hook dispatched through the
+/// new `gwt hook ...` CLI surface carries this substring. Used by
+/// [`is_gwt_managed_command`] to recognise new-form entries as
+/// managed so that regeneration replaces them in place instead of
+/// preserving them as "user hooks" and appending fresh duplicates.
+const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
 const GWT_MANAGED_RUNTIME_KIND: &str = "runtime-state";
 const CLAUDE_HOOK_COMMAND_TYPE: &str = "command";
 const MANAGED_EVENT_ORDER: &[&str] = &[
@@ -216,13 +222,68 @@ fn is_gwt_managed_command(command: &str) -> bool {
     command.contains(GWT_FORWARD_SCRIPT)
         || command.contains(GWT_BLOCK_SCRIPT_PREFIX)
         || command.contains(GWT_MANAGED_RUNTIME_MARKER)
+        || command.contains(GWT_HOOK_CLI_PREFIX)
 }
 
 fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
     let root = read_existing_settings(path)?;
     let hooks = root.get("hooks");
     Ok(contains_legacy_runtime_forwarder(hooks)
-        || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell()))
+        || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell())
+        || contains_legacy_node_bash_blockers(hooks)
+        || contains_inline_shell_runtime_hook(hooks))
+}
+
+/// SPEC #1942: tracked Codex / Claude hook files that still dispatch
+/// bash blockers through Node scripts (`node .../gwt-block-*.mjs`)
+/// must be migrated to the new `gwt hook block-*` form on the next
+/// regeneration pass. Without this, tracking the file causes the
+/// generator to short-circuit and the migration never completes.
+fn contains_legacy_node_bash_blockers(existing: Option<&Value>) -> bool {
+    any_managed_command(existing, |command| {
+        command.contains(GWT_BLOCK_SCRIPT_PREFIX)
+    })
+}
+
+/// SPEC #1942: detect tracked hook files that still carry the old
+/// `GWT_MANAGED_HOOK=runtime-state sh -lc '...'` inline-shell runtime
+/// hook form. The new form is
+/// `GWT_MANAGED_HOOK=runtime-state gwt hook runtime-state <event>`, so
+/// we trigger migration whenever a managed runtime command contains
+/// `sh -lc` (POSIX) or `ConvertTo-Json` (PowerShell), both of which
+/// were exclusive to the legacy inline writer.
+fn contains_inline_shell_runtime_hook(existing: Option<&Value>) -> bool {
+    any_managed_command(existing, |command| {
+        command.contains(GWT_MANAGED_RUNTIME_MARKER)
+            && (command.contains("sh -lc") || command.contains("ConvertTo-Json"))
+    })
+}
+
+/// Iterate every managed hook command under `events` and return true
+/// if any of them satisfies `predicate`. Shared body for the two
+/// detectors above.
+fn any_managed_command(existing: Option<&Value>, predicate: impl Fn(&str) -> bool) -> bool {
+    let Some(Value::Object(events)) = existing else {
+        return false;
+    };
+    events.values().any(|events_value| {
+        events_value.as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .as_object()
+                    .and_then(|obj| obj.get("hooks"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.as_object()
+                                .and_then(|obj| obj.get("command"))
+                                .and_then(Value::as_str)
+                                .is_some_and(&predicate)
+                        })
+                    })
+            })
+        })
+    })
 }
 
 fn contains_legacy_runtime_forwarder(existing: Option<&Value>) -> bool {
@@ -521,6 +582,159 @@ mod tests {
                 "bash blocker hooks must include {expected:?}, got: {actual:?}"
             );
         }
+    }
+
+    // Regression for PR #1943 review feedback ("settings.local.json
+    // was not actually regenerated"). Three independent bugs were
+    // shipped at once and this test locks all three:
+    //
+    // 1. Running the generator twice against a repo whose existing
+    //    settings file already contains new-form `gwt hook block-*`
+    //    commands must NOT duplicate them. `is_gwt_managed_command`
+    //    has to recognise the new form as managed so the generator
+    //    replaces instead of appending.
+    // 2. A tracked `.codex/hooks.json` that still has the legacy
+    //    `node .../gwt-block-*.mjs` entries must get migrated on the
+    //    next regeneration pass — the migration gate has to include
+    //    the node-bash-blocker detector.
+    // 3. A tracked `.codex/hooks.json` with the legacy
+    //    `GWT_MANAGED_HOOK=runtime-state sh -lc '...'` inline runtime
+    //    hook must also trigger migration.
+    #[test]
+    fn regenerating_twice_does_not_duplicate_new_form_managed_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let first = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let second = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        assert_eq!(
+            first, second,
+            "idempotent regeneration must produce byte-identical output"
+        );
+
+        let value: Value = serde_json::from_str(&second).unwrap();
+        let pre_tool = value["hooks"]["PreToolUse"].as_array().unwrap();
+        let bash_entries: Vec<_> = pre_tool
+            .iter()
+            .filter(|entry| entry["matcher"] == "Bash")
+            .collect();
+        assert_eq!(
+            bash_entries.len(),
+            1,
+            "exactly one Bash matcher entry expected, got {}: {:?}",
+            bash_entries.len(),
+            bash_entries
+        );
+    }
+
+    #[test]
+    fn tracked_legacy_node_bash_blockers_trigger_migration() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "command": "node .codex/hooks/scripts/gwt-block-git-branch-ops.mjs",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("gwt-block-git-branch-ops.mjs"),
+            "tracked legacy node bash blocker must be migrated away, got: {content}"
+        );
+        assert!(
+            content.contains("gwt hook block-git-branch-ops"),
+            "tracked file must be migrated to the new CLI form, got: {content}"
+        );
+    }
+
+    #[test]
+    fn tracked_legacy_inline_shell_runtime_hook_triggers_migration() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "GWT_MANAGED_HOOK=runtime-state sh -lc 'echo legacy'",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("sh -lc"),
+            "tracked legacy inline shell runtime hook must be migrated away, got: {content}"
+        );
+        assert!(
+            content.contains("gwt hook runtime-state"),
+            "tracked file must carry the new CLI form, got: {content}"
+        );
     }
 
     #[test]
