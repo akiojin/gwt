@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::theme;
+use crate::{screens::issues::IssueItem, theme};
 
 /// Which step of the wizard is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -226,6 +226,7 @@ pub struct BranchSuggestionOption {
 
 const AI_SUGGEST_TIMEOUT_TICKS: usize = 12;
 const MANUAL_INPUT_LABEL: &str = "Manual input";
+const RELATED_TO_NONE_LABEL: &str = "Related to none";
 
 #[derive(Debug, Clone, Default)]
 pub struct AISuggestState {
@@ -239,6 +240,36 @@ pub struct AISuggestState {
     pub error: Option<String>,
     /// Tick counter for spinner animation (incremented on WizardMessage::Tick).
     pub tick_counter: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssuePickerState {
+    pub issues: Vec<IssueItem>,
+    pub search_query: String,
+    pub search_active: bool,
+    pub load_error: Option<String>,
+}
+
+impl IssuePickerState {
+    pub fn filtered_issues(&self) -> Vec<&IssueItem> {
+        let query = self.search_query.trim().to_lowercase();
+        let mut issues = self
+            .issues
+            .iter()
+            .filter(|issue| {
+                query.is_empty()
+                    || issue.number.to_string().contains(&query)
+                    || issue.title.to_lowercase().contains(&query)
+                    || issue.state.to_lowercase().contains(&query)
+                    || issue
+                        .labels
+                        .iter()
+                        .any(|label| label.to_lowercase().contains(&query))
+            })
+            .collect::<Vec<_>>();
+        issues.sort_by(|left, right| right.number.cmp(&left.number));
+        issues
+    }
 }
 
 /// An agent option discovered on the system.
@@ -341,6 +372,7 @@ pub struct WizardState {
     pub resume_session_id: Option<String>,
     pub branch_name: String,
     pub issue_id: String,
+    pub issue_picker: IssuePickerState,
     pub skip_perms: bool,
     pub codex_fast_mode: bool,
     pub convert_source_agents: Vec<String>,
@@ -378,6 +410,7 @@ impl Default for WizardState {
             resume_session_id: None,
             branch_name: String::new(),
             issue_id: String::new(),
+            issue_picker: IssuePickerState::default(),
             skip_perms: false,
             codex_fast_mode: false,
             convert_source_agents: Vec::new(),
@@ -408,6 +441,54 @@ impl WizardState {
         } else {
             self.quick_start_entries.len() * 2 + 1
         }
+    }
+
+    fn issue_picker_option_count(&self) -> usize {
+        self.issue_picker.filtered_issues().len() + 1
+    }
+
+    fn issue_picker_selected_issue(&self) -> Option<&IssueItem> {
+        if self.selected == 0 {
+            return None;
+        }
+        self.issue_picker
+            .filtered_issues()
+            .get(self.selected.saturating_sub(1))
+            .copied()
+    }
+
+    fn issue_picker_default_selection(&self) -> usize {
+        let Ok(selected_issue) = self.issue_id.parse::<u32>() else {
+            return 0;
+        };
+        self.issue_picker
+            .filtered_issues()
+            .iter()
+            .position(|issue| issue.number == selected_issue)
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    fn issue_picker_labels(&self) -> Vec<String> {
+        let mut labels = Vec::with_capacity(self.issue_picker_option_count());
+        labels.push(RELATED_TO_NONE_LABEL.to_string());
+        labels.extend(
+            self.issue_picker
+                .filtered_issues()
+                .into_iter()
+                .map(|issue| {
+                    let labels = if issue.labels.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", issue.labels.join(", "))
+                    };
+                    format!(
+                        "#{} {} ({}){}",
+                        issue.number, issue.title, issue.state, labels
+                    )
+                }),
+        );
+        labels
     }
 
     fn selected_quick_start_action(&self) -> QuickStartAction {
@@ -611,10 +692,16 @@ impl WizardState {
                     self.ai_suggest.suggestions.len().max(1)
                 }
             }
-            WizardStep::IssueSelect => 0,     // text input
+            WizardStep::IssueSelect => self.issue_picker_option_count(),
             WizardStep::SkipPermissions => 2, // yes / no
             WizardStep::CodexFastMode => 2,   // on / off
         }
+    }
+
+    pub fn current_options_for_step(&self, step: WizardStep) -> Vec<String> {
+        let mut state = self.clone();
+        state.step = step;
+        state.current_options()
     }
 
     /// Static option labels for the current step.
@@ -707,7 +794,8 @@ impl WizardState {
                     labels
                 }
             }
-            WizardStep::BranchNameInput | WizardStep::IssueSelect => vec![],
+            WizardStep::IssueSelect => self.issue_picker_labels(),
+            WizardStep::BranchNameInput => vec![],
             _ => self
                 .current_static_options()
                 .into_iter()
@@ -817,6 +905,12 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
             }
         }
         WizardMessage::Back => {
+            if state.step == WizardStep::IssueSelect && state.issue_picker.search_active {
+                state.issue_picker.search_active = false;
+                state.issue_picker.search_query.clear();
+                state.selected = state.issue_picker_default_selection();
+                return;
+            }
             if let Some(prev) = prev_step(state.step, state) {
                 state.step = prev;
                 state.selected = step_default_selection(prev, state);
@@ -833,7 +927,15 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 state.branch_name.push(ch);
             }
             WizardStep::IssueSelect => {
-                state.issue_id.push(ch);
+                if state.issue_picker.search_active {
+                    state.issue_picker.search_query.push(ch);
+                    let option_count = state.option_count();
+                    super::clamp_index(&mut state.selected, option_count);
+                } else if ch == '/' {
+                    state.issue_picker.search_active = true;
+                    state.issue_picker.search_query.clear();
+                    state.selected = state.issue_picker_default_selection();
+                }
             }
             _ => {}
         },
@@ -842,7 +944,11 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 state.branch_name.pop();
             }
             WizardStep::IssueSelect => {
-                state.issue_id.pop();
+                if state.issue_picker.search_active {
+                    state.issue_picker.search_query.pop();
+                    let option_count = state.option_count();
+                    super::clamp_index(&mut state.selected, option_count);
+                }
             }
             _ => {}
         },
@@ -906,6 +1012,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
 
 fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
     match step {
+        WizardStep::IssueSelect => state.issue_picker_default_selection(),
         WizardStep::SkipPermissions => usize::from(!state.skip_perms),
         WizardStep::CodexFastMode => usize::from(!state.codex_fast_mode),
         _ => 0,
@@ -975,6 +1082,13 @@ fn apply_selection(state: &mut WizardState) {
         WizardStep::ExecutionMode => {
             if let Some(opt) = options.get(state.selected) {
                 state.mode = opt.to_lowercase();
+            }
+        }
+        WizardStep::IssueSelect => {
+            if let Some(issue) = state.issue_picker_selected_issue() {
+                state.issue_id = issue.number.to_string();
+            } else {
+                state.issue_id.clear();
             }
         }
         WizardStep::ConvertAgentSelect => {}
@@ -1805,7 +1919,11 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         1,
     );
     let hint = match state.step {
-        WizardStep::BranchNameInput | WizardStep::IssueSelect => "[Enter] Confirm  [Esc] Back",
+        WizardStep::BranchNameInput => "[Enter] Confirm  [Esc] Back",
+        WizardStep::IssueSelect if state.issue_picker.search_active => {
+            "[Enter] Select  [Esc] Clear search  [/]:search  [Up/Down] Navigate"
+        }
+        WizardStep::IssueSelect => "[Enter] Select  [Esc] Back  [/]:search  [Up/Down] Navigate",
         WizardStep::AIBranchSuggest if state.ai_suggest.loading => "[Esc] Cancel",
         WizardStep::AIBranchSuggest if state.ai_suggest.error.is_some() => {
             "[Enter] Manual input  [Esc] Retry"
@@ -1833,7 +1951,7 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
             render_input_step(state, frame, area, "Branch Name:", &state.branch_name);
         }
         WizardStep::IssueSelect => {
-            render_input_step(state, frame, area, "Issue ID (optional):", &state.issue_id);
+            render_issue_picker(state, frame, area);
         }
         WizardStep::AIBranchSuggest => {
             render_ai_suggest(state, frame, area);
@@ -1873,6 +1991,48 @@ fn render_input_step(
     frame.render_widget(
         Paragraph::new(format!("{value}_")).style(Style::default().fg(theme::color::ACTIVE)),
         Rect::new(area.x, area.y + 1, area.width, 1),
+    );
+}
+
+fn render_issue_picker(state: &WizardState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let search_text = if state.issue_picker.search_active {
+        format!("Search: {}_", state.issue_picker.search_query)
+    } else if state.issue_picker.search_query.is_empty() {
+        "Search: press / to filter cached issues".to_string()
+    } else {
+        format!("Search: {}", state.issue_picker.search_query)
+    };
+    frame.render_widget(
+        Paragraph::new(search_text).style(theme::style::header()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    let mut list_y = area.y + 1;
+    let mut list_height = area.height.saturating_sub(1);
+    if let Some(error) = state.issue_picker.load_error.as_ref() {
+        if list_height > 0 {
+            frame.render_widget(
+                Paragraph::new(format!("Cache unavailable: {error}"))
+                    .style(Style::default().fg(theme::color::ERROR)),
+                Rect::new(area.x, list_y, area.width, 1),
+            );
+            list_y = list_y.saturating_add(1);
+            list_height = list_height.saturating_sub(1);
+        }
+    }
+
+    if list_height == 0 {
+        return;
+    }
+
+    render_option_list(
+        state,
+        frame,
+        Rect::new(area.x, list_y, area.width, list_height),
     );
 }
 
@@ -2074,6 +2234,25 @@ mod tests {
             }
         }
         None
+    }
+
+    fn sample_issue_picker_issues() -> Vec<crate::screens::issues::IssueItem> {
+        vec![
+            crate::screens::issues::IssueItem {
+                number: 42,
+                title: "Fix login bug".to_string(),
+                state: "open".to_string(),
+                labels: vec!["bug".to_string(), "auth".to_string()],
+                body: "Login fails on Safari".to_string(),
+            },
+            crate::screens::issues::IssueItem {
+                number: 1776,
+                title: "Launch Agent issue linkage".to_string(),
+                state: "closed".to_string(),
+                labels: vec!["ux".to_string()],
+                body: "Wizard should link branches to issues".to_string(),
+            },
+        ]
     }
 
     #[test]
@@ -2375,21 +2554,68 @@ mod tests {
     }
 
     #[test]
-    fn input_char_issue_id() {
+    fn issue_select_current_options_include_none_and_cached_issues() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        update(&mut state, WizardMessage::InputChar('1'));
-        update(&mut state, WizardMessage::InputChar('2'));
-        assert_eq!(state.issue_id, "12");
+        state.issue_picker.issues = sample_issue_picker_issues();
+
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+                "#42 Fix login bug (open) [bug, auth]".to_string(),
+            ]
+        );
+        assert_eq!(state.option_count(), 3);
     }
 
     #[test]
-    fn backspace_issue_id() {
+    fn issue_select_search_filters_by_number_title_label_and_state() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        state.issue_id = "42".to_string();
-        update(&mut state, WizardMessage::Backspace);
-        assert_eq!(state.issue_id, "4");
+        state.issue_picker.issues = sample_issue_picker_issues();
+
+        update(&mut state, WizardMessage::InputChar('/'));
+        update(&mut state, WizardMessage::InputChar('c'));
+        update(&mut state, WizardMessage::InputChar('l'));
+
+        assert!(state.issue_picker.search_active);
+        assert_eq!(state.issue_picker.search_query, "cl");
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_on_issue_step_stores_selected_issue_number() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::IssueSelect;
+        state.issue_picker.issues = sample_issue_picker_issues();
+        state.selected = 2;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.issue_id, "42");
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+    }
+
+    #[test]
+    fn select_on_issue_step_can_choose_related_to_none() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::IssueSelect;
+        state.issue_picker.issues = sample_issue_picker_issues();
+        state.issue_id = "1776".to_string();
+        state.selected = 0;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert!(state.issue_id.is_empty());
+        assert_eq!(state.step, WizardStep::BranchNameInput);
     }
 
     #[test]
@@ -2572,7 +2798,8 @@ mod tests {
         assert_eq!(state.option_count(), 0); // text input
 
         state.step = WizardStep::IssueSelect;
-        assert_eq!(state.option_count(), 0); // text input
+        state.issue_picker.issues = sample_issue_picker_issues();
+        assert_eq!(state.option_count(), 3);
     }
 
     #[test]
@@ -2752,26 +2979,16 @@ mod tests {
     }
 
     #[test]
-    fn render_issue_input_uses_old_tui_two_row_layout() {
+    fn render_issue_picker_shows_related_none_and_cached_issues() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        state.issue_id = "1234".to_string();
+        state.issue_picker.issues = sample_issue_picker_issues();
 
         let buf = render_buffer(&state, 90, 24);
         let text = buffer_text(&buf);
-        let (_, prompt_y) = find_text_position(&buf, "Issue ID (optional):").expect("prompt line");
-        let (_, value_y) = find_text_position(&buf, "1234_").expect("value line");
-
-        assert!(text.contains("Issue ID (optional):"));
-        assert!(text.contains("1234_"));
-        assert!(
-            value_y > prompt_y,
-            "input value should render on a row below the prompt"
-        );
-        assert!(
-            text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1,
-            "issue input should use the same inline prompt style instead of adding another boxed title"
-        );
+        assert!(text.contains("Related to none"));
+        assert!(text.contains("Fix login bug"));
+        assert!(text.contains("Launch Agent issue linkage"));
     }
 
     #[test]
