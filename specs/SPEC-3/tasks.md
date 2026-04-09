@@ -337,3 +337,31 @@
 - [x] T173 Extend launch configuration so new-branch wizard flows preserve the selected base branch, with `origin/develop` as the SPEC/Issue fallback.
 - [x] T174 Implement launch-time worktree materialization and actual-path persistence before PTY spawn.
 - [x] T175 Verify focused worktree/materialization tests, broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 48: Claude Code Effort Level via CLAUDE_CODE_EFFORT_LEVEL
+
+- [ ] T176 [P] Write RED test: Claude Code agent capability reports `supports_reasoning_effort = true` for Opus 4.6 and Sonnet 4.6 and `false` for other models.
+- [ ] T177 [P] Write RED test: wizard flow for Claude Code with an effort-capable model includes the `ReasoningLevel` step between `ModelSelect` and `VersionSelect`, renders the header `Select Effort Level for <model>`, and skips the step for non-effort-capable models.
+- [ ] T178 [P] Write RED test: Claude Code `ReasoningLevel` renders the five fixed rows `Auto`, `Low`, `Medium`, `High`, `Max` in order with the US-10 description copy; Sonnet 4.6 omits `Max`; `Medium` always carries `(default)`; only the selected row carries `(current)`; first-render default selection is `Low`.
+- [ ] T179 [P] Write RED test: `AgentLaunchBuilder` maps `Auto → unset`, `Low → low`, `Medium → medium`, `High → high`, `Max → max` into `CLAUDE_CODE_EFFORT_LEVEL` on the spawned PTY env and never appends the `--effort` flag; the wizard never passes the displayed label verbatim.
+- [ ] T180 [P] Write RED test: switching the selected model on `ModelSelect` from an effort-capable Claude model to a non-effort-capable one clears the staged reasoning level.
+- [ ] T181 [P] Write RED test: Claude Code Quick Start entry persists the reasoning row identifier (including `Auto`) and relaunch via `Resume` / `Start new` restores the same row selection and env-var behavior even after displayed label copy is renamed.
+- [ ] T182 [P] Write RED test: launch-injected `CLAUDE_CODE_EFFORT_LEVEL` overrides the inherited profile value for the spawned PTY and leaves the parent gwt process environment untouched.
+- [ ] T183 Extend Claude Code agent capability metadata so `supports_reasoning_effort` gates the wizard step by current model selection.
+- [ ] T184 Route Claude Code through the existing `ReasoningLevel` wizard step with the `auto/low/medium/high/max` option set and old-TUI row formatting.
+- [ ] T185 Extend `AgentLaunchBuilder` to export `CLAUDE_CODE_EFFORT_LEVEL` on non-`auto` selections, never append `--effort`, and never mutate the parent process environment.
+- [ ] T186 Extend Claude Code Quick Start persistence and restoration to cover `reasoning_level`, reusing the storage already in place for Codex.
+- [ ] T187 Confirm the agent-launch audit log keeps `CLAUDE_CODE_EFFORT_LEVEL` in cleartext and add redaction coverage that asserts no regression for sensitive keys.
+- [ ] T188 Verify Phase 48 tests pass GREEN, run broad workspace checks, and refresh SPEC-3 artifacts.
+
+## Phase 49: Codex ReasoningLevel UI Label Refresh
+
+- [ ] T189 [P] Write RED test: Codex `ReasoningLevel` step header renders `Select Reasoning Level for <model>` using the selected model id.
+- [ ] T190 [P] Write RED test: Codex `ReasoningLevel` renders exactly four rows in order `Low`, `Medium`, `High`, `Extra high` with the description copy from US-11.
+- [ ] T191 [P] Write RED test: `Medium` always carries `(default)`; only the currently selected row carries `(current)`; first-render selection is `Medium` and renders as `Medium (default) (current)`.
+- [ ] T192 [P] Write RED test: launch builder maps each of the four UI rows to the expected upstream `-c model_reasoning_effort=<value>` token and never passes the human-readable label.
+- [ ] T193 [P] Write RED test: Codex Quick Start persists the selected UI row identifier and relaunch reproduces the same selection even after the upstream token mapping changes.
+- [ ] T194 Replace the Codex `ReasoningLevel` row set in `wizard.rs` with the four fixed rows, descriptions, header line, and annotation rules.
+- [ ] T195 Add the launch-builder label-to-token mapping table for the current Codex CLI snapshot and wire `AgentLaunchBuilder` to use it for `-c model_reasoning_effort=`.
+- [ ] T196 Update Codex Quick Start storage to store the UI row identifier instead of the upstream token, with a one-shot migration for any existing entries.
+- [ ] T197 Verify Phase 49 tests pass GREEN, run broad workspace checks, and refresh SPEC-3 artifacts.

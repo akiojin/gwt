@@ -57,7 +57,11 @@ session conversion.
    runs `BranchType -> Issue -> AI Suggest -> Branch Name -> Agent`.
 3. Given I select Codex, when I continue through the wizard, then the flow
    includes `Model -> Reasoning -> Version -> Execution Mode -> Skip Permissions -> Codex Fast Mode`
-   without requiring a trailing confirm screen.
+   without requiring a trailing confirm screen. When I select Claude Code
+   with an effort-capable model (Opus 4.6 / Sonnet 4.6), the same
+   `Model -> Reasoning -> Version -> Execution Mode -> Skip Permissions`
+   sequence runs (with `Reasoning` mapped to `CLAUDE_CODE_EFFORT_LEVEL` as
+   described in US-10); Claude Code has no Fast Mode step.
 4. Given I choose session conversion, when I pick `Convert` from execution
    mode, then the wizard routes through `ConvertAgentSelect` and
    `ConvertSessionSelect` before `SkipPermissions`.
@@ -151,6 +155,137 @@ As a developer, I want gwt to cache available agent versions at startup so that 
    expiry, then the new version appears in the list alongside the installed
    and `latest` options.
 
+### US-11: Codex Reasoning Level UI Labeling (P1) -- NOT IMPLEMENTED
+
+As a developer launching Codex, I want the `ReasoningLevel` wizard step to
+mirror the Codex CLI's own `/model` reasoning selection so that the level
+names, ordering, default marker, and current-selection marker match what I
+already see in the Codex CLI.
+
+The wizard `ReasoningLevel` step for Codex must render exactly four rows in
+the order below. The header line above the list must read
+`Select Reasoning Level for <model>` where `<model>` is the model id chosen
+on `ModelSelect` (for example `gpt-5.4`). The actual `-c
+model_reasoning_effort=<value>` value sent to Codex is NOT identical to the
+displayed label and is mapped per row by the launch builder; the wizard is
+responsible only for displaying these four rows and recording the user's
+selection.
+
+```
+Select Reasoning Level for <model>
+
+  1. Low                       Fast responses with lighter reasoning
+  2. Medium (default)          Balances speed and reasoning depth for everyday tasks
+  3. High                      Greater reasoning depth for complex problems
+> 4. Extra high (current)      Extra high reasoning depth for complex problems
+```
+
+**Acceptance Scenarios**
+
+1. Given I reach the Codex `ReasoningLevel` step, when the popup renders,
+   then the header line reads `Select Reasoning Level for <model>` using
+   the model id selected on `ModelSelect`.
+2. Given the popup renders, when I scan the list, then I see exactly the
+   four labels `Low`, `Medium`, `High`, `Extra high` in this fixed order,
+   each followed by the description copy shown above.
+3. Given the popup renders, when I look at the labels, then `Medium`
+   carries a `(default)` annotation regardless of which row is selected,
+   marking the Codex-side default reasoning level.
+4. Given a row is currently selected, when the popup renders, then that
+   row's label carries a `(current)` annotation in addition to any
+   `(default)` annotation. Only the selected row receives `(current)`.
+5. Given the user has not picked a level yet on this launch, when the
+   popup first renders, then the `Medium (default)` row is the initial
+   selection and therefore renders as `Medium (default) (current)` — the
+   two annotations stack on the default-and-currently-selected row.
+6. Given the user picks any row, when launch materializes, then the
+   launch builder maps the displayed label to the upstream
+   `-c model_reasoning_effort=<value>` token expected by the installed
+   Codex CLI version. The label-to-value mapping is owned by the launch
+   builder and tracked by a Codex CLI snapshot date in this SPEC; the
+   mapping is not part of the wizard's UI contract.
+
+### US-10: Launch Claude Code with Effort Level (P1) -- NOT IMPLEMENTED
+
+As a developer launching Claude Code, I want to pick an adaptive reasoning
+effort level in the same wizard step that Codex already uses, so that I can
+persist `max` effort across sessions through `CLAUDE_CODE_EFFORT_LEVEL` the
+same way Codex uses `model_reasoning_effort`.
+
+The wizard `ReasoningLevel` step for Claude Code renders the five rows
+below when the selected model is effort-capable (Opus 4.6 or Sonnet 4.6).
+The header line above the list reads
+`Select Effort Level for <model>` where `<model>` is the model id chosen
+on `ModelSelect` (for example `opus-4-6`). Unlike Codex, the Claude Code
+label set maps 1:1 (case-folded) to the `CLAUDE_CODE_EFFORT_LEVEL`
+environment variable value, and the wizard does not accept any label that
+is not in this list.
+
+```
+Select Effort Level for <model>
+
+  1. Auto                            Let the model decide how deeply to think (no env var exported)
+> 2. Low                             Fast, cheap responses for simple renames, greps, and quick questions
+  3. Medium (default)                Balanced reasoning for everyday agentic coding and tool-heavy work
+  4. High                            Deeper reasoning for complex problems (API/Team/Enterprise default)
+  5. Max (Opus 4.6 only) (current)   Deepest reasoning with no token-spending constraint; env-var-only persistence
+```
+
+**Label → env-var value mapping** (owned by `AgentLaunchBuilder`):
+
+| UI row | Description anchor | `CLAUDE_CODE_EFFORT_LEVEL` value | Notes |
+|---|---|---|---|
+| `Auto` | model default | _(not set)_ | Neither the env var nor `--effort` is passed. Any inherited profile value falls through unchanged. |
+| `Low` | fast / cheap | `low` | Persists across sessions. |
+| `Medium` | balanced | `medium` | Anthropic-side default for Pro / Max subscribers. |
+| `High` | deep reasoning | `high` | Anthropic-side default for API key / Team / Enterprise / Bedrock / Vertex / Foundry. |
+| `Max` | deepest reasoning | `max` | **Opus 4.6 only.** Persists across sessions only when set via env var (by design of upstream Claude Code). |
+
+**Acceptance Scenarios**
+
+1. Given I select Claude Code in `AgentSelect` with a supported model
+   (Opus 4.6 or Sonnet 4.6), when I continue through the wizard, then the
+   flow includes the `ReasoningLevel` step before `VersionSelect`, using the
+   same old-TUI row formatting Codex already uses, and the header line
+   reads `Select Effort Level for <model>` using the model id selected on
+   `ModelSelect`.
+2. Given I am on `ReasoningLevel` for Claude Code with Opus 4.6, when the
+   list renders, then I see exactly the five rows `Auto`, `Low`,
+   `Medium`, `High`, `Max` in this fixed order with the description copy
+   shown in the ASCII mock above.
+3. Given I am on `ReasoningLevel` for Claude Code with Sonnet 4.6, when
+   the list renders, then the `Max` row is omitted (because `max` is
+   Opus 4.6 only) and the other four rows render in order
+   `Auto`, `Low`, `Medium`, `High`.
+4. Given the popup renders, when I look at the labels, then `Medium`
+   always carries a `(default)` annotation regardless of which row is
+   selected, and only the currently selected row carries a `(current)`
+   annotation. On first render with no prior selection, `Low` is the
+   initial selection (matching the ASCII mock's selection marker) and
+   there is no stacking with `(default)`.
+5. Given I pick a non-`Auto` row, when launch materializes the PTY, then
+   the spawned Claude Code process receives `CLAUDE_CODE_EFFORT_LEVEL`
+   set to the lower-case of the label (`low` / `medium` / `high` /
+   `max`) and no `--effort` CLI flag is appended.
+6. Given I keep `Auto` selected, when launch materializes the PTY, then
+   `CLAUDE_CODE_EFFORT_LEVEL` is not exported and no `--effort` flag is
+   appended, letting any inherited profile value or model default apply.
+7. Given I select Claude Code with a model that is not effort-capable,
+   when the wizard runs, then the `ReasoningLevel` step is skipped
+   exactly as it is today for agents without reasoning support.
+8. Given Quick Start has a persisted Claude Code entry with a non-`Auto`
+   row, when I choose `Resume` or `Start new` from that entry, then the
+   wizard pre-fills the effort row and a subsequent launch exports the
+   same `CLAUDE_CODE_EFFORT_LEVEL` value. Persisted rows survive upstream
+   label renames because the Quick Start entry stores the row identifier,
+   not the env-var token.
+9. Given the user already has `CLAUDE_CODE_EFFORT_LEVEL` set in the
+   profile environment, when the wizard selects a non-`Auto` row, then
+   the launch-injected value overrides the inherited profile value for
+   the spawned PTY only (the parent process environment is untouched);
+   when the wizard selects `Auto`, the inherited profile value is left
+   untouched and reaches the child process unchanged.
+
 ### US-6: Convert Sessions Between Agent Types (P2) -- IMPLEMENTED
 
 As a developer, I want to convert an existing session to a different agent type so that I can switch tools mid-workflow.
@@ -177,6 +312,22 @@ As a developer, I want to convert an existing session to a different agent type 
   duplicated in the UI.
 - User keeps the default model label selected; launch should omit an explicit
   `--model` override instead of passing the human-readable placeholder text.
+- User selects Claude Code with an effort-capable model and then switches
+  back to a non-effort-capable model before leaving `ModelSelect`; the
+  wizard must drop any staged `ReasoningLevel` choice so launch does not
+  export a stale `CLAUDE_CODE_EFFORT_LEVEL`.
+- User picks Claude effort `max` on a non-Opus model; the wizard must
+  either hide `max` or refuse the selection so launch never exports an
+  unsupported combination.
+- Upstream Codex CLI renames or removes one of the four reasoning levels;
+  the launch builder mapping must be updated and the wizard contract
+  reviewed before the next release. The wizard UI must never silently
+  fall through to a label that no longer corresponds to a valid Codex
+  value.
+- `CLAUDE_CODE_EFFORT_LEVEL` already exists in the inherited profile
+  environment; selecting `auto` in the wizard must not unset the inherited
+  value via `env -u` tricks — gwt simply does not inject the var, and the
+  child process inherits whatever the profile provided.
 
 ## Functional Requirements
 
@@ -314,6 +465,59 @@ As a developer, I want to convert an existing session to a different agent type 
 - **FR-045**: Quick Start restores persisted `skip_permissions` for all built-in agents, including Claude.
 - **FR-046**: Claude launch sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` so Agent Teams capability is always available without an explicit pre-launch toggle.
 - **FR-047**: Every agent launch appends a structured audit line to `~/.gwt/logs/agent-launch.jsonl` including command/args/cwd/env for the spawned PTY config, with sensitive env values redacted.
+- **FR-048**: The `ReasoningLevel` wizard step applies to Claude Code when
+  the selected model is an effort-capable Claude model (Opus 4.6 or
+  Sonnet 4.6), using the same old-TUI row formatting already used for
+  Codex. When the selected Claude model does not support effort, the step
+  is skipped. The header line above the list reads
+  `Select Effort Level for <model>` using the model id selected on
+  `ModelSelect`.
+- **FR-049**: Claude Code `ReasoningLevel` rows are, in fixed order:
+  `Auto`, `Low`, `Medium`, `High`, `Max`. The `Max` row is shown only
+  when the selected model is Opus 4.6; Sonnet 4.6 renders the first four
+  rows only. Each row uses the description copy specified in US-10.
+  `Medium` always carries a `(default)` annotation, and the currently
+  selected row additionally carries a `(current)` annotation; first
+  render defaults to `Low` as the initial selection.
+- **FR-050**: `AgentLaunchBuilder` owns the label-to-env-var mapping for
+  Claude Code:
+  `Auto` → unset (neither env var nor CLI flag),
+  `Low` → `CLAUDE_CODE_EFFORT_LEVEL=low`,
+  `Medium` → `CLAUDE_CODE_EFFORT_LEVEL=medium`,
+  `High` → `CLAUDE_CODE_EFFORT_LEVEL=high`,
+  `Max` → `CLAUDE_CODE_EFFORT_LEVEL=max`.
+  The `--effort` CLI flag is never appended. The wizard never passes the
+  displayed label verbatim; it records only the row identifier and the
+  launch builder performs the mapping. Values outside
+  `{low, medium, high, max}` must never reach the spawned process.
+- **FR-051**: Claude Code Quick Start entries persist the effective
+  reasoning row identifier (including `Auto`) alongside model and
+  skip_permissions, so relaunch through `Resume` / `Start new` restores
+  the same `CLAUDE_CODE_EFFORT_LEVEL` behavior as the original launch
+  even if the displayed label copy is later renamed.
+- **FR-052**: The launch-injected `CLAUDE_CODE_EFFORT_LEVEL` value takes
+  precedence over any inherited profile environment value for the spawned
+  PTY. When the wizard row is `Auto`, gwt does not unset inherited
+  profile values; the child process inherits whatever the profile
+  provided. The parent gwt process environment is never mutated.
+- **FR-053**: The Codex `ReasoningLevel` wizard step renders exactly four
+  rows in fixed order: `Low`, `Medium`, `High`, `Extra high`, each with
+  the description copy specified in US-11. The header line above the list
+  reads `Select Reasoning Level for <model>` using the model id selected
+  on `ModelSelect`.
+- **FR-054**: `Medium` always carries a `(default)` annotation regardless
+  of selection state, marking the Codex-side default. The currently
+  selected row additionally carries a `(current)` annotation; on first
+  render with no prior selection, `Medium` is the initial selection and
+  therefore renders as `Medium (default) (current)`.
+- **FR-055**: The Codex `ReasoningLevel` wizard step is responsible only
+  for displaying labels and recording the user's row selection. The
+  launch builder owns mapping the chosen label to the upstream
+  `-c model_reasoning_effort=<value>` token, and the mapping is tracked
+  by a Codex CLI snapshot date in this SPEC. Adding or renaming Codex
+  reasoning levels in upstream requires updating the mapping but does
+  not change the wizard's UI contract unless the row count or order
+  changes.
 
 ## Non-Functional Requirements
 
@@ -332,6 +536,7 @@ As a developer, I want to convert an existing session to a different agent type 
 | Variable | Value | Purpose |
 |----------|-------|---------|
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | Enable agent teams |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `low` \| `medium` \| `high` \| `max` | Adaptive reasoning effort level for Opus 4.6 / Sonnet 4.6. Exported only when the wizard selects a non-`auto` level. `max` is Opus 4.6 only and persists across sessions only through this env var. Takes precedence over `/effort`, `--effort`, `settings.json`, and skill/subagent frontmatter. |
 | `CLAUDE_CODE_NO_FLICKER` | `1` | Disable TUI flicker |
 | `DISABLE_TELEMETRY` | `1` | Disable Statsig metrics |
 | `DISABLE_ERROR_REPORTING` | `1` | Disable Sentry error reporting |
@@ -373,7 +578,7 @@ As a developer, I want to convert an existing session to a different agent type 
 | `--model <model>` | Model selection (alias: `sonnet`, `opus`, or full name) |
 | `--allowedTools <tools>` | Tools that execute without prompting (pattern matching supported) |
 | `--disallowedTools <tools>` | Tools removed from context entirely |
-| `--effort <level>` | Effort level: low/medium/high/max (Opus 4.6 only) |
+| `--effort <level>` | Effort level: low/medium/high/max (Opus 4.6 only). gwt does not use this flag; it exports `CLAUDE_CODE_EFFORT_LEVEL` instead so `max` persists across sessions (see env var table). |
 | `--continue`, `-c` | Continue most recent conversation |
 | `--resume <id>`, `-r` | Resume specific session by ID or name |
 | `--name <name>`, `-n` | Set session display name |
@@ -393,7 +598,7 @@ Model list snapshot: **2026-04-06**.
 | `resume [SESSION_ID]` | Resume a specific Codex interactive session by session/thread ID |
 | `resume --last` | Continue the most recent Codex interactive session |
 | `--model <model>` | Default: `gpt-5.4`; available: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` |
-| `-c model_reasoning_effort=<level>` | Reasoning level: low/medium/high |
+| `-c model_reasoning_effort=<level>` | Reasoning level token sent to Codex. Mapped from the wizard's four-row UI (`Low`, `Medium`, `High`, `Extra high`) by the launch builder; mapping owned by SPEC-3 and tracked by the Codex model list snapshot date above. Wizard never sends the displayed label verbatim. |
 | `-c service_tier=fast` | Fast mode (Codex-only speed tier). Independent from skip-permission settings |
 | `--full-auto` | Approval/sandbox automation convenience alias (not a Fast mode toggle) |
 | `--yolo` | Skip permissions (Codex legacy flag) |
@@ -487,3 +692,14 @@ default = { id = "default", label = "Default", arg = "" }
 - **SC-009**: New-branch launches from Branches, SPEC detail, and Issue
   detail start inside a materialized sibling worktree whose path mirrors the
   branch hierarchy instead of falling back to the repository root checkout.
+- **SC-010**: Claude Code launches with an effort-capable model route
+  through `ReasoningLevel` with the five-row `Auto / Low / Medium / High
+  / Max` contract (four rows on Sonnet 4.6), export the chosen
+  `CLAUDE_CODE_EFFORT_LEVEL` (or omit it for `Auto`) using the mapping
+  in FR-050, and Quick Start relaunch reproduces the same row selection
+  and env-var behavior.
+- **SC-011**: Codex `ReasoningLevel` renders the four UI rows specified
+  in US-11 with stable `(default)` and `(current)` annotations, and the
+  launch builder maps each row to the upstream
+  `-c model_reasoning_effort=<value>` token without leaking the
+  human-readable label to Codex.

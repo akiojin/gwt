@@ -485,6 +485,89 @@ falls back to the repository root checkout.
    while preserving unrelated settings and unknown nested custom-agent
    sections such as `models`.
 
+### Phase 48: Claude Code Effort Level via CLAUDE_CODE_EFFORT_LEVEL
+
+Mirror the existing Codex `ReasoningLevel` wizard integration for Claude
+Code, but export the chosen level through the `CLAUDE_CODE_EFFORT_LEVEL`
+environment variable instead of a CLI flag so that `max` persists across
+sessions (per the upstream Claude Code precedence: env var > `/effort`
+command > `--effort` flag > `settings.json` > skill/subagent frontmatter).
+
+1. Extend agent capability metadata so Claude Code exposes
+   `supports_reasoning_effort` when the currently selected model is
+   `Opus 4.6` or `Sonnet 4.6`. `Max` is gated to Opus 4.6 only.
+2. Route Claude Code through the existing `ReasoningLevel` wizard step
+   after `ModelSelect`, reusing the old-TUI row formatting already in place
+   for Codex. The Claude row set is the fixed five rows
+   `Auto / Low / Medium / High / Max` (with `Max` omitted on Sonnet 4.6)
+   and the header line `Select Effort Level for <model>`. `Auto` means
+   "do not inject the env var and do not pass `--effort`". `Medium`
+   always carries `(default)`; the currently selected row carries
+   `(current)`; first render defaults to `Low`. Description copy per row
+   is owned by US-10.
+3. When the user switches back to a non-effort-capable Claude model on
+   `ModelSelect`, discard any staged reasoning choice so launch never
+   exports a stale level.
+4. Extend `AgentLaunchBuilder` with the label-to-env-var mapping table
+   (`Auto` → unset, `Low` → `low`, `Medium` → `medium`, `High` → `high`,
+   `Max` → `max`) so Claude launch configs add
+   `CLAUDE_CODE_EFFORT_LEVEL=<value>` to the PTY environment when a
+   non-`Auto` row is selected, never mutate the parent process env, and
+   never append the `--effort` CLI flag. `Auto` produces no env var and
+   no flag, letting any inherited profile value fall through unchanged.
+   The wizard must never pass the displayed label verbatim, and values
+   outside `{low, medium, high, max}` must never reach the spawned
+   process.
+5. Persist `reasoning_level` in the Claude Code Quick Start entry (already
+   stored for Codex) and restore it on Resume / Start new so relaunch
+   reproduces the same effective `CLAUDE_CODE_EFFORT_LEVEL`.
+6. Update the agent-launch audit log (`~/.gwt/logs/agent-launch.jsonl`)
+   redaction rules to keep `CLAUDE_CODE_EFFORT_LEVEL` in cleartext so
+   operators can correlate effort choices with sessions (it is not a
+   secret).
+7. Add focused RED/GREEN coverage:
+   - Wizard step inclusion/exclusion by model capability.
+   - Launch builder env-var injection for each non-`auto` level.
+   - `auto` producing neither env var nor `--effort`.
+   - Quick Start round-trip of `reasoning_level` for Claude Code.
+   - Model downgrade on `ModelSelect` discarding the staged level.
+
+### Phase 49: Codex ReasoningLevel UI Label Refresh
+
+Realign the existing Codex `ReasoningLevel` wizard step to mirror the
+Codex CLI's own `/model` reasoning selection screen, while keeping the
+mapping from displayed labels to upstream `-c model_reasoning_effort=`
+tokens entirely inside the launch builder.
+
+1. Replace the current Codex reasoning row set with the fixed four-row
+   list: `Low`, `Medium`, `High`, `Extra high`, in this order, with the
+   description copy specified in US-11 / FR-053.
+2. Render the header line above the list as
+   `Select Reasoning Level for <model>`, where `<model>` is the model id
+   selected on `ModelSelect`.
+3. Render `(default)` as a static annotation on the `Medium` row and
+   `(current)` as a dynamic annotation on the currently selected row.
+   On first render with no prior selection, the initial selection is
+   `Medium`, so the row renders as `Medium (default) (current)`.
+4. Introduce a launch-builder mapping table from the four UI labels to
+   the upstream `-c model_reasoning_effort=<value>` token expected by the
+   installed Codex CLI snapshot. The wizard MUST NOT pass the displayed
+   label verbatim. Track the snapshot date alongside the existing Codex
+   model snapshot in `spec.md`.
+5. Update the Codex Quick Start persistence to store the selected UI row
+   identifier (not the upstream token) so relaunch via Quick Start
+   reproduces the same `(current)` selection regardless of upstream
+   token renames.
+6. Add focused RED/GREEN coverage:
+   - Header line uses the selected model id.
+   - Four rows render in fixed order with the specified description copy.
+   - `Medium` always carries `(default)`; only the selected row carries
+     `(current)`; first-render selection is `Medium`.
+   - Launch builder maps each label to the expected upstream token and
+     never sends the human-readable label.
+   - Quick Start round-trip preserves the selected row even when the
+     upstream token mapping changes between snapshots.
+
 ## Dependencies
 
 - `reqwest` or `ureq` crate for HTTP client (npm registry fetch).
