@@ -1003,7 +1003,6 @@ All notable changes to this project will be documented in this file.
 - **gui:** Make worktree summary panel height resizable (#1010)
 - Add GitHub Issue launch flow and stabilize gh detection (#1012)
 
-
 ## [7.0.0] - 2026-02-13
 
 ### Bug Fixes
@@ -1155,7 +1154,6 @@ All notable changes to this project will be documented in this file.
 - ログ画面のエントリを最新順（降順）で表示 (#905)
 - Claude Code起動時にCLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1を自動設定 (#906)
 - エージェントモード実装 (SPEC-ba3f610c T001-T100) (#909)
-
 
 ## [6.28.1] - 2026-02-06
 
@@ -1591,7 +1589,6 @@ All notable changes to this project will be documented in this file.
 
 - Developブランチへの自動マージを無効化 (#804)
 - **release:** ARM Linuxビルドをネイティブランナーに変更
-
 
 ## [6.27.0] - 2026-02-03
 
@@ -2369,7 +2366,6 @@ All notable changes to this project will be documented in this file.
 
 - Developブランチへの自動マージを無効化 (#804)
 
-
 ## [6.22.4] - 2026-01-30
 
 ### Bug Fixes
@@ -2697,7 +2693,6 @@ All notable changes to this project will be documented in this file.
 
 - Developブランチへの自動マージを無効化 (#804)
 
-
 ## [6.22.1] - 2026-01-27
 
 ### Bug Fixes
@@ -2979,7 +2974,6 @@ All notable changes to this project will be documented in this file.
 
 - Developブランチへの自動マージを無効化 (#804)
 
-
 ## [6.21.0] - 2026-01-26
 
 ### Bug Fixes
@@ -3096,7 +3090,6 @@ All notable changes to this project will be documented in this file.
 
 - Developブランチへの自動マージを無効化 (#804)
 
-
 ## [6.20.0] - 2026-01-26
 
 ### Bug Fixes
@@ -3204,7 +3197,6 @@ All notable changes to this project will be documented in this file.
 
 - Hook setup重複登録防止のテスト追加 (#726)
 
-
 ## [6.17.1] - 2026-01-26
 
 ### Bug Fixes
@@ -3304,7 +3296,6 @@ All notable changes to this project will be documented in this file.
 
 - Hook setup重複登録防止のテスト追加 (#726)
 
-
 ## [6.16.0] - 2026-01-25
 
 ### Bug Fixes
@@ -3386,7 +3377,6 @@ All notable changes to this project will be documented in this file.
 ### Testing
 
 - Hook setup重複登録防止のテスト追加 (#726)
-
 
 ## [6.15.0] - 2026-01-25
 
@@ -3473,7 +3463,6 @@ All notable changes to this project will be documented in this file.
 ### Testing
 
 - Hook setup重複登録防止のテスト追加 (#726)
-
 
 ## [6.13.0] - 2026-01-23
 

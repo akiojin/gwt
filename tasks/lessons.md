@@ -1,5 +1,133 @@
 # Lessons Learned
 
+## 2026-04-09 — fix: `tracing_appender::rolling::daily` の日付境界は思い込みで local 扱いしない
+
+### 事象
+
+`gwt-core/tests/logging_init.rs` が深夜帯に恒常失敗し、`init()` 後に
+`tracing::info!` を流しても `current_log_file()` が見に行くファイルが空のままだった。
+
+### 原因
+
+- `crates/gwt-core/src/logging/writer.rs` と `crates/gwt-tui/src/logs_watcher/watch.rs` が
+  `gwt.log.YYYY-MM-DD` の日付を local 前提で扱っていた。
+- しかし実際に使っている `tracing-appender 0.2.4` の `rolling::daily` は UTC 日付で
+  ファイル名とローテーション境界を決めていた。
+- そのため JST 深夜のような UTC 日付との差分がある時間帯では、
+  テスト・watcher・housekeeping が別の日のファイルを見ていた。
+
+### 再発防止策
+
+1. 外部 crate の時間境界や file naming はコメントや記憶ではなく、使っている version の source / docs で確認する。
+2. log rotation のような date-sensitive contract は writer だけでなく watcher / housekeeping / spec を同時に揃える。
+3. 深夜帯だけ落ちる integration test を見たら、まず local time と UTC のどちらを境界にしているかを疑う。
+
+## 2026-04-09 — fix: IME 切り分けで `raw` だけ正常なら「入力解釈」ではなく idle redraw を先に疑う
+
+### 事象
+
+`gwt` では日本語 IME 候補選択が壊れる一方、同じ terminal で raw `crossterm`
+probe は正常だった。さらに layered probe では `raw` は正常で `redraw` /
+`ratatui` が同様に壊れた。
+
+### 原因
+
+- 問題の本体は `crossterm` の raw event 解釈ではなく、周期 redraw が
+  composition 中の IME UI を中断していたことだった。
+- `gwt` の main loop は outer loop ごとに無条件で `terminal.draw(...)`
+  しており、tick ベースの idle repaint が terminal focus 中でも止まらなかった。
+
+### 再発防止策
+
+1. terminal/IME の不具合で raw probe だけ正常な場合、まず「event routing」より
+   先に「idle redraw / cursor reset / clear」を疑う。
+2. 再現 probe は `raw` / `redraw` / `ratatui` のように 1 変数ずつ増やし、
+   redraw そのものと rendering stack を分離して検証する。
+3. main loop の描画は無条件 repaint ではなく dirty-driven にし、
+   terminal focus 中の idle tick redraw は明示的な必要条件があるときだけ許可する。
+
+## 2026-04-09 — fix: dirty-driven redraw にしたら PTY drain の全経路で redraw dirty を立てる
+
+### 事象
+
+idle tick redraw を止めたあと、IME 確定文字だけでなく ASCII 入力も 1 文字遅れで
+表示され、次のキー入力でまとめて見えるようになった。
+
+### 原因
+
+- outer loop 冒頭で PTY output を drain した場合は redraw dirty を立てていたが、
+  poll loop 中に到着した PTY output を drain した場合は dirty flag を更新していなかった。
+- そのため model 自体は更新されていても、次の入力イベントまで描画が走らない経路が残った。
+
+### 再発防止策
+
+1. dirty-driven redraw への変更では、「どの経路が redraw を要求するか」を helper に集約し、複数ループで手書きしない。
+2. PTY output のような非入力イベントは「state が変わった」だけでなく「見た目を更新する必要がある」ことを RED テストで固定する。
+3. idle redraw suppression の修正後は、IME だけでなく plain ASCII / shell output でも 1 文字遅延がないかを必ず確認する。
+
+## 2026-04-08 — fix: `REPORT_EVENT_TYPES` を有効化したら `Repeat` を `Press` と別経路で扱う
+
+### 事象
+
+IME 候補の最初の一覧表示は維持されたが、次ページへ送るタイミングで入力制御を
+失う症状が残った。
+
+### 原因
+
+- 起動時に `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES)`
+  を有効化したことで、互換端末では `KeyEventKind::Repeat` が届くようになった。
+- しかし `event.rs` の翻訳層は `KeyEventKind::Press` だけを `Message::KeyInput` に
+  流し、`Repeat` を無条件で捨てていた。
+- そのため、ページ送りのような繰り返しキーに依存する入力経路が途中で途切れた。
+
+### 再発防止策
+
+1. `crossterm` の keyboard enhancement flag を増やしたら、対応する
+   `KeyEventKind` の downstream 契約まで必ず確認する。
+2. event loop の key filter 変更では `Press` だけでなく `Repeat` / `Release` の
+   扱いを RED テストで固定する。
+3. IME や端末依存の入力不具合では、flag 有効化そのものだけでなく、その後段の
+   イベント翻訳層が新しい event kind を落としていないかを先に疑う。
+
+## 2026-04-08 — fix: 重い Cargo テストを並列実行すると flaky なタイムアウトを誘発しやすい
+
+### 事象
+
+`cargo test -p gwt-tui` と `cargo test -p gwt-core -p gwt-tui` を同時に走らせた際、
+`update_branches_docker_stop_executes_and_refreshes_detail` が一度だけ timeout で失敗した。
+同じテストを単独で再実行すると成功した。
+
+### 原因
+
+- package cache / build directory の lock 待ちと並列負荷が重なり、
+  Docker worker の完了待ちが一時的に遅延した。
+- 重い Cargo テストの並列化は、CI と異なるローカル負荷条件で flaky を誘発しやすい。
+
+### 再発防止策
+
+1. `cargo test -p gwt-tui` と `cargo test -p gwt-core -p gwt-tui` のような重複する重い検証は並列で回さず、順次実行する。
+2. flaky が出た場合は直ちに単独再実行し、再現性を確認してから結果を採用する。
+3. 並列化は読み取り系コマンド中心に限定し、負荷の高い Rust ビルド/テストには適用しない。
+
+## 2026-04-07 — fix: IME 問題に常用トグルを足す前に実アプリの入力証跡を取る
+
+### 事象
+
+日本語 IME 候補選択の途中送信に対して、`Ctrl+G,y` で切り替える
+terminal IME mode を先に実装したが、ユーザーから「入力モードを切り替えるのは
+非常に使いにくい」とフィードバックを受け、常用 UX として成立しなかった。
+
+### 原因
+
+- `crossterm` / 端末 / IME の境界でどのキーが実際に届いているかを確定する前に、
+  明示トグルという回避策を product surface に乗せた。
+- 「安全側の暫定回避」を、そのまま常用 UX として残してしまった。
+
+### 再発防止策
+
+1. 端末入力まわりの不具合では、まず実アプリ上の入力経路（raw event / keybind / PTY forward）の証跡を取る。
+2. 根本原因が未確定の段階では、常用を前提にした入力モード切替や persistent UI affordance を追加しない。
+3. 調査用機能は env-gated logging など fail-open な計測を優先し、通常 UX への影響を 0 に近づける。
 ## 2026-04-08 — fix: coalesced `home + repaint` payloads need frame segmentation before Codex row-history derivation
 
 ### 事象

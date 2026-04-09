@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
-use crate::message::Message;
+use crate::{input_trace, message::Message};
 
 /// Tick interval for the event loop.
 const TICK_RATE: Duration = Duration::from_millis(100);
@@ -37,7 +37,15 @@ pub fn poll_event_slice(deadline: Instant, max_wait: Duration) -> Option<Message
 
 fn translate_event(event: Event) -> Option<Message> {
     match event {
-        Event::Key(key) if key.kind == event::KeyEventKind::Press => Some(Message::KeyInput(key)),
+        Event::Key(key)
+            if matches!(
+                key.kind,
+                event::KeyEventKind::Press | event::KeyEventKind::Repeat
+            ) =>
+        {
+            input_trace::trace_crossterm_key(key);
+            Some(Message::KeyInput(key))
+        }
         Event::Paste(text) => Some(Message::PasteInput(text)),
         Event::Mouse(mouse) if mouse.kind == event::MouseEventKind::Moved => None,
         Event::Mouse(mouse) => Some(Message::MouseInput(mouse)),
@@ -238,7 +246,7 @@ pub fn classify_key(key: KeyEvent) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{Event, KeyEventKind, KeyEventState};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -247,6 +255,10 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         }
+    }
+
+    fn key_with_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent { kind, ..key(code) }
     }
 
     #[test]
@@ -277,6 +289,19 @@ mod tests {
         assert!(matches!(
             msg,
             Some(Message::PasteInput(text)) if text == "git status\npwd"
+        ));
+    }
+
+    #[test]
+    fn translate_event_maps_repeat_key_to_message() {
+        let msg = translate_event(Event::Key(key_with_kind(
+            KeyCode::Tab,
+            KeyEventKind::Repeat,
+        )));
+        assert!(matches!(
+            msg,
+            Some(Message::KeyInput(key))
+                if key.code == KeyCode::Tab && key.kind == KeyEventKind::Repeat
         ));
     }
 
@@ -342,6 +367,15 @@ mod tests {
                 modifiers
             })) if modifiers == KeyModifiers::NONE
         ));
+    }
+
+    #[test]
+    fn translate_event_ignores_key_release() {
+        let msg = translate_event(Event::Key(key_with_kind(
+            KeyCode::Tab,
+            KeyEventKind::Release,
+        )));
+        assert!(msg.is_none());
     }
 
     #[test]

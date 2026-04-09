@@ -2,13 +2,13 @@
 //!
 //! Spawns a background thread that:
 //!
-//! 1. Performs an initial full read of the current day's log file and
+//! 1. Performs an initial full read of the current UTC day's log file and
 //!    dispatches a `LogsMessage::SetEntries` to the UI.
 //! 2. Installs a debounced `notify` watcher on the log directory.
 //! 3. On each debounced change, reads any new bytes appended since
 //!    the previous offset, parses them as JSONL, and dispatches a
 //!    `LogsMessage::AppendEntries`.
-//! 4. Handles day rollover by reopening the new `gwt.log.YYYY-MM-DD`
+//! 4. Handles UTC day rollover by reopening the new `gwt.log.YYYY-MM-DD`
 //!    file when it appears.
 
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -55,18 +55,17 @@ pub fn spawn(log_dir: PathBuf, tx: Sender<LogsWatcherPacket>) -> LogsWatcherHand
 fn run(log_dir: PathBuf, tx: Sender<LogsWatcherPacket>) {
     let mut current = WatcherState::new(log_dir.clone());
 
-    // Initial read: parse the entire current day's file (if it exists)
-    // and dispatch SetEntries.
+    // Initial read: parse the entire current day's file (if it exists).
+    // We delay publishing `SetEntries` until after the watcher is active
+    // so the first append cannot race ahead of watcher registration.
     let entries = current.read_all_from_start();
-    if tx.send(LogsWatcherPacket::SetEntries(entries)).is_err() {
-        return;
-    }
 
     // notify-debouncer-mini uses a separate sender/receiver pair.
     let (evt_tx, evt_rx) = channel();
     let mut debouncer = match new_debouncer(Duration::from_millis(150), evt_tx) {
         Ok(d) => d,
         Err(err) => {
+            let _ = tx.send(LogsWatcherPacket::SetEntries(entries));
             tracing::warn!(
                 target: "gwt_tui::logs_watcher",
                 error = %err,
@@ -80,12 +79,17 @@ fn run(log_dir: PathBuf, tx: Sender<LogsWatcherPacket>) {
         .watcher()
         .watch(&log_dir, RecursiveMode::NonRecursive)
     {
+        let _ = tx.send(LogsWatcherPacket::SetEntries(entries));
         tracing::warn!(
             target: "gwt_tui::logs_watcher",
             dir = %log_dir.display(),
             error = %err,
             "failed to watch log directory; Logs tab will not stream"
         );
+        return;
+    }
+
+    if tx.send(LogsWatcherPacket::SetEntries(entries)).is_err() {
         return;
     }
 
@@ -134,8 +138,8 @@ impl WatcherState {
         }
     }
 
-    /// Check whether the "current day" file has changed (rollover at
-    /// local midnight). Returns `true` if the pointer was reset.
+    /// Check whether the active UTC-day file has changed. Returns
+    /// `true` if the pointer was reset.
     fn maybe_rotate(&mut self) -> bool {
         let today = current_log_file(&self.log_dir);
         if today != self.current_file {

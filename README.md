@@ -79,6 +79,34 @@ All TUI key bindings use the `Ctrl+G` prefix.
 | `Ctrl+G`, `?` | Help / key binding reference |
 | `Ctrl+G`, `q` | Quit |
 
+To investigate Japanese IME candidate selection in a shell or agent terminal,
+launch gwt with `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl`. The JSONL
+trace records raw `crossterm` key events, keybind decisions, and forwarded PTY
+bytes without adding a runtime input-mode toggle.
+
+To compare that routed trace with raw terminal input, run
+`cargo run -p gwt-tui --example keytest -- --mode raw` in the same terminal.
+The probe logs every raw `crossterm::event::Event` to
+`/tmp/gwt-crossterm-events.jsonl` by default, or to the positional output path
+you pass.
+
+To isolate redraw-related IME regressions, the same probe also supports
+`--mode redraw` and `--mode ratatui`. `redraw` repaints the same committed-text
+surface on a periodic tick using direct `crossterm` commands, while `ratatui`
+uses the same surface through ratatui on the same tick. Use `--tick-ms <N>` to
+change the redraw interval when comparing modes.
+
+gwt also requests minimal kitty keyboard enhancements during terminal startup
+(`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them on shutdown.
+Unsupported terminals fail open and continue with existing behavior. Repeated
+key events from compatible terminals now stay on the same input path as normal
+key presses, which matters when IME candidate navigation advances to another
+page. While the terminal pane owns focus, idle 100 ms ticks now avoid repainting
+the TUI unless an overlay or other explicit periodic UI surface still needs
+animation, which reduces IME candidate interruption from background redraws.
+PTY output still requests an immediate redraw, so committed text and normal
+shell output are not delayed until the next keypress.
+
 ## Environment and requirements
 
 ### Required

@@ -17,9 +17,9 @@ pub struct HousekeepReport {
     pub errors: Vec<(PathBuf, String)>,
 }
 
-/// Delete rotated log files older than `retention_days` relative to today
-/// (UTC date, matching the rolling writer). Returns a `HousekeepReport`
-/// describing what was done.
+/// Delete rotated log files older than `retention_days` relative to today's
+/// UTC date, matching the rolling writer's UTC boundary. Returns a
+/// `HousekeepReport` describing what was done.
 ///
 /// `retention_days == 0` disables housekeeping entirely. The active file
 /// (`gwt.log`) and files whose date suffix cannot be parsed are left

@@ -124,7 +124,7 @@ Add character without clutter:
 - **Dividers:** `───── ═════ •••••• ░░░░░░ ≋≋≋≋≋≋`
 - **Section markers:** `▶ SECTION`, `[ SECTION ]`, `─── SECTION ───`, `◆ SECTION`
 - **Background textures:** Patterns using light characters like `· ∙ ░`
-- **Icons:** Nerd Font icons if available: `   󰊢`
+- **Icons:** Nerd Font icons if available: `󰊢`
 
 ## Anti-Patterns to Avoid
 

@@ -75,6 +75,33 @@ TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用しま
 | `Ctrl+G`, `?` | ヘルプ / キーバインド一覧 |
 | `Ctrl+G`, `q` | 終了 |
 
+シェルやエージェント端末で日本語 IME の候補選択を調査する場合は、
+`GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl` を付けて gwt を起動してください。
+JSONL トレースには、生の `crossterm` キーイベント、keybind 判定、PTY に
+転送したバイト列が記録され、実行中に入力モードを切り替える必要はありません。
+
+その routed trace と terminal の生入力を比較したい場合は、同じ端末で
+`cargo run -p gwt-tui --example keytest -- --mode raw` を実行してください。
+probe は既定で `/tmp/gwt-crossterm-events.jsonl` に全
+`crossterm::event::Event` を記録し、必要なら位置引数で出力先を
+上書きできます。
+
+描画起因の IME 退行を切り分けるため、同じ probe には `--mode redraw` と
+`--mode ratatui` もあります。`redraw` は同じ committed-text surface を
+direct `crossterm` で周期再描画し、`ratatui` は同じ surface を同じ tick
+で ratatui 経由に切り替えます。モード比較時の再描画間隔は
+`--tick-ms <N>` で変更できます。
+
+また gwt は起動時に minimal な kitty keyboard enhancement
+(`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) を要求し、終了時に pop します。
+非対応端末では fail-open で従来挙動を維持します。互換端末で発生する
+繰り返しキーイベントも通常の key press と同じ入力経路に残るため、IME の
+候補ページ送り時にイベントが途中で消えにくくなります。さらに terminal pane
+が focus を持つ間は、overlay など明示的に周期 UI が必要な場合を除いて、
+idle な 100 ms tick では TUI を再描画しないため、バックグラウンド redraw に
+よる IME 候補操作の中断を抑えます。一方で PTY output は即座に redraw を要求
+するため、確定文字や通常の shell 出力が次のキー入力まで遅延しません。
+
 ## 必要環境変数と前提
 
 ### 必須
