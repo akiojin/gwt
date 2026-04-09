@@ -13,24 +13,26 @@ REST-first `gh api` flows for all PR operations. GraphQL only for unresolved rev
 
 ## Mode Auto-Detection
 
-On invocation, resolve the current branch's PR state and select mode:
+On invocation, run Shared Preflight, then route:
 
-1. **Preflight** — Resolve repo, head, base, and list PRs via REST (see [Shared Preflight](#shared-preflight)).
-2. **Route:**
-   - User explicitly says "check status" / "PR status" / "is it merged?" --> **check** mode
-   - User explicitly says "fix CI" / "fix the PR" / "resolve blockers" --> **fix** mode
-   - User explicitly says "create PR" / "open PR" --> **create** mode (with smart skip if open PR exists)
-   - No explicit mode --> auto-detect:
-     - No PR exists --> **create**
-     - Open unmerged PR exists, user has new commits --> **create** (push-only + post-push fix)
-     - Open unmerged PR exists, user asks about status --> **check**
-     - PR has CI failures / review comments / conflicts --> **fix**
-     - All PRs merged with new commits --> **create**
-     - All PRs merged, no diff --> report NO ACTION
+1. **Preflight** — always runs first (see [Shared Preflight](#shared-preflight)).
+2. **Explicit mode** (user said "check" / "fix" / "create"):
+   - "check status" / "PR status" / "is it merged?" → **check** mode
+   - "fix CI" / "fix the PR" / "resolve blockers" → **fix** mode
+   - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
+3. **Auto-detect** (no explicit mode) — use the commit-count-first
+   decision from Preflight Step 6:
+   - `N > 0` + no open PR → **create**
+   - `N > 0` + open PR → **create** (push-only + post-push fix)
+   - `N = 0` + open PR → **fix** (check CI / reviews / conflicts)
+   - `N = 0` + no open PR → report **NO ACTION**
 
 ## Shared Preflight
 
-Every mode begins with these steps:
+Every mode begins with these steps. **The order is intentional — commit
+count against the base branch comes before PR state lookup so that the
+MERGED shortcut ("PR is done therefore nothing to do") is structurally
+impossible.**
 
 1. **Repo + branches:**
    - `git rev-parse --show-toplevel` / `git rev-parse --abbrev-ref HEAD`
@@ -38,15 +40,33 @@ Every mode begins with these steps:
 2. **Branch protection:** Only `develop` may target `main`. Refuse any other branch targeting `main`.
 3. **Working tree state:** `git status --porcelain`. If dirty, pause and present options (continue / abort / cleanup). Do not auto-commit/stash.
 4. **Fetch:** `git fetch origin`
-5. **PR lookup (REST-first):**
+5. **Commit count against base (mandatory first check):**
+   ```bash
+   N=$(git rev-list --count "origin/$base..HEAD")
+   ```
+   > **Baseline ref rule**: ALWAYS compare against `origin/<base>`
+   > (the PR target branch, default `origin/develop`). NEVER use
+   > `origin/<head>` (the remote tracking branch of the current
+   > branch) — that only tells you if commits are pushed, not
+   > whether develop has your work. Confusing the two is the root
+   > cause of the MERGED-state false NO ACTION bug.
+6. **PR lookup + open-PR check:**
    - `repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
    - `owner="${repo_slug%%/*}"`
    - `gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100"`
-6. **Classify PR state:**
-   - No PR --> `NO_PR`
-   - Open + unmerged (`state == "open" && merged_at == null`) --> `UNMERGED_PR_EXISTS`
-   - Only closed + unmerged --> `CLOSED_UNMERGED_ONLY`
-   - At least one merged, no open unmerged --> perform post-merge commit check (see `references/check-flow.md`)
+   - `has_open_pr` = any entry with `state == "open" && merged_at == null`
+7. **Route using the 2×2 matrix:**
+
+   | Commits (N) | Open PR? | Action |
+   |---|---|---|
+   | N > 0 | No | **CREATE** new PR |
+   | N > 0 | Yes | **PUSH ONLY** to existing PR → then **FIX** |
+   | N = 0 | Yes | **FIX** (CI / reviews / conflicts) |
+   | N = 0 | No | **NO ACTION** |
+
+   This matrix is exhaustive. PR state (MERGED / CLOSED) is not
+   consulted — it is irrelevant when the commit count and open-PR
+   presence already determine the action.
 
 ## Mode: Create
 
@@ -106,25 +126,31 @@ Human-readable summary using signal prefixes:
 
 Per-status templates:
 
-- **NO_PR:** `>> CREATE PR -- No PR exists for <head> -> <base>.`
-- **UNMERGED_PR_EXISTS:** `> PUSH ONLY -- Unmerged PR open for <head>.` + PR URL
-- **CLOSED_UNMERGED_ONLY:** `>> CREATE PR -- No open PR; only closed unmerged PRs found.` + last closed PR
-- **ALL_MERGED_WITH_NEW_COMMITS:** `>> CREATE PR -- <N> new commit(s) after last merge (#<pr>).`
-- **ALL_MERGED_NO_PR_DIFF:** `-- NO ACTION -- All PRs merged, no PR-worthy diff.`
-- **CHECK_FAILED:** `!! MANUAL CHECK -- Could not determine PR status.` + reason
+Templates map directly from the Preflight 2×2 matrix:
+
+- **N > 0, no open PR:** `>> CREATE PR -- <N> new commit(s) not covered by any PR.`
+- **N > 0, open PR:** `> PUSH ONLY -- Unmerged PR #<number> open for <head>.` + PR URL
+- **N = 0, open PR:** `> FIX -- PR #<number> open, checking CI/reviews/conflicts.`
+- **N = 0, no open PR:** `-- NO ACTION -- No commits ahead of <base>, no open PR.`
+- **Fallback:** `!! MANUAL CHECK -- Could not determine commit count.` + reason
 
 Append `(!) Worktree has uncommitted changes.` when dirty.
 
-### Post-Merge Commit Check
+### Commit Count (from Preflight Step 5)
 
-When all PRs are merged:
+The commit count `N = git rev-list --count origin/<base>..HEAD` is
+computed in the Shared Preflight and is the primary routing signal.
+Check mode simply reports it:
 
-1. Get `merge_commit_sha` from latest merged PR.
-2. Verify ancestry: `git merge-base --is-ancestor <merge_commit> HEAD`
-3. If ancestor, count: `git rev-list --count <merge_commit>..HEAD`
-4. Fallback chain: `origin/<head>..HEAD` --> `origin/<base>..HEAD`
-5. Before recommending CREATE_PR, verify diff exists: `git diff --quiet origin/<base>...HEAD --`
-6. Empty diff --> NO ACTION. Both fallbacks fail --> MANUAL CHECK.
+- `N > 0` + no open PR → `>> CREATE PR -- <N> new commit(s) not in any PR.`
+- `N > 0` + open PR → `> PUSH ONLY -- Unmerged PR open.` + PR URL
+- `N = 0` + open PR → report CI / review / conflict status
+- `N = 0` + no open PR → `-- NO ACTION`
+
+The old "Post-Merge Commit Check" logic (merge_commit ancestry,
+fallback chain) is subsumed by `git rev-list --count origin/<base>..HEAD`
+which directly answers "does develop have all my work?" regardless of
+PR state.
 
 ## Mode: Fix
 
