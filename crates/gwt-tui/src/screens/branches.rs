@@ -114,6 +114,7 @@ pub struct BranchItem {
     pub is_local: bool,
     pub category: BranchCategory,
     pub worktree_path: Option<std::path::PathBuf>,
+    pub upstream: Option<String>,
 }
 
 /// Per-branch merge state used by Branch Cleanup (FR-018a/d).
@@ -133,6 +134,42 @@ pub struct CleanupSettings {
     /// Whether the next confirmed cleanup should also delete the matching
     /// remote tracking branch via `gh` / `git push --delete origin`.
     pub delete_remote: bool,
+}
+
+/// Why a branch cannot currently be selected for Branch Cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionBlockedReason {
+    ProtectedBranch,
+    CurrentHead,
+    ActiveSession,
+    MergeCheckRunning,
+    NotMerged,
+    RemoteTracking,
+    Unknown,
+}
+
+impl CleanupSelectionBlockedReason {
+    pub fn toast_message(self) -> &'static str {
+        match self {
+            Self::ProtectedBranch => "Cannot select for cleanup: protected branch",
+            Self::CurrentHead => "Cannot select for cleanup: branch is current HEAD",
+            Self::ActiveSession => "Cannot select for cleanup: branch has an active session",
+            Self::MergeCheckRunning => "Cannot select for cleanup: merge check is still running",
+            Self::NotMerged => "Cannot select for cleanup: branch is not merged",
+            Self::RemoteTracking => {
+                "Cannot select for cleanup: remote-tracking branches are not cleanup candidates"
+            }
+            Self::Unknown => "Cannot select for cleanup",
+        }
+    }
+}
+
+/// Result of toggling Branch Cleanup selection for one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionToggle {
+    Selected,
+    Deselected,
+    Blocked(CleanupSelectionBlockedReason),
 }
 
 /// Phase of an in-flight Branch Cleanup execution (FR-018g/h).
@@ -523,6 +560,10 @@ impl BranchesState {
         self.cleanup_selected.contains(branch)
     }
 
+    fn branch_item(&self, branch: &str) -> Option<&BranchItem> {
+        self.branches.iter().find(|item| item.name == branch)
+    }
+
     /// Returns true when `branch` is allowed to participate in Branch Cleanup
     /// selection (FR-018b).
     ///
@@ -532,43 +573,69 @@ impl BranchesState {
     /// the whole point of Branch Cleanup in a gwt workflow where every
     /// branch normally has its own worktree.
     pub fn is_cleanable_candidate(&self, branch: &str) -> bool {
-        if gwt_git::is_protected_branch(branch) {
+        let Some(item) = self.branch_item(branch) else {
             return false;
+        };
+        item.is_local
+            && !gwt_git::is_protected_branch(branch)
+            && self
+                .current_head_branch
+                .as_deref()
+                .is_none_or(|head| head != branch)
+            && !self.active_session_branches.contains(branch)
+    }
+
+    /// Returns the concrete reason a row is currently blocked from cleanup
+    /// selection, or `None` when the row is selectable.
+    pub fn cleanup_selection_blocked_reason(
+        &self,
+        branch: &str,
+    ) -> Option<CleanupSelectionBlockedReason> {
+        let item = self.branch_item(branch)?;
+        if !item.is_local {
+            return Some(CleanupSelectionBlockedReason::RemoteTracking);
+        }
+        if gwt_git::is_protected_branch(branch) {
+            return Some(CleanupSelectionBlockedReason::ProtectedBranch);
         }
         if self
             .current_head_branch
             .as_deref()
             .is_some_and(|head| head == branch)
         {
-            return false;
+            return Some(CleanupSelectionBlockedReason::CurrentHead);
         }
         if self.active_session_branches.contains(branch) {
-            return false;
+            return Some(CleanupSelectionBlockedReason::ActiveSession);
         }
-        true
+        match self.merge_state(branch) {
+            MergeState::Computing => Some(CleanupSelectionBlockedReason::MergeCheckRunning),
+            MergeState::NotMerged => Some(CleanupSelectionBlockedReason::NotMerged),
+            MergeState::Cleanable(_) => None,
+        }
     }
 
     /// Returns true when the branch is both a protection-allowed candidate
     /// and has a positive merge result that makes it cleanable right now.
     pub fn is_cleanup_selectable(&self, branch: &str) -> bool {
-        if !self.is_cleanable_candidate(branch) {
-            return false;
-        }
-        matches!(self.merge_state(branch), MergeState::Cleanable(_))
+        self.cleanup_selection_blocked_reason(branch).is_none()
     }
 
     /// Toggle Branch Cleanup selection for `branch`. No-op when the branch
     /// is not currently selectable (FR-018c).
-    pub fn toggle_cleanup_selection(&mut self, branch: &str) -> bool {
-        if !self.is_cleanup_selectable(branch) {
-            return false;
+    pub fn toggle_cleanup_selection(&mut self, branch: &str) -> CleanupSelectionToggle {
+        if let Some(reason) = self.cleanup_selection_blocked_reason(branch) {
+            return CleanupSelectionToggle::Blocked(reason);
+        } else if self.branch_item(branch).is_none() {
+            return CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::Unknown);
         }
         if self.cleanup_selected.contains(branch) {
             self.cleanup_selected.remove(branch);
+            CleanupSelectionToggle::Deselected
         } else {
             self.cleanup_selected.insert(branch.to_string());
+            CleanupSelectionToggle::Selected
         }
-        true
     }
 
     /// Add every currently visible cleanable branch to the selection set.
@@ -1281,6 +1348,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "develop".to_string(),
@@ -1288,6 +1356,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Develop,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "feature/login".to_string(),
@@ -1295,6 +1364,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "origin/feature/api".to_string(),
@@ -1302,6 +1372,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "hotfix/crash".to_string(),
@@ -1309,6 +1380,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
         ]
     }
@@ -1321,6 +1393,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "zeta-local".to_string(),
@@ -1328,6 +1401,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "yellow-local".to_string(),
@@ -1335,6 +1409,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "origin/zzz-remote".to_string(),
@@ -1342,6 +1417,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
         ]
     }
@@ -1513,6 +1589,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/worktree-a")),
+            upstream: None,
         };
         state.branches = vec![branch.clone()];
         state.detail_cache.insert(
@@ -1854,6 +1931,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "feature/worktree".to_string(),
@@ -1861,6 +1939,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: Some(PathBuf::from("/tmp/worktree")),
+                upstream: None,
             },
         ];
 
@@ -1983,6 +2062,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(tmp.path().to_path_buf()),
+            upstream: None,
         };
 
         let detail = load_branch_detail(&branch, &sample_containers());
@@ -2174,6 +2254,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-live")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/live".to_string(),
@@ -2212,6 +2293,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-wait")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/wait".to_string(),
@@ -2250,6 +2332,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-narrow")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/narrow".to_string(),
@@ -2322,6 +2405,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         }
     }
 
@@ -2341,7 +2425,10 @@ mod tests {
     fn toggle_cleanup_selection_skips_computing_branches() {
         let mut state = cleanup_state_with(vec![feature("feature/foo")]);
         // Default state is Computing → not selectable.
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::MergeCheckRunning)
+        );
         assert!(state.cleanup_selected.is_empty());
     }
 
@@ -2353,10 +2440,16 @@ mod tests {
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
 
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
         assert!(state.is_cleanup_selected("feature/foo"));
 
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Deselected
+        );
         assert!(!state.is_cleanup_selected("feature/foo"));
     }
 
@@ -2368,9 +2461,13 @@ mod tests {
             is_local: true,
             category: BranchCategory::Main,
             worktree_path: None,
+            upstream: None,
         }]);
         state.set_merge_state("main", MergeState::Cleanable(gwt_git::MergeTarget::Main));
-        assert!(!state.toggle_cleanup_selection("main"));
+        assert_eq!(
+            state.toggle_cleanup_selection("main"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::ProtectedBranch)
+        );
     }
 
     #[test]
@@ -2381,7 +2478,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::CurrentHead)
+        );
     }
 
     #[test]
@@ -2394,7 +2494,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::ActiveSession)
+        );
     }
 
     #[test]
@@ -2408,7 +2511,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
     }
 
     #[test]
@@ -2423,6 +2529,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
         ]);
         state.set_merge_state(
@@ -2454,7 +2561,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
 
         // Simulate the view-mode toggle and sort cycle paths.
         update(&mut state, BranchesMessage::ToggleView);

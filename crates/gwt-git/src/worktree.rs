@@ -23,6 +23,13 @@ pub struct WorktreeManager {
     repo_path: PathBuf,
 }
 
+/// Outcome of an optional remote-branch delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDeleteOutcome {
+    Deleted,
+    SkippedMissing,
+}
+
 impl WorktreeManager {
     /// Create a new manager for the repository at `repo_path`.
     pub fn new(repo_path: impl AsRef<Path>) -> Self {
@@ -155,6 +162,44 @@ impl WorktreeManager {
         }
 
         Ok(())
+    }
+
+    /// Delete the remote branch that corresponds to `local_branch`.
+    ///
+    /// When `upstream` is provided it wins; otherwise the helper falls back to
+    /// `origin/<local_branch>`. Missing tracking refs are treated as a
+    /// successful no-op so cleanup can continue after local deletion has
+    /// already succeeded.
+    pub fn delete_remote_branch(
+        &self,
+        local_branch: &str,
+        upstream: Option<&str>,
+    ) -> Result<RemoteDeleteOutcome> {
+        let remote_ref = upstream
+            .map(normalize_remote_ref)
+            .unwrap_or_else(|| format!("origin/{local_branch}"));
+
+        if !self.remote_branch_exists(&remote_ref)? {
+            return Ok(RemoteDeleteOutcome::SkippedMissing);
+        }
+
+        let normalized = normalize_remote_ref(&remote_ref);
+        let (remote, branch) = normalized
+            .split_once('/')
+            .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {normalized}")))?;
+
+        let output = std::process::Command::new("git")
+            .args(["push", remote, "--delete", branch])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("push {remote} --delete {branch}: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(RemoteDeleteOutcome::Deleted)
     }
 
     /// Create a local worktree branch from a remote-tracking branch.
@@ -846,6 +891,55 @@ prunable gitdir file points to non-existent location
         assert!(!manager
             .remote_branch_exists("origin/feature/missing")
             .unwrap());
+    }
+
+    #[test]
+    fn delete_remote_branch_removes_existing_upstream_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        let remote_path = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "feature/prune-me");
+        git_push_branch(&repo_path, "feature/prune-me");
+
+        let manager = WorktreeManager::new(&repo_path);
+        manager.fetch_origin().unwrap();
+
+        assert_eq!(
+            manager
+                .delete_remote_branch("feature/prune-me", Some("origin/feature/prune-me"))
+                .unwrap(),
+            RemoteDeleteOutcome::Deleted
+        );
+        assert!(!manager
+            .remote_branch_exists("origin/feature/prune-me")
+            .unwrap());
+    }
+
+    #[test]
+    fn delete_remote_branch_skips_when_tracking_ref_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        let remote_path = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        manager.fetch_origin().unwrap();
+
+        assert_eq!(
+            manager
+                .delete_remote_branch("feature/missing", None)
+                .unwrap(),
+            RemoteDeleteOutcome::SkippedMissing
+        );
     }
 
     #[test]

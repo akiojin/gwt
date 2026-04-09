@@ -1,9 +1,9 @@
 //! Branch Cleanup confirmation modal (FR-018e).
 //!
 //! Listed branches come from the Branches list selection. The modal lets the
-//! user toggle the `delete_remote` setting with `r`, confirm with `Enter`,
-//! and cancel with `Esc`. All other input is ignored so the modal owns the
-//! keyboard while it is visible.
+//! user toggle the run-wide `delete_remote` setting with `r`, confirm with
+//! `Enter`, and cancel with `Esc`. All other input is ignored so the modal
+//! owns the keyboard while it is visible.
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -25,22 +25,18 @@ pub struct CleanupConfirmRow {
 }
 
 /// State of the Branch Cleanup confirm modal.
-///
-/// The `delete_remote` toggle that the old GUI `CleanupModal` exposed is
-/// deliberately absent from this port: the current `gwt-git` API has no
-/// `delete_remote_branch` helper, so wiring a toggle that only updates UI
-/// state would mislead the user. A follow-up can add the toggle once the
-/// remote-delete plumbing lands in `gwt-git`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CleanupConfirmState {
     pub visible: bool,
     pub rows: Vec<CleanupConfirmRow>,
+    pub delete_remote: bool,
 }
 
 impl CleanupConfirmState {
     /// Open the modal with the given selection.
-    pub fn show(&mut self, rows: Vec<CleanupConfirmRow>) {
+    pub fn show(&mut self, rows: Vec<CleanupConfirmRow>, delete_remote: bool) {
         self.rows = rows;
+        self.delete_remote = delete_remote;
         self.visible = true;
     }
 
@@ -58,6 +54,8 @@ impl CleanupConfirmState {
 /// Messages for the confirm modal.
 #[derive(Debug, Clone)]
 pub enum CleanupConfirmMessage {
+    /// `r` pressed — caller should flip the run-wide remote-delete toggle.
+    ToggleRemote,
     /// `Enter` pressed — caller should start the cleanup run.
     Confirm,
     /// `Esc` pressed — caller should drop the modal.
@@ -81,6 +79,10 @@ pub fn update(
     msg: CleanupConfirmMessage,
 ) -> CleanupConfirmOutcome {
     match msg {
+        CleanupConfirmMessage::ToggleRemote => {
+            state.delete_remote = !state.delete_remote;
+            CleanupConfirmOutcome::Pending
+        }
         CleanupConfirmMessage::Confirm => {
             state.hide();
             CleanupConfirmOutcome::Confirmed
@@ -99,8 +101,8 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
     }
 
     let width = 60_u16.min(area.width);
-    let body_height = (state.rows.len() as u16).saturating_add(7).min(area.height);
-    let height = body_height.max(8);
+    let body_height = (state.rows.len() as u16).saturating_add(8).min(area.height);
+    let height = body_height.max(9);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let dialog = Rect::new(x, y, width, height);
@@ -125,6 +127,7 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(1),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -172,11 +175,27 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
     let body = Paragraph::new(body_lines);
     frame.render_widget(body, layout[1]);
 
+    let toggle = Paragraph::new(Line::from(vec![
+        Span::styled(
+            if state.delete_remote {
+                "  [x] "
+            } else {
+                "  [ ] "
+            },
+            Style::default().fg(theme::color::ACTIVE),
+        ),
+        Span::styled(
+            "Also delete remote (r)",
+            Style::default().fg(theme::color::TEXT_SECONDARY),
+        ),
+    ]));
+    frame.render_widget(toggle, layout[2]);
+
     let hint = Paragraph::new(Line::from(vec![Span::styled(
-        "  [Enter] Confirm   [Esc] Cancel",
+        "  [r] Toggle remote   [Enter] Confirm   [Esc] Cancel",
         Style::default().fg(theme::color::TEXT_SECONDARY),
     )]));
-    frame.render_widget(hint, layout[2]);
+    frame.render_widget(hint, layout[3]);
 }
 
 #[cfg(test)]
@@ -220,7 +239,7 @@ mod tests {
     #[test]
     fn show_makes_modal_visible_with_rows() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         assert!(state.visible);
         assert_eq!(state.count(), 3);
     }
@@ -228,7 +247,7 @@ mod tests {
     #[test]
     fn confirm_returns_confirmed_outcome() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let outcome = update(&mut state, CleanupConfirmMessage::Confirm);
         assert_eq!(outcome, CleanupConfirmOutcome::Confirmed);
         assert!(!state.visible);
@@ -237,16 +256,28 @@ mod tests {
     #[test]
     fn cancel_hides_modal() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let outcome = update(&mut state, CleanupConfirmMessage::Cancel);
         assert_eq!(outcome, CleanupConfirmOutcome::Cancelled);
         assert!(!state.visible);
     }
 
     #[test]
+    fn toggle_remote_flips_delete_remote_and_stays_pending() {
+        let mut state = CleanupConfirmState::default();
+        state.show(rows(), false);
+
+        let outcome = update(&mut state, CleanupConfirmMessage::ToggleRemote);
+
+        assert_eq!(outcome, CleanupConfirmOutcome::Pending);
+        assert!(state.visible);
+        assert!(state.delete_remote);
+    }
+
+    #[test]
     fn render_lists_each_branch_with_its_target_label() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let text = render_text(&state);
         assert!(text.contains("Confirm Cleanup"), "{text}");
         assert!(text.contains("Delete 3"), "{text}");
@@ -261,14 +292,11 @@ mod tests {
     }
 
     #[test]
-    fn render_does_not_advertise_delete_remote_toggle() {
-        // FR-018f follow-up: the `Also delete remote` toggle is removed
-        // until gwt-git gains a remote-delete helper.
+    fn render_advertises_delete_remote_toggle() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let text = render_text(&state);
-        assert!(!text.contains("Also delete remote"), "{text}");
-        assert!(!text.contains("Toggle remote"), "{text}");
+        assert!(text.contains("Also delete remote"), "{text}");
     }
 
     #[test]

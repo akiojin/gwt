@@ -1209,6 +1209,7 @@ where
                 is_local: b.is_local,
                 category: screens::branches::categorize_branch(&b.name),
                 worktree_path: None,
+                upstream: b.upstream.clone(),
             })
             .collect();
         screens::branches::update(
@@ -1796,6 +1797,12 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     // Branch Cleanup confirm modal — Enter confirms, Esc cancels (FR-018e).
     if model.cleanup_confirm.visible {
         let msg = match key.code {
+            KeyCode::Char('r')
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                Some(screens::cleanup_confirm::CleanupConfirmMessage::ToggleRemote)
+            }
             KeyCode::Enter => Some(screens::cleanup_confirm::CleanupConfirmMessage::Confirm),
             KeyCode::Esc => Some(screens::cleanup_confirm::CleanupConfirmMessage::Cancel),
             _ => None,
@@ -1950,16 +1957,25 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
                 // Space: toggle Branch Cleanup selection on the focused row
-                // (FR-018c). Falls back to focusing the Branch Detail pane
-                // when there is no selectable branch in scope.
+                // (FR-018c). Blocked rows stay focused and surface a
+                // short-lived Info toast that explains why cleanup selection
+                // is not currently allowed.
                 KeyCode::Char(' ') => {
                     if let Some(name) = model.branches.selected_branch().map(|b| b.name.clone()) {
-                        let toggled = model.branches.toggle_cleanup_selection(&name);
-                        if !toggled {
-                            model.active_focus = FocusPane::BranchDetail;
+                        match model.branches.toggle_cleanup_selection(&name) {
+                            screens::branches::CleanupSelectionToggle::Selected
+                            | screens::branches::CleanupSelectionToggle::Deselected => {}
+                            screens::branches::CleanupSelectionToggle::Blocked(reason) => {
+                                apply_notification(
+                                    model,
+                                    Notification::new(
+                                        Severity::Info,
+                                        "cleanup",
+                                        reason.toast_message(),
+                                    ),
+                                );
+                            }
                         }
-                    } else {
-                        model.active_focus = FocusPane::BranchDetail;
                     }
                     return;
                 }
@@ -2783,6 +2799,7 @@ fn refresh_branches(model: &mut Model) {
                 is_local: branch.is_local,
                 category: screens::branches::categorize_branch(&branch.name),
                 worktree_path: None,
+                upstream: branch.upstream.clone(),
             })
             .collect();
         screens::branches::update(
@@ -4200,7 +4217,9 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
         return;
     }
 
-    model.cleanup_confirm.show(rows);
+    model
+        .cleanup_confirm
+        .show(rows, model.branches.cleanup_settings.delete_remote);
 }
 
 fn handle_cleanup_confirm_message(
@@ -4210,6 +4229,7 @@ fn handle_cleanup_confirm_message(
     use screens::cleanup_confirm::CleanupConfirmOutcome;
 
     let outcome = screens::cleanup_confirm::update(&mut model.cleanup_confirm, msg);
+    model.branches.cleanup_settings.delete_remote = model.cleanup_confirm.delete_remote;
     match outcome {
         CleanupConfirmOutcome::Pending => {}
         CleanupConfirmOutcome::Cancelled => {}
@@ -4284,7 +4304,8 @@ fn start_cleanup_run(model: &mut Model) {
         return;
     }
 
-    model.cleanup_progress.show(branches.len(), false);
+    let delete_remote = model.cleanup_confirm.delete_remote;
+    model.cleanup_progress.show(branches.len(), delete_remote);
 
     let queue: crate::model::CleanupEventQueue =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -4306,6 +4327,12 @@ fn start_cleanup_run(model: &mut Model) {
                 .as_ref()
                 .map(|path| (item.name.clone(), path.clone()))
         })
+        .collect();
+    let upstreams: std::collections::HashMap<String, Option<String>> = model
+        .branches
+        .branches
+        .iter()
+        .map(|item| (item.name.clone(), item.upstream.clone()))
         .collect();
 
     std::thread::spawn(move || {
@@ -4347,7 +4374,18 @@ fn start_cleanup_run(model: &mut Model) {
                         if let Some(path) = worktree_paths.get(&branch) {
                             let _ = crate::index_worker::shutdown_and_remove(&repo_path, path);
                         }
-                        (true, None)
+                        if delete_remote {
+                            match manager.delete_remote_branch(
+                                &branch,
+                                upstreams.get(&branch).and_then(|value| value.as_deref()),
+                            ) {
+                                Ok(gwt_git::RemoteDeleteOutcome::Deleted)
+                                | Ok(gwt_git::RemoteDeleteOutcome::SkippedMissing) => (true, None),
+                                Err(err) => (false, Some(format!("remote delete failed: {err}"))),
+                            }
+                        } else {
+                            (true, None)
+                        }
                     }
                     Err(err) => (false, Some(err.to_string())),
                 }
@@ -8373,6 +8411,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-banner")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 120, 16);
@@ -8395,6 +8434,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-top-row")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 120, 16);
@@ -8879,6 +8919,7 @@ mod tests {
             worktree_path: Some(PathBuf::from(
                 "/tmp/demo/project-repo-feature-compact-detail",
             )),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 80, 24);
@@ -8914,6 +8955,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-title-context")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 160, 24);
@@ -10297,6 +10339,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let mut matching = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -10393,6 +10436,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -10489,6 +10533,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -10570,6 +10615,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Gemini);
@@ -13197,6 +13243,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             })
             .collect();
 
@@ -13517,6 +13564,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(wt_a.path().to_path_buf()),
+                upstream: None,
             },
             screens::branches::BranchItem {
                 name: "feature/b".to_string(),
@@ -13524,6 +13572,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(wt_b.path().to_path_buf()),
+                upstream: None,
             },
         ];
 
@@ -13551,6 +13600,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             screens::branches::BranchItem {
                 name: "feature/b".to_string(),
@@ -13558,6 +13608,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
         ];
 
@@ -13604,6 +13655,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
         model.branches.detail_section = 3;
 
@@ -13640,6 +13692,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
         model.branches.detail_section = 3;
         model.active_focus = FocusPane::BranchDetail;
@@ -13677,6 +13730,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
         model.branches.detail_section = 3;
         model.active_focus = FocusPane::BranchDetail;
@@ -13715,6 +13769,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -13747,6 +13802,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -13765,6 +13821,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -13787,6 +13844,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -13805,6 +13863,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
         model.branches.detail_section = 2;
@@ -13824,6 +13883,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
         model.branches.detail_section = 3;
@@ -13853,6 +13913,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
         model.branches.detail_section = 3;
@@ -13882,6 +13943,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.active_focus = FocusPane::BranchDetail;
         update(
@@ -13905,6 +13967,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-view-mode")),
+            upstream: None,
         }];
         model.active_focus = FocusPane::BranchDetail;
         model.branches.detail_section = 0;
@@ -13967,6 +14030,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.branches.docker_containers = vec![docker_container(
@@ -14007,6 +14071,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-mnemonics")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 220, 24);
@@ -14024,6 +14089,119 @@ CUSTOM_ENV = "enabled"
 
         route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
         assert!(model.help_visible);
+    }
+
+    #[test]
+    fn route_key_to_management_branches_space_on_unmerged_branch_keeps_list_focus_and_shows_info_toast(
+    ) {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(!model.branches.is_cleanup_selected("feature/not-merged"));
+        let notification = model
+            .current_notification
+            .as_ref()
+            .expect("cleanup selection info toast");
+        assert_eq!(notification.severity, Severity::Info);
+        assert_eq!(notification.source, "cleanup");
+        assert_eq!(
+            notification.message,
+            "Cannot select for cleanup: branch is not merged"
+        );
+        assert_eq!(
+            model.current_notification_ttl,
+            Some(std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn update_key_input_cleanup_confirm_r_then_enter_deletes_remote_branch() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_create_branch(&repo_path, "feature/cleanup-remote");
+        git_push_branch(&repo_path, "feature/cleanup-remote");
+
+        let mut model = Model::new(repo_path.clone());
+        model.cleanup_confirm.show(
+            vec![screens::cleanup_confirm::CleanupConfirmRow {
+                branch: "feature/cleanup-remote".to_string(),
+                target: gwt_git::MergeTarget::Main,
+            }],
+            false,
+        );
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/cleanup-remote".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: Some("origin/feature/cleanup-remote".to_string()),
+        }];
+        model.branches.current_head_branch = Some("master".to_string());
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char('r'), KeyModifiers::NONE)),
+        );
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| {
+                model
+                    .cleanup_progress
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.phase == screens::branches::CleanupRunPhase::Done)
+            },
+            "cleanup progress completion",
+        );
+
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            !remote_output.status.success(),
+            "remote branch should be deleted: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
     }
 
     #[test]
@@ -14045,6 +14223,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(tmp.path().to_path_buf()),
+                upstream: None,
             }];
             model.branches.docker_containers = vec![docker_container(
                 "abc123",

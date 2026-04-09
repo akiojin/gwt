@@ -366,6 +366,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-agent-context")),
+            upstream: None,
         }];
         model.branches.selected = 0;
 
