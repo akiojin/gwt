@@ -99,7 +99,17 @@ impl Cache {
     }
 
     /// Write a full Issue snapshot to the cache atomically.
+    ///
+    /// After writing, the `sections/` and `comments/` directories are
+    /// swept so that files belonging to sections or comments that no
+    /// longer exist in `snapshot` are deleted. Without this sweep a
+    /// SPEC would grow monotonically across edits even after sections
+    /// were removed or re-routed from the body into comments (or vice
+    /// versa), and stale reads from `read_section` would return
+    /// content the Issue has already deleted.
     pub fn write_snapshot(&self, snapshot: &IssueSnapshot) -> Result<(), CacheError> {
+        use std::collections::HashSet;
+
         let dir = self.issue_dir(snapshot.number);
         let sections_dir = dir.join("sections");
         let comments_dir = dir.join("comments");
@@ -109,16 +119,17 @@ impl Cache {
         // Write body.md (tmp -> rename).
         write_atomic(&dir.join("body.md"), snapshot.body.as_bytes())?;
 
-        // Write each comment body verbatim.
-        //
-        // We do NOT garbage-collect stale comment files here — higher layers
-        // can call [`Cache::prune_comments`] when a write shrinks the comment
-        // set, because determining staleness requires knowing the previous
-        // state.
+        // Collect the comment filenames that this snapshot asserts
+        // should exist, write them, and then sweep any leftover
+        // `comments/*.md` that isn't in the set.
+        let mut desired_comments: HashSet<String> = HashSet::new();
         for comment in &snapshot.comments {
-            let path = comments_dir.join(format!("{}.md", comment.id.0));
+            let filename = format!("{}.md", comment.id.0);
+            let path = comments_dir.join(&filename);
             write_atomic(&path, comment.body.as_bytes())?;
+            desired_comments.insert(filename);
         }
+        prune_unlisted_files(&comments_dir, &desired_comments)?;
 
         // Parse the body + comments into a SpecBody and write per-section files.
         let parsed_comments: Vec<crate::body::Comment> = snapshot
@@ -130,10 +141,15 @@ impl Cache {
             })
             .collect();
         let spec_body = SpecBody::parse(&snapshot.body, &parsed_comments)?;
+
+        let mut desired_sections: HashSet<String> = HashSet::new();
         for (name, content) in spec_body.sections.iter() {
-            let path = sections_dir.join(section_filename(name));
+            let filename = section_filename(name);
+            let path = sections_dir.join(&filename);
             write_atomic(&path, content.as_bytes())?;
+            desired_sections.insert(filename);
         }
+        prune_unlisted_files(&sections_dir, &desired_sections)?;
 
         // Finally, write meta.json.
         let meta = CacheMeta::from_snapshot(snapshot);
@@ -254,6 +270,42 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Remove every regular file under `dir` whose filename is not in
+/// `keep`. Subdirectories and tmp files (`.*.tmp-*`) are left alone.
+/// Errors encountered while reading the directory are propagated;
+/// errors from individual `remove_file` calls are also propagated so
+/// that a broken cache surfaces loudly instead of silently drifting.
+fn prune_unlisted_files(
+    dir: &Path,
+    keep: &std::collections::HashSet<String>,
+) -> std::io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name_os = entry.file_name();
+        let Some(name) = name_os.to_str() else {
+            continue;
+        };
+        // Skip the write-atomic tmp staging files — they are
+        // transient and deleting them here would race the in-progress
+        // writers.
+        if name.starts_with('.') {
+            continue;
+        }
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        if !keep.contains(name) {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Map a [`SectionName`] to a safe-ish filename under `sections/`. We keep

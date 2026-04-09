@@ -240,6 +240,97 @@ fn red_59_read_missing_section_returns_none() {
     assert!(got.is_none());
 }
 
+// Regression (CodeRabbit / PR #1943): write_snapshot must sweep
+// section files that belonged to a prior snapshot but are absent from
+// the current one. Without this, `read_section` returns stale content
+// for a section the Issue has already deleted.
+#[test]
+fn write_snapshot_prunes_stale_section_files() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+
+    // v1: spec + tasks sections in the body.
+    let body_v1 = mk_body_with_spec_and_tasks_in_body("s1", "t1");
+    cache.write_snapshot(&mk_snapshot(42, body_v1)).unwrap();
+
+    let sections_dir = tmp.path().join("42").join("sections");
+    assert!(
+        sections_dir.join("spec.md").exists(),
+        "v1 should have spec.md"
+    );
+    assert!(
+        sections_dir.join("tasks.md").exists(),
+        "v1 should have tasks.md"
+    );
+
+    // v2: only the `spec` section remains (tasks was removed).
+    let body_v2 = "<!-- gwt-spec id=42 version=1 -->\n\
+<!-- sections:\n\
+spec=body\n\
+-->\n\
+\n\
+<!-- artifact:spec BEGIN -->\n\
+s2\n\
+<!-- artifact:spec END -->\n"
+        .to_string();
+    cache.write_snapshot(&mk_snapshot(42, body_v2)).unwrap();
+
+    assert!(
+        sections_dir.join("spec.md").exists(),
+        "v2 spec.md should still exist"
+    );
+    assert!(
+        !sections_dir.join("tasks.md").exists(),
+        "v2 should have pruned the stale tasks.md, but it is still present"
+    );
+
+    // Reading the pruned section must return None, not the stale v1
+    // content.
+    assert!(cache
+        .read_section(IssueNumber(42), &n("tasks"))
+        .unwrap()
+        .is_none());
+}
+
+// Companion regression: stale comment files must also be swept when a
+// snapshot drops a comment id.
+#[test]
+fn write_snapshot_prunes_stale_comment_files() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+
+    let mk = |comment_ids: &[u64]| IssueSnapshot {
+        number: IssueNumber(7),
+        title: "Spec 7".into(),
+        body: mk_body_with_spec_and_tasks_in_body("s", "t"),
+        labels: vec!["gwt-spec".into()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("t1"),
+        comments: comment_ids
+            .iter()
+            .map(|id| CommentSnapshot {
+                id: CommentId(*id),
+                body: format!("comment {id}"),
+                updated_at: UpdatedAt::new("t1"),
+            })
+            .collect(),
+    };
+
+    cache.write_snapshot(&mk(&[100, 200, 300])).unwrap();
+    let comments_dir = tmp.path().join("7").join("comments");
+    assert!(comments_dir.join("100.md").exists());
+    assert!(comments_dir.join("200.md").exists());
+    assert!(comments_dir.join("300.md").exists());
+
+    cache.write_snapshot(&mk(&[100, 300])).unwrap();
+    assert!(comments_dir.join("100.md").exists());
+    assert!(
+        !comments_dir.join("200.md").exists(),
+        "v2 must prune the dropped 200.md"
+    );
+    assert!(comments_dir.join("300.md").exists());
+}
+
 // Keep Comment in use so the import is not a lint warning.
 #[allow(dead_code)]
 fn _ensure_comment_is_used(c: Comment) -> Comment {

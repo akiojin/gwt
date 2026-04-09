@@ -432,18 +432,23 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
                     ));
                 } else {
                     for n in numbers {
-                        ops.read_section(IssueNumber(n), &SectionName("spec".to_string()))
-                            .ok();
+                        // Propagate fetch/auth/not-found errors instead
+                        // of swallowing them with `.ok()` — a silent
+                        // pull that still prints "pulled #N" on failure
+                        // is worse than no pull at all.
+                        ops.read_section(IssueNumber(n), &SectionName("spec".to_string()))?;
                         out.push_str(&format!("pulled #{n}\n"));
                     }
                 }
                 0
             }
             CliCommand::SpecRepair { number } => {
-                // read_section already runs a fresh fetch and rewrites the
+                // read_section runs a fresh fetch and rewrites the
                 // cache — that is the repair operation for the MVP.
-                ops.read_section(IssueNumber(number), &SectionName("spec".to_string()))
-                    .ok();
+                // Surface any error (fetch/parse/auth/not-found) to the
+                // caller so a broken cache does not hide behind a
+                // misleading "repaired cache for #N" success line.
+                ops.read_section(IssueNumber(number), &SectionName("spec".to_string()))?;
                 out.push_str(&format!("repaired cache for #{number}\n"));
                 0
             }
@@ -633,17 +638,42 @@ pub struct DefaultCliEnv {
 impl DefaultCliEnv {
     pub fn new(owner: &str, repo: &str) -> Result<Self, gwt_github::client::ApiError> {
         let client = HttpIssueClient::from_gh_auth(owner, repo)?;
-        let cache_root = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".gwt")
-            .join("cache")
-            .join("issues");
+        let cache_root = Self::default_cache_root();
         Ok(DefaultCliEnv {
             client,
             cache_root,
             stdout: io::stdout(),
             stderr: io::stderr(),
         })
+    }
+
+    /// Build an env for hook dispatch that deliberately skips
+    /// `gh auth token` resolution. Hook handlers never touch GitHub,
+    /// so forcing them to depend on the user having run `gh auth
+    /// login` would break every Bash tool call on a fresh machine.
+    ///
+    /// The inner `HttpIssueClient` is constructed with an empty token
+    /// and empty owner/repo strings; any attempt to actually call it
+    /// would fail (which is fine — the hook code paths go through
+    /// `run_hook`, not the SPEC issue client).
+    pub fn new_for_hooks() -> Result<Self, gwt_github::client::ApiError> {
+        let transport = gwt_github::client::http::ReqwestTransport::new()
+            .map_err(|e| gwt_github::client::ApiError::Network(e.to_string()))?;
+        let client = HttpIssueClient::with_transport(transport, String::new(), "", "");
+        Ok(DefaultCliEnv {
+            client,
+            cache_root: Self::default_cache_root(),
+            stdout: io::stdout(),
+            stderr: io::stderr(),
+        })
+    }
+
+    fn default_cache_root() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".gwt")
+            .join("cache")
+            .join("issues")
     }
 }
 

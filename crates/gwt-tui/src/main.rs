@@ -384,14 +384,15 @@ fn run_cli(argv: &[String]) -> io::Result<()> {
         std::process::exit(code);
     }
 
-    // `gwt hook ...` path: use a stub env with empty owner/repo since hooks
-    // don't touch GitHub. We still reuse DefaultCliEnv for stdout/stderr
-    // plumbing; the HttpIssueClient inside is simply unused by hook handlers.
-    let mut env = match gwt_tui::cli::DefaultCliEnv::new("", "") {
+    // `gwt hook ...` path: hooks never touch GitHub, so we deliberately
+    // skip the `gh auth token` resolution that `DefaultCliEnv::new`
+    // performs. `new_for_hooks` constructs an env with an inert
+    // HttpIssueClient (empty token / owner / repo) — attempting to call
+    // the client would fail loudly, but the hook code paths route
+    // through `run_hook` and never touch it.
+    let mut env = match gwt_tui::cli::DefaultCliEnv::new_for_hooks() {
         Ok(env) => env,
         Err(e) => {
-            // Hook handlers should still work even without gh auth; if env
-            // construction fails due to auth, log and exit 1.
             eprintln!("gwt hook: {e}");
             std::process::exit(1);
         }
