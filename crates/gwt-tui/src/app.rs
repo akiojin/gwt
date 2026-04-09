@@ -2980,7 +2980,12 @@ fn refresh_active_session_branches_with(model: &mut Model, sessions_dir: &Path) 
             SessionTabType::Agent { .. } => {
                 let path = sessions_dir.join(format!("{}.toml", session.id));
                 if let Ok(persisted) = AgentSession::load(&path) {
-                    active.insert(persisted.branch.clone());
+                    if !matches!(
+                        agent_session_runtime_status(sessions_dir, &session.id, &persisted),
+                        gwt_agent::AgentStatus::Stopped
+                    ) {
+                        active.insert(persisted.branch.clone());
+                    }
                 } else if let Some((_, branch)) = session.name.split_once(": ") {
                     // Fall back to the tab title only when no persisted
                     // metadata exists (e.g., freshly spawned session before
@@ -11621,6 +11626,107 @@ CUSTOM_ENV = "enabled"
         let persisted = AgentSession::load(&dir.path().join(format!("{}.toml", persisted.id)))
             .expect("load stopped agent session");
         assert_eq!(persisted.status, gwt_agent::AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn refresh_active_session_branches_with_ignores_stopped_agent_sessions() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.update_status(gwt_agent::AgentStatus::Stopped);
+        persisted
+            .save(dir.path())
+            .expect("persist stopped agent session");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(worktree.clone()),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/test",
+            screens::branches::MergeState::Cleanable(gwt_git::MergeTarget::Develop),
+        );
+
+        refresh_active_session_branches_with(&mut model, dir.path());
+
+        assert!(
+            !model
+                .branches
+                .active_session_branches
+                .contains("feature/test"),
+            "stopped agent sessions must not block cleanup selection"
+        );
+        assert_eq!(
+            model.branches.toggle_cleanup_selection("feature/test"),
+            screens::branches::CleanupSelectionToggle::Selected
+        );
+    }
+
+    #[test]
+    fn refresh_active_session_branches_with_keeps_running_agent_sessions_blocked() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.update_status(gwt_agent::AgentStatus::Running);
+        persisted
+            .save(dir.path())
+            .expect("persist running agent session");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(worktree),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/test",
+            screens::branches::MergeState::Cleanable(gwt_git::MergeTarget::Develop),
+        );
+
+        refresh_active_session_branches_with(&mut model, dir.path());
+
+        assert!(model
+            .branches
+            .active_session_branches
+            .contains("feature/test"));
+        assert_eq!(
+            model.branches.toggle_cleanup_selection("feature/test"),
+            screens::branches::CleanupSelectionToggle::Blocked(
+                screens::branches::CleanupSelectionBlockedReason::ActiveSession
+            )
+        );
     }
 
     #[test]
