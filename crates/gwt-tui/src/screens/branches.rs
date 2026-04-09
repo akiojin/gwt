@@ -151,14 +151,12 @@ pub enum CleanupSelectionBlockedReason {
 impl CleanupSelectionBlockedReason {
     pub fn toast_message(self) -> &'static str {
         match self {
-            Self::ProtectedBranch => "Cannot select for cleanup: protected branch",
-            Self::CurrentHead => "Cannot select for cleanup: branch is current HEAD",
-            Self::ActiveSession => "Cannot select for cleanup: branch has an active session",
-            Self::MergeCheckRunning => "Cannot select for cleanup: merge check is still running",
-            Self::NotMerged => "Cannot select for cleanup: branch is not merged",
-            Self::RemoteTracking => {
-                "Cannot select for cleanup: remote-tracking branches are not cleanup candidates"
-            }
+            Self::ProtectedBranch => "Cannot select: protected branch",
+            Self::CurrentHead => "Cannot select: current HEAD",
+            Self::ActiveSession => "Cannot select: active session",
+            Self::MergeCheckRunning => "Cannot select: merge check running",
+            Self::NotMerged => "Cannot select: not merged",
+            Self::RemoteTracking => "Cannot select: remote-tracking branch",
             Self::Unknown => "Cannot select for cleanup",
         }
     }

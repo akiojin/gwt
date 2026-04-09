@@ -14124,14 +14124,39 @@ CUSTOM_ENV = "enabled"
             .expect("cleanup selection info toast");
         assert_eq!(notification.severity, Severity::Info);
         assert_eq!(notification.source, "cleanup");
-        assert_eq!(
-            notification.message,
-            "Cannot select for cleanup: branch is not merged"
-        );
+        assert_eq!(notification.message, "Cannot select: not merged");
         assert_eq!(
             model.current_notification_ttl,
             Some(std::time::Duration::from_secs(5))
         );
+    }
+
+    #[test]
+    fn render_model_text_branches_blocked_cleanup_toast_is_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        let rendered = render_model_text(&model, 80, 24);
+        assert!(rendered.contains("Cannot select: not merged"), "{rendered}");
     }
 
     #[test]
