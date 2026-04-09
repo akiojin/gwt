@@ -1,625 +1,153 @@
-//! Error types for gwt-core
-//!
-//! Error codes are categorized as follows:
-//! - E1xxx: Git operation errors
-//! - E2xxx: Worktree operation errors
-//! - E3xxx: Configuration errors
-//! - E4xxx: Agent launch errors
-//! - E5xxx: Web API errors
-//! - E6xxx: Docker operation errors
-//! - E7xxx: Terminal operation errors
+//! Error types for gwt-core.
 
-use std::{path::PathBuf, sync::OnceLock};
-
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
-/// Severity level of an error, used to determine whether to show a report toast
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ErrorSeverity {
-    /// User input validation errors (e.g., branch name duplicate) — no toast
-    Info,
-    /// Recoverable but noteworthy — no toast
-    Warning,
-    /// Unexpected error — show report toast
-    Error,
-    /// Fatal error affecting app operation — show report toast
-    Critical,
-}
-
-impl std::fmt::Display for ErrorSeverity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Info => write!(f, "info"),
-            Self::Warning => write!(f, "warning"),
-            Self::Error => write!(f, "error"),
-            Self::Critical => write!(f, "critical"),
-        }
-    }
-}
-
-/// Structured error returned from Tauri commands to the frontend
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructuredError {
-    pub severity: ErrorSeverity,
-    pub code: String,
-    pub message: String,
-    pub command: String,
-    pub category: String,
-    pub suggestions: Vec<String>,
-    pub timestamp: String,
-}
-
-impl StructuredError {
-    /// Create a StructuredError from a GwtError and the command name that failed
-    pub fn from_gwt_error(error: &GwtError, command: &str) -> Self {
-        Self {
-            severity: error.severity(),
-            code: error.code().to_string(),
-            message: error.to_string(),
-            command: command.to_string(),
-            category: error.category().to_string(),
-            suggestions: error.suggestions(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        }
-    }
-
-    /// Create a StructuredError for an internal/untyped error (plain String)
-    pub fn internal(message: &str, command: &str) -> Self {
-        Self {
-            severity: ErrorSeverity::Error,
-            code: "E9002".to_string(),
-            message: format!("[E9002] Internal error: {message}"),
-            command: command.to_string(),
-            category: ErrorCategory::Internal.to_string(),
-            suggestions: Vec::new(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        }
-    }
-}
-
-impl std::fmt::Display for StructuredError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-const ERROR_MESSAGES_TOML: &str = include_str!("errors.toml");
-
-fn error_messages() -> &'static toml::Value {
-    static MESSAGES: OnceLock<toml::Value> = OnceLock::new();
-    MESSAGES.get_or_init(|| {
-        toml::from_str(ERROR_MESSAGES_TOML)
-            .unwrap_or_else(|_| toml::Value::Table(Default::default()))
-    })
-}
-
-macro_rules! error_code {
-    ($error:expr, { $($pat:pat => $code:expr,)+ }) => {
-        match $error {
-            $($pat => $code,)+
-        }
-    };
-}
-
-/// Result type alias using GwtError
-pub type Result<T> = std::result::Result<T, GwtError>;
-
-/// Main error type for gwt-core
-#[derive(Error, Debug)]
+/// Unified error type for all gwt operations.
+#[derive(Debug, thiserror::Error)]
 pub enum GwtError {
-    // E1xxx: Git operation errors
-    #[error("[E1001] Repository not found: {path}")]
-    RepositoryNotFound { path: PathBuf },
-
-    #[error("[E1002] Not a git repository: {path}")]
-    NotAGitRepository { path: PathBuf },
-
-    #[error("[E1003] Branch not found: {name}")]
-    BranchNotFound { name: String },
-
-    #[error("[E1004] Branch already exists: {name}")]
-    BranchAlreadyExists { name: String },
-
-    #[error("[E1005] Remote not found: {name}")]
-    RemoteNotFound { name: String },
-
-    #[error("[E1006] Fetch failed: {reason}")]
-    FetchFailed { reason: String },
-
-    #[error("[E1007] Pull failed (not fast-forward): {reason}")]
-    PullNotFastForward { reason: String },
-
-    #[error("[E1008] Uncommitted changes detected")]
-    UncommittedChanges,
-
-    #[error("[E1009] Unpushed commits detected")]
-    UnpushedCommits,
-
-    #[error("[E1010] Branch diverged from remote: {branch}")]
-    BranchDiverged { branch: String },
-
-    #[error("[E1011] Git command failed: {command}")]
-    GitCommandFailed { command: String, reason: String },
-
-    #[error("[E1012] Git executable not found")]
-    GitNotFound,
-
-    #[error("[E1013] Git operation failed: {operation}: {details}")]
-    GitOperationFailed { operation: String, details: String },
-
-    #[error("[E1014] Branch create failed: {name}: {details}")]
-    BranchCreateFailed { name: String, details: String },
-
-    #[error("[E1015] Branch delete failed: {name}: {details}")]
-    BranchDeleteFailed { name: String, details: String },
-
-    // E2xxx: Worktree operation errors
-    #[error("[E2001] Worktree not found: {path}")]
-    WorktreeNotFound { path: PathBuf },
-
-    #[error("[E2002] Worktree already exists: {path}")]
-    WorktreeAlreadyExists { path: PathBuf },
-
-    #[error("[E2003] Failed to create worktree: {reason}")]
-    WorktreeCreateFailed { reason: String },
-
-    #[error("[E2004] Failed to remove worktree: {reason}")]
-    WorktreeRemoveFailed { reason: String },
-
-    #[error("[E2005] Protected branch cannot be deleted: {branch}")]
-    ProtectedBranch { branch: String },
-
-    #[error("[E2006] Worktree path invalid: {path}")]
-    WorktreePathInvalid { path: PathBuf },
-
-    #[error("[E2007] Orphaned worktree detected: {path}")]
-    OrphanedWorktree { path: PathBuf },
-
-    #[error("[E2008] Worktree locked by another process: {path}")]
-    WorktreeLocked { path: PathBuf },
-
-    #[error("[E2009] Path exists - automatic worktree recovery is disabled. Please resolve manually: {path}")]
-    WorktreePathConflict { path: PathBuf },
-
-    // E3xxx: Configuration errors
-    #[error("[E3001] Configuration file not found: {path}")]
-    ConfigNotFound { path: PathBuf },
-
-    #[error("[E3002] Configuration parse error: {reason}")]
-    ConfigParseError { reason: String },
-
-    #[error("[E3003] Configuration write error: {reason}")]
-    ConfigWriteError { reason: String },
-
-    #[error("[E3004] Invalid configuration value: {key} = {value}")]
-    ConfigInvalidValue { key: String, value: String },
-
-    #[error("[E3005] Profile not found: {name}")]
-    ProfileNotFound { name: String },
-
-    #[error("[E3006] Session not found: {id}")]
-    SessionNotFound { id: String },
-
-    #[error("[E3007] Migration failed (JSON to TOML): {reason}")]
-    MigrationFailed { reason: String },
-
-    // E4xxx: Agent launch errors
-    #[error("[E4001] Agent not found: {name}")]
-    AgentNotFound { name: String },
-
-    #[error("[E4002] Agent launch failed: {name}, reason: {reason}")]
-    AgentLaunchFailed { name: String, reason: String },
-
-    #[error("[E4003] Agent configuration invalid: {name}")]
-    AgentConfigInvalid { name: String },
-
-    #[error("[E4004] Agent process terminated unexpectedly: {name}")]
-    AgentTerminated { name: String },
-
-    // E5xxx: Web API errors
-    #[error("[E5001] Server bind failed: {address}")]
-    ServerBindFailed { address: String },
-
-    #[error("[E5002] WebSocket connection failed: {reason}")]
-    WebSocketFailed { reason: String },
-
-    #[error("[E5003] API request failed: {endpoint}")]
-    ApiRequestFailed { endpoint: String },
-
-    #[error("[E5004] PTY spawn failed: {reason}")]
-    PtySpawnFailed { reason: String },
-
-    // E6xxx: Docker operation errors
-    #[error("[E6001] Docker error: {0}")]
-    Docker(String),
-
-    #[error("[E6002] Docker daemon not running")]
-    DockerDaemonNotRunning,
-
-    #[error("[E6003] Docker build failed: {reason}")]
-    DockerBuildFailed { reason: String },
-
-    #[error("[E6004] Docker container start failed: {reason}")]
-    DockerStartFailed { reason: String },
-
-    #[error("[E6005] Docker container not found: {name}")]
-    DockerContainerNotFound { name: String },
-
-    #[error("[E6006] Docker port conflict: port {port} is already in use")]
-    DockerPortConflict { port: u16 },
-
-    #[error("[E6007] Docker operation timeout")]
-    DockerTimeout,
-
-    // E7xxx: Terminal operation errors
-    #[error("{0}")]
-    Terminal(#[from] crate::terminal::TerminalError),
-
-    // Generic errors
-    #[error("[E9001] IO error: {0}")]
+    /// I/O error.
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("[E9002] Internal error: {0}")]
-    Internal(String),
+    /// Git operation error.
+    #[error("Git error: {0}")]
+    Git(String),
+
+    /// Configuration error.
+    #[error("Config error: {0}")]
+    Config(String),
+
+    /// Agent launch/communication error.
+    #[error("Agent error: {0}")]
+    Agent(String),
+
+    /// Terminal/PTY error.
+    #[error("Terminal error: {0}")]
+    Terminal(String),
+
+    /// Docker operation error.
+    #[error("Docker error: {0}")]
+    Docker(String),
+
+    /// AI provider error.
+    #[error("AI error: {0}")]
+    Ai(String),
+
+    /// Notification error.
+    #[error("Notification error: {0}")]
+    Notification(String),
+
+    /// Voice input/output error.
+    #[error("Voice error: {0}")]
+    Voice(String),
+
+    /// Clipboard error.
+    #[error("Clipboard error: {0}")]
+    Clipboard(String),
+
+    /// Skill execution error.
+    #[error("Skill error: {0}")]
+    Skill(String),
+
+    /// Catch-all for uncategorised errors.
+    #[error("{0}")]
+    Other(String),
 }
 
-impl GwtError {
-    /// Get the error code as a string (e.g., "E1001")
-    pub fn code(&self) -> &'static str {
-        error_code!(self, {
-            // E1xxx
-            Self::RepositoryNotFound { .. } => "E1001",
-            Self::NotAGitRepository { .. } => "E1002",
-            Self::BranchNotFound { .. } => "E1003",
-            Self::BranchAlreadyExists { .. } => "E1004",
-            Self::RemoteNotFound { .. } => "E1005",
-            Self::FetchFailed { .. } => "E1006",
-            Self::PullNotFastForward { .. } => "E1007",
-            Self::UncommittedChanges => "E1008",
-            Self::UnpushedCommits => "E1009",
-            Self::BranchDiverged { .. } => "E1010",
-            Self::GitCommandFailed { .. } => "E1011",
-            Self::GitNotFound => "E1012",
-            Self::GitOperationFailed { .. } => "E1013",
-            Self::BranchCreateFailed { .. } => "E1014",
-            Self::BranchDeleteFailed { .. } => "E1015",
-            // E2xxx
-            Self::WorktreeNotFound { .. } => "E2001",
-            Self::WorktreeAlreadyExists { .. } => "E2002",
-            Self::WorktreeCreateFailed { .. } => "E2003",
-            Self::WorktreeRemoveFailed { .. } => "E2004",
-            Self::ProtectedBranch { .. } => "E2005",
-            Self::WorktreePathInvalid { .. } => "E2006",
-            Self::OrphanedWorktree { .. } => "E2007",
-            Self::WorktreeLocked { .. } => "E2008",
-            Self::WorktreePathConflict { .. } => "E2009",
-            // E3xxx
-            Self::ConfigNotFound { .. } => "E3001",
-            Self::ConfigParseError { .. } => "E3002",
-            Self::ConfigWriteError { .. } => "E3003",
-            Self::ConfigInvalidValue { .. } => "E3004",
-            Self::ProfileNotFound { .. } => "E3005",
-            Self::SessionNotFound { .. } => "E3006",
-            Self::MigrationFailed { .. } => "E3007",
-            // E4xxx
-            Self::AgentNotFound { .. } => "E4001",
-            Self::AgentLaunchFailed { .. } => "E4002",
-            Self::AgentConfigInvalid { .. } => "E4003",
-            Self::AgentTerminated { .. } => "E4004",
-            // E5xxx
-            Self::ServerBindFailed { .. } => "E5001",
-            Self::WebSocketFailed { .. } => "E5002",
-            Self::ApiRequestFailed { .. } => "E5003",
-            Self::PtySpawnFailed { .. } => "E5004",
-            // E6xxx
-            Self::Docker(_) => "E6001",
-            Self::DockerDaemonNotRunning => "E6002",
-            Self::DockerBuildFailed { .. } => "E6003",
-            Self::DockerStartFailed { .. } => "E6004",
-            Self::DockerContainerNotFound { .. } => "E6005",
-            Self::DockerPortConflict { .. } => "E6006",
-            Self::DockerTimeout => "E6007",
-            // E7xxx
-            Self::Terminal(ref e) => match e {
-                crate::terminal::TerminalError::PtyCreationFailed { .. } => "E7001",
-                crate::terminal::TerminalError::PtyIoError { .. } => "E7002",
-                crate::terminal::TerminalError::EmulatorError { .. } => "E7003",
-                crate::terminal::TerminalError::ScrollbackError { .. } => "E7004",
-                crate::terminal::TerminalError::IpcError { .. } => "E7005",
-                crate::terminal::TerminalError::PaneLimitReached { .. } => "E7006",
-                crate::terminal::TerminalError::WslPathConversion { .. } => "E7007",
-            },
-            // E9xxx
-            Self::Io(_) => "E9001",
-            Self::Internal(_) => "E9002",
-        })
-    }
-
-    /// Get embedded error message for this error code, if available
-    pub fn message(&self) -> Option<String> {
-        let code = self.code();
-        let messages = error_messages();
-        let table = messages.as_table()?;
-        for section in table.values() {
-            if let Some(section_table) = section.as_table() {
-                if let Some(value) = section_table.get(code).and_then(|v| v.as_str()) {
-                    return Some(value.to_string());
-                }
-            }
-        }
-        None
-    }
-
-    /// Get suggestions for resolving this error
-    pub fn suggestions(&self) -> Vec<String> {
-        let code = self.code();
-        let messages = error_messages();
-        if let Some(table) = messages.as_table() {
-            if let Some(suggestions) = table.get("suggestions").and_then(|s| s.as_table()) {
-                if let Some(arr) = suggestions.get(code).and_then(|v| v.as_array()) {
-                    return arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                }
-            }
-        }
-        Vec::new()
-    }
-
-    /// Get the severity level of this error
-    pub fn severity(&self) -> ErrorSeverity {
-        match self {
-            // Info: user input / validation errors — expected failures
-            Self::RepositoryNotFound { .. }
-            | Self::NotAGitRepository { .. }
-            | Self::BranchNotFound { .. }
-            | Self::BranchAlreadyExists { .. }
-            | Self::RemoteNotFound { .. }
-            | Self::UncommittedChanges
-            | Self::UnpushedCommits
-            | Self::BranchDiverged { .. }
-            | Self::WorktreeAlreadyExists { .. }
-            | Self::ProtectedBranch { .. }
-            | Self::WorktreePathInvalid { .. }
-            | Self::ConfigInvalidValue { .. }
-            | Self::ProfileNotFound { .. }
-            | Self::SessionNotFound { .. }
-            | Self::AgentNotFound { .. }
-            | Self::AgentConfigInvalid { .. }
-            | Self::DockerContainerNotFound { .. }
-            | Self::WorktreePathConflict { .. } => ErrorSeverity::Info,
-
-            // Warning: recoverable but noteworthy
-            Self::WorktreeLocked { .. }
-            | Self::OrphanedWorktree { .. }
-            | Self::PullNotFastForward { .. }
-            | Self::DockerPortConflict { .. }
-            | Self::DockerTimeout => ErrorSeverity::Warning,
-
-            // Error: unexpected failures
-            Self::FetchFailed { .. }
-            | Self::GitCommandFailed { .. }
-            | Self::GitNotFound
-            | Self::GitOperationFailed { .. }
-            | Self::BranchCreateFailed { .. }
-            | Self::BranchDeleteFailed { .. }
-            | Self::WorktreeNotFound { .. }
-            | Self::WorktreeCreateFailed { .. }
-            | Self::WorktreeRemoveFailed { .. }
-            | Self::ConfigNotFound { .. }
-            | Self::ConfigParseError { .. }
-            | Self::ConfigWriteError { .. }
-            | Self::MigrationFailed { .. }
-            | Self::AgentLaunchFailed { .. }
-            | Self::AgentTerminated { .. }
-            | Self::ServerBindFailed { .. }
-            | Self::WebSocketFailed { .. }
-            | Self::ApiRequestFailed { .. }
-            | Self::PtySpawnFailed { .. }
-            | Self::Docker(_)
-            | Self::DockerDaemonNotRunning
-            | Self::DockerBuildFailed { .. }
-            | Self::DockerStartFailed { .. }
-            | Self::Terminal(_)
-            | Self::Io(_) => ErrorSeverity::Error,
-
-            // Critical: data corruption risk
-            Self::Internal(_) => ErrorSeverity::Critical,
-        }
-    }
-
-    /// Get the error category
-    pub fn category(&self) -> ErrorCategory {
-        match self.code().chars().nth(1).and_then(|c| c.to_digit(10)) {
-            Some(1) => ErrorCategory::Git,
-            Some(2) => ErrorCategory::Worktree,
-            Some(3) => ErrorCategory::Config,
-            Some(4) => ErrorCategory::Agent,
-            Some(5) => ErrorCategory::WebApi,
-            Some(6) => ErrorCategory::Docker,
-            Some(7) => ErrorCategory::Terminal,
-            _ => ErrorCategory::Internal,
-        }
-    }
-}
-
-/// Error category for grouping errors
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCategory {
-    Git,
-    Worktree,
-    Config,
-    Agent,
-    WebApi,
-    Docker,
-    Terminal,
-    Internal,
-}
-
-impl std::fmt::Display for ErrorCategory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Git => write!(f, "Git"),
-            Self::Worktree => write!(f, "Worktree"),
-            Self::Config => write!(f, "Config"),
-            Self::Agent => write!(f, "Agent"),
-            Self::WebApi => write!(f, "WebApi"),
-            Self::Docker => write!(f, "Docker"),
-            Self::Terminal => write!(f, "Terminal"),
-            Self::Internal => write!(f, "Internal"),
-        }
-    }
-}
+/// Convenience alias used throughout the crate and dependents.
+pub type Result<T> = std::result::Result<T, GwtError>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_error_code() {
-        let err = GwtError::RepositoryNotFound {
-            path: PathBuf::from("/tmp/repo"),
-        };
-        assert_eq!(err.code(), "E1001");
-        assert_eq!(err.category(), ErrorCategory::Git);
+    fn io_error_converts_from_std() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let gwt_err: GwtError = io_err.into();
+        assert!(matches!(gwt_err, GwtError::Io(_)));
+        assert!(gwt_err.to_string().contains("gone"));
     }
 
     #[test]
-    fn test_error_display() {
-        let err = GwtError::BranchNotFound {
-            name: "feature/test".to_string(),
-        };
-        assert!(err.to_string().contains("[E1003]"));
-        assert!(err.to_string().contains("feature/test"));
+    fn git_error_displays_message() {
+        let err = GwtError::Git("bad ref".into());
+        assert_eq!(err.to_string(), "Git error: bad ref");
     }
 
     #[test]
-    fn test_error_category() {
-        assert_eq!(
-            GwtError::RepositoryNotFound {
-                path: PathBuf::new()
-            }
-            .category(),
-            ErrorCategory::Git
-        );
-        assert_eq!(
-            GwtError::WorktreeNotFound {
-                path: PathBuf::new()
-            }
-            .category(),
-            ErrorCategory::Worktree
-        );
-        assert_eq!(
-            GwtError::ConfigNotFound {
-                path: PathBuf::new()
-            }
-            .category(),
-            ErrorCategory::Config
-        );
-    }
-
-    // ---- StructuredError / ErrorSeverity tests ----
-
-    #[test]
-    fn test_severity_info_for_user_errors() {
-        assert_eq!(
-            GwtError::BranchAlreadyExists {
-                name: "main".into()
-            }
-            .severity(),
-            ErrorSeverity::Info
-        );
-        assert_eq!(
-            GwtError::ProtectedBranch {
-                branch: "main".into()
-            }
-            .severity(),
-            ErrorSeverity::Info
-        );
-        assert_eq!(
-            GwtError::ProfileNotFound { name: "x".into() }.severity(),
-            ErrorSeverity::Info
-        );
+    fn config_error_displays_message() {
+        let err = GwtError::Config("missing key".into());
+        assert_eq!(err.to_string(), "Config error: missing key");
     }
 
     #[test]
-    fn test_severity_warning_for_recoverable() {
-        assert_eq!(
-            GwtError::WorktreeLocked {
-                path: PathBuf::new()
-            }
-            .severity(),
-            ErrorSeverity::Warning
-        );
-        assert_eq!(GwtError::DockerTimeout.severity(), ErrorSeverity::Warning);
+    fn agent_error_displays_message() {
+        let err = GwtError::Agent("timeout".into());
+        assert_eq!(err.to_string(), "Agent error: timeout");
     }
 
     #[test]
-    fn test_severity_error_for_unexpected() {
-        assert_eq!(
-            GwtError::GitCommandFailed {
-                command: "status".into(),
-                reason: "failed".into()
-            }
-            .severity(),
-            ErrorSeverity::Error
-        );
-        assert_eq!(GwtError::GitNotFound.severity(), ErrorSeverity::Error);
-        assert_eq!(
-            GwtError::Io(std::io::Error::other("test")).severity(),
-            ErrorSeverity::Error
-        );
+    fn terminal_error_displays_message() {
+        let err = GwtError::Terminal("pty failed".into());
+        assert_eq!(err.to_string(), "Terminal error: pty failed");
     }
 
     #[test]
-    fn test_severity_critical_for_internal() {
-        assert_eq!(
-            GwtError::Internal("oops".into()).severity(),
-            ErrorSeverity::Critical
-        );
+    fn docker_error_displays_message() {
+        let err = GwtError::Docker("daemon not running".into());
+        assert_eq!(err.to_string(), "Docker error: daemon not running");
     }
 
     #[test]
-    fn test_structured_error_from_gwt_error() {
-        let err = GwtError::BranchNotFound {
-            name: "feature/test".into(),
-        };
-        let se = StructuredError::from_gwt_error(&err, "list_worktrees");
-        assert_eq!(se.severity, ErrorSeverity::Info);
-        assert_eq!(se.code, "E1003");
-        assert!(se.message.contains("feature/test"));
-        assert_eq!(se.command, "list_worktrees");
-        assert_eq!(se.category, "Git");
-        assert!(!se.timestamp.is_empty());
+    fn ai_error_displays_message() {
+        let err = GwtError::Ai("rate limited".into());
+        assert_eq!(err.to_string(), "AI error: rate limited");
     }
 
     #[test]
-    fn test_structured_error_internal_helper() {
-        let se = StructuredError::internal("something broke", "do_thing");
-        assert_eq!(se.severity, ErrorSeverity::Error);
-        assert_eq!(se.code, "E9002");
-        assert_eq!(se.command, "do_thing");
-        assert!(se.message.contains("something broke"));
+    fn notification_error_displays_message() {
+        let err = GwtError::Notification("send failed".into());
+        assert_eq!(err.to_string(), "Notification error: send failed");
     }
 
     #[test]
-    fn test_structured_error_serde_roundtrip() {
-        let se = StructuredError::internal("test", "cmd");
-        let json = serde_json::to_string(&se).expect("serialize");
-        let de: StructuredError = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(de.code, se.code);
-        assert_eq!(de.command, se.command);
-        assert_eq!(de.severity, se.severity);
+    fn voice_error_displays_message() {
+        let err = GwtError::Voice("mic unavailable".into());
+        assert_eq!(err.to_string(), "Voice error: mic unavailable");
     }
 
     #[test]
-    fn test_error_severity_display() {
-        assert_eq!(ErrorSeverity::Info.to_string(), "info");
-        assert_eq!(ErrorSeverity::Warning.to_string(), "warning");
-        assert_eq!(ErrorSeverity::Error.to_string(), "error");
-        assert_eq!(ErrorSeverity::Critical.to_string(), "critical");
+    fn clipboard_error_displays_message() {
+        let err = GwtError::Clipboard("paste failed".into());
+        assert_eq!(err.to_string(), "Clipboard error: paste failed");
+    }
+
+    #[test]
+    fn skill_error_displays_message() {
+        let err = GwtError::Skill("not found".into());
+        assert_eq!(err.to_string(), "Skill error: not found");
+    }
+
+    #[test]
+    fn other_error_displays_raw_message() {
+        let err = GwtError::Other("something unexpected".into());
+        assert_eq!(err.to_string(), "something unexpected");
+    }
+
+    #[test]
+    fn gwt_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(GwtError::Other("test".into()));
+        assert!(err.to_string().contains("test"));
+    }
+
+    #[test]
+    fn result_alias_works() {
+        fn ok_fn() -> Result<i32> {
+            Ok(42)
+        }
+        fn err_fn() -> Result<i32> {
+            Err(GwtError::Other("nope".into()))
+        }
+        assert_eq!(ok_fn().unwrap(), 42);
+        assert!(err_fn().is_err());
     }
 }

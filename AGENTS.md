@@ -1,1 +1,301 @@
-@CLAUDE.md
+# AGENTS.md
+
+このファイルは、このリポジトリでコードを扱う際のガイダンスを提供します。
+
+## エージェント運用原則
+
+- **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
+- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策は `tasks/lessons.md` に記録し、同種の作業を始める前に確認する。
+- **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
+- **Subagent Strategy:** 独立した調査、分析、実装、テスト整備はサブエージェントに分割し、メインのコンテキストを不要な詳細で汚さない。担当範囲、完了条件、検証観点を明示して責務を重複させない。
+- **Demand Elegance:** 非自明な変更では、力技で実装する前に 2〜3 のアプローチを比較し、もっともシンプルで保守しやすい案を選ぶ。単純な修正では過剰設計しない。
+- **Autonomous Bug Fixing:** バグ対応では、まず再現手順、ログ、失敗テスト、関連コードを自律的に調査し、原因特定、修正、再発防止確認まで進める。不可逆な仕様判断やプロダクト判断だけをユーザーに確認する。
+- **Investigation-First Discussion:** 実装中に以下のシグナルを検知した場合、実装を一時停止して調査と議論に入る:
+  - generator やテンプレートを変更したが、生成される実ファイル（settings.local.json 等）を実際に確認していない
+  - SPEC の acceptance scenario と実装の実際の挙動が一致しない
+  - 実装が tasks.md に記載されていないファイルに触れようとしている
+  - テストが通ったが、手動で検証すると期待と異なる結果になる
+  - migration / 互換性パスの条件分岐が新形式を網羅していない
+  - 変更の下流影響（何が壊れるか）、上流前提（何が先に必要か）、同時変更境界（何を一緒に変えないと中間状態で壊れるか）を分析していない
+
+  調査手順: コードを読む → 依存関係を洗い出す → 実行して試す → 結果をユーザーに提示 → 判断を仰ぐ。「進めて」と言われるまでは議論を続ける。明示的に壁打ちモードに入りたい場合は `gwt-spec-brainstorm` を使用する。
+
+## 開発指針
+
+### 🛠️ 技術実装指針
+
+- **設計・実装は複雑にせずに、シンプルさの極限を追求してください**
+- **ただし、ユーザビリティと開発者体験の品質は決して妥協しない**
+- 実装はシンプルに、開発者体験は最高品質に
+- TUI 操作の直感性と効率性を技術的複雑さより優先
+- **変更は外科的に行い、影響範囲を最小限にする。** 必要な箇所だけに手を入れ、新たなバグを持ち込まない
+- **非自明な変更では、実装前に「もっともシンプルでエレガントな解」を比較し、採用理由を1行で明示する。**
+- **場当たり的な修正（ワークアラウンド）を禁止する。** 必ず根本原因を特定してから修正すること。原因が不明な場合はログ・テスト・コードを調査し、推測で修正しない
+
+### 🧩 TUI ガイドライン
+
+- デスクトップ TUI は ratatui + crossterm
+- バックエンド: Rust (gwt-core + gwt-tui)
+- ターミナルエミュレーション: vt100 crate
+- UI アイコンは Unicode シンボルを使用する
+
+### 🔒 ブランチ保護ルール
+
+- **develop ブランチへの直接コミットは禁止。** pre-commit hook によりブロックされる。作業は必ず feature ブランチで行い、PR 経由で develop にマージする
+- SPEC 策定・ブレインストーミングは develop 上のエージェントで行えるが、コミットは feature/feature-{N} ブランチに切り替えてから実行する
+
+### 📝 設計ガイドライン
+
+- 設計に関するドキュメントには、ソースコードを書かないこと
+
+## 開発品質
+
+### 完了条件
+
+- エラーが発生している状態で完了としないこと。必ずエラーが解消された時点で完了とする。
+- 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
+- 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
+- **完了報告前のセルフチェックリスト（必須）:**
+  - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
+  - [ ] 全テスト通過・lint / 型チェック成功
+  - [ ] 未実装・TODO が残っていないか
+  - [ ] コミット＆プッシュ済みか
+
+## 開発ワークフロー
+
+### 実装前ワークフロー（必須）
+
+> 🚨 **エージェントは、以下のワークフローを完了するまでプロダクションコードの実装に着手してはならない。**
+
+#### 1. 仕様策定（feat / fix / refactor 対象）
+
+> 🚨 **既存 SPEC の検索が最優先。新規 SPEC の作成は、該当する既存 SPEC が存在しないことを確認した後の最終手段である。**
+
+##### Step 1: 既存 SPEC を検索する（必須）
+
+- 実装に入る前に、`gwt-search` で関連する既存 SPEC と Issue を必ず検索する
+- 検索クエリは対象機能のキーワードを 2〜3 パターン試す（日本語・英語両方）
+- `gwt-search --specs` で SPEC を、`gwt-search --issues` で Issue を絞り込める
+
+##### Step 2: 既存 SPEC が見つかった場合 → 既存 SPEC を更新する
+
+- 該当 SPEC の `spec.md` に不足しているユーザーストーリー・機能要件・受け入れシナリオを追加する
+- `plan.md` に新しいフェーズや実装ステップを追加する
+- `tasks.md` に新しいタスクを追加する
+- `metadata.json` の status/phase を必要に応じて更新する（例: `done` → `in-progress` に戻す）
+- 対象の SPEC が確定した後は SPEC 管理ワークフローに従って実装進行を管理する
+
+##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
+
+- `gwt-spec-design` を使って DDD ベースの SPEC 設計を行う（ドメイン分析 → SPEC 登録 → 仕様明確化）
+- SPEC ディレクトリ内の `spec.md` に最低限以下を含める:
+  - ユーザーシナリオとテスト（受け入れシナリオ）
+  - 機能要件（FR-\*）
+  - 成功基準
+- `gwt-spec-plan` で `plan.md`、`tasks.md` も策定してから実装に入る
+- 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
+- 現在のコンバセーションでは SPEC 登録までで完了とする
+
+##### 共通ルール
+
+- 通常の GitHub Issue から開始する場合は、`gwt-issue` により直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
+- 仕様策定時のユーザーインタビューでは以下を遵守する:
+  - 表面的・ありきたりな質問を避け、技術実装・UX・トレードオフに踏み込んだ質問をする
+  - 1回で終わらず、仕様が十分に詰まるまで継続的にインタビューする
+
+#### 2. TDD（テストファースト）
+
+- `gwt-spec-build` を使って TDD ベースで実装する（SPEC モードまたはスタンドアロンモード）
+- 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
+- Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
+- テストが RED（失敗）状態であることを確認してから実装に進む
+
+#### 適用除外
+
+以下の変更は仕様策定・TDD を省略できる:
+
+- `fix:` タイプのバグ修正（原因調査 → 修正 → 再発防止確認の Plan/Execute/Verify で管理する）
+- `docs:` / `chore:` タイプの変更（ドキュメント修正、CI設定、依存更新など）
+- 1行程度の明白な typo 修正
+- CLAUDE.md / README.md の更新のみの変更
+
+### Plan / Execute / Verify（必須）
+
+- 中規模以上の作業（複数ファイル変更、仕様判断を伴う変更、原因調査が必要な不具合修正）では、実装前に短い Plan を作成する。
+- Plan には最低限「何を変えるか」「どう検証するか」を含め、実装中に前提が崩れたら Plan を更新してから再開する。
+- 不具合修正は、再現手順の確立 → 原因特定 → 修正 → 再発防止確認までを1サイクルで完了する。
+- 仕様選択が不可逆な場合、またはプロダクト判断が必要な場合のみユーザーへ確認し、それ以外は自律的に進める。
+
+### タスクトラッキング（tasks/）
+
+- 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
+- `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
+- 再発防止に値する失敗やレビュー指摘は `tasks/lessons.md` に「事象 / 原因 / 再発防止策」の形式で記録する。
+- 同種の作業を始める前に `tasks/lessons.md` を確認し、既知の失敗を繰り返さない。
+
+### サブエージェント活用（並列化）
+
+- 独立した作業単位（例: Rust修正、GUI修正、テスト整備）に分割できる場合はサブエージェントで並列実行する。
+- 各サブエージェントには担当範囲・完了条件・検証観点を明示し、責務を重複させない。
+- 統合担当は最終的に全変更を再レビューし、競合解消と統合検証を実施してから完了とする。
+
+### 基本ルール
+
+- 指示を受けた場合、まず既存実装・関連ドキュメント（README/CLAUDE.md）を確認し、必要なら先に更新する。
+- 作業（タスク）を完了したら、変更点を日本語でコミットログに追加して、コミット＆プッシュを必ず行う
+- 完了報告には、実行した検証コマンドと結果（成功/失敗、未実施項目）を必ず含める
+- 作業（タスク）は、最大限の並列化をして進める
+- `git rebase -i origin/main` はLLMでの失敗率が高いため禁止（必要な場合は人間が手動で整形すること）
+- 作業（タスク）は、忖度なしで進める
+- **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除を行ってはならない。Worktreeは起動ブランチで作業を完結する設計。**
+- 「進めて」等の承認指示は、承認済みタスクを自律的に完了まで進める指示である。不要な中間確認を挟まず、完了まで一気に進める
+- **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（ローカル SPEC）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / CLAUDE.md更新のみ
+
+### コミットメッセージポリシー
+
+> 🚨 **コミットログはリリースワークフローがバージョン判定に使用する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**
+
+- バージョン判定とリリースノート生成を Conventional Commits から自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
+- コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。バージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
+- ローカルでは `bunx commitlint --from HEAD~1 --to HEAD` などで必ず自己検証し、CI の commitlint に丸投げしない。エラーが出た状態で push しない。
+- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、破壊的変更を認識させる。
+- 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、解析精度を担保する。
+- `chore:` や `docs:` などリリース対象外のタイプでも必ずプレフィックスを付け、曖昧な自然文だけのコミットメッセージを禁止する。
+- コミット前に commitlint ルール（subject 空欄禁止・100文字以内など）を自己確認し、CI での差し戻しを防止する。
+
+### ローカル検証/実行ルール（Rust）
+
+- このリポジトリのローカル検証・実行は Cargo を使用する
+- ビルド: `cargo build -p gwt-tui`
+- 開発: `cargo run -p gwt-tui`
+- テスト: `cargo test -p gwt-core -p gwt-tui`
+- Lint: `cargo clippy --all-targets --all-features -- -D warnings`
+- フォーマット: `cargo fmt`
+
+## コミュニケーションガイドライン
+
+- 回答は必ず日本語
+- TUI のユーザー向け表示は英語のみ（日本語の文言を表示しない）
+- ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
+- ログ参照の指示があれば、この環境から直接読み取って調査すること
+
+## ドキュメント管理
+
+- ドキュメントはREADME.md/README.ja.mdに集約する
+- 仕様・要件は **GitHub Issue (`gwt-spec` ラベル)** に記載する。読み書きは `gwt issue spec <n>` CLI 経由、ローカルキャッシュは `~/.gwt/cache/issues/`
+
+### README.md / README.ja.md に必ず記載する内容
+
+- 利用者向けの導線: インストール方法、起動方法、基本操作、主要機能の使い方
+- 利用前提: サポートOS、初期設定（例: AI 機能を使う場合の設定）
+- 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`cargo test` など）
+- 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
+- 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
+- 変更が設計判断を必要とする場合の案内: 重要仕様の所在 (GitHub Issue `gwt-spec` ラベル、`gwt issue spec <n>` でアクセス)
+- `CLAUDE.md` の運用ルールや内部実装ガイドは README に入れない
+- 英語版/日本語版の内容は同等レベルを保つ（順序・見出しは対応させる）
+
+## コードクオリティガイドライン
+
+- マークダウンファイルはmarkdownlintでエラー及び警告がない状態にする
+- コミットログはcommitlintに対応する
+
+## 開発ガイドライン
+
+- 既存のファイルのメンテナンスを無視して、新規ファイルばかり作成するのは禁止。既存ファイルを改修することを優先する。
+
+## ドキュメント作成ガイドライン
+
+- README.mdには設計などは書いてはいけない。プロジェクトの説明やディレクトリ構成などの説明のみに徹底する。設計などは、適切なファイルへのリンクを書く。
+
+## リリースワークフロー
+
+- feature/\* ブランチは develop への PR を作成し、オーナー承認後にマージする。develop で次回リリース候補を蓄積する。
+- **main への PR は develop からのみ許可。** それ以外のブランチ（feature/\*、release-\* 等）から main への直接 PR は禁止。CI（`pr-source-check.yml`）でも拒否される。
+- `/release` コマンドで Release PR を作成:
+  - Conventional Commits を解析してバージョン自動判定（feat→minor, fix→patch, !→major）
+  - git-cliff で CHANGELOG.md を更新
+  - Cargo.toml, package.json のバージョンを更新
+  - develop → main への PR を作成（リリースブランチは作成しない）
+- Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
+  - タグ・GitHub Release を作成
+  - ビルド済みバイナリを GitHub Release にアップロード
+
+## パッケージ公開状況
+
+| プラットフォーム | 確認コマンド |
+| -------------- | ----------- |
+| GitHub Release | `gh release list --repo akiojin/gwt --limit 1` |
+
+## 使用中の技術
+
+- Rust 2021 Edition (stable) + ratatui, crossterm, vt100, portable-pty, serde, tokio
+- ローカルファイルと Git メタデータ（DB なし）
+
+## プロジェクト構成
+
+```text
+├── Cargo.toml          # ワークスペース設定
+├── crates/
+│   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
+│   ├── gwt-github/     # GitHub Issue SOT for SPEC 管理 (SPEC-12)
+│   └── gwt-tui/        # ratatui TUI フロントエンド + CLI (`gwt issue spec ...`)
+└── package.json        # 開発用スクリプト
+```
+
+**SPEC 管理**: SPEC は `gwt-spec` ラベル付き GitHub Issue として格納される (#1930 SPEC-12 参照)。
+読み取りは `gwt issue spec <n> [--section <name>]`、書き込みは
+`gwt issue spec <n> --edit <section> -f <file>`、一覧は `gwt issue spec list`。
+ローカルキャッシュは `~/.gwt/cache/issues/` で UI レイヤーの唯一の真実
+(一方向フロー: GitHub API → cache → UI、SPEC-12 FR-022)。
+
+<!-- BEGIN gwt managed skills -->
+## Available Skills & Commands (gwt)
+
+Skills are located in `.claude/skills/<name>/SKILL.md`.
+Commands can be invoked as `/gwt:<command-name>`.
+
+### SPEC Lifecycle (DDD / SDD / TDD)
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| gwt-spec-design | `/gwt:gwt-spec-design` | Drive SPEC design from intake to planning-ready with DDD methodology. Runs preflight search, one-question-at-a-time interview, domain discovery (Bounded Context, Ubiquitous Language), SPEC registration, and clarification. |
+| gwt-spec-plan | `/gwt:gwt-spec-plan` | Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Produces research.md, data-model.md, quickstart.md, contracts/*. Runs CLEAR/AUTO-FIXABLE/NEEDS-DECISION analysis. |
+| gwt-spec-build | `/gwt:gwt-spec-build` | Implement code using test-first TDD methodology. Works in SPEC mode (tasks.md-driven) or standalone mode (no SPEC needed). Red-Green-Refactor loop, verification, PR flow, completion gate. |
+| gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-spec-design. |
+
+### Issue & PR Management
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| gwt-issue | `/gwt:gwt-issue` | Unified GitHub Issue lifecycle. Auto-detects mode: no Issue number → register (search first, create Issue or SPEC); Issue number/URL → resolve (analyze, decide direct fix vs SPEC path). |
+| gwt-pr | `/gwt:gwt-pr` | Unified GitHub PR lifecycle. Auto-detects mode: no PR → create; PR exists → check status; CI failures/reviews → fix. REST-first `gh api` flows. |
+
+### Search & Agent Management
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-spec-design and gwt-issue. |
+| gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; pane ID + message → send input; stop/close + pane ID → stop pane. |
+
+### TUI Design
+
+| Skill | Command | Description |
+|-------|---------|-------------|
+| tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal user interfaces with ratatui, crossterm, and xterm.js. |
+
+### Recommended Workflow
+
+```
+gwt-spec-design → gwt-spec-plan → gwt-spec-build → gwt-arch-review
+     ↑                                    |
+     └────────────────────────────────────┘
+```
+
+1. **Design a feature** → `gwt-spec-design` (DDD intake → SPEC creation)
+2. **Plan implementation** → `gwt-spec-plan` (SDD architecture → tasks)
+3. **Build with TDD** → `gwt-spec-build` (Red-Green-Refactor → PR)
+4. **Review architecture** → `gwt-arch-review` (analysis → improvement proposals)
+5. **Manage issues** → `gwt-issue` (register or resolve)
+6. **Manage PRs** → `gwt-pr` (create, check, or fix)
+<!-- END gwt managed skills -->

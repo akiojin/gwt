@@ -1,0 +1,16 @@
+[package]
+name = "gwt-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Voice input backend abstraction for gwt"
+publish = false
+
+[dependencies]
+gwt-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,307 @@
+---
+name: gwt-pr
+description: "Use proactively after implementation work to create, check, or fix PRs. Auto-detects mode from branch PR state: no PR creates one, open PR pushes updates, CI failures/conflicts/reviews triggers fix mode. Triggers: 'create PR', 'check PR', 'fix CI', 'PR status'."
+---
+
+# gwt-pr — Unified PR Lifecycle Manager
+
+## Overview
+
+Single skill for the full PR lifecycle: create, check status, and fix blockers. Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user.
+
+REST-first `gh api` flows for all PR operations. GraphQL only for unresolved review threads and thread reply/resolve.
+
+## Mode Auto-Detection
+
+On invocation, run Shared Preflight, then route:
+
+1. **Preflight** — always runs first (see [Shared Preflight](#shared-preflight)).
+2. **Explicit mode** (user said "check" / "fix" / "create"):
+   - "check status" / "PR status" / "is it merged?" → **check** mode
+   - "fix CI" / "fix the PR" / "resolve blockers" → **fix** mode
+   - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
+3. **Auto-detect** (no explicit mode) — use the commit-count-first
+   decision from Preflight Step 7:
+   - `N > 0` + no open PR → **create**
+   - `N > 0` + open PR → **create** (push-only + post-push fix)
+   - `N = 0` + open PR → **fix** (check CI / reviews / conflicts)
+   - `N = 0` + no open PR → report **NO ACTION**
+
+## Shared Preflight
+
+Every mode begins with these steps. **The order is intentional — commit
+count against the base branch comes before PR state lookup so that the
+MERGED shortcut ("PR is done therefore nothing to do") is structurally
+impossible.**
+
+1. **Repo + branches:**
+   - `git rev-parse --show-toplevel` / `git rev-parse --abbrev-ref HEAD`
+   - Base defaults to `develop` unless user specifies.
+2. **Branch protection:** Only `develop` may target `main`. Refuse any other branch targeting `main`.
+3. **Working tree state:** `git status --porcelain`. If dirty, pause and present options (continue / abort / cleanup). Do not auto-commit/stash.
+4. **Fetch:** `git fetch origin`
+5. **Commit count against base (mandatory first check):**
+   ```bash
+   N=$(git rev-list --count "origin/$base..HEAD")
+   ```
+   > **Baseline ref rule**: ALWAYS compare against `origin/<base>`
+   > (the PR target branch, default `origin/develop`). NEVER use
+   > `origin/<head>` (the remote tracking branch of the current
+   > branch) — that only tells you if commits are pushed, not
+   > whether develop has your work. Confusing the two is the root
+   > cause of the MERGED-state false NO ACTION bug.
+6. **PR lookup + open-PR check:**
+   - `repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
+   - `owner="${repo_slug%%/*}"`
+   - `gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100"`
+   - `has_open_pr` = any entry with `state == "open" && merged_at == null`
+7. **Route using the 2×2 matrix:**
+
+   | Commits (N) | Open PR? | Action |
+   |---|---|---|
+   | N > 0 | No | **CREATE** new PR |
+   | N > 0 | Yes | **PUSH ONLY** to existing PR → then **FIX** |
+   | N = 0 | Yes | **FIX** (CI / reviews / conflicts) |
+   | N = 0 | No | **NO ACTION** |
+
+   This matrix is exhaustive. PR state (MERGED / CLOSED) is not
+   consulted — it is irrelevant when the commit count and open-PR
+   presence already determine the action.
+
+## Mode: Create
+
+Detailed logic in `references/create-flow.md`.
+
+### Decision Rules
+
+Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
+
+1. **Do not create or switch branches.** Always use the current branch as head.
+2. **If open PR exists** → push only, return existing PR URL, enter Fix mode.
+3. **If no open PR** → create new PR.
+4. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+
+### PR Title Rules
+
+- Format: `<type>(<scope>): <subject>` (Conventional Commits)
+- type: `feat`/`fix`/`docs`/`chore`/`refactor`/`test`/`ci`/`perf`
+- subject: imperative mood, under 70 chars, no capital, no period
+- Branch prefix `feat/`/`fix/` must match title type
+
+### PR Body Rules
+
+- Template: `.claude/skills/gwt-pr/references/pr-body-template.md`
+- Required sections: Summary, Changes, Testing, Closing Issues, Related Issues, Checklist
+- Conditional sections (remove if N/A): Context, Risk/Impact, Screenshots, Deployment
+- Remove all `<!-- GUIDE: ... -->` comments from final output
+- No `TODO` in required sections; derive content from diff/Issues/SPECs before asking user
+- `Closing Issues`: `Closes #N` or `None` only. Bare `#N` without keyword is forbidden.
+- Add reason to every unchecked checklist item
+
+### Create/Update Commands
+
+- Primary: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
+- Fallback: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
+- Update (only if user asks): `PATCH` via REST or `gh pr edit`
+
+### Post-Create
+
+After PR creation or push, automatically enter **fix** mode to check CI/conflicts/reviews.
+
+## Mode: Check
+
+Detailed logic in `references/check-flow.md`.
+
+**Read-only mode.** Do not create/switch branches, push, or create/edit PRs.
+
+### Output Contract
+
+Human-readable summary using signal prefixes:
+
+| Prefix | Action | Meaning |
+|--------|--------|---------|
+| `>>` | `CREATE PR` | Create a new PR |
+| `>` | `PUSH ONLY` | Push to existing PR |
+| `~` | `FIX` | Fix CI / reviews / conflicts on existing PR |
+| `--` | `NO ACTION` | Nothing to do |
+| `!!` | `MANUAL CHECK` | Manual check required |
+
+Per-status templates:
+
+Templates map directly from the Preflight 2×2 matrix:
+
+- **N > 0, no open PR:** `>> CREATE PR -- <N> new commit(s) not covered by any PR.`
+- **N > 0, open PR:** `> PUSH ONLY -- Unmerged PR #<number> open for <head>.` + PR URL
+- **N = 0, open PR:** `~ FIX -- PR #<number> open, checking CI/reviews/conflicts.`
+- **N = 0, no open PR:** `-- NO ACTION -- No commits ahead of <base>, no open PR.`
+- **Fallback:** `!! MANUAL CHECK -- Could not determine commit count.` + reason
+
+Append `(!) Worktree has uncommitted changes.` when dirty.
+
+### Commit Count (from Preflight Step 5)
+
+The commit count `N = git rev-list --count origin/<base>..HEAD` is
+computed in the Shared Preflight and is the primary routing signal.
+Check mode simply reports it:
+
+- `N > 0` + no open PR → `>> CREATE PR -- <N> new commit(s) not in any PR.`
+- `N > 0` + open PR → `> PUSH ONLY -- Unmerged PR open.` + PR URL
+- `N = 0` + open PR → report CI / review / conflict status
+- `N = 0` + no open PR → `-- NO ACTION`
+
+The old "Post-Merge Commit Check" logic (merge_commit ancestry,
+fallback chain) is subsumed by `git rev-list --count origin/<base>..HEAD`
+which directly answers "does develop have all my work?" regardless of
+PR state.
+
+## Mode: Fix
+
+Detailed logic in `references/fix-flow.md`.
+
+### Inspection Targets
+
+- **CI failures:** REST check-runs + GitHub Actions log extraction
+- **Merge conflicts:** `mergeable` / `mergeStateStatus` fields (CONFLICTING/DIRTY/BEHIND)
+- **Reviewer comments:** REST reviews + inline comments + issue comments (full text, no truncation)
+- **Unresolved threads:** GraphQL only
+- **Change requests:** Reviews with `CHANGES_REQUESTED` state
+
+### Diagnosis Report (mandatory format)
+
+```text
+## Diagnosis Report: PR #<number>
+
+**Merge Verdict: BLOCKED | CLEAR**
+Blocking items: <N>
+
+---
+
+### BLOCKING
+
+#### B1. [CATEGORY] <1-line title>
+- **What:** Factual statement
+- **Where:** file_path:line / check name / branch ref
+- **Evidence:** Verbatim quote from output
+- **Action:** Specific fix with file path/command
+- **Auto-fix:** Yes | No (needs confirmation)
+
+---
+
+### INFORMATIONAL
+#### I1. [CATEGORY] <1-line title>
+- **What / Note**
+
+---
+
+**Summary:** <N> blocking, <M> informational.
+```
+
+**Categories:** `CONFLICT`, `BRANCH-BEHIND`, `CI-FAILURE`, `CHANGE-REQUEST`, `UNRESOLVED-THREAD`, `REVIEW-COMMENT`
+
+**Classification:**
+
+- BLOCKING: merge conflicts, BEHIND, CI failure/cancelled/timed_out, CHANGES_REQUESTED, unresolved threads, unanswered review comments (any reviewer comment with no reply)
+- INFORMATIONAL: review comments that already have a reply, pending CI, outdated threads
+
+**Each CHANGE-REQUEST, UNRESOLVED-THREAD, and UNANSWERED-COMMENT is a separate B-item.**
+
+### Execution Path
+
+1. All `Auto-fix: Yes` --> proceed directly to fix.
+2. Any `Auto-fix: No` --> ask user about those items only.
+
+### Fix Implementation
+
+- Apply fixes, commit, push.
+- For BRANCH-BEHIND: `git fetch origin <base> && git merge origin/<base> && git push`
+- For CONFLICT: inspect both sides, resolve if clear, ask user if ambiguous.
+
+### Comment Response Policy
+
+> **No reviewer comment may be left unanswered or unresolved.**
+
+- Every unresolved thread MUST receive a reply AND be resolved.
+- Reply content (every comment gets a reply, even if no code change was needed):
+  - Fixed: "Fixed: <what was done>." with commit reference.
+  - Not applicable: "Not applicable: <reason why no change is needed>."
+  - Already addressed: "Already addressed in commit <sha>: <summary>."
+  - Acknowledged: "Acknowledged: <brief response>." for informational comments.
+- After replying, **resolve the conversation** via GraphQL
+  `--reply-and-resolve` JSON array covering ALL threads.
+- If `--reply-and-resolve` is not available, resolve manually via
+  `gh api graphql` with `resolveReviewThread` mutation.
+- **Verification:** After resolving, re-check that no unresolved
+  threads remain. Unresolved threads block the Merge Verdict.
+
+### Reviewer Notification (mandatory)
+
+Post PR comment via REST summarizing all fixes. Fallback: `gh pr comment`.
+
+### Verify Fix (mandatory)
+
+Re-run inspection with `--mode all`. Loop until exit code 0.
+- CI pending --> poll 30s intervals until complete.
+- After fix push, re-poll for new CI run.
+
+### Loop Safety Guard
+
+Same CI check fails 3 consecutive iterations --> report to user, ask continue/abort/change approach.
+
+## Diagnosis Report Anti-Patterns
+
+| Prohibited | Required Alternative |
+|---|---|
+| "We should look into..." | "Edit `path/file.ts:42` to..." |
+| "There seem to be some issues" | "3 blocking items detected" |
+| "This might be causing..." | "Root cause: `<error from log>`" |
+| "Consider fixing..." | "Action: Fix `<what>` in `<where>`" |
+| "Various CI checks are failing" | "2 CI checks failing: `build`, `lint`" |
+
+## Comment Formatting Rules
+
+- No escaped newline literals (`\n`) in final comment text.
+- Use real line breaks. Verify before posting.
+- If raw escape sequences needed for explanation, use fenced code blocks only.
+
+## Issue Progress Comment Template
+
+When work is tracked in Issues:
+
+```markdown
+Progress
+- ...
+
+Done
+- ...
+
+Next
+- ...
+```
+
+## Bundled Scripts
+
+| Script | Path | Purpose |
+|--------|------|---------|
+| check_pr_status.py | `.claude/skills/gwt-pr-check/scripts/check_pr_status.py` | PR status check |
+| inspect_pr_checks.py | `.claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py` | CI/conflict/review inspection |
+
+### inspect_pr_checks.py Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--repo` | `.` | Path inside the target Git repository |
+| `--pr` | (current) | PR number or URL |
+| `--mode` | `all` | `checks`, `conflicts`, `reviews`, `all` |
+| `--max-lines` | 160 | Max lines for log snippets |
+| `--context` | 30 | Context lines around failure markers |
+| `--required-only` | false | Limit to required checks only |
+| `--json` | false | Emit JSON output |
+| `--reply-and-resolve` | (none) | JSON array of `{threadId, body}` |
+| `--add-comment` | (none) | Post comment to PR |
+
+## References
+
+- `references/create-flow.md` -- PR creation workflow details
+- `references/check-flow.md` -- PR status checking details
+- `references/fix-flow.md` -- CI/conflict/review fix details
+- `references/pr-body-template.md` -- PR body template

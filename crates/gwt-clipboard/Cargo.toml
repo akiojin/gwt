@@ -1,0 +1,16 @@
+[package]
+name = "gwt-clipboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Clipboard abstraction for file paste and text operations"
+publish = false
+
+[dependencies]
+gwt-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

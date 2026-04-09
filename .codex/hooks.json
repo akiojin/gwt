@@ -1,0 +1,80 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "GWT_MANAGED_HOOK=runtime-state '/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook runtime-state PostToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "GWT_MANAGED_HOOK=runtime-state '/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook runtime-state PreToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "'/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook block-git-branch-ops",
+            "type": "command"
+          },
+          {
+            "command": "'/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook block-cd-command",
+            "type": "command"
+          },
+          {
+            "command": "'/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook block-file-ops",
+            "type": "command"
+          },
+          {
+            "command": "'/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook block-git-dir-override",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "GWT_MANAGED_HOOK=runtime-state '/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook runtime-state SessionStart",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "GWT_MANAGED_HOOK=runtime-state '/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook runtime-state Stop",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "GWT_MANAGED_HOOK=runtime-state '/Users/akiojin/Workbench/gwt/feature/specs/target/debug/gwt-tui' hook runtime-state UserPromptSubmit",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ]
+  }
+}

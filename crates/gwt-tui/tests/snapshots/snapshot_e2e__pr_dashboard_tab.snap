@@ -1,0 +1,29 @@
+---
+source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 320
+expression: output
+---
+┌...│ Issues │ PRs │ Specs │...────────┐┌ › Shell ─────────────────────────────┐
+│PR Dashboard                          ││Session: Shell (80x24)                │
+│No pull requests loaded               ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+ ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ dtl  r rfsh  C-g Tab  Esc term  ?
