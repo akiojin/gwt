@@ -21,7 +21,7 @@ On invocation, run Shared Preflight, then route:
    - "fix CI" / "fix the PR" / "resolve blockers" → **fix** mode
    - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
 3. **Auto-detect** (no explicit mode) — use the commit-count-first
-   decision from Preflight Step 6:
+   decision from Preflight Step 7:
    - `N > 0` + no open PR → **create**
    - `N > 0` + open PR → **create** (push-only + post-push fix)
    - `N = 0` + open PR → **fix** (check CI / reviews / conflicts)
@@ -74,11 +74,12 @@ Detailed logic in `references/create-flow.md`.
 
 ### Decision Rules
 
+Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
+
 1. **Do not create or switch branches.** Always use the current branch as head.
-2. **If `UNMERGED_PR_EXISTS`** --> push only, return existing PR URL.
-3. **If `NO_PR` or `CLOSED_UNMERGED_ONLY`** --> create new PR.
-4. **If all PRs merged** --> post-merge commit check determines create vs no-action.
-5. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+2. **If open PR exists** → push only, return existing PR URL, enter Fix mode.
+3. **If no open PR** → create new PR.
+4. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
 
 ### PR Title Rules
 
@@ -121,6 +122,7 @@ Human-readable summary using signal prefixes:
 |--------|--------|---------|
 | `>>` | `CREATE PR` | Create a new PR |
 | `>` | `PUSH ONLY` | Push to existing PR |
+| `~` | `FIX` | Fix CI / reviews / conflicts on existing PR |
 | `--` | `NO ACTION` | Nothing to do |
 | `!!` | `MANUAL CHECK` | Manual check required |
 
@@ -130,7 +132,7 @@ Templates map directly from the Preflight 2×2 matrix:
 
 - **N > 0, no open PR:** `>> CREATE PR -- <N> new commit(s) not covered by any PR.`
 - **N > 0, open PR:** `> PUSH ONLY -- Unmerged PR #<number> open for <head>.` + PR URL
-- **N = 0, open PR:** `> FIX -- PR #<number> open, checking CI/reviews/conflicts.`
+- **N = 0, open PR:** `~ FIX -- PR #<number> open, checking CI/reviews/conflicts.`
 - **N = 0, no open PR:** `-- NO ACTION -- No commits ahead of <base>, no open PR.`
 - **Fallback:** `!! MANUAL CHECK -- Could not determine commit count.` + reason
 

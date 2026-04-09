@@ -1951,7 +1951,13 @@ impl Model {
                     .join("cache")
                     .join("issues");
                 let mut specs = crate::screens::specs::SpecsState::new(cache_root);
+                // Silently attempt to load cached SPECs. If the cache
+                // directory doesn't exist yet (first startup before any
+                // `gwt issue spec pull`), we leave the list empty rather
+                // than setting last_error — an error message on a fresh
+                // install is confusing.
                 specs.reload_from_cache();
+                specs.last_error = None;
                 specs
             },
             wizard: None,
