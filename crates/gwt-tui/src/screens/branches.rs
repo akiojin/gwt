@@ -114,6 +114,7 @@ pub struct BranchItem {
     pub is_local: bool,
     pub category: BranchCategory,
     pub worktree_path: Option<std::path::PathBuf>,
+    pub upstream: Option<String>,
 }
 
 /// Per-branch merge state used by Branch Cleanup (FR-018a/d).
@@ -133,6 +134,56 @@ pub struct CleanupSettings {
     /// Whether the next confirmed cleanup should also delete the matching
     /// remote tracking branch via `gh` / `git push --delete origin`.
     pub delete_remote: bool,
+}
+
+/// Why a branch cannot currently be selected for Branch Cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionBlockedReason {
+    ProtectedBranch,
+    CurrentHead,
+    ActiveSession,
+    MergeCheckRunning,
+    RemoteTrackingWithoutLocal,
+    Unknown,
+}
+
+impl CleanupSelectionBlockedReason {
+    pub fn toast_message(self) -> &'static str {
+        match self {
+            Self::ProtectedBranch => "Cannot select: protected branch",
+            Self::CurrentHead => "Cannot select: current HEAD",
+            Self::ActiveSession => "Cannot select: active session",
+            Self::MergeCheckRunning => "Cannot select: merge check running",
+            Self::RemoteTrackingWithoutLocal => {
+                "Cannot select: remote-tracking without local branch"
+            }
+            Self::Unknown => "Cannot select for cleanup",
+        }
+    }
+}
+
+/// Why a selectable branch still deserves extra warning in the confirm modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionRisk {
+    Unmerged,
+    RemoteTracking,
+}
+
+impl CleanupSelectionRisk {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unmerged => "unmerged",
+            Self::RemoteTracking => "remote-tracking",
+        }
+    }
+}
+
+/// Result of toggling Branch Cleanup selection for one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionToggle {
+    Selected,
+    Deselected,
+    Blocked(CleanupSelectionBlockedReason),
 }
 
 /// Phase of an in-flight Branch Cleanup execution (FR-018g/h).
@@ -545,52 +596,123 @@ impl BranchesState {
         self.cleanup_selected.contains(branch)
     }
 
+    fn branch_item(&self, branch: &str) -> Option<&BranchItem> {
+        self.branches.iter().find(|item| item.name == branch)
+    }
+
+    fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
+        name.strip_prefix("refs/remotes/origin/")
+            .or_else(|| name.strip_prefix("origin/"))
+    }
+
+    /// Resolve the local branch that a cleanup action should operate on.
+    ///
+    /// Local rows resolve to themselves. Remote-tracking rows resolve only
+    /// when a matching local branch exists; otherwise they are not cleanup
+    /// candidates.
+    pub fn cleanup_execution_branch(&self, branch: &str) -> Option<String> {
+        let item = self.branch_item(branch)?;
+        if item.is_local {
+            return Some(item.name.clone());
+        }
+        let local_name = Self::local_branch_for_remote_ref(&item.name)?;
+        self.branches
+            .iter()
+            .find(|candidate| candidate.is_local && candidate.name == local_name)
+            .map(|candidate| candidate.name.clone())
+    }
+
     /// Returns true when `branch` is allowed to participate in Branch Cleanup
     /// selection (FR-018b).
     ///
-    /// Protected names, the current HEAD, and branches with an active agent
-    /// or shell session are rejected. Feature branches that are checked out
-    /// by a worktree **are still candidates** — cleaning up the worktree is
-    /// the whole point of Branch Cleanup in a gwt workflow where every
-    /// branch normally has its own worktree.
+    /// Protected names, the current HEAD, branches with an active agent or
+    /// shell session, merge-check spinner rows, and remote-tracking rows
+    /// without a matching local branch are rejected. Feature branches that are
+    /// checked out by a worktree **are still candidates** — cleaning up the
+    /// worktree is the whole point of Branch Cleanup in a gwt workflow where
+    /// every branch normally has its own worktree.
     pub fn is_cleanable_candidate(&self, branch: &str) -> bool {
-        if gwt_git::is_protected_branch(branch) {
-            return false;
+        self.cleanup_selection_blocked_reason(branch).is_none()
+    }
+
+    /// Returns the concrete reason a row is currently blocked from cleanup
+    /// selection, or `None` when the row is selectable.
+    pub fn cleanup_selection_blocked_reason(
+        &self,
+        branch: &str,
+    ) -> Option<CleanupSelectionBlockedReason> {
+        let item = self.branch_item(branch)?;
+        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
+            return if item.is_local {
+                Some(CleanupSelectionBlockedReason::Unknown)
+            } else {
+                Some(CleanupSelectionBlockedReason::RemoteTrackingWithoutLocal)
+            };
+        };
+        if gwt_git::is_protected_branch(&execution_branch) {
+            return Some(CleanupSelectionBlockedReason::ProtectedBranch);
         }
         if self
             .current_head_branch
             .as_deref()
-            .is_some_and(|head| head == branch)
+            .is_some_and(|head| head == execution_branch)
         {
-            return false;
+            return Some(CleanupSelectionBlockedReason::CurrentHead);
         }
-        if self.active_session_branches.contains(branch) {
-            return false;
+        if self.active_session_branches.contains(&execution_branch) {
+            return Some(CleanupSelectionBlockedReason::ActiveSession);
         }
-        true
+        if matches!(self.merge_state(&execution_branch), MergeState::Computing) {
+            return Some(CleanupSelectionBlockedReason::MergeCheckRunning);
+        }
+        None
+    }
+
+    /// Return the warning risks that should be surfaced in confirm modal for a
+    /// selectable branch.
+    pub fn cleanup_selection_risks(&self, branch: &str) -> Vec<CleanupSelectionRisk> {
+        if self.cleanup_selection_blocked_reason(branch).is_some() {
+            return Vec::new();
+        }
+
+        let Some(item) = self.branch_item(branch) else {
+            return Vec::new();
+        };
+        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
+            return Vec::new();
+        };
+
+        let mut risks = Vec::new();
+        if !item.is_local {
+            risks.push(CleanupSelectionRisk::RemoteTracking);
+        }
+        if matches!(self.merge_state(&execution_branch), MergeState::NotMerged) {
+            risks.push(CleanupSelectionRisk::Unmerged);
+        }
+        risks
     }
 
     /// Returns true when the branch is both a protection-allowed candidate
-    /// and has a positive merge result that makes it cleanable right now.
+    /// and not blocked by protection/runtime state.
     pub fn is_cleanup_selectable(&self, branch: &str) -> bool {
-        if !self.is_cleanable_candidate(branch) {
-            return false;
-        }
-        matches!(self.merge_state(branch), MergeState::Cleanable(_))
+        self.cleanup_selection_blocked_reason(branch).is_none()
     }
 
     /// Toggle Branch Cleanup selection for `branch`. No-op when the branch
     /// is not currently selectable (FR-018c).
-    pub fn toggle_cleanup_selection(&mut self, branch: &str) -> bool {
-        if !self.is_cleanup_selectable(branch) {
-            return false;
+    pub fn toggle_cleanup_selection(&mut self, branch: &str) -> CleanupSelectionToggle {
+        if let Some(reason) = self.cleanup_selection_blocked_reason(branch) {
+            return CleanupSelectionToggle::Blocked(reason);
+        } else if self.branch_item(branch).is_none() {
+            return CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::Unknown);
         }
         if self.cleanup_selected.contains(branch) {
             self.cleanup_selected.remove(branch);
+            CleanupSelectionToggle::Deselected
         } else {
             self.cleanup_selected.insert(branch.to_string());
+            CleanupSelectionToggle::Selected
         }
-        true
     }
 
     /// Add every currently visible cleanable branch to the selection set.
@@ -620,7 +742,8 @@ impl BranchesState {
 
     /// Returns the merge target for a branch when it is cleanable.
     pub fn cleanup_target(&self, branch: &str) -> Option<gwt_git::MergeTarget> {
-        match self.merge_state(branch) {
+        let execution_branch = self.cleanup_execution_branch(branch)?;
+        match self.merge_state(&execution_branch) {
             MergeState::Cleanable(target) => Some(target),
             _ => None,
         }
@@ -1076,24 +1199,29 @@ fn branch_row_leading_spans<'a>(
     };
     // Branch Cleanup gutter glyphs (FR-018c/d):
     //   `●` (cyan)   — selected for cleanup
-    //   `✔` (green)  — cleanable now (merged into main or develop)
-    //   spinner      — merge detection still running
-    //   `·` (gray)   — local feature branch with unmerged commits
+    //   `✔` (green)  — safe-selectable local branch
+    //   spinner      — merge detection still running (blocked)
+    //   `·` (gray)   — unsafe-selectable unmerged local branch
     //   `–` (dim)    — protected / current HEAD / active session
-    //   ` ` (blank)  — remote-tracking branch (never a candidate)
+    //   ` ` (blank)  — remote-tracking row
     let spinner_glyph = state.merge_spinner_glyph();
-    let (gutter_glyph, gutter_color) = if !branch.is_local {
-        (" ", theme::color::TEXT_DISABLED)
-    } else if state.is_cleanup_selected(&branch.name) {
+    let blocked_reason = state.cleanup_selection_blocked_reason(&branch.name);
+    let risks = state.cleanup_selection_risks(&branch.name);
+    let (gutter_glyph, gutter_color) = if state.is_cleanup_selected(&branch.name) {
         ("\u{25CF}", theme::color::ACTIVE)
-    } else if !state.is_cleanable_candidate(&branch.name) {
+    } else if matches!(
+        blocked_reason,
+        Some(CleanupSelectionBlockedReason::MergeCheckRunning)
+    ) {
+        (spinner_glyph, theme::color::ACTIVE)
+    } else if !branch.is_local {
+        (" ", theme::color::TEXT_DISABLED)
+    } else if blocked_reason.is_some() {
         ("\u{2013}", theme::color::TEXT_DISABLED)
+    } else if risks.contains(&CleanupSelectionRisk::Unmerged) {
+        ("\u{00B7}", theme::color::TEXT_SECONDARY)
     } else {
-        match state.merge_state(&branch.name) {
-            MergeState::Computing => (spinner_glyph, theme::color::ACTIVE),
-            MergeState::Cleanable(_) => ("\u{2714}", theme::color::SUCCESS),
-            MergeState::NotMerged => ("\u{00B7}", theme::color::TEXT_SECONDARY),
-        }
+        ("\u{2714}", theme::color::SUCCESS)
     };
 
     vec![
@@ -1394,6 +1522,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "develop".to_string(),
@@ -1401,6 +1530,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Develop,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "feature/login".to_string(),
@@ -1408,6 +1538,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "origin/feature/api".to_string(),
@@ -1415,6 +1546,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "hotfix/crash".to_string(),
@@ -1422,6 +1554,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
         ]
     }
@@ -1434,6 +1567,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "zeta-local".to_string(),
@@ -1441,6 +1575,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "yellow-local".to_string(),
@@ -1448,6 +1583,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "origin/zzz-remote".to_string(),
@@ -1455,6 +1591,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
         ]
     }
@@ -1626,6 +1763,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/worktree-a")),
+            upstream: None,
         };
         state.branches = vec![branch.clone()];
         state.detail_cache.insert(
@@ -1967,6 +2105,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "feature/worktree".to_string(),
@@ -1974,6 +2113,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: Some(PathBuf::from("/tmp/worktree")),
+                upstream: None,
             },
         ];
 
@@ -2096,6 +2236,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(tmp.path().to_path_buf()),
+            upstream: None,
         };
 
         let detail = load_branch_detail(&branch, &sample_containers());
@@ -2287,6 +2428,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-live")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/live".to_string(),
@@ -2325,6 +2467,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-wait")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/wait".to_string(),
@@ -2366,6 +2509,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-narrow")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/narrow".to_string(),
@@ -2403,6 +2547,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: Some(PathBuf::from("/tmp/wt-feature-visible")),
+                upstream: None,
             },
             BranchItem {
                 name: "feature/hidden".to_string(),
@@ -2410,6 +2555,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: Some(PathBuf::from("/tmp/wt-feature-hidden")),
+                upstream: None,
             },
         ];
         state.search_query = "visible".to_string();
@@ -2440,6 +2586,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-wide")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/this-branch-name-is-too-wide".to_string(),
@@ -2505,6 +2652,18 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
+        }
+    }
+
+    fn remote(name: &str) -> BranchItem {
+        BranchItem {
+            name: name.to_string(),
+            is_head: false,
+            is_local: false,
+            category: BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
         }
     }
 
@@ -2524,8 +2683,27 @@ mod tests {
     fn toggle_cleanup_selection_skips_computing_branches() {
         let mut state = cleanup_state_with(vec![feature("feature/foo")]);
         // Default state is Computing → not selectable.
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::MergeCheckRunning)
+        );
         assert!(state.cleanup_selected.is_empty());
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_allows_unmerged_branch_and_marks_risk() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        state.set_merge_state("feature/foo", MergeState::NotMerged);
+
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
+        assert!(state.is_cleanup_selected("feature/foo"));
+        assert_eq!(
+            state.cleanup_selection_risks("feature/foo"),
+            vec![CleanupSelectionRisk::Unmerged]
+        );
     }
 
     #[test]
@@ -2536,10 +2714,16 @@ mod tests {
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
 
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
         assert!(state.is_cleanup_selected("feature/foo"));
 
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Deselected
+        );
         assert!(!state.is_cleanup_selected("feature/foo"));
     }
 
@@ -2551,9 +2735,13 @@ mod tests {
             is_local: true,
             category: BranchCategory::Main,
             worktree_path: None,
+            upstream: None,
         }]);
         state.set_merge_state("main", MergeState::Cleanable(gwt_git::MergeTarget::Main));
-        assert!(!state.toggle_cleanup_selection("main"));
+        assert_eq!(
+            state.toggle_cleanup_selection("main"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::ProtectedBranch)
+        );
     }
 
     #[test]
@@ -2564,7 +2752,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::CurrentHead)
+        );
     }
 
     #[test]
@@ -2577,7 +2768,42 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::ActiveSession)
+        );
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_allows_remote_tracking_branch_with_local_counterpart() {
+        let mut state =
+            cleanup_state_with(vec![feature("feature/foo"), remote("origin/feature/foo")]);
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+
+        assert_eq!(
+            state.toggle_cleanup_selection("origin/feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
+        assert!(state.is_cleanup_selected("origin/feature/foo"));
+        assert_eq!(
+            state.cleanup_selection_risks("origin/feature/foo"),
+            vec![CleanupSelectionRisk::RemoteTracking]
+        );
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_rejects_remote_tracking_branch_without_local_counterpart() {
+        let mut state = cleanup_state_with(vec![remote("origin/feature/foo")]);
+
+        assert_eq!(
+            state.toggle_cleanup_selection("origin/feature/foo"),
+            CleanupSelectionToggle::Blocked(
+                CleanupSelectionBlockedReason::RemoteTrackingWithoutLocal
+            )
+        );
     }
 
     #[test]
@@ -2591,21 +2817,27 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
     }
 
     #[test]
-    fn select_all_visible_cleanable_only_picks_cleanable_rows() {
+    fn select_all_visible_cleanup_picks_safe_and_unsafe_rows_but_skips_blocked_rows() {
         let mut state = cleanup_state_with(vec![
             feature("feature/foo"),
             feature("feature/bar"),
             feature("feature/baz"),
+            remote("origin/feature/bar"),
+            remote("origin/feature/remote-only"),
             BranchItem {
                 name: "main".to_string(),
                 is_head: false,
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
         ]);
         state.set_merge_state(
@@ -2625,9 +2857,11 @@ mod tests {
 
         assert!(state.is_cleanup_selected("feature/foo"));
         assert!(state.is_cleanup_selected("feature/bar"));
-        assert!(!state.is_cleanup_selected("feature/baz"));
+        assert!(state.is_cleanup_selected("feature/baz"));
+        assert!(state.is_cleanup_selected("origin/feature/bar"));
+        assert!(!state.is_cleanup_selected("origin/feature/remote-only"));
         assert!(!state.is_cleanup_selected("main"));
-        assert_eq!(state.cleanup_selection_count(), 2);
+        assert_eq!(state.cleanup_selection_count(), 4);
     }
 
     #[test]
@@ -2637,7 +2871,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
 
         // Simulate the view-mode toggle and sort cycle paths.
         update(&mut state, BranchesMessage::ToggleView);
