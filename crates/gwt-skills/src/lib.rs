@@ -728,7 +728,8 @@ mod tests {
             );
         }
 
-        for relative in [".claude/skills/gwt-pr/references/check-flow.md"] {
+        {
+            let relative = ".claude/skills/gwt-pr/references/check-flow.md";
             let check_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
@@ -756,7 +757,8 @@ mod tests {
             );
         }
 
-        for relative in [".claude/skills/gwt-pr/references/create-flow.md"] {
+        {
+            let relative = ".claude/skills/gwt-pr/references/create-flow.md";
             let create_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
@@ -790,7 +792,8 @@ mod tests {
             );
         }
 
-        for relative in [".claude/skills/gwt-pr/references/fix-flow.md"] {
+        {
+            let relative = ".claude/skills/gwt-pr/references/fix-flow.md";
             let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(

@@ -41,8 +41,8 @@
 
 ### 🔒 ブランチ保護ルール
 
-- **develop ブランチへの直接コミットは禁止。** pre-commit hook によりブロックされる。作業は必ず feature ブランチで行い、PR 経由で develop にマージする
-- SPEC 策定・ブレインストーミングは develop 上のエージェントで行えるが、コミットは feature/feature-{N} ブランチに切り替えてから実行する
+- develop ブランチへの直接コミット / push は許可する。ただし共有ブランチなので、`origin/develop` を取り込んだ上で fast-forward を維持し、履歴を壊さないこと
+- SPEC 策定・ブレインストーミングは develop 上のエージェントで行える。必要に応じて feature ブランチを使ってもよいが、develop でのコミット / push も禁止しない
 
 ### 📝 設計ガイドライン
 

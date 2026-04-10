@@ -29,8 +29,7 @@ use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
-    distribute_to_worktree, generate_codex_hooks, generate_settings_local, prune_stale_gwt_assets,
-    update_git_exclude,
+    distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -67,6 +66,15 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
+const MANAGED_ASSET_ROOTS: &[&str] = &[
+    ".claude/skills",
+    ".claude/commands",
+    ".claude/hooks/scripts",
+    ".claude/settings.local.json",
+    ".codex/skills",
+    ".codex/hooks/scripts",
+    ".codex/hooks.json",
+];
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -1301,7 +1309,7 @@ where
         }
         model.branches.checked_out_branches = checked_out;
     }
-    prune_stale_gwt_assets_for_repo_worktrees(model);
+    refresh_managed_gwt_assets_for_repo_worktrees(model);
 
     // Refresh the protection inputs the Cleanup gutter consults. The HEAD
     // branch tracks the gwt-tui process itself; active session branches are
@@ -1421,19 +1429,73 @@ fn load_git_view_with<S, C, B, P>(
     );
 }
 
-fn prune_stale_gwt_assets_for_repo_worktrees(model: &Model) {
+fn refresh_managed_gwt_assets_for_repo_worktrees(model: &Model) {
     let mut paths = std::collections::HashSet::new();
     paths.insert(model.repo_path().to_path_buf());
     paths.extend(model.active_worktree_paths());
 
     for worktree in paths {
-        if let Err(error) = prune_stale_gwt_assets(&worktree) {
-            tracing::warn!(
-                worktree = %worktree.display(),
-                error = %error,
-                "failed to prune stale gwt assets during initial data refresh"
-            );
+        if !worktree_has_managed_asset_state(&worktree) {
+            continue;
         }
+        refresh_managed_gwt_assets_for_worktree(&worktree, "startup refresh");
+    }
+}
+
+fn worktree_has_managed_asset_state(worktree: &Path) -> bool {
+    MANAGED_ASSET_ROOTS
+        .iter()
+        .any(|relative| worktree.join(relative).exists())
+        || git_tracks_managed_assets(worktree)
+}
+
+fn git_tracks_managed_assets(worktree: &Path) -> bool {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--")
+        .args(MANAGED_ASSET_ROOTS)
+        .output()
+    {
+        Ok(output) => output.status.success() && !output.stdout.is_empty(),
+        Err(_) => false,
+    }
+}
+
+fn refresh_managed_gwt_assets_for_worktree(worktree: &Path, context: &str) {
+    if let Err(error) = distribute_to_worktree(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to distribute gwt managed assets"
+        );
+    }
+    if let Err(error) = update_git_exclude(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to update gwt managed excludes"
+        );
+    }
+    if let Err(error) = generate_settings_local(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to regenerate Claude hook settings"
+        );
+    }
+    if let Err(error) = generate_codex_hooks(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to regenerate Codex hook settings"
+        );
     }
 }
 
@@ -4028,18 +4090,7 @@ where
         .working_dir
         .clone()
         .unwrap_or_else(|| model.repo_path.clone());
-    if let Err(e) = distribute_to_worktree(&worktree) {
-        tracing::warn!("skill distribution failed: {e}");
-    }
-    if let Err(e) = update_git_exclude(&worktree) {
-        tracing::warn!("git exclude update failed: {e}");
-    }
-    if let Err(e) = generate_settings_local(&worktree) {
-        tracing::warn!("settings.local.json generation failed: {e}");
-    }
-    if let Err(e) = generate_codex_hooks(&worktree) {
-        tracing::warn!("hooks.json generation failed: {e}");
-    }
+    refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch");
 
     // Spawn PTY process for the agent session.
     let mut pty_env = config.env_vars.clone();
@@ -11115,6 +11166,167 @@ mod tests {
         assert!(
             unrelated_stale.exists(),
             "startup sweep should not touch non-worktree directories"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_refreshes_managed_assets_for_repo_and_active_worktrees() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        fs::create_dir_all(tracked_command.parent().expect("tracked command parent"))
+            .expect("create tracked command dir");
+        fs::write(&tracked_command, "tracked brainstorm command")
+            .expect("write tracked brainstorm command");
+        let add_tracked_command = std::process::Command::new("git")
+            .args(["add", ".claude/commands/gwt-spec-brainstorm.md"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add tracked brainstorm command");
+        assert!(
+            add_tracked_command.status.success(),
+            "git add tracked brainstorm command failed: {}",
+            String::from_utf8_lossy(&add_tracked_command.stderr)
+        );
+        fs::remove_file(&tracked_command).expect("delete tracked brainstorm command");
+
+        let worktree = dir.path().join("wt-feature-sync");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/sync",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+
+        let legacy_hooks = serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state SessionStart",
+                        "type": "command"
+                    }]
+                }],
+                "UserPromptSubmit": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state UserPromptSubmit",
+                        "type": "command"
+                    }]
+                }],
+                "PreToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [{
+                            "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state PreToolUse",
+                            "type": "command"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-git-branch-ops",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-cd-command",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-file-ops",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-git-dir-override",
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ],
+                "PostToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state PostToolUse",
+                        "type": "command"
+                    }]
+                }],
+                "Stop": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state Stop",
+                        "type": "command"
+                    }]
+                }]
+            }
+        }))
+        .expect("serialize legacy hooks");
+
+        let codex_hooks = worktree.join(".codex/hooks.json");
+        let claude_settings = worktree.join(".claude/settings.local.json");
+        fs::create_dir_all(codex_hooks.parent().expect("codex hooks parent"))
+            .expect("create codex dir");
+        fs::create_dir_all(claude_settings.parent().expect("claude settings parent"))
+            .expect("create claude dir");
+        fs::write(&codex_hooks, &legacy_hooks).expect("write legacy codex hooks");
+        fs::write(&claude_settings, &legacy_hooks).expect("write legacy claude settings");
+
+        let add_codex_hooks = std::process::Command::new("git")
+            .args(["add", ".codex/hooks.json"])
+            .current_dir(&worktree)
+            .output()
+            .expect("git add codex hooks");
+        assert!(
+            add_codex_hooks.status.success(),
+            "git add codex hooks failed: {}",
+            String::from_utf8_lossy(&add_codex_hooks.stderr)
+        );
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        let tracked_command_content =
+            fs::read_to_string(&tracked_command).expect("tracked brainstorm command restored");
+        assert!(
+            tracked_command_content.contains("SPEC Brainstorm Command"),
+            "startup refresh should restore missing tracked bundled commands"
+        );
+
+        let codex_content = fs::read_to_string(&codex_hooks).expect("read migrated codex hooks");
+        assert!(
+            codex_content.contains("block-bash-policy"),
+            "startup refresh should consolidate Bash policy hooks"
+        );
+        assert!(
+            !codex_content.contains("GWT_MANAGED_HOOK=runtime-state"),
+            "startup refresh should remove the legacy runtime marker"
+        );
+        assert!(
+            !codex_content.contains("block-git-branch-ops"),
+            "startup refresh should replace split bash blockers"
+        );
+
+        let claude_content =
+            fs::read_to_string(&claude_settings).expect("read migrated claude settings");
+        assert!(
+            claude_content.contains("block-bash-policy"),
+            "startup refresh should regenerate Claude settings too"
+        );
+        assert!(
+            !claude_content.contains("GWT_MANAGED_HOOK=runtime-state"),
+            "startup refresh should remove the legacy runtime marker from Claude settings"
         );
     }
 
