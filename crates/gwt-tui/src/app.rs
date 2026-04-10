@@ -3718,14 +3718,12 @@ fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<St
 
 fn materialize_pending_launch(model: &mut Model) {
     if let Err(err) = materialize_pending_launch_with(model, &gwt_sessions_dir()) {
-        apply_notification(
+        update(
             model,
-            Notification::new(
-                Severity::Warn,
-                "session",
-                "Launch metadata was not persisted",
-            )
-            .with_detail(err),
+            Message::PushErrorNotification(
+                Notification::new(Severity::Error, "session", "Agent launch failed")
+                    .with_detail(err),
+            ),
         );
     }
 }
@@ -3744,7 +3742,22 @@ fn materialize_pending_launch_with(
     };
 
     resolve_launch_worktree(&model.repo_path, &mut config)?;
-    apply_docker_runtime_to_launch_config(&model.repo_path, &mut config)?;
+    if let Err(err) = apply_docker_runtime_to_launch_config(&model.repo_path, &mut config) {
+        update(
+            model,
+            Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetError(
+                err.clone(),
+            )),
+        );
+        update(
+            model,
+            Message::PushErrorNotification(
+                Notification::new(Severity::Error, "docker", "Docker launch failed")
+                    .with_detail(err),
+            ),
+        );
+        return Ok(());
+    }
 
     let worktree = config
         .working_dir
@@ -4007,6 +4020,8 @@ fn apply_docker_runtime_to_launch_config(
         .clone()
         .unwrap_or_else(|| repo_path.to_path_buf());
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
+    ensure_docker_launch_runtime_ready()?;
+    ensure_docker_launch_service_ready(&launch)?;
 
     let mut args = vec![
         "compose".to_string(),
@@ -4028,6 +4043,48 @@ fn apply_docker_runtime_to_launch_config(
     config.docker_service = Some(launch.service);
 
     Ok(())
+}
+
+fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
+    if !gwt_docker::docker_available() {
+        return Err("Docker is not installed or not available on PATH".to_string());
+    }
+    if !gwt_docker::compose_available() {
+        return Err("docker compose is not available".to_string());
+    }
+    if !gwt_docker::daemon_running() {
+        return Err("Docker daemon is not running".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_docker_launch_service_ready(launch: &DockerLaunchPlan) -> Result<(), String> {
+    let running = gwt_docker::compose_service_is_running(&launch.compose_file, &launch.service)
+        .map_err(|err| err.to_string())?;
+    if running {
+        return Ok(());
+    }
+
+    gwt_docker::compose_up(&launch.compose_file, &launch.service).map_err(|err| err.to_string())?;
+
+    let running = gwt_docker::compose_service_is_running(&launch.compose_file, &launch.service)
+        .map_err(|err| err.to_string())?;
+    if running {
+        return Ok(());
+    }
+
+    let mut message = format!(
+        "docker compose service '{}' is not running after startup.",
+        launch.service
+    );
+    if let Ok(logs) = gwt_docker::compose_service_logs(&launch.compose_file, &launch.service) {
+        let trimmed = logs.trim();
+        if !trimmed.is_empty() {
+            message.push_str("\n\n");
+            message.push_str(trimmed);
+        }
+    }
+    Err(message)
 }
 
 fn resolve_docker_launch_plan(
@@ -6978,6 +7035,40 @@ mod tests {
         }
 
         result
+    }
+
+    fn with_docker_bin_override<R>(path: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::DOCKER_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        result
+    }
+
+    fn write_docker_launch_compose_fixture(worktree: &std::path::Path) -> PathBuf {
+        let compose_path = worktree.join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  gwt:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose fixture");
+        compose_path
     }
 
     #[cfg(unix)]
@@ -11647,7 +11738,9 @@ services:
             codex_fast_mode: false,
         };
 
-        with_fake_docker("#!/bin/sh\nexit 0\n", || {
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nexit 0\n",
+            || {
             let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
             apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
                 .expect("apply docker runtime");
@@ -11672,6 +11765,178 @@ services:
                 Some("/workspace")
             );
             assert_eq!(config.docker_service.as_deref(), Some("web"));
+        },
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_missing_docker_routes_visible_error_without_session() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        with_docker_bin_override(&worktree.path().join("missing-docker"), || {
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+        });
+
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.error_queue.len(), 1);
+        let notification = model.error_queue.front().expect("error notification");
+        assert_eq!(notification.source, "docker");
+        assert_eq!(notification.message, "Docker launch failed");
+        assert!(notification
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Docker is not installed or not available on PATH"));
+        assert!(
+            fs::read_dir(sessions_dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "failing Docker launch must not persist a session entry"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_stopped_docker_service_starts_it_before_exec() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        let compose_path = write_docker_launch_compose_fixture(worktree.path());
+        let log_path = worktree.path().join("docker-args.log");
+        let running_flag = worktree.path().join("service-running");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ -f '{}' ]; then\n    printf 'gwt\\n'\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  : > '{}'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display(),
+            running_flag.display(),
+            running_flag.display(),
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "/bin/echo".to_string(),
+                args: vec!["agent-test".to_string()],
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                skip_permissions: false,
+                codex_fast_mode: false,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            let mut log = String::new();
+            for _ in 0..50 {
+                log = fs::read_to_string(&log_path).unwrap_or_default();
+                if log.contains("compose -f")
+                    && log.contains(" up -d gwt")
+                    && log.contains(" exec -w /workspace gwt /bin/echo agent-test")
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            assert!(log.contains(&format!(
+                "compose -f {} ps --status running --services",
+                compose_path.display()
+            )));
+            assert!(log.contains(&format!("compose -f {} up -d gwt", compose_path.display())));
+            assert!(log.contains(&format!(
+                "compose -f {} exec -w /workspace gwt /bin/echo agent-test",
+                compose_path.display()
+            )));
+            assert_eq!(model.session_count(), 2);
+            assert!(model.error_queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_service_that_never_starts_routes_error_without_session() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"logs\" ]; then\n  printf 'boot failed\\n'\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n";
+
+        with_fake_docker(script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "claude".to_string(),
+                args: Vec::new(),
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                skip_permissions: false,
+                codex_fast_mode: false,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            assert_eq!(model.session_count(), 1);
+            assert_eq!(model.error_queue.len(), 1);
+            let notification = model.error_queue.front().expect("error notification");
+            assert_eq!(notification.source, "docker");
+            assert_eq!(notification.message, "Docker launch failed");
+            assert!(notification
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("docker compose service 'gwt' is not running after startup."));
+            assert!(
+                fs::read_dir(sessions_dir.path())
+                    .expect("read sessions dir")
+                    .next()
+                    .is_none(),
+                "launch must not persist a session when Docker service never becomes ready"
+            );
         });
     }
 

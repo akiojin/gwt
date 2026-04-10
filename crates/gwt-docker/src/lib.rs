@@ -10,7 +10,10 @@ pub mod devcontainer;
 pub mod port;
 
 pub use compose::{parse_compose_file, ComposeService};
-pub use container::{list_containers, restart, start, stop, ContainerInfo, ContainerStatus};
+pub use container::{
+    compose_service_is_running, compose_service_logs, compose_up, list_containers, restart, start,
+    stop, ContainerInfo, ContainerStatus,
+};
 pub use detect::{
     compose_available, daemon_running, detect_docker_files, docker_available, DockerFiles,
 };

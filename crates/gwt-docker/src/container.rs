@@ -67,10 +67,23 @@ fn docker_timeout() -> Duration {
 }
 
 fn run_docker_with_timeout(args: &[&str], action: &str) -> Result<Output> {
-    let mut child = Command::new(docker_binary())
+    run_docker_with_timeout_in_dir(args, action, None)
+}
+
+fn run_docker_with_timeout_in_dir(
+    args: &[&str],
+    action: &str,
+    current_dir: Option<&std::path::Path>,
+) -> Result<Output> {
+    let mut command = Command::new(docker_binary());
+    command
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = current_dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| GwtError::Docker(format!("failed to run {action}: {e}")))?;
 
@@ -101,6 +114,96 @@ fn run_docker_with_timeout(args: &[&str], action: &str) -> Result<Output> {
     child
         .wait_with_output()
         .map_err(|e| GwtError::Docker(format!("failed to collect {action} output: {e}")))
+}
+
+fn compose_parent_dir(compose_file: &std::path::Path) -> &std::path::Path {
+    compose_file
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+}
+
+/// Start a compose service in detached mode.
+pub fn compose_up(compose_file: &std::path::Path, service: &str) -> Result<()> {
+    let compose_file = compose_file.display().to_string();
+    let output = run_docker_with_timeout_in_dir(
+        &["compose", "-f", &compose_file, "up", "-d", service],
+        "docker compose up",
+        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GwtError::Docker(if stderr.is_empty() {
+            "docker compose up failed".to_string()
+        } else {
+            stderr
+        }));
+    }
+    debug!(
+        category = "docker",
+        service = service,
+        compose_file = compose_file,
+        "compose service started"
+    );
+    Ok(())
+}
+
+/// Return whether a compose service is currently running.
+pub fn compose_service_is_running(compose_file: &std::path::Path, service: &str) -> Result<bool> {
+    let compose_file = compose_file.display().to_string();
+    let output = run_docker_with_timeout_in_dir(
+        &[
+            "compose",
+            "-f",
+            &compose_file,
+            "ps",
+            "--status",
+            "running",
+            "--services",
+        ],
+        "docker compose ps",
+        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GwtError::Docker(if stderr.is_empty() {
+            "docker compose ps failed".to_string()
+        } else {
+            stderr
+        }));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .any(|running_service| running_service == service))
+}
+
+/// Return recent logs for a compose service.
+pub fn compose_service_logs(compose_file: &std::path::Path, service: &str) -> Result<String> {
+    let compose_file = compose_file.display().to_string();
+    let output = run_docker_with_timeout_in_dir(
+        &[
+            "compose",
+            "-f",
+            &compose_file,
+            "logs",
+            "--no-color",
+            "--tail",
+            "50",
+            service,
+        ],
+        "docker compose logs",
+        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GwtError::Docker(if stderr.is_empty() {
+            "docker compose logs failed".to_string()
+        } else {
+            stderr
+        }));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// List all containers (including stopped ones).
@@ -390,6 +493,67 @@ mod tests {
                 err.to_string().contains("docker ps timed out"),
                 "unexpected timeout error: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn compose_up_invokes_docker_with_expected_arguments() {
+        let log_dir = tempfile::tempdir().expect("temp log dir");
+        let log_path = log_dir.path().join("args.txt");
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            log_path.display()
+        );
+
+        with_fake_docker(&script, |_| {
+            compose_up(&compose_path, "app").expect("compose up");
+        });
+
+        assert_eq!(
+            read_invocation(&log_path),
+            format!("compose\n-f\n{}\nup\n-d\napp\n", compose_path.display())
+        );
+    }
+
+    #[test]
+    fn compose_service_is_running_reads_compose_ps_output() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'app\\nworker\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, |_| {
+            assert!(compose_service_is_running(&compose_path, "app").expect("ps status"));
+            assert!(!compose_service_is_running(&compose_path, "db").expect("ps status"));
+        });
+    }
+
+    #[test]
+    fn compose_service_logs_returns_stdout() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"logs\" ]; then\n  printf 'boot failed\\nstack line\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, |_| {
+            let logs = compose_service_logs(&compose_path, "app").expect("logs");
+            assert!(logs.contains("boot failed"));
+            assert!(logs.contains("stack line"));
         });
     }
 }
