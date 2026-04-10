@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-10 — feat: `~/.gwt/cache/issues/` を SPEC 専用と決め打ちしない
+
+### 事象
+
+`gwt issue view/comments/create/comment` を実装した際、`gwt-github::Cache::write_snapshot`
+が `SpecBody::parse` を必須としていたため、plain GitHub Issue の body を cache できず
+`Parse(MissingHeader)` で失敗した。
+
+### 原因
+
+- cache root が `~/.gwt/cache/issues/` で共通なのに、実装が `gwt-spec` header を
+  持つ entry しか来ない前提になっていた。
+- `gwt issue spec ...` の契約をそのまま plain issue read/write に流用し、
+  cache entry の consumers が増えたことを data model に反映できていなかった。
+
+### 再発防止策
+
+1. `~/.gwt/cache/issues/` を触る変更では、「SPEC artifact cache だけか」「plain issue snapshot も入るか」を先に分けて考える。
+2. body marker を持たない entry が入る可能性がある場合、cache layer は snapshot-only fallback を持たせ、spec-only parse failure で全体を落とさない。
+3. cache schema を広げるときは `gwt-github` の unit tests と、consumer 側 (`gwt-tui` CLI/TUI) の integration tests を同時に追加する。
+
 ## 2026-04-09 — fix: `tracing_appender::rolling::daily` の日付境界は思い込みで local 扱いしない
 
 ### 事象
