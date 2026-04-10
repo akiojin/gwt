@@ -1,12 +1,14 @@
 //! Integration tests for the `gwt issue spec` CLI dispatch (SPEC-12 Phase 6).
 
+use gwt_git::PrStatus;
 use gwt_github::client::{
     CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
 };
 use gwt_github::Cache;
 use gwt_tui::cli::{
-    dispatch, parse_issue_args, should_dispatch_cli, CliCommand, CliParseError, LinkedPrSummary,
-    TestEnv,
+    dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli, CliCommand,
+    CliParseError, LinkedPrSummary, PrCheckItem, PrChecksSummary, PrReview, PrReviewThread,
+    PrReviewThreadComment, TestEnv,
 };
 use tempfile::TempDir;
 
@@ -23,9 +25,13 @@ fn argv(parts: &[&str]) -> Vec<String> {
 // -----------------------------------------------------------------
 
 #[test]
-fn red_70_should_dispatch_cli_when_first_arg_is_issue_or_hook() {
+fn red_70_should_dispatch_cli_when_first_arg_is_cli_verb() {
     assert!(should_dispatch_cli(&argv(&["gwt", "issue"])));
     assert!(should_dispatch_cli(&argv(&["gwt", "issue", "spec", "42"])));
+    assert!(should_dispatch_cli(&argv(&["gwt", "pr", "current"])));
+    assert!(should_dispatch_cli(&argv(&[
+        "gwt", "actions", "logs", "--run", "101"
+    ])));
     assert!(should_dispatch_cli(&argv(&[
         "gwt",
         "hook",
@@ -266,6 +272,79 @@ fn red_96_parse_issue_comment() {
             file: "/tmp/comment.md".into(),
         }
     );
+}
+
+#[test]
+fn red_103_parse_pr_current() {
+    let cmd = parse_pr_args(&[s("current")]).unwrap();
+    assert_eq!(cmd, CliCommand::PrCurrent);
+}
+
+#[test]
+fn red_104_parse_pr_view() {
+    let cmd = parse_pr_args(&[s("view"), s("42")]).unwrap();
+    assert_eq!(cmd, CliCommand::PrView { number: 42 });
+}
+
+#[test]
+fn red_105_parse_pr_checks() {
+    let cmd = parse_pr_args(&[s("checks"), s("42")]).unwrap();
+    assert_eq!(cmd, CliCommand::PrChecks { number: 42 });
+}
+
+#[test]
+fn red_105a_parse_pr_comment() {
+    let cmd = parse_pr_args(&[s("comment"), s("42"), s("-f"), s("/tmp/reply.md")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::PrComment {
+            number: 42,
+            file: "/tmp/reply.md".into(),
+        }
+    );
+}
+
+#[test]
+fn red_105b_parse_pr_reviews() {
+    let cmd = parse_pr_args(&[s("reviews"), s("42")]).unwrap();
+    assert_eq!(cmd, CliCommand::PrReviews { number: 42 });
+}
+
+#[test]
+fn red_105c_parse_pr_review_threads() {
+    let cmd = parse_pr_args(&[s("review-threads"), s("42")]).unwrap();
+    assert_eq!(cmd, CliCommand::PrReviewThreads { number: 42 });
+}
+
+#[test]
+fn red_105d_parse_pr_reply_and_resolve() {
+    let cmd = parse_pr_args(&[
+        s("review-threads"),
+        s("reply-and-resolve"),
+        s("42"),
+        s("-f"),
+        s("/tmp/reply.md"),
+    ])
+    .unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::PrReviewThreadsReplyAndResolve {
+            number: 42,
+            file: "/tmp/reply.md".into(),
+        }
+    );
+}
+
+#[test]
+fn red_106_parse_actions_logs() {
+    let cmd = parse_actions_args(&[s("logs"), s("--run"), s("101")]).unwrap();
+    assert_eq!(cmd, CliCommand::ActionsLogs { run_id: 101 });
+}
+
+#[test]
+fn red_107_parse_actions_job_logs() {
+    let cmd = parse_actions_args(&[s("job-logs"), s("--job"), s("202")]).unwrap();
+    assert_eq!(cmd, CliCommand::ActionsJobLogs { job_id: 202 });
 }
 
 // -----------------------------------------------------------------
@@ -662,4 +741,262 @@ fn red_102_dispatch_issue_linked_prs_is_cache_first() {
     let out = String::from_utf8(env.stdout.clone()).unwrap();
     assert!(out.contains("Cached linked PR"));
     assert!(!out.contains("Fresh linked PR"));
+}
+
+#[test]
+fn red_108_dispatch_pr_current_is_live_first() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_current_pr(Some(PrStatus {
+        number: 77,
+        title: "Current PR".to_string(),
+        state: gwt_git::pr_status::PrState::Open,
+        url: "https://example.com/pr/77".to_string(),
+        ci_status: "SUCCESS".to_string(),
+        mergeable: "MERGEABLE".to_string(),
+        review_status: "APPROVED".to_string(),
+    }));
+
+    let code = dispatch(&mut env, &argv(&["gwt", "pr", "current"]));
+    assert_eq!(code, 0);
+    assert_eq!(env.pr_current_call_count, 1);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("#77 [OPEN] Current PR"));
+    assert!(out.contains("https://example.com/pr/77"));
+}
+
+#[test]
+fn red_109_dispatch_pr_view_reads_live_data() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_pr(
+        42,
+        PrStatus {
+            number: 42,
+            title: "Viewed PR".to_string(),
+            state: gwt_git::pr_status::PrState::Merged,
+            url: "https://example.com/pr/42".to_string(),
+            ci_status: "SUCCESS".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            review_status: "APPROVED".to_string(),
+        },
+    );
+
+    let code = dispatch(&mut env, &argv(&["gwt", "pr", "view", "42"]));
+    assert_eq!(code, 0);
+    assert_eq!(env.pr_view_call_log, vec![42]);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("#42 [MERGED] Viewed PR"));
+    assert!(out.contains("mergeable: UNKNOWN"));
+}
+
+#[test]
+fn red_109a_dispatch_pr_comment_posts_live_comment() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.files.insert(
+        "/virtual/pr-comment.md".to_string(),
+        "Looks good now.".to_string(),
+    );
+
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "pr", "comment", "42", "-f", "/virtual/pr-comment.md"]),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(env.pr_comments, vec![(42, "Looks good now.".to_string())]);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("created comment on PR #42"));
+}
+
+#[test]
+fn red_109b_dispatch_pr_reviews_reads_live_data() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_pr_reviews(
+        42,
+        vec![PrReview {
+            id: "1".to_string(),
+            state: "CHANGES_REQUESTED".to_string(),
+            body: "Please add coverage.".to_string(),
+            submitted_at: "2026-04-10T00:00:00Z".to_string(),
+            author: "reviewer".to_string(),
+        }],
+    );
+
+    let code = dispatch(&mut env, &argv(&["gwt", "pr", "reviews", "42"]));
+    assert_eq!(code, 0);
+    assert_eq!(env.pr_reviews_call_log, vec![42]);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("=== review:1 [CHANGES_REQUESTED] by reviewer"));
+    assert!(out.contains("Please add coverage."));
+}
+
+#[test]
+fn red_109c_dispatch_pr_review_threads_reads_live_data() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_pr_review_threads(
+        42,
+        vec![PrReviewThread {
+            id: "thread-1".to_string(),
+            is_resolved: false,
+            is_outdated: false,
+            path: "src/lib.rs".to_string(),
+            line: Some(12),
+            comments: vec![PrReviewThreadComment {
+                id: "comment-1".to_string(),
+                body: "Please rename this variable.".to_string(),
+                created_at: "2026-04-10T00:00:00Z".to_string(),
+                updated_at: "2026-04-10T00:00:00Z".to_string(),
+                author: "reviewer".to_string(),
+            }],
+        }],
+    );
+
+    let code = dispatch(&mut env, &argv(&["gwt", "pr", "review-threads", "42"]));
+    assert_eq!(code, 0);
+    assert_eq!(env.pr_review_threads_call_log, vec![42]);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("=== thread:thread-1 resolved=false"));
+    assert!(out.contains("Please rename this variable."));
+}
+
+#[test]
+fn red_109d_dispatch_pr_reply_and_resolve_targets_unresolved_threads() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.files.insert(
+        "/virtual/reply.md".to_string(),
+        "Fixed in latest commit.".to_string(),
+    );
+    env.seed_pr_review_threads(
+        42,
+        vec![
+            PrReviewThread {
+                id: "thread-1".to_string(),
+                is_resolved: false,
+                is_outdated: false,
+                path: "src/lib.rs".to_string(),
+                line: Some(12),
+                comments: vec![],
+            },
+            PrReviewThread {
+                id: "thread-2".to_string(),
+                is_resolved: true,
+                is_outdated: false,
+                path: "src/main.rs".to_string(),
+                line: Some(99),
+                comments: vec![],
+            },
+        ],
+    );
+
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "pr",
+            "review-threads",
+            "reply-and-resolve",
+            "42",
+            "-f",
+            "/virtual/reply.md",
+        ]),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        env.pr_reply_and_resolve_call_log,
+        vec![(42, "Fixed in latest commit.".to_string())]
+    );
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("replied to and resolved 1 review threads on PR #42"));
+}
+
+#[test]
+fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_pr_checks(
+        42,
+        PrChecksSummary {
+            summary: "PR #42 | CI: FAILURE | Merge: CONFLICTING | Review: CHANGES_REQUESTED"
+                .to_string(),
+            ci_status: "FAILURE".to_string(),
+            merge_status: "CONFLICTING".to_string(),
+            review_status: "CHANGES_REQUESTED".to_string(),
+            checks: vec![PrCheckItem {
+                name: "test".to_string(),
+                state: "COMPLETED".to_string(),
+                conclusion: "FAILURE".to_string(),
+                url: "https://example.com/runs/1".to_string(),
+                started_at: "2026-04-10T00:00:00Z".to_string(),
+                completed_at: "2026-04-10T00:01:00Z".to_string(),
+                workflow: "CI".to_string(),
+            }],
+        },
+    );
+
+    let code = dispatch(&mut env, &argv(&["gwt", "pr", "checks", "42"]));
+    assert_eq!(code, 0);
+    assert_eq!(env.pr_checks_call_log, vec![42]);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("summary: PR #42 | CI: FAILURE"));
+    assert!(out.contains("- test [COMPLETED / FAILURE]"));
+    assert!(out.contains("workflow: CI"));
+}
+
+#[test]
+fn red_111_dispatch_actions_logs_is_live_first() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_run_log(101, "first run log");
+
+    let code = dispatch(&mut env, &argv(&["gwt", "actions", "logs", "--run", "101"]));
+    assert_eq!(code, 0);
+    assert_eq!(env.run_log_call_log, vec![101]);
+    let first = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(first.contains("first run log"));
+
+    env.stdout.clear();
+    env.seed_run_log(101, "fresh run log");
+    let code = dispatch(&mut env, &argv(&["gwt", "actions", "logs", "--run", "101"]));
+    assert_eq!(code, 0);
+    assert_eq!(env.run_log_call_log, vec![101, 101]);
+    let second = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(second.contains("fresh run log"));
+}
+
+#[test]
+fn red_112_dispatch_actions_job_logs_is_live_first() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_job_log(202, "first job log");
+
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "actions", "job-logs", "--job", "202"]),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(env.job_log_call_log, vec![202]);
+    let first = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(first.contains("first job log"));
+
+    env.stdout.clear();
+    env.seed_job_log(202, "fresh job log");
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "actions", "job-logs", "--job", "202"]),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(env.job_log_call_log, vec![202, 202]);
+    let second = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(second.contains("fresh job log"));
 }
