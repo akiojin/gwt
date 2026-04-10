@@ -136,9 +136,14 @@ fn dispatch_post_normalized_message(
     };
 
     let was_tick = matches!(msg, Message::Tick);
+    let visible_branch_signature_before =
+        was_tick.then(|| app::visible_branch_live_indicator_signature(model));
     app::update(model, msg);
     if was_tick {
-        *needs_render |= should_render_after_tick(model);
+        *needs_render |= app::should_render_after_tick_with_visible_branch_signature(
+            visible_branch_signature_before.unwrap_or_default(),
+            model,
+        );
     } else {
         *needs_render = true;
     }
@@ -219,6 +224,7 @@ fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
     PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
 }
 
+#[cfg(test)]
 fn should_render_after_tick(model: &Model) -> bool {
     app::tick_redraw_required(model)
 }

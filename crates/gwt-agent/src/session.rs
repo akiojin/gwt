@@ -224,10 +224,8 @@ pub fn persist_session_status(
 
 fn hook_event_status(event: &str) -> Option<AgentStatus> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
-            Some(AgentStatus::Running)
-        }
-        "Stop" => Some(AgentStatus::WaitingInput),
+        "SessionStart" | "Stop" => Some(AgentStatus::WaitingInput),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentStatus::Running),
         _ => None,
     }
 }
@@ -337,16 +335,16 @@ mod tests {
 
     #[test]
     fn hook_runtime_state_maps_running_and_waiting_events() {
-        for event in [
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-        ] {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse"] {
             let runtime = SessionRuntimeState::from_hook_event(event).expect("running event");
             assert_eq!(runtime.status, AgentStatus::Running, "{event}");
             assert_eq!(runtime.source_event.as_deref(), Some(event));
         }
+
+        let session_start =
+            SessionRuntimeState::from_hook_event("SessionStart").expect("session start event");
+        assert_eq!(session_start.status, AgentStatus::WaitingInput);
+        assert_eq!(session_start.source_event.as_deref(), Some("SessionStart"));
 
         let waiting = SessionRuntimeState::from_hook_event("Stop").expect("waiting event");
         assert_eq!(waiting.status, AgentStatus::WaitingInput);

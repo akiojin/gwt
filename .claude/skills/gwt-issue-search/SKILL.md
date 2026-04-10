@@ -84,5 +84,5 @@ Add `--respect-ttl` to skip when the previous refresh is younger than 15 minutes
 - The TUI refreshes the Issue index automatically at startup (TTL 15 min). Non-TUI sessions trigger an inline build on the first search.
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
-- For SPEC search, use `gwt-spec-search` instead (SPECs are now local files)
+- For SPEC search, use `gwt-spec-search` instead (SPECs are GitHub Issues cached at `~/.gwt/cache/issues/`)
 - For file search, use `gwt-project-search` instead

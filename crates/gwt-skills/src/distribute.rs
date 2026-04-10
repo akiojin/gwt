@@ -45,7 +45,7 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
 
-    prune_managed_asset_roots(worktree, &mut report)?;
+    prune_managed_asset_roots(worktree, &tracked_paths, &mut report)?;
 
     // Claude Code targets
     write_dir_assets(
@@ -93,42 +93,57 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
 /// materializing the current bundle.
 pub fn prune_stale_gwt_assets(worktree: &Path) -> io::Result<usize> {
     let mut report = DistributeReport::default();
-    prune_managed_asset_roots(worktree, &mut report)?;
+    let tracked_paths = tracked_gwt_asset_paths(worktree);
+    prune_managed_asset_roots(worktree, &tracked_paths, &mut report)?;
     Ok(report.paths_removed)
 }
 
-fn prune_managed_asset_roots(worktree: &Path, report: &mut DistributeReport) -> io::Result<()> {
+fn prune_managed_asset_roots(
+    worktree: &Path,
+    tracked_paths: &HashSet<PathBuf>,
+    report: &mut DistributeReport,
+) -> io::Result<()> {
     // Claude Code targets
     prune_dir_against_source(
         &CLAUDE_SKILLS,
+        worktree,
         &worktree.join(".claude/skills"),
         Some(RootEntryKind::Directories),
+        tracked_paths,
         report,
     )?;
     prune_dir_against_source(
         &CLAUDE_COMMANDS,
+        worktree,
         &worktree.join(".claude/commands"),
         Some(RootEntryKind::Files),
+        tracked_paths,
         report,
     )?;
     prune_dir_against_source(
         &CLAUDE_HOOKS,
+        worktree,
         &worktree.join(".claude/hooks/scripts"),
         Some(RootEntryKind::Files),
+        tracked_paths,
         report,
     )?;
 
     // Codex targets use the same skill bundle as Claude.
     prune_dir_against_source(
         &CLAUDE_SKILLS,
+        worktree,
         &worktree.join(".codex/skills"),
         Some(RootEntryKind::Directories),
+        tracked_paths,
         report,
     )?;
     prune_dir_against_source(
         &CODEX_HOOKS,
+        worktree,
         &worktree.join(".codex/hooks/scripts"),
         Some(RootEntryKind::Files),
+        tracked_paths,
         report,
     )?;
 
@@ -173,8 +188,10 @@ fn write_dir_assets(
 
 fn prune_dir_against_source(
     source: &Dir<'_>,
+    worktree: &Path,
     dest: &Path,
     root_kind: Option<RootEntryKind>,
+    tracked_paths: &HashSet<PathBuf>,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
     if !dest.exists() {
@@ -211,6 +228,14 @@ fn prune_dir_against_source(
         };
 
         if !keep {
+            // Protect git-tracked files from being pruned even if
+            // they are not in the current binary's bundle. This
+            // prevents the race condition where a newly added skill
+            // or command file is committed to git but has not yet
+            // been included in a build's `include_dir!` snapshot.
+            if should_skip_tracked_path(worktree, &entry.path(), tracked_paths) {
+                continue;
+            }
             remove_path(&entry.path())?;
             report.paths_removed += 1;
         }
@@ -218,7 +243,14 @@ fn prune_dir_against_source(
 
     for subdir in source.dirs() {
         let subdir_name = subdir.path().file_name().unwrap_or_default();
-        prune_dir_against_source(subdir, &dest.join(subdir_name), None, report)?;
+        prune_dir_against_source(
+            subdir,
+            worktree,
+            &dest.join(subdir_name),
+            None,
+            tracked_paths,
+            report,
+        )?;
     }
 
     Ok(())
@@ -404,8 +436,12 @@ mod tests {
         assert!(!stale_hook.exists(), "unexpected {}", stale_hook.display());
     }
 
+    // SPEC #1942 fix: tracked gwt-managed assets are now preserved by
+    // prune_dir_against_source so that newly committed skills/commands
+    // are not deleted before they appear in the next binary build's
+    // include_dir! snapshot.
     #[test]
-    fn distribute_removes_tracked_stale_gwt_assets() {
+    fn distribute_preserves_tracked_stale_gwt_assets() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
@@ -423,51 +459,52 @@ mod tests {
         distribute_to_worktree(dir.path()).unwrap();
 
         assert!(
-            !tracked_command.exists(),
-            "unexpected {}",
+            tracked_command.exists(),
+            "tracked gwt command must be preserved: {}",
             tracked_command.display()
         );
         assert!(
-            !tracked_hook.exists(),
-            "unexpected {}",
+            tracked_hook.exists(),
+            "tracked gwt hook must be preserved: {}",
             tracked_hook.display()
         );
     }
 
+    // Nested paths inside managed skill dirs: untracked stale files
+    // are pruned, but tracked files are preserved.
     #[test]
-    fn distribute_prunes_stale_nested_paths_inside_managed_skill_dirs() {
+    fn distribute_prunes_untracked_stale_nested_paths_but_preserves_tracked() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
         let tracked_skill = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
-        let stale_nested = dir
+        let untracked_nested = dir
             .path()
             .join(".claude/skills/gwt-pr/references/legacy.md");
-        let stale_codex_nested = dir.path().join(".codex/skills/gwt-pr/legacy.txt");
+        let untracked_codex_nested = dir.path().join(".codex/skills/gwt-pr/legacy.txt");
 
         fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
-        fs::create_dir_all(stale_nested.parent().unwrap()).unwrap();
-        fs::create_dir_all(stale_codex_nested.parent().unwrap()).unwrap();
+        fs::create_dir_all(untracked_nested.parent().unwrap()).unwrap();
+        fs::create_dir_all(untracked_codex_nested.parent().unwrap()).unwrap();
         fs::write(&tracked_skill, "tracked skill").unwrap();
-        fs::write(&stale_nested, "legacy nested file").unwrap();
-        fs::write(&stale_codex_nested, "legacy codex file").unwrap();
+        fs::write(&untracked_nested, "legacy nested file").unwrap();
+        fs::write(&untracked_codex_nested, "legacy codex file").unwrap();
 
+        // Only track the SKILL.md, NOT the nested legacy files.
         track_path(dir.path(), ".claude/skills/gwt-pr/SKILL.md");
-        track_path(dir.path(), ".claude/skills/gwt-pr/references/legacy.md");
-        track_path(dir.path(), ".codex/skills/gwt-pr/legacy.txt");
 
         distribute_to_worktree(dir.path()).unwrap();
 
         assert_eq!(fs::read_to_string(&tracked_skill).unwrap(), "tracked skill");
         assert!(
-            !stale_nested.exists(),
-            "unexpected {}",
-            stale_nested.display()
+            !untracked_nested.exists(),
+            "untracked stale nested file should be pruned: {}",
+            untracked_nested.display()
         );
         assert!(
-            !stale_codex_nested.exists(),
-            "unexpected {}",
-            stale_codex_nested.display()
+            !untracked_codex_nested.exists(),
+            "untracked stale codex nested file should be pruned: {}",
+            untracked_codex_nested.display()
         );
     }
 
