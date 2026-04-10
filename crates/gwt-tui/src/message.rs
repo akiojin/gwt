@@ -122,6 +122,8 @@ pub enum Message {
     ToggleHelp,
     /// Open the wizard overlay with SPEC context for prefilling.
     OpenWizardWithSpec(SpecContext),
+    /// Open the wizard overlay with an Issue preselected for linking.
+    OpenWizardWithIssue(u64),
     /// Close the wizard overlay.
     CloseWizard,
 }
@@ -184,6 +186,7 @@ mod tests {
         let _ = Message::Initialization(InitializationMessage::Exit);
         let _ = Message::OpenSessionConversion;
         let _ = Message::OpenWizardWithSpec(SpecContext::new("SPEC-1", "Title", ""));
+        let _ = Message::OpenWizardWithIssue(1776);
         let _ = Message::CloseWizard;
     }
 }
