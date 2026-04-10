@@ -22,6 +22,27 @@ Codex agent terminal で、日本語の wide glyph が full-screen redraw のた
 2. 回帰テストには「CJK wide glyph redraw で trailing clear が diff に出ること」を必ず含める。
 3. wide continuation cell は hidden cell として扱い、selection / URL overlay は glyph 幅全体に集約する。
 
+## 2026-04-10 — spec: skill 文面だけで満足せず、質問UI契約は asset contract test まで固定する
+
+### 事象
+
+`gwt-spec-brainstorm` の SPEC と SKILL.md には「選択UIで継続質問する」と
+書かれていたが、repo 側の回帰テストは `gwt issue spec list` 参照や command
+存在確認しか見ておらず、1 回回答で止まる退行を検出できなかった。
+
+### 原因
+
+- 継続質問を「prompt 上の方針」としてしか扱わず、repo 内で拘束される
+  asset contract として扱っていなかった。
+- command 文面も selection UI first / next highest-impact question /
+  single-answer exit 禁止まで明示しておらず、実質的に LLM 任せだった。
+
+### 再発防止策
+
+1. 質問UIや handoff 条件のような prompt contract を変更したら、SKILL.md だけでなく command と asset contract test を同じ変更セットで更新する。
+2. 「継続する」と書くだけで満足せず、「回答後に何を再計算し、何が残っていたら exit してはいけないか」まで文面で固定する。
+3. GitHub-backed SPEC を更新したら、対応する repo-side test がその契約を拾えているかを確認する。
+
 ## 2026-04-10 — fix: managed asset の startup sweep は prune だけで終わらせず、missing tracked file も restore する
 
 ### 事象
