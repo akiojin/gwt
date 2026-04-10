@@ -18,6 +18,7 @@ pub struct IssueItem {
     pub state: String,
     pub labels: Vec<String>,
     pub body: String,
+    pub linked_branches: Vec<String>,
 }
 
 /// State for the issues screen.
@@ -28,6 +29,7 @@ pub struct IssuesState {
     pub(crate) detail_view: bool,
     pub(crate) search_query: String,
     pub(crate) search_active: bool,
+    pub(crate) last_error: Option<String>,
 }
 
 impl IssuesState {
@@ -39,9 +41,13 @@ impl IssuesState {
             .filter(|i| {
                 query_lower.is_empty()
                     || i.title.to_lowercase().contains(&query_lower)
+                    || i.state.to_lowercase().contains(&query_lower)
                     || i.labels
                         .iter()
                         .any(|l| l.to_lowercase().contains(&query_lower))
+                    || i.linked_branches
+                        .iter()
+                        .any(|branch| branch.to_lowercase().contains(&query_lower))
                     || i.number.to_string().contains(&query_lower)
             })
             .collect()
@@ -115,6 +121,7 @@ pub fn update(state: &mut IssuesState, msg: IssuesMessage) {
         }
         IssuesMessage::SetIssues(issues) => {
             state.issues = issues;
+            state.last_error = None;
             state.clamp_selected();
         }
     }
@@ -169,6 +176,16 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_issues();
 
     if filtered.is_empty() {
+        if state.issues.is_empty() {
+            if let Some(error) = &state.last_error {
+                let paragraph = Paragraph::new(format!("Unable to load issues: {error}"))
+                    .block(Block::default())
+                    .style(theme::style::muted_text())
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(paragraph, area);
+                return;
+            }
+        }
         super::render_empty_list(frame, area, !state.issues.is_empty(), "issues");
         return;
     }
@@ -190,6 +207,14 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
             } else {
                 format!(" [{}]", issue.labels.join(", "))
             };
+            let linked_branches = issue.linked_branches.len();
+            let linked_str = if linked_branches == 0 {
+                String::new()
+            } else if linked_branches == 1 {
+                " • 1 branch".to_string()
+            } else {
+                format!(" • {linked_branches} branches")
+            };
 
             let line = Line::from(vec![
                 Span::styled(
@@ -202,6 +227,7 @@ fn render_issue_list(state: &IssuesState, frame: &mut Frame, area: Rect) {
                     Style::default().fg(state_color),
                 ),
                 Span::styled(labels_str, Style::default().fg(theme::color::ACCENT)),
+                Span::styled(linked_str, Style::default().fg(theme::color::FOCUS)),
             ]);
             ListItem::new(line)
         })
@@ -233,8 +259,9 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // Issue header
-            Constraint::Min(0),    // Body
+            Constraint::Length(4),                                      // Issue header
+            Constraint::Length(issue.linked_branches.len() as u16 + 3), // Linked branches
+            Constraint::Min(0),                                         // Body
         ])
         .split(area);
 
@@ -255,6 +282,22 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(theme::color::FOCUS));
     frame.render_widget(header, chunks[0]);
 
+    let linked_branches = if issue.linked_branches.is_empty() {
+        "None".to_string()
+    } else {
+        issue
+            .linked_branches
+            .iter()
+            .map(|branch| format!("- {branch}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let linked = Paragraph::new(linked_branches)
+        .block(Block::default().title("Linked branches"))
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(theme::color::TEXT_PRIMARY));
+    frame.render_widget(linked, chunks[1]);
+
     // Body section
     let body_block = Block::default().title("Description");
     let body_text = if issue.body.is_empty() {
@@ -266,7 +309,7 @@ fn render_detail(state: &IssuesState, frame: &mut Frame, area: Rect) {
         .block(body_block)
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(theme::color::TEXT_PRIMARY));
-    frame.render_widget(body, chunks[1]);
+    frame.render_widget(body, chunks[2]);
 }
 
 #[cfg(test)]
@@ -284,6 +327,10 @@ mod tests {
                 state: "open".to_string(),
                 labels: vec!["bug".to_string(), "priority".to_string()],
                 body: "Login fails on Safari.".to_string(),
+                linked_branches: vec![
+                    "feature/login-ui".to_string(),
+                    "feature/login-api".to_string(),
+                ],
             },
             IssueItem {
                 number: 2,
@@ -291,6 +338,7 @@ mod tests {
                 state: "open".to_string(),
                 labels: vec!["enhancement".to_string()],
                 body: "Users want dark mode support.".to_string(),
+                linked_branches: vec!["feature/dark-mode".to_string()],
             },
             IssueItem {
                 number: 3,
@@ -298,6 +346,7 @@ mod tests {
                 state: "closed".to_string(),
                 labels: vec![],
                 body: String::new(),
+                linked_branches: vec![],
             },
             IssueItem {
                 number: 10,
@@ -305,6 +354,7 @@ mod tests {
                 state: "open".to_string(),
                 labels: vec!["refactor".to_string()],
                 body: "Settings module needs cleanup.".to_string(),
+                linked_branches: vec![],
             },
         ]
     }
@@ -512,6 +562,7 @@ mod tests {
             state: "open".to_string(),
             labels: vec![],
             body: String::new(),
+            linked_branches: vec![],
         }];
         state.detail_view = true;
         let backend = TestBackend::new(80, 24);
@@ -539,5 +590,53 @@ mod tests {
         // "read" matches "Update README"
         let filtered = state.filtered_issues();
         assert!(state.selected < filtered.len().max(1));
+    }
+
+    #[test]
+    fn render_list_shows_linked_branch_count_indicator() {
+        let mut state = IssuesState::default();
+        state.issues = sample_issues();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("2 branches"));
+        assert!(text.contains("1 branch"));
+    }
+
+    #[test]
+    fn render_detail_shows_linked_branches_section() {
+        let mut state = IssuesState::default();
+        state.issues = sample_issues();
+        state.detail_view = true;
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Linked branches"));
+        assert!(text.contains("feature/login-ui"));
+        assert!(text.contains("feature/login-api"));
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            let line = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>();
+            text.push_str(line.trim_end());
+            text.push('\n');
+        }
+        text
     }
 }

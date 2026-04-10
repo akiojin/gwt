@@ -132,6 +132,7 @@ pub struct LaunchConfig {
     pub resume_session_id: Option<String>,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub linked_issue_number: Option<u64>,
 }
 
 /// Permission mode for agent launch.
@@ -341,6 +342,7 @@ impl AgentLaunchBuilder {
             resume_session_id,
             skip_permissions,
             codex_fast_mode,
+            linked_issue_number: None,
         }
     }
 

@@ -39,6 +39,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
@@ -1004,7 +1005,7 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::profiles::update(&mut model.profiles, msg);
         }
         Message::Issues(msg) => {
-            screens::issues::update(&mut model.issues, msg);
+            handle_issues_message(model, msg);
         }
         Message::GitView(msg) => {
             screens::git_view::update(&mut model.git_view, msg);
@@ -1168,6 +1169,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::OpenWizardWithSpec(spec_context) => {
             open_wizard(model, Some(spec_context));
         }
+        Message::OpenWizardWithIssue(issue_number) => {
+            open_wizard_with_issue(model, issue_number);
+        }
         Message::CloseWizard => {
             model.wizard = None;
         }
@@ -1199,6 +1203,7 @@ where
 {
     schedule_startup_version_cache_refresh();
     let has_git_remote = repo_has_git_remote(&model.repo_path);
+    reload_cached_issues(model);
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -1483,6 +1488,9 @@ fn switch_management_tab_with<F, D>(
     };
     if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
         model.settings.load_category_fields();
+    }
+    if tab == ManagementTab::Issues {
+        reload_cached_issues(model);
     }
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
@@ -2027,11 +2035,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     if !is_in_text_input_mode(model) && !key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Right => {
-                model.management_tab = model.management_tab.next();
+                let next = model.management_tab.next();
+                switch_management_tab(model, next);
                 return;
             }
             KeyCode::Left => {
-                model.management_tab = model.management_tab.prev();
+                let prev = model.management_tab.prev();
+                switch_management_tab(model, prev);
                 return;
             }
             _ => {}
@@ -2119,6 +2129,16 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Issues => {
+            if key.code == KeyCode::Enter
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+                && model.issues.detail_view
+            {
+                if let Some(issue) = model.issues.selected_issue() {
+                    update(model, Message::OpenWizardWithIssue(issue.number.into()));
+                }
+                return;
+            }
+
             if model.issues.search_active {
                 let msg = match key.code {
                     KeyCode::Esc => Some(IssuesMessage::SearchClear),
@@ -2126,7 +2146,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     _ => search_input_char(&key).map(IssuesMessage::SearchInput),
                 };
                 if let Some(m) = msg {
-                    screens::issues::update(&mut model.issues, m);
+                    update(model, Message::Issues(m));
                     return;
                 }
             }
@@ -2140,9 +2160,9 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
-                screens::issues::update(&mut model.issues, m);
+                update(model, Message::Issues(m));
             } else if key.code == KeyCode::Esc && model.issues.detail_view {
-                screens::issues::update(&mut model.issues, IssuesMessage::ToggleDetail);
+                update(model, Message::Issues(IssuesMessage::ToggleDetail));
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -3732,7 +3752,9 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.resume_session_id(resume_session_id);
     }
 
-    builder.build()
+    let mut config = builder.build();
+    config.linked_issue_number = wizard.issue_id.parse::<u64>().ok();
+    config
 }
 
 fn build_custom_launch_config_from_wizard(
@@ -3796,6 +3818,7 @@ fn build_custom_launch_config_from_wizard(
         resume_session_id: wizard.resume_session_id.clone(),
         skip_permissions: wizard.skip_perms,
         codex_fast_mode: false,
+        linked_issue_number: wizard.issue_id.parse::<u64>().ok(),
     }
 }
 
@@ -3855,11 +3878,35 @@ fn materialize_pending_launch_with(
     model: &mut Model,
     sessions_dir: &std::path::Path,
 ) -> Result<(), String> {
+    materialize_pending_launch_with_hooks(
+        model,
+        sessions_dir,
+        link_selected_issue_to_branch,
+        resolve_launch_worktree,
+    )
+}
+
+fn materialize_pending_launch_with_hooks<Link, Resolve>(
+    model: &mut Model,
+    sessions_dir: &std::path::Path,
+    link_issue: Link,
+    resolve_worktree: Resolve,
+) -> Result<(), String>
+where
+    Link: FnOnce(&std::path::Path, &LaunchConfig) -> Result<(), String>,
+    Resolve: FnOnce(&std::path::Path, &mut LaunchConfig) -> Result<(), String>,
+{
     let Some(mut config) = model.pending_launch_config.take() else {
         return Ok(());
     };
 
-    resolve_launch_worktree(&model.repo_path, &mut config)?;
+    link_issue(&model.repo_path, &config)?;
+    resolve_worktree(&model.repo_path, &mut config)?;
+    if let Err(err) = persist_issue_linkage(&model.repo_path, &config) {
+        tracing::warn!("issue linkage store update failed: {err}");
+    } else if config.linked_issue_number.is_some() {
+        reload_cached_issues(model);
+    }
 
     let worktree = config
         .working_dir
@@ -3975,6 +4022,57 @@ fn materialize_pending_launch_with(
     );
 
     Ok(())
+}
+
+fn link_selected_issue_to_branch(
+    repo_path: &std::path::Path,
+    config: &LaunchConfig,
+) -> Result<(), String> {
+    link_selected_issue_to_branch_with(repo_path, config, |cwd, args| {
+        let output = Command::new("gh")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .map_err(|err| format!("gh issue develop: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "gh issue develop: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    })
+}
+
+fn link_selected_issue_to_branch_with<Run>(
+    repo_path: &std::path::Path,
+    config: &LaunchConfig,
+    run: Run,
+) -> Result<(), String>
+where
+    Run: FnOnce(&std::path::Path, &[String]) -> Result<(), String>,
+{
+    let Some(issue_number) = config.linked_issue_number else {
+        return Ok(());
+    };
+    let branch_name = config
+        .branch
+        .as_deref()
+        .ok_or_else(|| "issue linkage requires a branch name".to_string())?;
+    let base_branch = config
+        .base_branch
+        .as_deref()
+        .unwrap_or(DEFAULT_NEW_BRANCH_BASE_BRANCH);
+    let args = vec![
+        "issue".to_string(),
+        "develop".to_string(),
+        issue_number.to_string(),
+        "--name".to_string(),
+        branch_name.to_string(),
+        "--base".to_string(),
+        base_branch.to_string(),
+    ];
+    run(repo_path, &args)
 }
 
 fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
@@ -4277,10 +4375,32 @@ fn load_quick_start_entries(
 }
 
 fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecContext>) {
+    open_wizard_with_prefill(model, spec_context, None);
+}
+
+fn open_wizard_with_issue(model: &mut Model, issue_number: u64) {
+    open_wizard_with_prefill(model, None, Some(issue_number));
+}
+
+fn open_wizard_with_prefill(
+    model: &mut Model,
+    spec_context: Option<screens::wizard::SpecContext>,
+    initial_issue_number: Option<u64>,
+) {
     let cache_path = wizard_version_cache_path();
     let cache = VersionCache::load(&cache_path);
     let detected_agents = AgentDetector::detect_all();
-    let (wizard, refresh_targets) = prepare_wizard_startup(spec_context, detected_agents, &cache);
+    let (wizard, refresh_targets) = if let Some(issue_number) = initial_issue_number {
+        prepare_wizard_startup_with_issue_cache_root(
+            spec_context,
+            Some(issue_number),
+            detected_agents,
+            &cache,
+            default_issue_cache_root(),
+        )
+    } else {
+        prepare_wizard_startup(spec_context, detected_agents, &cache)
+    };
 
     model.wizard = Some(wizard);
     schedule_wizard_version_cache_refresh(cache_path, refresh_targets);
@@ -4677,11 +4797,28 @@ fn prepare_wizard_startup(
     detected_agents: Vec<DetectedAgent>,
     cache: &VersionCache,
 ) -> (screens::wizard::WizardState, Vec<AgentId>) {
+    prepare_wizard_startup_with_issue_cache_root(
+        spec_context,
+        None,
+        detected_agents,
+        cache,
+        default_issue_cache_root(),
+    )
+}
+
+fn prepare_wizard_startup_with_issue_cache_root(
+    spec_context: Option<screens::wizard::SpecContext>,
+    initial_issue_number: Option<u64>,
+    detected_agents: Vec<DetectedAgent>,
+    cache: &VersionCache,
+    issue_cache_root: PathBuf,
+) -> (screens::wizard::WizardState, Vec<AgentId>) {
     let branch_name = spec_context
         .as_ref()
         .and_then(|ctx| ctx.branch_seed())
         .unwrap_or_default();
-    let starts_new_branch = spec_context.is_some();
+    let starts_new_branch = spec_context.is_some() || initial_issue_number.is_some();
+    let (cached_issues, issue_load_error) = load_cached_wizard_issues(&issue_cache_root);
 
     let mut wizard = screens::wizard::WizardState {
         step: if starts_new_branch {
@@ -4693,6 +4830,15 @@ fn prepare_wizard_startup(
         gh_cli_available: gwt_core::process::command_exists("gh"),
         ai_enabled: false,
         branch_name,
+        issue_id: initial_issue_number
+            .map(|number| number.to_string())
+            .unwrap_or_default(),
+        issue_picker: screens::wizard::IssuePickerState {
+            issues: cached_issues,
+            search_query: String::new(),
+            search_active: false,
+            load_error: issue_load_error,
+        },
         spec_context,
         ..Default::default()
     };
@@ -4706,6 +4852,231 @@ fn prepare_wizard_startup(
     }
 
     (wizard, refresh_targets)
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct IssueBranchLinkStore {
+    branches: HashMap<String, u64>,
+}
+
+fn default_issue_cache_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gwt")
+        .join("cache")
+        .join("issues")
+}
+
+fn default_issue_linkage_store_path(repo_path: &std::path::Path) -> Option<PathBuf> {
+    let repo_hash = crate::index_worker::detect_repo_hash(repo_path)?;
+    Some(
+        gwt_cache_dir()
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str())),
+    )
+}
+
+fn handle_issues_message(model: &mut Model, msg: screens::issues::IssuesMessage) {
+    handle_issues_message_with_paths(
+        model,
+        msg,
+        default_issue_cache_root(),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+}
+
+fn handle_issues_message_with_paths(
+    model: &mut Model,
+    msg: screens::issues::IssuesMessage,
+    issue_cache_root: PathBuf,
+    linkage_store_path: Option<PathBuf>,
+) {
+    if matches!(msg, screens::issues::IssuesMessage::Refresh) {
+        reload_cached_issues_with_paths(model, issue_cache_root, linkage_store_path);
+        return;
+    }
+
+    screens::issues::update(&mut model.issues, msg);
+}
+
+fn reload_cached_issues(model: &mut Model) {
+    reload_cached_issues_with_paths(
+        model,
+        default_issue_cache_root(),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+}
+
+fn reload_cached_issues_with_paths(
+    model: &mut Model,
+    issue_cache_root: PathBuf,
+    linkage_store_path: Option<PathBuf>,
+) {
+    let (issues, issue_load_error) =
+        load_cached_issues_with_linkage(&issue_cache_root, linkage_store_path.as_deref());
+    screens::issues::update(
+        &mut model.issues,
+        screens::issues::IssuesMessage::SetIssues(issues),
+    );
+    model.issues.last_error = issue_load_error;
+    if model.issues.selected_issue().is_none() {
+        model.issues.detail_view = false;
+    }
+}
+
+fn load_cached_wizard_issues(
+    cache_root: &std::path::Path,
+) -> (Vec<screens::issues::IssueItem>, Option<String>) {
+    load_cached_issues_with_linkage(cache_root, None)
+}
+
+fn load_cached_issues_with_linkage(
+    cache_root: &std::path::Path,
+    linkage_store_path: Option<&std::path::Path>,
+) -> (Vec<screens::issues::IssueItem>, Option<String>) {
+    let linked_branches_by_issue = load_issue_linkage_map(linkage_store_path);
+    let dir = match std::fs::read_dir(cache_root) {
+        Ok(dir) => dir,
+        Err(err) => return (Vec::new(), Some(err.to_string())),
+    };
+
+    let mut issues = Vec::new();
+    for entry in dir.flatten() {
+        if !entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(number) = name.parse::<u32>() else {
+            continue;
+        };
+        let meta_path = entry.path().join("meta.json");
+        let Ok(meta_bytes) = std::fs::read(&meta_path) else {
+            continue;
+        };
+        let Ok(meta): Result<serde_json::Value, _> = serde_json::from_slice(&meta_bytes) else {
+            continue;
+        };
+        let title = meta
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let state = meta
+            .get("state")
+            .and_then(|value| value.as_str())
+            .unwrap_or("open")
+            .to_string();
+        let labels = meta
+            .get("labels")
+            .and_then(|value| value.as_array())
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|label| label.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let body = std::fs::read_to_string(entry.path().join("body.md")).unwrap_or_default();
+        let linked_branches = linked_branches_by_issue
+            .get(&number)
+            .cloned()
+            .unwrap_or_default();
+
+        issues.push(screens::issues::IssueItem {
+            number,
+            title,
+            state,
+            labels,
+            body,
+            linked_branches,
+        });
+    }
+
+    issues.sort_by(|left, right| right.number.cmp(&left.number));
+    (issues, None)
+}
+
+fn load_issue_linkage_map(
+    linkage_store_path: Option<&std::path::Path>,
+) -> HashMap<u32, Vec<String>> {
+    let mut by_issue: HashMap<u32, Vec<String>> = HashMap::new();
+    let Some(store_path) = linkage_store_path else {
+        return by_issue;
+    };
+    let store = match read_issue_linkage_store(store_path) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!("issue linkage store read failed: {err}");
+            return by_issue;
+        }
+    };
+
+    for (branch_name, issue_number) in store.branches {
+        let Ok(issue_number) = u32::try_from(issue_number) else {
+            continue;
+        };
+        by_issue.entry(issue_number).or_default().push(branch_name);
+    }
+
+    for branches in by_issue.values_mut() {
+        branches.sort();
+    }
+
+    by_issue
+}
+
+fn persist_issue_linkage(repo_path: &std::path::Path, config: &LaunchConfig) -> Result<(), String> {
+    let Some(issue_number) = config.linked_issue_number else {
+        return Ok(());
+    };
+    let Some(branch_name) = config.branch.as_deref() else {
+        return Ok(());
+    };
+    let Some(store_path) = default_issue_linkage_store_path(repo_path) else {
+        return Ok(());
+    };
+    persist_issue_linkage_at_path(&store_path, issue_number, branch_name)
+}
+
+fn persist_issue_linkage_at_path(
+    store_path: &std::path::Path,
+    issue_number: u64,
+    branch_name: &str,
+) -> Result<(), String> {
+    if branch_name.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut store = read_issue_linkage_store(store_path)?;
+    store.branches.insert(branch_name.to_string(), issue_number);
+
+    if let Some(parent) = store_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create issue linkage store dir: {err}"))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&store)
+        .map_err(|err| format!("serialize issue linkage store: {err}"))?;
+    std::fs::write(store_path, bytes).map_err(|err| format!("write issue linkage store: {err}"))
+}
+
+fn read_issue_linkage_store(store_path: &std::path::Path) -> Result<IssueBranchLinkStore, String> {
+    match std::fs::read(store_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|err| format!("parse issue linkage store {}: {err}", store_path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(IssueBranchLinkStore::default())
+        }
+        Err(err) => Err(format!(
+            "read issue linkage store {}: {err}",
+            store_path.display()
+        )),
+    }
 }
 /// All builtin agent IDs in display order.
 const BUILTIN_AGENTS: [AgentId; 4] = [
@@ -6583,6 +6954,7 @@ mod tests {
 
     static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static INPUT_TRACE_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
@@ -6594,6 +6966,35 @@ mod tests {
     fn test_model() -> Model {
         disable_global_custom_agents_for_tests();
         Model::new(PathBuf::from("/tmp/test"))
+    }
+
+    struct HomeEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("HOME", previous);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn with_temp_home<T>(run: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = HOME_ENV_TEST_LOCK.lock().expect("lock HOME env");
+        let home = tempfile::tempdir().expect("temp home dir");
+        let _env = HomeEnvGuard::set(home.path());
+        run(home.path())
     }
 
     #[test]
@@ -10740,6 +11141,118 @@ mod tests {
         assert_eq!(refresh_targets, vec![AgentId::Codex, AgentId::Gemini]);
     }
 
+    fn write_issue_cache_meta(
+        root: &std::path::Path,
+        number: u64,
+        title: &str,
+        state: &str,
+        labels: &[&str],
+    ) {
+        let dir = root.join(number.to_string());
+        fs::create_dir_all(&dir).expect("create issue cache dir");
+        fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({
+                "number": number,
+                "title": title,
+                "labels": labels,
+                "state": state,
+                "updated_at": "2026-04-09T00:00:00Z",
+                "comment_ids": []
+            })
+            .to_string(),
+        )
+        .expect("write issue cache meta");
+    }
+
+    fn write_issue_cache_body(root: &std::path::Path, number: u64, body: &str) {
+        let dir = root.join(number.to_string());
+        fs::create_dir_all(&dir).expect("create issue cache dir for body");
+        fs::write(dir.join("body.md"), body).expect("write issue cache body");
+    }
+
+    #[test]
+    fn prepare_wizard_startup_loads_cached_issues_and_prefills_selected_issue() {
+        let cache = VersionCache::new();
+        let issue_cache = tempfile::tempdir().expect("issue cache tempdir");
+        write_issue_cache_meta(
+            issue_cache.path(),
+            42,
+            "Fix login bug",
+            "open",
+            &["bug", "auth"],
+        );
+        write_issue_cache_meta(
+            issue_cache.path(),
+            1776,
+            "Launch Agent issue linkage",
+            "closed",
+            &["ux"],
+        );
+
+        let (wizard, _) = prepare_wizard_startup_with_issue_cache_root(
+            None,
+            Some(1776),
+            vec![],
+            &cache,
+            issue_cache.path().to_path_buf(),
+        );
+
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.issue_id, "1776");
+        assert_eq!(
+            wizard.current_options_for_step(screens::wizard::WizardStep::IssueSelect),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+                "#42 Fix login bug (open) [bug, auth]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_cached_issues_with_linkage_merges_issue_cache_and_local_branch_store() {
+        let issue_cache = tempfile::tempdir().expect("issue cache tempdir");
+        write_issue_cache_meta(issue_cache.path(), 42, "Fix login bug", "open", &["bug"]);
+        write_issue_cache_body(issue_cache.path(), 42, "Login fails on Safari.");
+        write_issue_cache_meta(
+            issue_cache.path(),
+            1776,
+            "Launch Agent issue linkage",
+            "closed",
+            &["ux"],
+        );
+
+        let linkage_path = issue_cache.path().join("issue-links.json");
+        persist_issue_linkage_at_path(&linkage_path, 42, "feature/login-api")
+            .expect("persist linkage");
+        persist_issue_linkage_at_path(&linkage_path, 42, "feature/login-ui")
+            .expect("persist linkage");
+        persist_issue_linkage_at_path(&linkage_path, 1776, "feature/issue-link")
+            .expect("persist linkage");
+
+        let (issues, load_error) =
+            load_cached_issues_with_linkage(issue_cache.path(), Some(linkage_path.as_path()));
+
+        assert!(load_error.is_none());
+        assert_eq!(
+            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
+            vec![1776, 42]
+        );
+        assert_eq!(
+            issues[0].linked_branches,
+            vec!["feature/issue-link".to_string()]
+        );
+        assert_eq!(
+            issues[1].linked_branches,
+            vec![
+                "feature/login-api".to_string(),
+                "feature/login-ui".to_string()
+            ]
+        );
+        assert_eq!(issues[1].body, "Login fails on Safari.");
+    }
+
     #[test]
     fn prepare_wizard_startup_starts_spec_prefill_at_branch_type_select() {
         let cache = VersionCache::new();
@@ -11614,6 +12127,21 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_carries_selected_issue_number() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            branch_name: "feature/issue-link".to_string(),
+            issue_id: "1776".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.linked_issue_number, Some(1776));
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_uses_resume_session_id_for_quick_start_resume() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -11749,6 +12277,53 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn link_selected_issue_to_branch_with_builds_gh_issue_develop_command() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/issue-link".to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: Some(1776),
+        };
+
+        let mut observed_cwd = None;
+        let mut observed_args = Vec::new();
+        link_selected_issue_to_branch_with(repo.path(), &config, |cwd, args| {
+            observed_cwd = Some(cwd.to_path_buf());
+            observed_args.extend(args.iter().cloned());
+            Ok(())
+        })
+        .expect("link issue");
+
+        assert_eq!(observed_cwd.as_deref(), Some(repo.path()));
+        assert_eq!(
+            observed_args,
+            [
+                "issue",
+                "develop",
+                "1776",
+                "--name",
+                "feature/issue-link",
+                "--base",
+                "develop",
+            ]
+        );
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_claude_effort_auto_persists_without_env() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -11831,6 +12406,105 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_issue_link_failure_stops_before_session_creation() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/issue-link".to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: Some(1776),
+        });
+
+        let result = materialize_pending_launch_with_hooks(
+            &mut model,
+            dir.path(),
+            |_repo_path, _config| Err("gh issue develop failed".to_string()),
+            |_repo_path, _config| {
+                panic!("resolve_launch_worktree should not run after link failure")
+            },
+        );
+
+        assert_eq!(result, Err("gh issue develop failed".to_string()));
+        assert_eq!(
+            model.sessions.len(),
+            1,
+            "launch should stop before creating a new tab"
+        );
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "failed link should not persist a session"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_issue_link_persists_local_linkage_store() {
+        with_temp_home(|_home| {
+            let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+            let repo_path = workspace_dir.path().join("repo");
+            fs::create_dir_all(&repo_path).expect("create repo path");
+            init_git_repo(&repo_path);
+            let remote_path = workspace_dir.path().join("origin.git");
+            init_bare_git_repo(&remote_path);
+            git_add_remote(&repo_path, "origin", &remote_path);
+
+            let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+            let mut model = Model::new(repo_path.clone());
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::Custom("my-agent".to_string()),
+                command: "gwt-missing-custom-agent-command".to_string(),
+                args: Vec::new(),
+                env_vars: HashMap::new(),
+                working_dir: Some(repo_path.clone()),
+                branch: Some("feature/issue-link".to_string()),
+                base_branch: Some("develop".to_string()),
+                display_name: "My Agent".to_string(),
+                color: AgentId::Custom("my-agent".to_string()).default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: Some(1776),
+            });
+
+            materialize_pending_launch_with_hooks(
+                &mut model,
+                sessions_dir.path(),
+                |_repo_path, _config| Ok(()),
+                |_repo_path, _config| Ok(()),
+            )
+            .expect("materialize launch");
+
+            let linkage_store_path =
+                default_issue_linkage_store_path(&repo_path).expect("repo hash-backed store path");
+            let issue_branches = load_issue_linkage_map(Some(linkage_store_path.as_path()));
+            assert_eq!(
+                issue_branches.get(&1776),
+                Some(&vec!["feature/issue-link".to_string()])
+            );
+        });
+    }
+
+    #[test]
     fn materialize_pending_launch_with_generates_claude_settings_local_hooks() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-feature-spec-42");
@@ -11854,6 +12528,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11898,6 +12573,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11972,6 +12648,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12020,6 +12697,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12068,6 +12746,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12135,6 +12814,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12193,6 +12873,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12233,6 +12914,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12292,6 +12974,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         augment_agent_hook_runtime_launch_config(&mut config, dir.path(), "session-123");
@@ -12565,6 +13248,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, sessions_dir.path())
@@ -13070,6 +13754,7 @@ CUSTOM_ENV = "enabled"
             resume_session_id: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -14263,6 +14948,7 @@ CUSTOM_ENV = "enabled"
                 state: "open".into(),
                 labels: vec!["ux".into()],
                 body: "First body".into(),
+                linked_branches: vec![],
             },
             screens::issues::IssueItem {
                 number: 2,
@@ -14270,6 +14956,7 @@ CUSTOM_ENV = "enabled"
                 state: "open".into(),
                 labels: vec!["bug".into()],
                 body: "Second body".into(),
+                linked_branches: vec![],
             },
         ];
         model.issues.selected = 1;
@@ -14283,6 +14970,47 @@ CUSTOM_ENV = "enabled"
             model.issues.selected_issue().map(|issue| issue.number),
             Some(2)
         );
+    }
+
+    #[test]
+    fn route_key_to_management_issues_shift_enter_opens_wizard_with_prefilled_issue() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Issues;
+        model.issues.issues = vec![screens::issues::IssueItem {
+            number: 1776,
+            title: "Launch Agent issue linkage".into(),
+            state: "open".into(),
+            labels: vec!["ux".into()],
+            body: "Wizard should link a selected issue".into(),
+            linked_branches: vec![],
+        }];
+        model.issues.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        let wizard = model.wizard.expect("wizard should open from issue detail");
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.issue_id, "1776");
+    }
+
+    #[test]
+    fn route_key_to_management_issues_refresh_reloads_issue_cache() {
+        with_temp_home(|home| {
+            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            write_issue_cache_meta(&issue_cache_root, 42, "Fix login bug", "open", &["bug"]);
+
+            let mut model = test_model();
+            model.management_tab = ManagementTab::Issues;
+            model.issues.last_error = Some("stale".to_string());
+
+            route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+
+            assert_eq!(model.issues.issues.len(), 1);
+            assert_eq!(model.issues.issues[0].number, 42);
+            assert!(model.issues.last_error.is_none());
+        });
     }
 
     #[test]
@@ -14310,6 +15038,30 @@ CUSTOM_ENV = "enabled"
 
         assert_eq!(model.git_view.files.len(), 1);
         assert_eq!(model.git_view.files[0].path, "tracked.txt");
+    }
+
+    #[test]
+    fn load_initial_data_populates_issues_from_issue_cache() {
+        with_temp_home(|home| {
+            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            write_issue_cache_meta(
+                &issue_cache_root,
+                1776,
+                "Launch Agent issue linkage",
+                "open",
+                &["ux"],
+            );
+
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+
+            let mut model = Model::new(dir.path().to_path_buf());
+            load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
+
+            assert_eq!(model.issues.issues.len(), 1);
+            assert_eq!(model.issues.issues[0].number, 1776);
+            assert!(model.issues.last_error.is_none());
+        });
     }
 
     #[test]
