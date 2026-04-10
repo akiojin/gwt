@@ -9,7 +9,7 @@ gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (
 
 ## Issues search first
 
-When the user asks any of the following, use GitHub Issues search **before** manual `gh issue list`,
+When the user asks any of the following, use GitHub Issues search before manual `gwt issue view`,
 title grep, or file search:
 
 - "既存 Issue を探して"
@@ -50,7 +50,8 @@ When the gwt TUI launches an agent pane, the following env vars are exported aut
   --n-results 10
 ```
 
-If the Issue index does not yet exist, the runner builds it inline (full mode) by calling `gh issue list` and embedding the results, then performs the search.
+If the Issue index does not yet exist, the runner builds it inline (full mode) by refreshing
+issue data and embedding the results, then performs the search.
 
 To force a refresh ignoring TTL:
 

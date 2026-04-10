@@ -86,24 +86,16 @@ fn runtime_state_invalid_event_exits_one() {
 
 #[test]
 fn block_hooks_with_empty_stdin_exit_zero() {
-    // With no stdin payload, every block hook treats the call as
+    // With no stdin payload, the consolidated block hook treats the call as
     // "no event to evaluate" → allow → exit 0. This pins that none
     // of them accidentally panic or return 2 on a missing payload.
-    let hooks = [
-        "block-git-branch-ops",
-        "block-cd-command",
-        "block-file-ops",
-        "block-git-dir-override",
-    ];
-    for hook in hooks {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new(tmp.path().to_path_buf());
-        let code = dispatch(&mut env, &argv(&["gwt", "hook", hook]));
-        assert_eq!(
-            code, 0,
-            "block hook {hook} with empty stdin must exit 0, got {code}"
-        );
-    }
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "block-bash-policy"]));
+    assert_eq!(
+        code, 0,
+        "block hook with empty stdin must exit 0, got {code}"
+    );
 }
 
 #[test]

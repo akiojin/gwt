@@ -287,21 +287,22 @@ Closes #456
 
 ### 10. PR作成/更新
 
-まず既存PRを確認：
+まず現在の develop 向け PR を確認：
 
 ```bash
-gh pr list --base main --head develop --state open --json number,title
+gwt pr current
 ```
 
 #### 既存PRがある場合
 
-以下を実行して、タイトル・ラベル・本文を更新（`## Closing Issues` を反映）：
+`gwt pr current` の出力に PR 番号が含まれている場合、以下を実行してタイトル・ラベル・本文を更新（`## Closing Issues` を反映）：
+本文は事前に temp file へ書き出し、その path を `{PR_BODY_FILE}` として扱うこと。
 
 ```bash
-gh pr edit {PR番号} \
+gwt pr edit {PR番号} \
   --title "chore(release): v{NEW_VERSION}" \
-  --add-label release \
-  --body "{PR_BODY}"
+  -f {PR_BODY_FILE} \
+  --add-label release
 ```
 
 > 「既存のRelease PR（#{PR番号}）を更新しました。」
@@ -312,12 +313,12 @@ gh pr edit {PR番号} \
 PRを作成：
 
 ```bash
-gh pr create \
+gwt pr create \
   --base main \
   --head develop \
   --title "chore(release): v{NEW_VERSION}" \
   --label release \
-  --body "{PR_BODY}"
+  -f {PR_BODY_FILE}
 ```
 
 **PR_BODY の内容**（LLMが生成）：
@@ -336,18 +337,24 @@ PR bodyには以下を含めてください：
 
 `ISSUE_NUMBERS` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する。
 
-まず、ステップ10で作成/更新した PR の番号を取得する：
+まず、ステップ10の直後に `gwt pr current` を再実行し、出力 1 行目の `#<number>` から PR 番号を取得する：
 
 ```bash
-PR_NUMBER=$(gh pr list --base main --head develop --state open --json number --jq '.[0].number')
+PR_CURRENT=$(gwt pr current)
+PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head -1)
 ```
 
 各 Issue にコメントを追記：
 
 ```bash
+COMMENT_FILE=$(mktemp)
+printf 'Included in release v%s (#%s)\n' "{NEW_VERSION}" "$PR_NUMBER" > "$COMMENT_FILE"
+
 for NUM in $ISSUE_NUMBERS; do
-  gh issue comment "$NUM" --body "Included in release v{NEW_VERSION} (#${PR_NUMBER})" || true
+  gwt issue comment "$NUM" -f "$COMMENT_FILE" || true
 done
+
+rm -f "$COMMENT_FILE"
 ```
 
 - `ISSUE_NUMBERS` が空の場合はこのステップ全体をスキップ

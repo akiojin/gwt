@@ -11,6 +11,7 @@
 //! Individual hook handlers (runtime-state, block-*, forward) will live in
 //! sibling files and consume these types.
 
+pub mod block_bash_policy;
 pub mod block_cd_command;
 pub mod block_file_ops;
 pub mod block_git_branch_ops;
@@ -31,10 +32,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookKind {
     RuntimeState,
-    BlockGitBranchOps,
-    BlockCdCommand,
-    BlockFileOps,
-    BlockGitDirOverride,
+    BlockBashPolicy,
     Forward,
 }
 
@@ -46,10 +44,7 @@ impl HookKind {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "runtime-state" => Some(Self::RuntimeState),
-            "block-git-branch-ops" => Some(Self::BlockGitBranchOps),
-            "block-cd-command" => Some(Self::BlockCdCommand),
-            "block-file-ops" => Some(Self::BlockFileOps),
-            "block-git-dir-override" => Some(Self::BlockGitDirOverride),
+            "block-bash-policy" => Some(Self::BlockBashPolicy),
             "forward" => Some(Self::Forward),
             _ => None,
         }

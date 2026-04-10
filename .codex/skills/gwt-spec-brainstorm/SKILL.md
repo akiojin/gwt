@@ -67,7 +67,7 @@ the exception path. Keep the same one-question-at-a-time discipline.
 
 1. Understand the user's concern or idea from their message.
 2. Run `gwt-search` with 2-3 semantic queries (Japanese + English).
-3. Check open SPEC Issues: `gh issue list --label gwt-spec --state open`.
+3. Check open SPEC Issues: `gwt issue spec list`.
 4. If a clear owner exists, present it before going further.
 
 ### Phase 2: Investigation

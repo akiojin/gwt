@@ -604,6 +604,25 @@ mod tests {
     }
 
     #[test]
+    fn distribute_preserves_tracked_bundled_spec_brainstorm_command() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
+        fs::write(&tracked_command, "tracked brainstorm command").unwrap();
+
+        track_path(dir.path(), ".claude/commands/gwt-spec-brainstorm.md");
+
+        distribute_to_worktree(dir.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&tracked_command).unwrap(),
+            "tracked brainstorm command"
+        );
+    }
+
+    #[test]
     fn root_level_protection_skips_nested_assets() {
         let worktree = Path::new("/tmp/repo");
         let protected_roots = HashSet::from([
