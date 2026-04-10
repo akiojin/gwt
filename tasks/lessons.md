@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-10 — fix: wide glyph の見切れは renderer だけでなく backend diff の trailing clear まで確認する
+
+### 事象
+
+Codex agent terminal で、日本語の wide glyph が full-screen redraw のたびに
+右端や行中でまだ見切れた。`cell.contents()` を保持する修正後も、
+前フレームの trailing cell の文字が右半分に残った。
+
+### 原因
+
+- `renderer.rs` 側では grapheme cluster と visible-right-edge crop を直していたが、
+  `ratatui-core::Buffer::diff` が CJK wide glyph では trailing clear を明示出力せず、
+  stale trailing cell が残る端末条件を見落としていた。
+- 併せて、selection overlay が wide continuation cell 側だけを選択したケースで、
+  可視 glyph 側へ style を集約できていなかった。
+
+### 再発防止策
+
+1. wide glyph の不具合では `vt100 cell -> Buffer` だけで完了扱いせず、`Buffer::diff -> backend Print` まで追って trailing clear の有無を確認する。
+2. 回帰テストには「CJK wide glyph redraw で trailing clear が diff に出ること」を必ず含める。
+3. wide continuation cell は hidden cell として扱い、selection / URL overlay は glyph 幅全体に集約する。
+
 ## 2026-04-10 — fix: managed asset の startup sweep は prune だけで終わらせず、missing tracked file も restore する
 
 ### 事象
