@@ -649,6 +649,20 @@ mod tests {
                 "expected brainstorm skill to use gwt issue spec list in {relative}"
             );
             assert!(
+                brainstorm_skill.contains("After each answer:")
+                    && brainstorm_skill.contains("Ask the next highest-impact question if any remain"),
+                "expected brainstorm skill to continue with the next highest-impact question in {relative}"
+            );
+            assert!(
+                brainstorm_skill.contains("Codex | `request_user_input`")
+                    && brainstorm_skill.contains("Do not end the brainstorm after a single answer"),
+                "expected brainstorm skill to require Codex question UI and forbid one-answer exits in {relative}"
+            );
+            assert!(
+                brainstorm_skill.contains("### SPEC Delta"),
+                "expected brainstorm skill to emit SPEC Delta in {relative}"
+            );
+            assert!(
                 !brainstorm_skill.contains("gh issue list --label gwt-spec --state open"),
                 "unexpected direct gh issue list guidance in {relative}"
             );
@@ -676,6 +690,21 @@ mod tests {
                 .exists(),
             "expected tracked gwt-spec-brainstorm command to remain present"
         );
+        {
+            let relative = ".claude/commands/gwt-spec-brainstorm.md";
+            let brainstorm_command = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                brainstorm_command.contains("selection UI")
+                    || brainstorm_command.contains("request_user_input"),
+                "expected brainstorm command to mention selection UI guidance in {relative}"
+            );
+            assert!(
+                brainstorm_command.contains("next highest-impact question")
+                    || brainstorm_command.contains("high-impact unknowns"),
+                "expected brainstorm command to require continued questioning in {relative}"
+            );
+        }
 
         for relative in [
             ".claude/skills/gwt-pr/SKILL.md",
