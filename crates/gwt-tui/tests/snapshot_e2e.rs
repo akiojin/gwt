@@ -115,6 +115,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: true,
             category: BranchCategory::Main,
             worktree_path: None,
+            upstream: None,
         },
         BranchItem {
             name: "feature/api".to_string(),
@@ -122,6 +123,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         },
         BranchItem {
             name: "feature/app-shell".to_string(),
@@ -129,6 +131,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         },
         BranchItem {
             name: "origin/release/1.0".to_string(),
@@ -136,6 +139,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: false,
             category: BranchCategory::Other,
             worktree_path: None,
+            upstream: None,
         },
     ]
 }
@@ -862,20 +866,22 @@ fn e2e_shift_enter_on_branch_opens_shell_session() {
 }
 
 #[test]
-fn e2e_space_on_branch_moves_focus_to_detail_without_opening_wizard() {
+fn e2e_space_on_protected_branch_keeps_focus_without_opening_wizard() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     app::update(
         &mut model,
         Message::Branches(BranchesMessage::SetBranches(sample_branches())),
     );
+    send_key(&mut model, &mut kb, press(KeyCode::Up));
+    send_key(&mut model, &mut kb, press(KeyCode::Up));
 
     assert!(!model.has_wizard());
     assert_eq!(model.active_focus, FocusPane::TabContent);
 
     send_key(&mut model, &mut kb, press(KeyCode::Char(' ')));
 
-    assert_eq!(model.active_focus, FocusPane::BranchDetail);
+    assert_eq!(model.active_focus, FocusPane::TabContent);
     assert!(!model.has_wizard());
 }
 
