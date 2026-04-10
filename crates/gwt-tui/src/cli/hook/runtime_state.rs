@@ -29,8 +29,8 @@ pub struct RuntimeState {
 /// [`HookError::InvalidEvent`].
 pub fn status_for_event(event: &str) -> Option<&'static str> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some("Running"),
-        "Stop" => Some("WaitingInput"),
+        "SessionStart" | "Stop" => Some("WaitingInput"),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some("Running"),
         _ => None,
     }
 }
