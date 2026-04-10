@@ -1693,6 +1693,7 @@ pub fn tick_redraw_required(model: &Model) -> bool {
             .docker_progress
             .as_ref()
             .is_some_and(|progress| progress.visible)
+        || model.cleanup_progress.visible
         || model.voice.is_active()
 }
 
@@ -6250,6 +6251,21 @@ mod tests {
     fn test_model() -> Model {
         disable_global_custom_agents_for_tests();
         Model::new(PathBuf::from("/tmp/test"))
+    }
+
+    #[test]
+    fn tick_redraw_required_stays_true_while_cleanup_progress_is_visible() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.cleanup_progress.show(1, false);
+
+        update(&mut model, Message::Tick);
+
+        assert!(
+            tick_redraw_required(&model),
+            "cleanup progress should keep tick-driven redraws alive until the modal reflects updates"
+        );
     }
 
     #[derive(Debug)]
