@@ -9849,6 +9849,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -9902,6 +9903,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
         model.sessions = vec![crate::model::SessionTab {
             id: "shell-0".to_string(),
