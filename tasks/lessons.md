@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-10 — fix: wide glyph の trailing clear は「出すか」だけでなく「順序」まで固定する
+
+### 事象
+
+wide glyph redraw で stale trailing text を防ぐために trailing clear を追加したが、
+crossterm backend では `wide glyph -> trailing blank` の順で `Print` され、
+一時的な余分な空白が表示された。マウス選択で glyph が再描画されると見た目だけ
+正常化した。
+
+### 原因
+
+- `ratatui-core::Buffer::diff` が wide glyph の visible cell を先に、trailing clear を
+  後に emit していた。
+- `ratatui-crossterm` backend は diff をそのまま cursor move + `Print` に変換するため、
+  blank 後描きがそのまま視覚アーティファクトになった。
+
+### 再発防止策
+
+1. wide glyph の redraw 回帰では「trailing clear があること」だけでなく、「clear が visible glyph より前に出ること」を diff レベルでテストに固定する。
+2. backend 依存の表示不具合では buffer equality だけで完了扱いせず、diff の update 順と backend の print 順まで追う。
+3. 「選択や hover で正常化する」症状は redraw 順序不正のシグナルとして扱い、overlay 側の見た目修正で済ませない。
+
 ## 2026-04-10 — fix: wide glyph の見切れは renderer だけでなく backend diff の trailing clear まで確認する
 
 ### 事象

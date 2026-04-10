@@ -499,14 +499,12 @@ impl Buffer {
         let mut to_skip: usize = 0;
         for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
             if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
-                let (x, y) = self.pos_of(i);
-                updates.push((x, y, &next_buffer[i]));
-
                 // If the current cell is multi-width, ensure the trailing cells are explicitly
                 // cleared when they previously contained non-blank content. Some terminals do not
                 // reliably clear the trailing cell(s) when printing a wide grapheme, which can
-                // result in visual artifacts (e.g., leftover characters). Emitting an explicit
-                // update for the trailing cells avoids this.
+                // result in visual artifacts (e.g., leftover characters). Emit those clears
+                // before reprinting the visible glyph so backends that translate the diff stream
+                // directly into cursor moves + prints do not leave a blank trailing cell behind.
                 let symbol = current.symbol();
                 let cell_width = symbol.width();
                 // Some terminals also leave stale text behind for standard wide glyphs
@@ -523,7 +521,7 @@ impl Buffer {
                         let next_trailing = &next_buffer[j];
                         if !next_trailing.skip && prev_trailing != next_trailing {
                             let (tx, ty) = self.pos_of(j);
-                            // Push an explicit update for the trailing cell.
+                            // Push an explicit update for the trailing cell first.
                             // This is expected to be a blank cell, but we use the actual
                             // content from the next buffer to handle cases where
                             // the user has explicitly set something else.
@@ -531,6 +529,9 @@ impl Buffer {
                         }
                     }
                 }
+
+                let (x, y) = self.pos_of(i);
+                updates.push((x, y, &next_buffer[i]));
             }
 
             to_skip = current.symbol().width().saturating_sub(1);
@@ -1364,6 +1365,24 @@ mod tests {
         assert!(
             diff.iter()
                 .any(|(x, y, c)| *x == 1 && *y == 0 && c.symbol() == " ")
+        );
+    }
+
+    #[test]
+    fn diff_orders_trailing_clear_before_wide_grapheme_redraw() {
+        let prev = Buffer::with_lines(["ab"]);
+
+        let mut next = Buffer::with_lines(["  "]);
+        next.set_string(0, 0, "界", Style::new());
+
+        let diff = prev.diff(&next);
+        assert_eq!(
+            diff,
+            [
+                (1, 0, &Cell::new(" ")),
+                (0, 0, &Cell::new("界")),
+            ],
+            "trailing clear must be emitted before the visible wide glyph so crossterm backends do not overdraw a blank after printing the glyph",
         );
     }
 }

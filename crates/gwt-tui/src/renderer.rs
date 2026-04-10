@@ -360,6 +360,7 @@ fn normalize_selection(selection: TerminalSelection) -> (TerminalCell, TerminalC
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Cell;
 
     #[test]
     fn map_vt_color_default() {
@@ -707,6 +708,28 @@ mod tests {
                 .iter()
                 .any(|(x, y, cell)| (*x, *y, cell.symbol()) == (2, 0, " ")),
             "wide CJK glyph redraw should explicitly clear the trailing cell so full-screen updates do not leave stale text behind",
+        );
+    }
+
+    #[test]
+    fn render_vt_screen_orders_trailing_clear_before_wide_glyph_redraw() {
+        let area = Rect::new(0, 0, 3, 1);
+        let mut previous = Buffer::empty(area);
+        previous.set_string(0, 0, "abc", Style::default());
+
+        let mut parser = vt100::Parser::new(1, 3, 0);
+        parser.process("aあ".as_bytes());
+        let mut next = previous.clone();
+        render_vt_screen(parser.screen(), &mut next, area);
+
+        let updates = previous.diff(&next);
+        assert_eq!(
+            updates,
+            [
+                (2, 0, &Cell::new(" ")),
+                (1, 0, &Cell::new("あ")),
+            ],
+            "wide glyph redraws should clear the trailing cell before redrawing the visible glyph so terminal backends do not leave a visual gap",
         );
     }
 
