@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
+use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -720,16 +721,16 @@ fn persist_agent_session_stopped(sessions_dir: &Path, session_id: &str) {
     }
 }
 
-fn bootstrap_agent_session_running(sessions_dir: &Path, session_id: &str) {
+fn bootstrap_agent_session_waiting_input(sessions_dir: &Path, session_id: &str) {
     let runtime_path = runtime_state_path(sessions_dir, session_id);
     if runtime_path.exists() {
         return;
     }
 
-    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::WaitingInput);
     runtime.source_event = Some("LaunchBootstrap".to_string());
     if let Err(err) = runtime.save(&runtime_path) {
-        tracing::warn!(session_id, error = %err, "failed to bootstrap running runtime state");
+        tracing::warn!(session_id, error = %err, "failed to bootstrap waiting runtime state");
     }
 }
 
@@ -1679,8 +1680,44 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
 ///
 /// This keeps non-terminal surfaces animated while allowing terminal-focused
 /// IME composition to proceed without idle repaints.
+fn visible_branch_live_indicator_rows(
+    model: &Model,
+) -> Vec<crate::screens::branches::VisibleBranchLiveIndicatorRow> {
+    visible_branches_list_area(model)
+        .map(|area| model.branches.visible_live_indicator_rows(area))
+        .unwrap_or_default()
+}
+
+pub fn visible_branch_live_indicator_signature(model: &Model) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in visible_branch_live_indicator_rows(model) {
+        row.branch_name.hash(&mut hasher);
+        for indicator in row.indicators {
+            branch_live_indicator_status_tag(indicator.status).hash(&mut hasher);
+            branch_live_indicator_color_tag(indicator.color).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+pub fn should_render_after_tick_with_visible_branch_signature(
+    visible_branch_signature_before: u64,
+    model: &Model,
+) -> bool {
+    visible_branch_signature_before != visible_branch_live_indicator_signature(model)
+        || tick_redraw_required(model)
+}
+
 pub fn tick_redraw_required(model: &Model) -> bool {
     if model.active_focus != FocusPane::Terminal {
+        return true;
+    }
+
+    if model.active_layer == ActiveLayer::Management
+        && model.management_tab == ManagementTab::Branches
+        && visible_branches_list_area(model)
+            .is_some_and(|area| model.branches.has_running_live_sessions(area))
+    {
         return true;
     }
 
@@ -1693,6 +1730,47 @@ pub fn tick_redraw_required(model: &Model) -> bool {
             .as_ref()
             .is_some_and(|progress| progress.visible)
         || model.voice.is_active()
+}
+
+fn visible_branches_list_area(model: &Model) -> Option<Rect> {
+    if model.active_layer != ActiveLayer::Management
+        || model.management_tab != ManagementTab::Branches
+    {
+        return None;
+    }
+
+    let management = visible_management_area(model)?;
+    let top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(management)[0];
+    let list_inner = pane_block(management_tab_title(model, top.width), false).inner(top);
+    Some(
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(list_inner)[1],
+    )
+}
+
+fn branch_live_indicator_status_tag(status: gwt_agent::AgentStatus) -> u8 {
+    match status {
+        gwt_agent::AgentStatus::Unknown => 0,
+        gwt_agent::AgentStatus::Running => 1,
+        gwt_agent::AgentStatus::WaitingInput => 2,
+        gwt_agent::AgentStatus::Stopped => 3,
+    }
+}
+
+fn branch_live_indicator_color_tag(color: crate::model::AgentColor) -> u8 {
+    match color {
+        crate::model::AgentColor::Green => 0,
+        crate::model::AgentColor::Blue => 1,
+        crate::model::AgentColor::Cyan => 2,
+        crate::model::AgentColor::Yellow => 3,
+        crate::model::AgentColor::Magenta => 4,
+        crate::model::AgentColor::Gray => 5,
+    }
 }
 
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
@@ -3600,8 +3678,8 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.version(&wizard.version);
     }
 
-    if !wizard.reasoning.is_empty() && wizard.reasoning != "medium" {
-        builder = builder.reasoning_level(&wizard.reasoning);
+    if let Some(reasoning_level) = wizard_reasoning_level_for_launch(wizard) {
+        builder = builder.reasoning_level(reasoning_level);
     }
 
     if wizard.agent_id == "codex" && wizard.codex_fast_mode {
@@ -3622,11 +3700,7 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.resume_session_id(resume_session_id);
     }
 
-    let mut config = builder.build();
-    if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
-        config.reasoning_level = Some(wizard.reasoning.clone());
-    }
-    config
+    builder.build()
 }
 
 fn build_custom_launch_config_from_wizard(
@@ -3695,6 +3769,22 @@ fn build_custom_launch_config_from_wizard(
 
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
+}
+
+fn wizard_reasoning_level_for_launch(wizard: &screens::wizard::WizardState) -> Option<&str> {
+    match wizard.agent_id.as_str() {
+        "codex" if !wizard.reasoning.is_empty() => Some(wizard.reasoning.as_str()),
+        "claude"
+            if !wizard.reasoning.is_empty()
+                && matches!(
+                    wizard.model.as_str(),
+                    "Default (Opus 4.6)" | "opus" | "sonnet"
+                ) =>
+        {
+            Some(wizard.reasoning.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<String> {
@@ -3830,7 +3920,7 @@ fn materialize_pending_launch_with(
             ),
         );
     } else {
-        bootstrap_agent_session_running(sessions_dir, &session.id);
+        bootstrap_agent_session_waiting_input(sessions_dir, &session.id);
         // Phase 8: ensure a watcher is running for this Worktree so live
         // SPEC/file edits feed the incremental indexer.
         crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
@@ -3906,7 +3996,13 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
 
     let main_repo_path =
         gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = existing_worktree_for_branch(&main_repo_path, &branch_name)? {
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let worktrees = manager.list().map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
+        .map(|worktree| worktree.path.clone())
+    {
         config.working_dir = Some(existing_worktree.clone());
         config.env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
@@ -3921,7 +4017,6 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
 
     manager
         .fetch_origin()
@@ -3952,7 +4047,20 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
             .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
     }
 
-    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let preferred_worktree_path =
+        gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
+        .ok_or_else(|| {
+            format!("failed to resolve available worktree path for branch {branch_name}")
+        })?;
+    if worktree_path != preferred_worktree_path {
+        tracing::warn!(
+            branch = branch_name,
+            preferred = %preferred_worktree_path.display(),
+            selected = %worktree_path.display(),
+            "preferred worktree path is occupied; using suffixed fallback"
+        );
+    }
     if local_branch_exists(&main_repo_path, &branch_name)? {
         manager
             .create(&branch_name, &worktree_path)
@@ -3971,6 +4079,48 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
     Ok(())
 }
 
+fn first_available_worktree_path(
+    preferred_path: &Path,
+    worktrees: &[gwt_git::WorktreeInfo],
+) -> Option<PathBuf> {
+    if !worktree_path_is_occupied(preferred_path, worktrees) && !preferred_path.exists() {
+        return Some(preferred_path.to_path_buf());
+    }
+
+    for suffix in 2usize.. {
+        let candidate = suffixed_worktree_path(preferred_path, suffix)?;
+        if !worktree_path_is_occupied(&candidate, worktrees) && !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(format!("{file_name}-{suffix}"));
+    Some(candidate)
+}
+
+fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
+    worktrees
+        .iter()
+        .any(|worktree| same_worktree_path(&worktree.path, path))
+}
+
+fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
@@ -3979,22 +4129,6 @@ fn origin_remote_ref(branch_name: &str) -> String {
     } else {
         format!("origin/{branch_name}")
     }
-}
-
-fn existing_worktree_for_branch(
-    repo_path: &Path,
-    branch_name: &str,
-) -> Result<Option<PathBuf>, String> {
-    let manager = gwt_git::WorktreeManager::new(repo_path);
-    manager
-        .list()
-        .map_err(|err| err.to_string())
-        .map(|worktrees| {
-            worktrees
-                .into_iter()
-                .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
-                .map(|worktree| worktree.path)
-        })
 }
 
 fn current_git_branch(repo_path: &Path) -> Result<String, String> {
@@ -10870,10 +11004,15 @@ mod tests {
             .chars()
             .filter(|ch| matches!(ch, '◐' | '◓' | '◑' | '◒'))
             .count();
+        let waiting_count = rendered.chars().filter(|ch| *ch == '●').count();
 
         assert_eq!(
-            spinner_count, 2,
-            "one live branch row should keep one spinner per live agent session"
+            spinner_count, 1,
+            "one live branch row should animate only the running agent session"
+        );
+        assert_eq!(
+            waiting_count, 1,
+            "one live branch row should keep the waiting agent visible with a static dot"
         );
         assert!(
             !rendered.contains("run ") && !rendered.contains("wait "),
@@ -10882,7 +11021,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_live_session_rendering_uses_agent_colors_for_each_spinner() {
+    fn branch_live_session_rendering_uses_agent_colors_for_running_and_waiting_indicators() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let repo_path = dir.path().join("repo");
         let selected_worktree = repo_path.join("wt-feature-test");
@@ -10946,19 +11085,186 @@ mod tests {
             })
             .expect("draw branches");
 
-        let spinner_colors: Vec<Color> = terminal
+        let indicator_colors: Vec<Color> = terminal
             .backend()
             .buffer()
             .content
             .iter()
-            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒" | "●"))
             .map(|cell| cell.fg)
             .collect();
 
         assert_eq!(
-            spinner_colors,
+            indicator_colors,
             vec![Color::Cyan, Color::Yellow],
-            "spinner indicators should keep per-agent colors so multiple agents remain distinguishable"
+            "running and waiting indicators should keep per-agent colors so multiple agents remain distinguishable"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_terminal_focus_animating_for_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+
+        assert!(
+            tick_redraw_required(&model),
+            "Branches should keep redrawing while a running live-session indicator is visible, even when terminal focus owns input"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_waiting_branch_indicators_static_under_terminal_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Yellow,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "waiting-only live-session indicators should stay static and must not re-enable idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_filtered_out_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.view_mode = screens::branches::ViewMode::All;
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/visible".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-visible")),
+            },
+            screens::branches::BranchItem {
+                name: "feature/hidden".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-hidden")),
+            },
+        ];
+        model.branches.search_query = "visible".to_string();
+        model.branches.live_session_summaries.insert(
+            "feature/hidden".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators on filtered-out rows must not force idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_running_branch_indicators_without_visible_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.terminal_size = (24, 8);
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/this-branch-name-is-too-wide".to_string(),
+            is_head: true,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-wide")),
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/this-branch-name-is-too-wide".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators with no visible summary strip must not re-enable idle redraws"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_repaints_visible_branch_indicator_state_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+        let before = visible_branch_live_indicator_signature(&model);
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+
+        assert!(
+            should_render_after_tick_with_visible_branch_signature(before, &model),
+            "a visible running spinner must repaint once when it transitions to a static waiting dot"
         );
     }
 
@@ -11356,6 +11662,39 @@ CUSTOM_ENV = "enabled"
             .contains(&"--dangerously-skip-permissions".to_string()));
     }
 
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_auto_persists_without_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "auto".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("auto"));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_high_exports_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "high".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"high".to_string())
+        );
+    }
+
     // SPEC-6 Phase 5: `append_agent_launch_log_with` and its redaction
     // helper were removed. Agent launches now emit a structured
     // `tracing::info!(target: "gwt_tui::agent::launch", ...)` event
@@ -11742,7 +12081,7 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn materialize_pending_launch_with_bootstraps_running_runtime_sidecar_after_spawn() {
+    fn materialize_pending_launch_with_bootstraps_waiting_runtime_sidecar_after_spawn() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-develop");
         fs::create_dir_all(&worktree).expect("create worktree");
@@ -11777,7 +12116,7 @@ CUSTOM_ENV = "enabled"
             .clone();
         let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session_id))
             .expect("bootstrap runtime state");
-        assert_eq!(runtime.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::WaitingInput);
         assert_eq!(runtime.source_event.as_deref(), Some("LaunchBootstrap"));
     }
 
@@ -12409,6 +12748,76 @@ CUSTOM_ENV = "enabled"
         let persisted = AgentSession::load(&session_entry).expect("load persisted session");
         assert_eq!(persisted.branch, "feature/test");
         assert_eq!(persisted.worktree_path, stale_worktree);
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_occupied_preferred_worktree_path_uses_suffixed_fallback() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        git_checkout_branch_or_create(&repo_path, "main");
+        git_push_branch(&repo_path, "main");
+        git_checkout_branch_or_create(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
+        git_checkout_branch_or_create(&repo_path, "main");
+
+        let occupied_path = workspace_dir.path().join("develop");
+        let occupied_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "dependabot/npm_and_yarn/test",
+                occupied_path.to_str().expect("occupied worktree path"),
+                "develop",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add occupied path");
+        assert!(
+            occupied_output.status.success(),
+            "git worktree add occupied path failed: {}",
+            String::from_utf8_lossy(&occupied_output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "develop".to_string(),
+            worktree_path: Some(repo_path.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(repo_path);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch with occupied preferred path");
+
+        let expected_worktree = workspace_dir.path().join("develop-2");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize fallback worktree");
+        assert!(
+            expected_worktree.exists(),
+            "launch should create a suffixed fallback path when the canonical branch path is occupied by another worktree"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "develop");
+        assert_eq!(persisted.worktree_path, expected_worktree);
     }
 
     #[test]
