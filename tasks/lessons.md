@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-10 — fix: `SessionStart` は「起動した」だけで `Running` とみなさない
+
+### 事象
+
+Branches の live session indicator で、agent を起動した直後まだ入力待ちのはずなのに
+spinner が回り続けて見えた。
+
+### 原因
+
+- launch bootstrap が runtime sidecar を `Running` で初期化していた。
+- hook state mapping でも `SessionStart` を `Running` にしており、
+  実行中イベントと待機イベントの境界を誤っていた。
+- そのため、ユーザー入力も tool 実行も始まっていない session でも
+  `WaitingInput` ではなく `Running` として Branches に表示されていた。
+
+### 再発防止策
+
+1. hook event を state に写像するときは、`session started` と `work started` を同一視しない。
+2. launch bootstrap が必要でも、初期状態は「見えてほしい state」にするのであって、「最初に困らない animation state」に寄せない。
+3. live indicator の仕様変更では、launch 直後の bootstrap、hook の `SessionStart`、実行中の `Pre/PostToolUse` を別々に RED テストで固定する。
+
 ## 2026-04-09 — fix: `tracing_appender::rolling::daily` の日付境界は思い込みで local 扱いしない
 
 ### 事象

@@ -720,16 +720,16 @@ fn persist_agent_session_stopped(sessions_dir: &Path, session_id: &str) {
     }
 }
 
-fn bootstrap_agent_session_running(sessions_dir: &Path, session_id: &str) {
+fn bootstrap_agent_session_waiting_input(sessions_dir: &Path, session_id: &str) {
     let runtime_path = runtime_state_path(sessions_dir, session_id);
     if runtime_path.exists() {
         return;
     }
 
-    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::WaitingInput);
     runtime.source_event = Some("LaunchBootstrap".to_string());
     if let Err(err) = runtime.save(&runtime_path) {
-        tracing::warn!(session_id, error = %err, "failed to bootstrap running runtime state");
+        tracing::warn!(session_id, error = %err, "failed to bootstrap waiting runtime state");
     }
 }
 
@@ -3837,7 +3837,7 @@ fn materialize_pending_launch_with(
             ),
         );
     } else {
-        bootstrap_agent_session_running(sessions_dir, &session.id);
+        bootstrap_agent_session_waiting_input(sessions_dir, &session.id);
         // Phase 8: ensure a watcher is running for this Worktree so live
         // SPEC/file edits feed the incremental indexer.
         crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
@@ -11842,7 +11842,7 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn materialize_pending_launch_with_bootstraps_running_runtime_sidecar_after_spawn() {
+    fn materialize_pending_launch_with_bootstraps_waiting_runtime_sidecar_after_spawn() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-develop");
         fs::create_dir_all(&worktree).expect("create worktree");
@@ -11877,7 +11877,7 @@ CUSTOM_ENV = "enabled"
             .clone();
         let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session_id))
             .expect("bootstrap runtime state");
-        assert_eq!(runtime.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::WaitingInput);
         assert_eq!(runtime.source_event.as_deref(), Some("LaunchBootstrap"));
     }
 
