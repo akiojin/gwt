@@ -3810,8 +3810,8 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.version(&wizard.version);
     }
 
-    if !wizard.reasoning.is_empty() && wizard.reasoning != "medium" {
-        builder = builder.reasoning_level(&wizard.reasoning);
+    if let Some(reasoning_level) = wizard_reasoning_level_for_launch(wizard) {
+        builder = builder.reasoning_level(reasoning_level);
     }
 
     if wizard.agent_id == "codex" && wizard.codex_fast_mode {
@@ -3841,7 +3841,9 @@ fn build_launch_config_from_wizard_with_custom_agents(
     if !wizard.version.is_empty() {
         config.tool_version = Some(wizard.version.clone());
     }
-    if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
+    if let Some(reasoning_level) = wizard_reasoning_level_for_launch(wizard) {
+        config.reasoning_level = Some(reasoning_level.to_string());
+    } else if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
         config.reasoning_level = Some(wizard.reasoning.clone());
     }
     config
@@ -3916,6 +3918,22 @@ fn build_custom_launch_config_from_wizard(
 
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
+}
+
+fn wizard_reasoning_level_for_launch(wizard: &screens::wizard::WizardState) -> Option<&str> {
+    match wizard.agent_id.as_str() {
+        "codex" if !wizard.reasoning.is_empty() => Some(wizard.reasoning.as_str()),
+        "claude"
+            if !wizard.reasoning.is_empty()
+                && matches!(
+                    wizard.model.as_str(),
+                    "Default (Opus 4.6)" | "opus" | "sonnet"
+                ) =>
+        {
+            Some(wizard.reasoning.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<String> {
@@ -4337,6 +4355,7 @@ where
         &mut emit_progress,
         &mut emit_log,
     )?;
+    maybe_inject_docker_sandbox_env(&launch, config)?;
     emit_progress(
         screens::docker_progress::DockerStage::WaitingForServices,
         format!(
@@ -4353,9 +4372,10 @@ where
         "exec".to_string(),
         "-w".to_string(),
         launch.container_cwd.clone(),
-        launch.service.clone(),
-        runtime_program.executable,
     ];
+    args.extend(docker_compose_exec_env_args(&config.env_vars));
+    args.push(launch.service.clone());
+    args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
     config.command = docker_binary_for_launch();
@@ -4408,6 +4428,56 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
         return Err("Docker daemon is not running".to_string());
     }
     Ok(())
+}
+
+fn maybe_inject_docker_sandbox_env(
+    launch: &DockerLaunchPlan,
+    config: &mut LaunchConfig,
+) -> Result<(), String> {
+    if cfg!(windows) || !matches!(config.agent_id, AgentId::ClaudeCode) || !config.skip_permissions
+    {
+        return Ok(());
+    }
+
+    let is_root = gwt_docker::compose_service_user_is_root(&launch.compose_file, &launch.service)
+        .map_err(|err| {
+        format!(
+            "Failed to determine Docker user for service '{}': {err}",
+            launch.service
+        )
+    })?;
+    if is_root {
+        config
+            .env_vars
+            .insert("IS_SANDBOX".to_string(), "1".to_string());
+    }
+    Ok(())
+}
+
+fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<String> {
+    let mut keys = env_vars.keys().collect::<Vec<_>>();
+    keys.sort();
+
+    let mut args = Vec::new();
+    for key in keys {
+        let key = key.trim();
+        if key.is_empty() || !is_valid_docker_env_key(key) {
+            continue;
+        }
+        let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
+        args.push("-e".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    args
+}
+
+fn is_valid_docker_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn resolve_docker_exec_program(
@@ -12496,6 +12566,178 @@ services:
     }
 
     #[test]
+    fn apply_docker_runtime_to_launch_config_forwards_valid_env_vars_into_exec_args() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "high".to_string());
+        env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
+        env_vars.insert("INVALID-KEY".to_string(), "ignored".to_string());
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars,
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: Some("high".to_string()),
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert_eq!(
+                    config.args,
+                    vec![
+                        "compose".to_string(),
+                        "-f".to_string(),
+                        compose_path.display().to_string(),
+                        "exec".to_string(),
+                        "-w".to_string(),
+                        "/workspace".to_string(),
+                        "-e".to_string(),
+                        "CLAUDE_CODE_EFFORT_LEVEL=high".to_string(),
+                        "-e".to_string(),
+                        "TERM=xterm-256color".to_string(),
+                        "web".to_string(),
+                        "claude".to_string(),
+                        "--print".to_string(),
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_adds_is_sandbox_for_root_claude_skip_permissions() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: true,
+            codex_fast_mode: false,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ] && [ \"$8\" = \"-lc\" ] && [ \"$9\" = \"id -u\" ]; then\n  printf '0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert!(config.args.contains(&"-e".to_string()));
+                assert!(config.args.contains(&"IS_SANDBOX=1".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_omits_is_sandbox_for_non_root_claude() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: true,
+            codex_fast_mode: false,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ] && [ \"$8\" = \"-lc\" ] && [ \"$9\" = \"id -u\" ]; then\n  printf '1000\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert!(!config.args.iter().any(|arg| arg == "IS_SANDBOX=1"));
+            },
+        );
+    }
+
+    #[test]
     fn apply_docker_runtime_to_launch_config_normalizes_package_runner_for_container_exec() {
         let project_root = tempfile::tempdir().expect("temp project root");
         let compose_path = project_root.path().join("docker-compose.yml");
@@ -13259,6 +13501,54 @@ services:
         assert!(!config
             .args
             .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_auto_persists_without_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "auto".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("auto"));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_medium_exports_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            reasoning: "medium".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("medium"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"medium".to_string())
+        );
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_haiku_ignores_effort_selection() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "haiku".to_string(),
+            reasoning: "high".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.reasoning_level.is_none());
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
     }
 
     // SPEC-6 Phase 5: `append_agent_launch_log_with` and its redaction

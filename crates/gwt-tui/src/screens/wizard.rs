@@ -60,6 +60,20 @@ impl WizardStep {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeModelFamily {
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningStepKind {
+    None,
+    Codex,
+    ClaudeEffort { max_available: bool },
+}
+
 /// Determine the next step based on current step and wizard context.
 ///
 /// Restores the old branch-first flow:
@@ -92,7 +106,7 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::ModelSelect => {
-            if state.agent_is_codex() {
+            if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.has_docker_workflow() {
                 Some(WizardStep::RuntimeTarget)
@@ -194,7 +208,7 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::VersionSelect => {
             if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
                 Some(WizardStep::DockerLifecycle)
-            } else if state.agent_is_codex() {
+            } else if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
@@ -207,7 +221,7 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::DockerLifecycle)
             } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
-            } else if state.agent_is_codex() {
+            } else if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
@@ -216,7 +230,7 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::RuntimeTarget => {
-            if state.agent_is_codex() {
+            if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
@@ -524,6 +538,8 @@ impl WizardState {
         }
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
+        } else if entry.agent_id == "claude" {
+            self.reasoning = "auto".to_string();
         }
         if let Some(version) = entry.version {
             self.version = version;
@@ -573,6 +589,30 @@ impl WizardState {
     /// Whether the selected agent is Codex (needs ReasoningLevel step).
     fn agent_is_codex(&self) -> bool {
         self.effective_agent_id() == "codex"
+    }
+
+    fn reasoning_step_kind(&self) -> ReasoningStepKind {
+        if self.agent_is_codex() {
+            return ReasoningStepKind::Codex;
+        }
+
+        if self.effective_agent_id() != "claude" {
+            return ReasoningStepKind::None;
+        }
+
+        match claude_model_family(&self.model) {
+            Some(ClaudeModelFamily::Opus) => ReasoningStepKind::ClaudeEffort {
+                max_available: true,
+            },
+            Some(ClaudeModelFamily::Sonnet) => ReasoningStepKind::ClaudeEffort {
+                max_available: false,
+            },
+            _ => ReasoningStepKind::None,
+        }
+    }
+
+    pub fn agent_uses_reasoning_step(&self) -> bool {
+        !matches!(self.reasoning_step_kind(), ReasoningStepKind::None)
     }
 
     /// Whether the selected agent is distributed via npm.
@@ -673,6 +713,7 @@ impl WizardState {
         if !self.agent_is_codex() {
             self.codex_fast_mode = false;
         }
+        self.sync_reasoning_state();
     }
 
     fn has_docker_workflow(&self) -> bool {
@@ -749,6 +790,47 @@ impl WizardState {
         }
     }
 
+    fn current_reasoning_options(&self) -> &'static [ReasoningDisplayOption] {
+        match self.reasoning_step_kind() {
+            ReasoningStepKind::Codex => &CODEX_REASONING_DISPLAY_OPTIONS,
+            ReasoningStepKind::ClaudeEffort {
+                max_available: true,
+            } => &CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS,
+            ReasoningStepKind::ClaudeEffort {
+                max_available: false,
+            } => &CLAUDE_SONNET_EFFORT_DISPLAY_OPTIONS,
+            ReasoningStepKind::None => &[],
+        }
+    }
+
+    fn current_reasoning_value(&self) -> Option<&str> {
+        let value = self.reasoning.as_str();
+        if value.is_empty() {
+            return None;
+        }
+        self.current_reasoning_options()
+            .iter()
+            .find(|option| option.stored_value == value)
+            .map(|option| option.stored_value)
+    }
+
+    fn sync_reasoning_state(&mut self) {
+        if self.current_reasoning_value().is_none() {
+            self.reasoning.clear();
+        }
+    }
+
+    fn reasoning_title(&self) -> String {
+        let model = reasoning_title_model(self);
+        match self.reasoning_step_kind() {
+            ReasoningStepKind::Codex => format!("Select Reasoning Level for {model}"),
+            ReasoningStepKind::ClaudeEffort { .. } => {
+                format!("Select Effort Level for {model}")
+            }
+            ReasoningStepKind::None => WizardStep::ReasoningLevel.title().to_string(),
+        }
+    }
+
     /// Number of selectable options for the current step.
     pub fn option_count(&self) -> usize {
         match self.step {
@@ -756,7 +838,7 @@ impl WizardState {
             WizardStep::BranchAction => 2, // existing branch / create new branch
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
-            WizardStep::ReasoningLevel => 4, // low, medium, high, xhigh
+            WizardStep::ReasoningLevel => self.current_reasoning_options().len(),
             WizardStep::VersionSelect => self.version_options.len().max(1),
             WizardStep::ExecutionMode => 4, // normal, continue, resume, convert
             WizardStep::RuntimeTarget => 2, // host, docker
@@ -785,7 +867,11 @@ impl WizardState {
     pub fn current_static_options(&self) -> Vec<&'static str> {
         match self.step {
             WizardStep::BranchAction => vec!["Use selected branch", "Create new from selected"],
-            WizardStep::ReasoningLevel => vec!["Low", "Medium", "High", "XHigh"],
+            WizardStep::ReasoningLevel => self
+                .current_reasoning_options()
+                .iter()
+                .map(|option| option.label)
+                .collect(),
             WizardStep::ExecutionMode => vec!["Normal", "Continue", "Resume", "Convert"],
             WizardStep::RuntimeTarget => vec!["Host", "Docker"],
             WizardStep::BranchTypeSelect => vec!["feature/", "bugfix/", "hotfix/", "release/"],
@@ -1084,6 +1170,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
 
 fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
     match step {
+        WizardStep::ReasoningLevel => reasoning_default_selection(state),
         WizardStep::VersionSelect => state
             .version_options
             .iter()
@@ -1164,8 +1251,8 @@ fn apply_selection(state: &mut WizardState) {
             state.sync_selected_agent_options();
         }
         WizardStep::ReasoningLevel => {
-            if let Some(opt) = options.get(state.selected) {
-                state.reasoning = opt.to_lowercase();
+            if let Some(opt) = state.current_reasoning_options().get(state.selected) {
+                state.reasoning = opt.stored_value.to_string();
             }
         }
         WizardStep::VersionSelect => {
@@ -1422,11 +1509,69 @@ const GEMINI_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 6] = [
     },
 ];
 
-const REASONING_DISPLAY_OPTIONS: [(&str, &str); 4] = [
-    ("Low", "Faster, less thorough"),
-    ("Medium", "Balanced"),
-    ("High", "Slower, more thorough"),
-    ("XHigh", "Extended high reasoning"),
+#[derive(Clone, Copy)]
+struct ReasoningDisplayOption {
+    label: &'static str,
+    stored_value: &'static str,
+    description: &'static str,
+}
+
+const CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS: [ReasoningDisplayOption; 5] = [
+    ReasoningDisplayOption {
+        label: "Auto",
+        stored_value: "auto",
+        description: "Let the model decide how deeply to think",
+    },
+    ReasoningDisplayOption {
+        label: "Low",
+        stored_value: "low",
+        description: "Fast, cheap responses for simple work",
+    },
+    ReasoningDisplayOption {
+        label: "Medium",
+        stored_value: "medium",
+        description: "Balanced reasoning for everyday tasks",
+    },
+    ReasoningDisplayOption {
+        label: "High",
+        stored_value: "high",
+        description: "Deeper reasoning for complex problems",
+    },
+    ReasoningDisplayOption {
+        label: "Max",
+        stored_value: "max",
+        description: "Deepest reasoning with no token limit bias",
+    },
+];
+
+const CLAUDE_SONNET_EFFORT_DISPLAY_OPTIONS: [ReasoningDisplayOption; 4] = [
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[0],
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[1],
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[2],
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[3],
+];
+
+const CODEX_REASONING_DISPLAY_OPTIONS: [ReasoningDisplayOption; 4] = [
+    ReasoningDisplayOption {
+        label: "Low",
+        stored_value: "low",
+        description: "Fast responses with lighter reasoning",
+    },
+    ReasoningDisplayOption {
+        label: "Medium",
+        stored_value: "medium",
+        description: "Balances speed and reasoning depth",
+    },
+    ReasoningDisplayOption {
+        label: "High",
+        stored_value: "high",
+        description: "Greater reasoning depth for complex problems",
+    },
+    ReasoningDisplayOption {
+        label: "Extra high",
+        stored_value: "xhigh",
+        description: "Extra high reasoning depth for complex problems",
+    },
 ];
 
 const EXECUTION_MODE_DISPLAY_OPTIONS: [(&str, &str); 4] = [
@@ -1457,6 +1602,44 @@ fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOption] {
         "codex" => &CODEX_MODEL_DISPLAY_OPTIONS,
         "gemini" => &GEMINI_MODEL_DISPLAY_OPTIONS,
         _ => &[],
+    }
+}
+
+fn claude_model_family(model: &str) -> Option<ClaudeModelFamily> {
+    match model {
+        "Default (Opus 4.6)" | "opus" => Some(ClaudeModelFamily::Opus),
+        "sonnet" => Some(ClaudeModelFamily::Sonnet),
+        "haiku" => Some(ClaudeModelFamily::Haiku),
+        _ => None,
+    }
+}
+
+fn reasoning_title_model(state: &WizardState) -> &str {
+    match claude_model_family(&state.model) {
+        Some(ClaudeModelFamily::Opus) => "opus",
+        Some(ClaudeModelFamily::Sonnet) => "sonnet",
+        Some(ClaudeModelFamily::Haiku) => "haiku",
+        None if state.model.is_empty() => "model",
+        None => state.model.as_str(),
+    }
+}
+
+fn reasoning_default_selection(state: &WizardState) -> usize {
+    if let Some(value) = state.current_reasoning_value() {
+        return state
+            .current_reasoning_options()
+            .iter()
+            .position(|option| option.stored_value == value)
+            .unwrap_or(0);
+    }
+
+    match state.reasoning_step_kind() {
+        ReasoningStepKind::Codex => state
+            .current_reasoning_options()
+            .iter()
+            .position(|option| option.stored_value == "medium")
+            .unwrap_or(0),
+        ReasoningStepKind::ClaudeEffort { .. } | ReasoningStepKind::None => 0,
     }
 }
 
@@ -1611,12 +1794,27 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
 fn render_reasoning_level_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let available_width = area.width as usize;
-    let items = REASONING_DISPLAY_OPTIONS
+    let items = state
+        .current_reasoning_options()
         .iter()
         .enumerate()
-        .map(|(idx, (label, description))| {
+        .map(|(idx, option)| {
             let marker = if idx == state.selected { "> " } else { "  " };
-            let text = format_fixed_width_line(marker, label, description, 10, available_width);
+            let label_width = if matches!(
+                state.reasoning_step_kind(),
+                ReasoningStepKind::ClaudeEffort { .. }
+            ) {
+                6
+            } else {
+                10
+            };
+            let text = format_fixed_width_line(
+                marker,
+                option.label,
+                option.description,
+                label_width,
+                available_width,
+            );
             ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
@@ -1850,8 +2048,17 @@ fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
             }
         }
         WizardStep::ReasoningLevel => {
-            for &(label, desc) in &REASONING_DISPLAY_OPTIONS {
-                max_line = max_line.max(2 + 10.max(label.len()) + 1 + desc.len());
+            let label_width = if matches!(
+                state.reasoning_step_kind(),
+                ReasoningStepKind::ClaudeEffort { .. }
+            ) {
+                6
+            } else {
+                10
+            };
+            for option in state.current_reasoning_options() {
+                max_line = max_line
+                    .max(2 + label_width.max(option.label.len()) + 1 + option.description.len());
             }
         }
         WizardStep::SkipPermissions => {
@@ -1902,6 +2109,8 @@ fn popup_title(state: &WizardState) -> String {
             state.step.title(),
             quick_start_title_summary(&state.quick_start_entries[0])
         )
+    } else if state.step == WizardStep::ReasoningLevel {
+        state.reasoning_title()
     } else {
         state.step.title().to_string()
     }
@@ -2483,21 +2692,38 @@ mod tests {
     }
 
     #[test]
-    fn step_transitions_claude_skips_reasoning() {
+    fn step_transitions_claude_opus_includes_reasoning() {
         let mut state = WizardState::default();
         state.agent_id = "claude".to_string();
-        // Claude: AgentSelect → ModelSelect → VersionSelect → ExecutionMode
+        state.model = "opus".to_string();
+
         assert_eq!(
             next_step(WizardStep::AgentSelect, &state),
             Some(WizardStep::ModelSelect)
         );
         assert_eq!(
             next_step(WizardStep::ModelSelect, &state),
+            Some(WizardStep::ReasoningLevel)
+        );
+        assert_eq!(
+            next_step(WizardStep::ReasoningLevel, &state),
             Some(WizardStep::VersionSelect)
         );
         assert_eq!(
             next_step(WizardStep::VersionSelect, &state),
             Some(WizardStep::ExecutionMode)
+        );
+    }
+
+    #[test]
+    fn step_transitions_claude_haiku_skips_reasoning() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.model = "haiku".to_string();
+
+        assert_eq!(
+            next_step(WizardStep::ModelSelect, &state),
+            Some(WizardStep::VersionSelect)
         );
     }
 
@@ -2862,6 +3088,7 @@ mod tests {
         state.agent_id = "claude".to_string();
         state.detected_agents = sample_agents();
         state.step = WizardStep::ModelSelect;
+        state.selected = 3;
 
         update(&mut state, WizardMessage::Select);
 
@@ -2884,6 +3111,7 @@ mod tests {
         state.agent_id = "claude".to_string();
         state.detected_agents = sample_agents();
         state.step = WizardStep::ModelSelect;
+        state.selected = 3;
         state.docker_context = Some(DockerWizardContext {
             services: vec!["web".to_string()],
             suggested_service: Some("web".to_string()),
@@ -2998,6 +3226,22 @@ mod tests {
         assert_eq!(state.resume_session_id.as_deref(), Some("sess-12345678"));
         assert!(state.skip_perms);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn select_on_quick_start_without_reasoning_treats_legacy_claude_entry_as_auto() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.detected_agents = sample_agents();
+        state.selected = 2;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.agent_id, "claude");
+        assert_eq!(state.model, "sonnet");
+        assert_eq!(state.reasoning, "auto");
     }
 
     #[test]
@@ -3811,15 +4055,45 @@ mod tests {
         let mut state = WizardState::default();
         state.step = WizardStep::ReasoningLevel;
         state.agent_id = "codex".to_string();
+        state.model = "gpt-5.4".to_string();
         state.selected = 2;
 
         let text = render_text(&state, 90, 24);
 
-        assert!(text.contains("Reasoning Level"));
-        assert!(text.contains("  Low        Faster, less thorough"));
-        assert!(text.contains("  Medium     Balanced"));
-        assert!(text.contains("> High       Slower, more thorough"));
-        assert!(text.contains("  XHigh      Extended high reasoning"));
+        assert!(text.contains("Select Reasoning Level for gpt-5.4"));
+        assert!(text.contains("  Low        Fast responses with lighter reasoning"));
+        assert!(text.contains("  Medium     Balances speed and reasoning depth"));
+        assert!(text.contains("> High       Greater reasoning depth for complex problems"));
+        assert!(text.contains("  Extra high Extra high reasoning depth for complex problems"));
+    }
+
+    #[test]
+    fn render_claude_effort_step_uses_effort_title_and_opus_rows() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ReasoningLevel;
+        state.agent_id = "claude".to_string();
+        state.model = "opus".to_string();
+
+        let text = render_text(&state, 110, 24);
+
+        assert!(text.contains("Select Effort Level for opus"));
+        assert!(text.contains("Auto"));
+        assert!(text.contains("Let the model decide how deeply to think"));
+        assert!(text.contains("Max"));
+        assert!(text.contains("Deepest reasoning with no token limit bias"));
+    }
+
+    #[test]
+    fn render_claude_effort_step_hides_max_for_sonnet() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ReasoningLevel;
+        state.agent_id = "claude".to_string();
+        state.model = "sonnet".to_string();
+
+        let text = render_text(&state, 110, 24);
+
+        assert!(text.contains("Select Effort Level for sonnet"));
+        assert!(!text.contains("  Max    "));
     }
 
     #[test]

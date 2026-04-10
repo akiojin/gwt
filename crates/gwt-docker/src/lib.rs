@@ -12,10 +12,10 @@ pub mod port;
 pub use compose::{parse_compose_file, ComposeService};
 pub use container::{
     compose_restart, compose_service_exec_capture, compose_service_has_command,
-    compose_service_is_running, compose_service_logs, compose_service_status, compose_stop,
-    compose_up, compose_up_force_recreate, compose_up_force_recreate_with_output,
-    compose_up_with_output, list_containers, restart, start, stop, CommandOutputStream,
-    ComposeServiceStatus, ContainerInfo, ContainerStatus,
+    compose_service_is_running, compose_service_logs, compose_service_status,
+    compose_service_user_is_root, compose_stop, compose_up, compose_up_force_recreate,
+    compose_up_force_recreate_with_output, compose_up_with_output, list_containers, restart, start,
+    stop, CommandOutputStream, ComposeServiceStatus, ContainerInfo, ContainerStatus,
 };
 pub use detect::{
     compose_available, daemon_running, detect_docker_files, docker_available, DockerFiles,

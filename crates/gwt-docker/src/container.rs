@@ -564,6 +564,31 @@ pub fn compose_service_exec_capture(
     )
 }
 
+/// Return whether a compose service executes as root inside the container.
+pub fn compose_service_user_is_root(compose_file: &std::path::Path, service: &str) -> Result<bool> {
+    let output = compose_service_exec_capture(
+        compose_file,
+        service,
+        None,
+        &["sh".to_string(), "-lc".to_string(), "id -u".to_string()],
+    )?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "failed to determine container user".to_string()
+        };
+        return Err(GwtError::Docker(detail));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
+}
+
 /// Stop a compose service.
 pub fn compose_stop(compose_file: &std::path::Path, service: &str) -> Result<()> {
     let compose_file = compose_file.display().to_string();
@@ -1213,6 +1238,38 @@ mod tests {
                     compose_path.display()
                 )
             );
+        });
+    }
+
+    #[test]
+    fn compose_service_user_is_root_returns_true_for_uid_zero() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"app\" ] && [ \"$7\" = \"sh\" ] && [ \"$8\" = \"-lc\" ] && [ \"$9\" = \"id -u\" ]; then\n  printf '0\\n'\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n";
+
+        with_fake_docker(script, |_| {
+            assert!(compose_service_user_is_root(&compose_path, "app").expect("root probe"));
+        });
+    }
+
+    #[test]
+    fn compose_service_user_is_root_returns_false_for_non_root() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"app\" ] && [ \"$7\" = \"sh\" ] && [ \"$8\" = \"-lc\" ] && [ \"$9\" = \"id -u\" ]; then\n  printf '1000\\n'\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n";
+
+        with_fake_docker(script, |_| {
+            assert!(!compose_service_user_is_root(&compose_path, "app").expect("root probe"));
         });
     }
 }
