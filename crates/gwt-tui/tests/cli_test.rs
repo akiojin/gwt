@@ -275,6 +275,19 @@ fn red_96_parse_issue_comment() {
 }
 
 #[test]
+fn red_96a_parse_issue_comment_rejects_trailing_args() {
+    let err = parse_issue_args(&[
+        s("comment"),
+        s("42"),
+        s("-f"),
+        s("/tmp/comment.md"),
+        s("extra"),
+    ])
+    .unwrap_err();
+    assert!(matches!(err, CliParseError::Usage));
+}
+
+#[test]
 fn red_103_parse_pr_current() {
     let cmd = parse_pr_args(&[s("current")]).unwrap();
     assert_eq!(cmd, CliCommand::PrCurrent);
@@ -390,6 +403,42 @@ fn red_105d_parse_pr_reply_and_resolve() {
 }
 
 #[test]
+fn red_105e_parse_pr_fixed_arity_subcommands_reject_trailing_args() {
+    let cases = [
+        vec![s("current"), s("extra")],
+        vec![s("view"), s("42"), s("extra")],
+        vec![
+            s("comment"),
+            s("42"),
+            s("-f"),
+            s("/tmp/reply.md"),
+            s("extra"),
+        ],
+        vec![s("reviews"), s("42"), s("extra")],
+        vec![s("review-threads"), s("42"), s("extra")],
+        vec![
+            s("review-threads"),
+            s("reply-and-resolve"),
+            s("42"),
+            s("-f"),
+            s("/tmp/reply.md"),
+            s("extra"),
+        ],
+        vec![s("checks"), s("42"), s("extra")],
+    ];
+
+    for args in cases {
+        let err = parse_pr_args(&args).unwrap_err();
+        assert!(
+            matches!(err, CliParseError::Usage),
+            "expected usage for {:?}, got {:?}",
+            args,
+            err
+        );
+    }
+}
+
+#[test]
 fn red_106_parse_actions_logs() {
     let cmd = parse_actions_args(&[s("logs"), s("--run"), s("101")]).unwrap();
     assert_eq!(cmd, CliCommand::ActionsLogs { run_id: 101 });
@@ -399,6 +448,15 @@ fn red_106_parse_actions_logs() {
 fn red_107_parse_actions_job_logs() {
     let cmd = parse_actions_args(&[s("job-logs"), s("--job"), s("202")]).unwrap();
     assert_eq!(cmd, CliCommand::ActionsJobLogs { job_id: 202 });
+}
+
+#[test]
+fn red_107a_parse_actions_rejects_trailing_args() {
+    let err = parse_actions_args(&[s("logs"), s("--run"), s("101"), s("extra")]).unwrap_err();
+    assert!(matches!(err, CliParseError::Usage));
+
+    let err = parse_actions_args(&[s("job-logs"), s("--job"), s("202"), s("extra")]).unwrap_err();
+    assert!(matches!(err, CliParseError::Usage));
 }
 
 // -----------------------------------------------------------------

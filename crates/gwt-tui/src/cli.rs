@@ -256,42 +256,51 @@ pub fn parse_issue_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 pub fn parse_pr_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
-        Some("current") if it.peek().is_none() => Ok(CliCommand::PrCurrent),
+        Some("current") => {
+            ensure_no_remaining_args(it)?;
+            Ok(CliCommand::PrCurrent)
+        }
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
-        Some("view") => Ok(CliCommand::PrView {
-            number: parse_required_number(it.next())?,
-        }),
+        Some("view") => {
+            let number = parse_required_number(it.next())?;
+            ensure_no_remaining_args(it)?;
+            Ok(CliCommand::PrView { number })
+        }
         Some("comment") => {
             let number = parse_required_number(it.next())?;
             expect_flag(it.next(), "-f")?;
-            Ok(CliCommand::PrComment {
-                number,
-                file: it.next().ok_or(CliParseError::MissingFlag("-f"))?.clone(),
-            })
+            let file = it.next().ok_or(CliParseError::MissingFlag("-f"))?.clone();
+            ensure_no_remaining_args(it)?;
+            Ok(CliCommand::PrComment { number, file })
         }
-        Some("reviews") => Ok(CliCommand::PrReviews {
-            number: parse_required_number(it.next())?,
-        }),
+        Some("reviews") => {
+            let number = parse_required_number(it.next())?;
+            ensure_no_remaining_args(it)?;
+            Ok(CliCommand::PrReviews { number })
+        }
         Some("review-threads") => match it.next().map(String::as_str) {
             Some("reply-and-resolve") => {
                 let number = parse_required_number(it.next())?;
                 expect_flag(it.next(), "-f")?;
-                Ok(CliCommand::PrReviewThreadsReplyAndResolve {
-                    number,
-                    file: it.next().ok_or(CliParseError::MissingFlag("-f"))?.clone(),
-                })
+                let file = it.next().ok_or(CliParseError::MissingFlag("-f"))?.clone();
+                ensure_no_remaining_args(it)?;
+                Ok(CliCommand::PrReviewThreadsReplyAndResolve { number, file })
             }
-            Some(number_arg) => Ok(CliCommand::PrReviewThreads {
-                number: number_arg
+            Some(number_arg) => {
+                let number = number_arg
                     .parse()
-                    .map_err(|_| CliParseError::InvalidNumber(number_arg.to_string()))?,
-            }),
+                    .map_err(|_| CliParseError::InvalidNumber(number_arg.to_string()))?;
+                ensure_no_remaining_args(it)?;
+                Ok(CliCommand::PrReviewThreads { number })
+            }
             None => Err(CliParseError::Usage),
         },
-        Some("checks") => Ok(CliCommand::PrChecks {
-            number: parse_required_number(it.next())?,
-        }),
+        Some("checks") => {
+            let number = parse_required_number(it.next())?;
+            ensure_no_remaining_args(it)?;
+            Ok(CliCommand::PrChecks { number })
+        }
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
         None => Err(CliParseError::Usage),
     }
@@ -303,15 +312,15 @@ pub fn parse_actions_args(args: &[String]) -> Result<CliCommand, CliParseError> 
     match it.next().map(String::as_str) {
         Some("logs") => {
             expect_flag(it.next(), "--run")?;
-            Ok(CliCommand::ActionsLogs {
-                run_id: parse_required_number(it.next())?,
-            })
+            let run_id = parse_required_number(it.next())?;
+            ensure_no_remaining_args(it)?;
+            Ok(CliCommand::ActionsLogs { run_id })
         }
         Some("job-logs") => {
             expect_flag(it.next(), "--job")?;
-            Ok(CliCommand::ActionsJobLogs {
-                job_id: parse_required_number(it.next())?,
-            })
+            let job_id = parse_required_number(it.next())?;
+            ensure_no_remaining_args(it)?;
+            Ok(CliCommand::ActionsJobLogs { job_id })
         }
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
         None => Err(CliParseError::Usage),
@@ -331,6 +340,15 @@ fn parse_required_number(arg: Option<&String>) -> Result<u64, CliParseError> {
     value
         .parse()
         .map_err(|_| CliParseError::InvalidNumber(value.clone()))
+}
+
+fn ensure_no_remaining_args<'a>(
+    mut args: impl Iterator<Item = &'a String>,
+) -> Result<(), CliParseError> {
+    if args.next().is_some() {
+        return Err(CliParseError::Usage);
+    }
+    Ok(())
 }
 
 fn parse_pr_create_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
@@ -687,7 +705,7 @@ fn parse_issue_create_args(args: &[&String]) -> Result<CliCommand, CliParseError
 }
 
 fn parse_issue_comment_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
-    if args.len() < 3 {
+    if args.len() != 3 {
         return Err(CliParseError::Usage);
     }
     let number = args[0]
@@ -1722,10 +1740,20 @@ fn reply_and_resolve_pr_review_threads_via_gh(
 ) -> io::Result<usize> {
     let unresolved: Vec<PrReviewThread> = fetch_pr_review_threads_via_gh(owner, repo, number)?
         .into_iter()
-        .filter(|thread| !thread.is_resolved && !thread.is_outdated)
+        .filter(should_resolve_review_thread)
         .collect();
 
+    let mut resolved_count = 0;
     for thread in &unresolved {
+        let Some(current_thread) =
+            fetch_pr_review_thread_state_via_gh(owner, repo, number, &thread.id)?
+        else {
+            continue;
+        };
+        if !should_resolve_review_thread(&current_thread) {
+            continue;
+        }
+
         let reply_mutation = r#"
 mutation($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {
@@ -1736,23 +1764,25 @@ mutation($threadId: ID!, $body: String!) {
   }
 }
 "#;
-        let reply = Command::new("gh")
-            .args([
-                "api",
-                "graphql",
-                "-f",
-                &format!("query={reply_mutation}"),
-                "-f",
-                &format!("threadId={}", thread.id),
-                "-f",
-                &format!("body={body}"),
-            ])
-            .output()?;
-        if !reply.status.success() {
-            return Err(io::Error::other(format!(
-                "gh api graphql reply: {}",
-                String::from_utf8_lossy(&reply.stderr).trim()
-            )));
+        if should_reply_to_review_thread(&current_thread, body) {
+            let reply = Command::new("gh")
+                .args([
+                    "api",
+                    "graphql",
+                    "-f",
+                    &format!("query={reply_mutation}"),
+                    "-f",
+                    &format!("threadId={}", thread.id),
+                    "-f",
+                    &format!("body={body}"),
+                ])
+                .output()?;
+            if !reply.status.success() {
+                return Err(io::Error::other(format!(
+                    "gh api graphql reply: {}",
+                    String::from_utf8_lossy(&reply.stderr).trim()
+                )));
+            }
         }
 
         let resolve_mutation = r#"
@@ -1773,14 +1803,23 @@ mutation($threadId: ID!) {
             ])
             .output()?;
         if !resolve.status.success() {
+            if fetch_pr_review_thread_state_via_gh(owner, repo, number, &thread.id)?
+                .as_ref()
+                .is_some_and(|thread| thread.is_resolved)
+            {
+                resolved_count += 1;
+                continue;
+            }
             return Err(io::Error::other(format!(
                 "gh api graphql resolve: {}",
                 String::from_utf8_lossy(&resolve.stderr).trim()
             )));
         }
+
+        resolved_count += 1;
     }
 
-    Ok(unresolved.len())
+    Ok(resolved_count)
 }
 
 fn fetch_pr_checks_via_gh(
@@ -1843,12 +1882,9 @@ fn fetch_pr_checks_via_gh(
         }
     }
 
-    let checks = if output.status.success() {
-        parse_pr_checks_items_json(&String::from_utf8_lossy(&output.stdout))
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
-    } else {
-        Vec::new()
-    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let checks = parse_pr_checks_items_response(&stdout, &stderr, output.status.success())?;
 
     Ok(PrChecksSummary {
         summary: format!(
@@ -1860,6 +1896,29 @@ fn fetch_pr_checks_via_gh(
         review_status: pr.review_status,
         checks,
     })
+}
+
+fn fetch_pr_review_thread_state_via_gh(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    thread_id: &str,
+) -> io::Result<Option<PrReviewThread>> {
+    Ok(fetch_pr_review_threads_via_gh(owner, repo, number)?
+        .into_iter()
+        .find(|thread| thread.id == thread_id))
+}
+
+fn review_thread_has_comment_body(thread: &PrReviewThread, body: &str) -> bool {
+    thread.comments.iter().any(|comment| comment.body == body)
+}
+
+fn should_reply_to_review_thread(thread: &PrReviewThread, body: &str) -> bool {
+    should_resolve_review_thread(thread) && !review_thread_has_comment_body(thread, body)
+}
+
+fn should_resolve_review_thread(thread: &PrReviewThread) -> bool {
+    !thread.is_resolved && !thread.is_outdated
 }
 
 fn parse_pr_checks_items_json(json: &str) -> Result<Vec<PrCheckItem>, serde_json::Error> {
@@ -1907,6 +1966,19 @@ fn parse_pr_checks_items_json(json: &str) -> Result<Vec<PrCheckItem>, serde_json
                 .to_string(),
         })
         .collect())
+}
+
+fn parse_pr_checks_items_response(
+    stdout: &str,
+    stderr: &str,
+    success: bool,
+) -> io::Result<Vec<PrCheckItem>> {
+    if !success {
+        return Err(io::Error::other(format!("gh pr checks: {}", stderr.trim())));
+    }
+
+    parse_pr_checks_items_json(stdout)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
 
 fn parse_available_fields(message: &str) -> Vec<String> {
@@ -2558,4 +2630,74 @@ fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_thread() -> PrReviewThread {
+        PrReviewThread {
+            id: "thread-1".to_string(),
+            is_resolved: false,
+            is_outdated: false,
+            path: "src/lib.rs".to_string(),
+            line: Some(12),
+            comments: vec![],
+        }
+    }
+
+    #[test]
+    fn review_thread_reply_is_skipped_for_duplicate_body() {
+        let mut thread = sample_thread();
+        thread.comments.push(PrReviewThreadComment {
+            id: "comment-1".to_string(),
+            body: "Fixed in latest commit.".to_string(),
+            created_at: "2026-04-10T00:00:00Z".to_string(),
+            updated_at: "2026-04-10T00:00:00Z".to_string(),
+            author: "reviewer".to_string(),
+        });
+
+        assert!(!should_reply_to_review_thread(
+            &thread,
+            "Fixed in latest commit."
+        ));
+        assert!(should_resolve_review_thread(&thread));
+    }
+
+    #[test]
+    fn review_thread_reply_is_skipped_for_resolved_or_outdated_threads() {
+        let mut resolved = sample_thread();
+        resolved.is_resolved = true;
+        assert!(!should_reply_to_review_thread(&resolved, "reply"));
+        assert!(!should_resolve_review_thread(&resolved));
+
+        let mut outdated = sample_thread();
+        outdated.is_outdated = true;
+        assert!(!should_reply_to_review_thread(&outdated, "reply"));
+        assert!(!should_resolve_review_thread(&outdated));
+    }
+
+    #[test]
+    fn pr_checks_response_returns_error_when_gh_fails() {
+        let err = parse_pr_checks_items_response("", "auth failed", false).unwrap_err();
+        assert!(
+            err.to_string().contains("gh pr checks: auth failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn pr_checks_response_parses_success_payload() {
+        let items = parse_pr_checks_items_response(
+            r#"[{"name":"test","state":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://example.com","startedAt":"2026-04-10T00:00:00Z","completedAt":"2026-04-10T00:01:00Z","workflow":"CI"}]"#,
+            "",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "test");
+        assert_eq!(items[0].conclusion, "SUCCESS");
+    }
 }
