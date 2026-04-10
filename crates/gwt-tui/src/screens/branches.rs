@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use gwt_agent::AgentStatus;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph},
     Frame,
@@ -210,11 +210,20 @@ pub struct BranchLiveSessionSummary {
     pub indicators: Vec<BranchLiveSessionIndicator>,
 }
 
+/// Kind of branch-row live session indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchLiveSessionIndicatorKind {
+    Agent,
+    Shell,
+}
+
 /// Lightweight live session indicator rendered directly in the branch list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BranchLiveSessionIndicator {
+    pub kind: BranchLiveSessionIndicatorKind,
     pub status: AgentStatus,
     pub color: crate::model::AgentColor,
+    pub active: bool,
 }
 
 /// Visible live-session indicators for a single rendered branch row.
@@ -1129,11 +1138,13 @@ fn build_branch_live_summary(
 
     let spans: Vec<Span<'static>> = visible_branch_live_indicators(summary, available_width)
         .filter_map(|indicator| {
-            let glyph = branch_live_indicator_glyph(indicator.status, animation_tick)?;
-            Some(Span::styled(
-                glyph.to_string(),
-                Style::default().fg(branch_live_indicator_color(indicator.color)),
-            ))
+            let glyph =
+                branch_live_indicator_glyph(indicator.kind, indicator.status, animation_tick)?;
+            let mut style = Style::default().fg(branch_live_indicator_color(indicator.color));
+            if indicator.active {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Some(Span::styled(glyph.to_string(), style))
         })
         .collect();
 
@@ -1152,11 +1163,21 @@ fn visible_branch_live_indicators(
         .indicators
         .iter()
         .take(available_width)
-        .filter(|indicator| branch_live_indicator_glyph(indicator.status, 0).is_some())
+        .filter(|indicator| {
+            branch_live_indicator_glyph(indicator.kind, indicator.status, 0).is_some()
+        })
         .copied()
 }
 
-fn branch_live_indicator_glyph(status: AgentStatus, animation_tick: usize) -> Option<char> {
+fn branch_live_indicator_glyph(
+    kind: BranchLiveSessionIndicatorKind,
+    status: AgentStatus,
+    animation_tick: usize,
+) -> Option<char> {
+    if kind == BranchLiveSessionIndicatorKind::Shell {
+        return Some('▸');
+    }
+
     match status {
         AgentStatus::Running => Some(running_spinner_frame(animation_tick)),
         AgentStatus::WaitingInput => Some('●'),
@@ -2292,8 +2313,10 @@ mod tests {
             "feature/live".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Blue,
+                    active: false,
                 }],
             },
         );
@@ -2330,8 +2353,10 @@ mod tests {
             "feature/wait".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::WaitingInput,
                     color: crate::model::AgentColor::Green,
+                    active: false,
                 }],
             },
         );
@@ -2371,8 +2396,10 @@ mod tests {
             "feature/narrow".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Blue,
+                    active: false,
                 }],
             },
         );
@@ -2417,8 +2444,10 @@ mod tests {
             "feature/hidden".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Blue,
+                    active: false,
                 }],
             },
         );
@@ -2445,8 +2474,10 @@ mod tests {
             "feature/this-branch-name-is-too-wide".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Cyan,
+                    active: false,
                 }],
             },
         );

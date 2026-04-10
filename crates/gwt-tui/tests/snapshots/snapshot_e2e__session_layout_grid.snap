@@ -3,7 +3,7 @@ source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
 ┌ 1: › Shell ──────────────────────────────────────────────────────────────────┐
-│                                                                              │
+│Session: Shell (78x21)                                                        │
 │                                                                              │
 │                                                                              │
 │                                                                              │
