@@ -2543,6 +2543,86 @@ fn apply_notification(model: &mut Model, notification: Notification) {
     }
 }
 
+fn mirror_log_event_without_watcher(model: &mut Model, event: Notification) {
+    if model.logs_watcher_rx.is_none() {
+        screens::logs::update(
+            &mut model.logs,
+            screens::logs::LogsMessage::AppendEntries(vec![event]),
+        );
+    }
+}
+
+fn emit_log_event(event: &Notification) {
+    let detail = event.detail.as_deref().unwrap_or("");
+    let action = event
+        .fields
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let service = event
+        .fields
+        .get("service")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let stream = event
+        .fields
+        .get("stream")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    match event.severity {
+        Severity::Debug => {
+            tracing::debug!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+        Severity::Info => {
+            tracing::info!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+        Severity::Warn => {
+            tracing::warn!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+        Severity::Error => {
+            tracing::error!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+    }
+}
+
+fn record_log_event(model: &mut Model, event: Notification) {
+    mirror_log_event_without_watcher(model, event.clone());
+    emit_log_event(&event);
+}
+
 fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
     let detail = err.to_string();
     if gwt_core::runtime::project_index_runtime_error_kind(&detail).is_some() {
@@ -2749,6 +2829,9 @@ fn drain_docker_progress_events(model: &mut Model) {
     match event {
         DockerProgressEvent::Stage { stage, message } => {
             emit_branch_docker_progress(model, stage, message);
+        }
+        DockerProgressEvent::Log { entry } => {
+            record_log_event(model, entry);
         }
         DockerProgressEvent::BranchCompleted { message } => {
             model.docker_progress_events = None;
@@ -3855,6 +3938,9 @@ fn spawn_docker_launch_worker(
                         DockerProgressEvent::Stage { stage, message },
                     );
                 },
+                |entry| {
+                    push_docker_progress_event(&events, DockerProgressEvent::Log { entry });
+                },
             )?;
             Ok(config)
         })();
@@ -4115,16 +4201,18 @@ fn apply_docker_runtime_to_launch_config(
     repo_path: &Path,
     config: &mut LaunchConfig,
 ) -> Result<(), String> {
-    apply_docker_runtime_to_launch_config_with_progress(repo_path, config, |_, _| {})
+    apply_docker_runtime_to_launch_config_with_progress(repo_path, config, |_, _| {}, |_| {})
 }
 
-fn apply_docker_runtime_to_launch_config_with_progress<F>(
+fn apply_docker_runtime_to_launch_config_with_progress<F, G>(
     repo_path: &Path,
     config: &mut LaunchConfig,
     mut emit_progress: F,
+    mut emit_log: G,
 ) -> Result<(), String>
 where
     F: FnMut(screens::docker_progress::DockerStage, String),
+    G: FnMut(Notification),
 {
     if config.runtime_target != LaunchRuntimeTarget::Docker {
         return Ok(());
@@ -4140,7 +4228,7 @@ where
         .unwrap_or_else(|| repo_path.to_path_buf());
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
-    ensure_docker_launch_service_ready(&launch, &mut emit_progress)?;
+    ensure_docker_launch_service_ready(&launch, &mut emit_progress, &mut emit_log)?;
     let runtime_command = docker_runtime_command_for_exec(config);
     emit_progress(
         screens::docker_progress::DockerStage::WaitingForServices,
@@ -4171,6 +4259,35 @@ where
     config.docker_service = Some(launch.service);
 
     Ok(())
+}
+
+fn docker_compose_up_log_entry(
+    service: &str,
+    stream: Option<gwt_docker::CommandOutputStream>,
+    message: impl Into<String>,
+) -> Notification {
+    let stream_label = stream.map(|stream| match stream {
+        gwt_docker::CommandOutputStream::Stdout => "stdout",
+        gwt_docker::CommandOutputStream::Stderr => "stderr",
+    });
+    let rendered = match stream_label {
+        Some(label) => format!("[{service}][{label}] {}", message.into()),
+        None => format!("[{service}] {}", message.into()),
+    };
+    let severity = match stream {
+        Some(gwt_docker::CommandOutputStream::Stderr) => Severity::Warn,
+        _ => Severity::Info,
+    };
+    let mut event = Notification::new(severity, "docker", rendered)
+        .with_field(
+            "action",
+            serde_json::Value::String("compose_up".to_string()),
+        )
+        .with_field("service", serde_json::Value::String(service.to_string()));
+    if let Some(label) = stream_label {
+        event = event.with_field("stream", serde_json::Value::String(label.to_string()));
+    }
+    event
 }
 
 fn docker_runtime_command_for_exec(config: &LaunchConfig) -> String {
@@ -4221,12 +4338,14 @@ fn ensure_docker_launch_command_ready(
     ))
 }
 
-fn ensure_docker_launch_service_ready<F>(
+fn ensure_docker_launch_service_ready<F, G>(
     launch: &DockerLaunchPlan,
     emit_progress: &mut F,
+    emit_log: &mut G,
 ) -> Result<(), String>
 where
     F: FnMut(screens::docker_progress::DockerStage, String),
+    G: FnMut(Notification),
 {
     let running = gwt_docker::compose_service_is_running(&launch.compose_file, &launch.service)
         .map_err(|err| err.to_string())?;
@@ -4241,7 +4360,24 @@ where
             launch.service
         ),
     );
-    gwt_docker::compose_up(&launch.compose_file, &launch.service).map_err(|err| err.to_string())?;
+    emit_log(docker_compose_up_log_entry(
+        &launch.service,
+        None,
+        format!("Running docker compose up -d {}", launch.service),
+    ));
+    gwt_docker::compose_up_with_output(&launch.compose_file, &launch.service, |stream, line| {
+        emit_log(docker_compose_up_log_entry(
+            &launch.service,
+            Some(stream),
+            line.to_string(),
+        ));
+    })
+    .map_err(|err| err.to_string())?;
+    emit_log(docker_compose_up_log_entry(
+        &launch.service,
+        None,
+        format!("docker compose up -d {} completed", launch.service),
+    ));
 
     emit_progress(
         screens::docker_progress::DockerStage::StartingContainer,
@@ -12234,6 +12370,72 @@ services:
                 .as_deref()
                 .unwrap_or_default()
                 .contains("Command 'claude' is not available in Docker service 'gwt'"));
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_async_docker_launch_streams_compose_output_into_logs() {
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+        let release_flag = worktree.path().join("release-compose-up");
+        let running_flag = worktree.path().join("service-running");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("installed".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ -f '{}' ]; then\n    printf 'gwt\\n'\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  printf 'build step 1\\n'\n  printf 'build warning\\n' >&2\n  while [ ! -f '{}' ]; do\n    sleep 0.01\n  done\n  : > '{}'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            running_flag.display(),
+            release_flag.display(),
+            running_flag.display(),
+        );
+
+        with_fake_docker(&script, || {
+            materialize_pending_launch(&mut model);
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| {
+                    model.logs.entries.iter().any(|entry| {
+                        entry.source == "docker"
+                            && entry.message.contains("[gwt][stdout] build step 1")
+                    }) && model.logs.entries.iter().any(|entry| {
+                        entry.source == "docker"
+                            && entry.message.contains("[gwt][stderr] build warning")
+                    })
+                },
+                "docker compose output in logs",
+            );
+
+            assert!(model.current_notification.is_none());
+            assert!(model.error_queue.is_empty());
+
+            fs::write(&release_flag, "").expect("release compose up");
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| model.docker_progress_events.is_none() && !model.error_queue.is_empty(),
+                "docker launch failure after logs",
+            );
         });
     }
 

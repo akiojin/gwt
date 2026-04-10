@@ -453,6 +453,9 @@ pub enum DockerProgressEvent {
         stage: crate::screens::docker_progress::DockerStage,
         message: String,
     },
+    Log {
+        entry: Notification,
+    },
     BranchCompleted {
         message: String,
     },

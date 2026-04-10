@@ -5,7 +5,9 @@
 
 use gwt_core::{GwtError, Result};
 use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -50,6 +52,13 @@ pub struct ContainerInfo {
     pub image: String,
     /// Published ports (e.g. "0.0.0.0:8080->80/tcp").
     pub ports: String,
+}
+
+/// Output stream emitted by a Docker command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutputStream {
+    Stdout,
+    Stderr,
 }
 
 fn docker_binary() -> OsString {
@@ -134,6 +143,170 @@ fn run_docker_with_timeout_in_dir_and_timeout(
         .map_err(|e| GwtError::Docker(format!("failed to collect {action} output: {e}")))
 }
 
+#[derive(Debug)]
+struct CommandOutputLine {
+    stream: CommandOutputStream,
+    line: String,
+}
+
+fn spawn_output_reader(
+    reader: impl Read + Send + 'static,
+    stream: CommandOutputStream,
+    tx: mpsc::Sender<CommandOutputLine>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines().map_while(|line| line.ok()) {
+            if tx.send(CommandOutputLine { stream, line }).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn push_output_line(buf: &mut Vec<u8>, line: &str) {
+    buf.extend_from_slice(line.as_bytes());
+    buf.push(b'\n');
+}
+
+fn handle_command_output_line<F>(
+    line: CommandOutputLine,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    on_line: &mut F,
+) where
+    F: FnMut(CommandOutputStream, &str),
+{
+    match line.stream {
+        CommandOutputStream::Stdout => push_output_line(stdout, &line.line),
+        CommandOutputStream::Stderr => push_output_line(stderr, &line.line),
+    }
+    on_line(line.stream, &line.line);
+}
+
+fn drain_output_lines<F>(
+    rx: &mpsc::Receiver<CommandOutputLine>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    on_line: &mut F,
+) where
+    F: FnMut(CommandOutputStream, &str),
+{
+    while let Ok(line) = rx.try_recv() {
+        handle_command_output_line(line, stdout, stderr, on_line);
+    }
+}
+
+fn run_docker_with_output_streaming_in_dir_and_timeout<F>(
+    args: &[&str],
+    action: &str,
+    current_dir: Option<&std::path::Path>,
+    timeout: Duration,
+    mut on_line: F,
+) -> Result<Output>
+where
+    F: FnMut(CommandOutputStream, &str),
+{
+    let mut command = Command::new(docker_binary());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = current_dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| GwtError::Docker(format!("failed to run {action}: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| GwtError::Docker(format!("failed to capture stdout for {action}")))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| GwtError::Docker(format!("failed to capture stderr for {action}")))?;
+    let (tx, rx) = mpsc::channel::<CommandOutputLine>();
+    let stdout_handle = spawn_output_reader(stdout, CommandOutputStream::Stdout, tx.clone());
+    let stderr_handle = spawn_output_reader(stderr, CommandOutputStream::Stderr, tx);
+
+    let deadline = Instant::now() + timeout;
+    let mut collected_stdout = Vec::new();
+    let mut collected_stderr = Vec::new();
+
+    let status = loop {
+        drain_output_lines(
+            &rx,
+            &mut collected_stdout,
+            &mut collected_stderr,
+            &mut on_line,
+        );
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    drain_output_lines(
+                        &rx,
+                        &mut collected_stdout,
+                        &mut collected_stderr,
+                        &mut on_line,
+                    );
+                    return Err(GwtError::Docker(format!(
+                        "{action} timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                }
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                drain_output_lines(
+                    &rx,
+                    &mut collected_stdout,
+                    &mut collected_stderr,
+                    &mut on_line,
+                );
+                return Err(GwtError::Docker(format!(
+                    "failed while waiting for {action}: {e}"
+                )));
+            }
+        }
+
+        match rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(line) => handle_command_output_line(
+                line,
+                &mut collected_stdout,
+                &mut collected_stderr,
+                &mut on_line,
+            ),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {}
+        }
+    };
+
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+    drain_output_lines(
+        &rx,
+        &mut collected_stdout,
+        &mut collected_stderr,
+        &mut on_line,
+    );
+
+    Ok(Output {
+        status,
+        stdout: collected_stdout,
+        stderr: collected_stderr,
+    })
+}
+
 fn compose_parent_dir(compose_file: &std::path::Path) -> &std::path::Path {
     compose_file
         .parent()
@@ -142,12 +315,25 @@ fn compose_parent_dir(compose_file: &std::path::Path) -> &std::path::Path {
 
 /// Start a compose service in detached mode.
 pub fn compose_up(compose_file: &std::path::Path, service: &str) -> Result<()> {
+    compose_up_with_output(compose_file, service, |_, _| {})
+}
+
+/// Start a compose service in detached mode while streaming stdout/stderr lines.
+pub fn compose_up_with_output<F>(
+    compose_file: &std::path::Path,
+    service: &str,
+    on_line: F,
+) -> Result<()>
+where
+    F: FnMut(CommandOutputStream, &str),
+{
     let compose_file = compose_file.display().to_string();
-    let output = run_docker_with_timeout_in_dir_and_timeout(
+    let output = run_docker_with_output_streaming_in_dir_and_timeout(
         &["compose", "-f", &compose_file, "up", "-d", service],
         "docker compose up",
         Some(compose_parent_dir(std::path::Path::new(&compose_file))),
         docker_compose_up_timeout(),
+        on_line,
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -607,6 +793,30 @@ mod tests {
             read_invocation(&log_path),
             format!("compose\n-f\n{}\nup\n-d\napp\n", compose_path.display())
         );
+    }
+
+    #[test]
+    fn compose_up_with_output_streams_stdout_and_stderr_lines() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ]; then\n  printf 'stdout line 1\\n'\n  printf 'stderr line 1\\n' >&2\n  printf 'stdout line 2\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, |_| {
+            let mut seen = Vec::new();
+            compose_up_with_output(&compose_path, "app", |stream, line| {
+                seen.push((stream, line.to_string()));
+            })
+            .expect("compose up");
+
+            assert!(seen.contains(&(CommandOutputStream::Stdout, "stdout line 1".to_string())));
+            assert!(seen.contains(&(CommandOutputStream::Stderr, "stderr line 1".to_string())));
+            assert!(seen.contains(&(CommandOutputStream::Stdout, "stdout line 2".to_string())));
+        });
     }
 
     #[test]

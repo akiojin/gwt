@@ -1776,3 +1776,24 @@ Launch Agent Wizard から Docker runtime を選ぶと、image build を伴う
 1. `docker info` / `compose ps` のような probe と、`compose up` のような build/start 操作は timeout を分離する。
 2. 進捗を出したい長時間処理は UI thread で同期実行せず、background worker と event queue に載せる。
 3. progress overlay と error overlay が共存する flow では、失敗時にどちらを primary surface にするかを先に決め、RED テストで閉じ忘れを防ぐ。
+
+## 2026-04-10 — fix: 長時間の外部コマンドは stage 表示だけでなく stdout/stderr の観測面を必ず用意する
+
+### 事象
+
+Docker launch の `BuildingImage` stage は表示されていたが、`docker compose up -d`
+の stdout/stderr がどこにも出ておらず、実際に build 中なのか、失敗済みなのか、
+あるいは無出力待機なのかをユーザーが判断できなかった。
+
+### 原因
+
+- Docker progress overlay は stage と要約メッセージしか持っておらず、
+  外部コマンドの実出力を扱う経路がなかった。
+- `compose up` の成功時出力は破棄され、失敗時だけ一部 stderr が detail に残る設計だった。
+- そのため「overlay は生きているが実体が分からない」観測不能状態が生まれた。
+
+### 再発防止策
+
+1. build/start のような長時間コマンドを導入したら、overlay とは別に stdout/stderr を Logs タブとログファイルへ流す経路を最初から設計する。
+2. RED テストでは「進捗 stage が見える」だけでなく「実出力が log surface に現れる」ことまで固定する。
+3. 成功時出力を捨てず、少なくとも line-oriented な structured log として残す。
