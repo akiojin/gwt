@@ -22,6 +22,15 @@ use crate::screens::settings::SettingsMessage;
 use crate::screens::versions::VersionsMessage;
 use crate::screens::wizard::{SpecContext, WizardMessage};
 
+/// Direction for moving the active session inside grid layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridSessionDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// Every possible action in the TUI.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -41,6 +50,8 @@ pub enum Message {
     PrevSession,
     /// Switch to session by index (0-based).
     SwitchSession(usize),
+    /// Move the active session selection within grid layout.
+    MoveGridSession(GridSessionDirection),
     /// Toggle session layout between Tab and Grid.
     ToggleSessionLayout,
     /// Create a new shell session.
@@ -131,6 +142,7 @@ mod tests {
         let _ = Message::NextSession;
         let _ = Message::PrevSession;
         let _ = Message::SwitchSession(0);
+        let _ = Message::MoveGridSession(GridSessionDirection::Left);
         let _ = Message::ToggleSessionLayout;
         let _ = Message::NewShell;
         let _ = Message::CloseSession;

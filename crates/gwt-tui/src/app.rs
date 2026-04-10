@@ -48,7 +48,7 @@ use crate::{
     custom_agents::load_custom_agents,
     input::voice::VoiceInputMessage,
     input_trace,
-    message::Message,
+    message::{GridSessionDirection, Message},
     model::{
         ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
         ManagementTab, Model, PendingSessionConversion, ScrollbackStrategy, SessionLayout,
@@ -175,25 +175,36 @@ pub fn session_content_size(model: &Model) -> (u16, u16) {
 }
 
 fn sync_session_viewports(model: &mut Model) {
-    let Some(content) = active_session_content_area(model) else {
+    let Some(session_area) = visible_session_area(model) else {
         return;
     };
-    let render_width = model
-        .active_session_tab()
-        .map(|session| session_text_area(session, content).width)
-        .unwrap_or(content.width);
 
-    for pty in model.pty_handles.values() {
-        let _ = pty.resize(render_width, content.height);
-    }
-    for session in &mut model.sessions {
+    for session_idx in 0..model.sessions.len() {
+        let Some(content) = session_content_area_for_index(model, session_area, session_idx) else {
+            continue;
+        };
+        let render_width = model
+            .sessions
+            .get(session_idx)
+            .map(|session| session_text_area(session, content).width)
+            .unwrap_or(content.width);
+
+        let session_id = model.sessions[session_idx].id.clone();
+        if let Some(pty) = model.pty_handles.get(&session_id) {
+            let _ = pty.resize(render_width, content.height);
+        }
+
+        let session = &mut model.sessions[session_idx];
         let current_scrollback = session.vt.scrollback();
         session.vt.resize(content.height, render_width);
         session
             .vt
             .set_scrollback(current_scrollback.min(session.vt.max_scrollback()));
     }
+
     if let Some(session) = model.active_session_tab() {
+        let content = active_session_content_area(model).unwrap_or(session_area);
+        let render_width = session_text_area(session, content).width;
         crate::scroll_debug::log_lazy(|| {
             format!(
             "event=viewport_sync session={} content_width={} content_height={} render_width={} vt_rows={} vt_cols={} scrollback={} max_scrollback={} follow_live={}",
@@ -797,6 +808,8 @@ fn refresh_branch_live_session_summaries_with(model: &mut Model, sessions_dir: &
 pub fn update(model: &mut Model, msg: Message) {
     let previous_active_session = model.active_session;
     let previous_active_focus = model.active_focus;
+    let previous_session_count = model.sessions.len();
+    let previous_session_layout = model.session_layout;
 
     match msg {
         Message::Quit => {
@@ -848,6 +861,9 @@ pub fn update(model: &mut Model, msg: Message) {
             if idx < model.sessions.len() {
                 model.active_session = idx;
             }
+        }
+        Message::MoveGridSession(direction) => {
+            move_grid_session(model, direction);
         }
         Message::ToggleSessionLayout => {
             model.session_layout = match model.session_layout {
@@ -1190,6 +1206,15 @@ pub fn update(model: &mut Model, msg: Message) {
         previous_active_session,
         previous_active_focus,
     );
+
+    if previous_session_count != model.sessions.len()
+        || previous_session_layout != model.session_layout
+    {
+        sync_session_viewports(model);
+    }
+    if previous_active_session != model.active_session {
+        refresh_branch_live_session_summaries(model);
+    }
 
     // Flush buffered PTY input after every message so keystrokes reach the PTY
     // without waiting for the next Tick.
@@ -1764,8 +1789,10 @@ pub fn visible_branch_live_indicator_signature(model: &Model) -> u64 {
     for row in visible_branch_live_indicator_rows(model) {
         row.branch_name.hash(&mut hasher);
         for indicator in row.indicators {
+            branch_live_indicator_kind_tag(indicator.kind).hash(&mut hasher);
             branch_live_indicator_status_tag(indicator.status).hash(&mut hasher);
             branch_live_indicator_color_tag(indicator.color).hash(&mut hasher);
+            indicator.active.hash(&mut hasher);
         }
     }
     hasher.finish()
@@ -1831,6 +1858,15 @@ fn branch_live_indicator_status_tag(status: gwt_agent::AgentStatus) -> u8 {
         gwt_agent::AgentStatus::Running => 1,
         gwt_agent::AgentStatus::WaitingInput => 2,
         gwt_agent::AgentStatus::Stopped => 3,
+    }
+}
+
+fn branch_live_indicator_kind_tag(
+    kind: crate::screens::branches::BranchLiveSessionIndicatorKind,
+) -> u8 {
+    match kind {
+        crate::screens::branches::BranchLiveSessionIndicatorKind::Agent => 0,
+        crate::screens::branches::BranchLiveSessionIndicatorKind::Shell => 1,
     }
 }
 
@@ -2522,40 +2558,72 @@ fn branch_live_session_summaries_with(
 ) -> HashMap<String, screens::branches::BranchLiveSessionSummary> {
     let mut summaries: HashMap<String, screens::branches::BranchLiveSessionSummary> =
         HashMap::new();
+    let active_session_id = model.active_session_tab().map(|session| session.id.clone());
 
     for session in &model.sessions {
-        let SessionTabType::Agent { agent_id, color } = &session.tab_type else {
-            continue;
-        };
+        match &session.tab_type {
+            SessionTabType::Agent { agent_id, color } => {
+                let path = sessions_dir.join(format!("{}.toml", session.id));
+                let Ok(persisted) = AgentSession::load(&path) else {
+                    continue;
+                };
+                let runtime_status =
+                    agent_session_runtime_status(sessions_dir, &session.id, &persisted);
+                let is_active = active_session_id.as_deref() == Some(session.id.as_str());
+                let status = if matches!(
+                    runtime_status,
+                    gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
+                ) {
+                    runtime_status
+                } else if is_active {
+                    gwt_agent::AgentStatus::WaitingInput
+                } else {
+                    continue;
+                };
 
-        let path = sessions_dir.join(format!("{}.toml", session.id));
-        let Ok(persisted) = AgentSession::load(&path) else {
-            continue;
-        };
-        let status = agent_session_runtime_status(sessions_dir, &session.id, &persisted);
-        if !matches!(
-            status,
-            gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
-        ) {
-            continue;
+                let candidate = screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status,
+                    color: branch_spinner_palette_color(agent_id, *color),
+                    active: is_active,
+                };
+                summaries
+                    .entry(persisted.branch.clone())
+                    .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
+                        indicators: Vec::new(),
+                    })
+                    .indicators
+                    .push(candidate);
+            }
+            SessionTabType::Shell => {}
         }
+    }
 
-        let candidate = screens::branches::BranchLiveSessionIndicator {
-            status,
-            color: branch_spinner_palette_color(agent_id, *color),
-        };
-        summaries
-            .entry(persisted.branch.clone())
-            .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
-                indicators: Vec::new(),
-            })
-            .indicators
-            .push(candidate);
+    if let Some(active_session) = model.active_session_tab() {
+        if matches!(&active_session.tab_type, SessionTabType::Shell) {
+            if let Some(branch) = active_session.name.strip_prefix("Shell: ") {
+                summaries
+                    .entry(branch.to_string())
+                    .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
+                        indicators: Vec::new(),
+                    })
+                    .indicators
+                    .push(screens::branches::BranchLiveSessionIndicator {
+                        kind: screens::branches::BranchLiveSessionIndicatorKind::Shell,
+                        status: gwt_agent::AgentStatus::WaitingInput,
+                        color: crate::model::AgentColor::Gray,
+                        active: true,
+                    });
+            }
+        }
     }
 
     for summary in summaries.values_mut() {
         summary.indicators.sort_by_key(|indicator| {
-            std::cmp::Reverse(branch_live_session_priority(indicator.status))
+            (
+                std::cmp::Reverse(u8::from(indicator.active)),
+                std::cmp::Reverse(branch_live_session_priority(indicator.status)),
+            )
         });
     }
 
@@ -5516,32 +5584,187 @@ fn title_hit_label_index(
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridAxis {
+    RowsFirst,
+    ColumnsFirst,
+}
+
+fn responsive_grid_axis(area: Rect) -> GridAxis {
+    if area.height > area.width {
+        GridAxis::ColumnsFirst
+    } else {
+        GridAxis::RowsFirst
+    }
+}
+
+fn grid_primary_count(count: usize) -> usize {
+    (count as f64).sqrt().ceil() as usize
+}
+
 fn grid_session_pane_area(area: Rect, count: usize, target_index: usize) -> Option<Rect> {
     if count == 0 || target_index >= count {
         return None;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
+    let primary = grid_primary_count(count);
+    match responsive_grid_axis(area) {
+        GridAxis::RowsFirst => {
+            let rows = count.div_ceil(primary);
+            let row_constraints: Vec<Constraint> = (0..rows)
+                .map(|_| Constraint::Ratio(1, rows as u32))
+                .collect();
+            let row_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(row_constraints)
+                .split(area);
 
-    let target_row = target_index / cols;
-    let start = target_row * cols;
-    let end = (start + cols).min(count);
-    let n = end - start;
-    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-    let col_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_constraints)
-        .split(row_chunks[target_row]);
+            let target_row = target_index / primary;
+            let start = target_row * primary;
+            let end = (start + primary).min(count);
+            let n = end - start;
+            let col_constraints: Vec<Constraint> =
+                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+            let col_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(col_constraints)
+                .split(row_chunks[target_row]);
 
-    col_chunks.get(target_index - start).copied()
+            col_chunks.get(target_index - start).copied()
+        }
+        GridAxis::ColumnsFirst => {
+            let cols = count.div_ceil(primary);
+            let col_constraints: Vec<Constraint> = (0..cols)
+                .map(|_| Constraint::Ratio(1, cols as u32))
+                .collect();
+            let col_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(col_constraints)
+                .split(area);
+
+            let target_col = target_index / primary;
+            let start = target_col * primary;
+            let end = (start + primary).min(count);
+            let n = end - start;
+            let row_constraints: Vec<Constraint> =
+                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+            let row_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(row_constraints)
+                .split(col_chunks[target_col]);
+
+            row_chunks.get(target_index - start).copied()
+        }
+    }
+}
+
+fn move_grid_session(model: &mut Model, direction: GridSessionDirection) {
+    if model.session_layout != SessionLayout::Grid {
+        return;
+    }
+
+    let Some(session_area) = visible_session_area(model) else {
+        return;
+    };
+    let Some(next_session) = adjacent_grid_session_index(
+        session_area,
+        model.sessions.len(),
+        model.active_session,
+        direction,
+    ) else {
+        return;
+    };
+
+    model.active_session = next_session;
+}
+
+fn adjacent_grid_session_index(
+    area: Rect,
+    count: usize,
+    active_index: usize,
+    direction: GridSessionDirection,
+) -> Option<usize> {
+    let current_area = grid_session_pane_area(area, count, active_index)?;
+    let current_center = rect_center_doubled(current_area);
+    let mut aligned_best: Option<(i32, i32, usize)> = None;
+    let mut fallback_best: Option<(i32, i32, usize)> = None;
+
+    for candidate_index in 0..count {
+        if candidate_index == active_index {
+            continue;
+        }
+        let Some(candidate_area) = grid_session_pane_area(area, count, candidate_index) else {
+            continue;
+        };
+        let candidate_center = rect_center_doubled(candidate_area);
+        let Some((primary_distance, secondary_distance)) =
+            directional_center_distances(current_center, candidate_center, direction)
+        else {
+            continue;
+        };
+        let key = (primary_distance, secondary_distance, candidate_index);
+        let overlaps = match direction {
+            GridSessionDirection::Left | GridSessionDirection::Right => {
+                rects_overlap_vertically(current_area, candidate_area)
+            }
+            GridSessionDirection::Up | GridSessionDirection::Down => {
+                rects_overlap_horizontally(current_area, candidate_area)
+            }
+        };
+        let slot = if overlaps {
+            &mut aligned_best
+        } else {
+            &mut fallback_best
+        };
+        if slot.as_ref().is_none_or(|best| key < *best) {
+            *slot = Some(key);
+        }
+    }
+
+    aligned_best
+        .or(fallback_best)
+        .map(|(_, _, candidate_index)| candidate_index)
+}
+
+fn rect_center_doubled(area: Rect) -> (i32, i32) {
+    (
+        i32::from(area.x) * 2 + i32::from(area.width),
+        i32::from(area.y) * 2 + i32::from(area.height),
+    )
+}
+
+fn directional_center_distances(
+    current_center: (i32, i32),
+    candidate_center: (i32, i32),
+    direction: GridSessionDirection,
+) -> Option<(i32, i32)> {
+    match direction {
+        GridSessionDirection::Left if candidate_center.0 < current_center.0 => Some((
+            current_center.0 - candidate_center.0,
+            (candidate_center.1 - current_center.1).abs(),
+        )),
+        GridSessionDirection::Right if candidate_center.0 > current_center.0 => Some((
+            candidate_center.0 - current_center.0,
+            (candidate_center.1 - current_center.1).abs(),
+        )),
+        GridSessionDirection::Up if candidate_center.1 < current_center.1 => Some((
+            current_center.1 - candidate_center.1,
+            (candidate_center.0 - current_center.0).abs(),
+        )),
+        GridSessionDirection::Down if candidate_center.1 > current_center.1 => Some((
+            candidate_center.1 - current_center.1,
+            (candidate_center.0 - current_center.0).abs(),
+        )),
+        _ => None,
+    }
+}
+
+fn rects_overlap_vertically(left: Rect, right: Rect) -> bool {
+    left.y < right.bottom() && right.y < left.bottom()
+}
+
+fn rects_overlap_horizontally(top: Rect, bottom: Rect) -> bool {
+    top.x < bottom.right() && bottom.x < top.right()
 }
 
 fn handle_management_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
@@ -5729,10 +5952,17 @@ where
     }
 
     if !hits_active_session {
-        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && scroll_target_session_index(model, mouse).is_some()
+        {
+            model.active_focus = FocusPane::Terminal;
+        } else if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
             model.terminal_trackpad_scroll_row = None;
+        } else {
+            return Ok(false);
         }
-        return Ok(false);
     }
 
     if matches!(
@@ -5751,22 +5981,32 @@ where
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, 1, "wheel");
+            let Some(target_session) = scroll_target_session_index(model, mouse) else {
+                return Ok(false);
+            };
+            let routing = session_scroll_routing_for_index(model, target_session);
+            log_session_scroll_routing(model, target_session, routing, 1, "wheel");
             match routing {
-                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, 1)),
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_session_by_rows(model, target_session, 1))
+                }
                 ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, 1))
+                    Ok(queue_session_mouse_scroll(model, target_session, mouse, 1))
                 }
             }
         }
         MouseEventKind::ScrollDown => {
-            let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, -1, "wheel");
+            let Some(target_session) = scroll_target_session_index(model, mouse) else {
+                return Ok(false);
+            };
+            let routing = session_scroll_routing_for_index(model, target_session);
+            log_session_scroll_routing(model, target_session, routing, -1, "wheel");
             match routing {
-                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, -1)),
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_session_by_rows(model, target_session, -1))
+                }
                 ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, -1))
+                    Ok(queue_session_mouse_scroll(model, target_session, mouse, -1))
                 }
             }
         }
@@ -5784,14 +6024,25 @@ where
             }
             let delta_rows = delta_rows.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
             let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, delta_rows, "trackpad_drag");
+            log_session_scroll_routing(
+                model,
+                model.active_session,
+                routing,
+                delta_rows,
+                "trackpad_drag",
+            );
             match routing {
-                ScrollInputRouting::LocalViewport => {
-                    Ok(scroll_active_session_by_rows(model, delta_rows))
-                }
-                ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, delta_rows))
-                }
+                ScrollInputRouting::LocalViewport => Ok(scroll_session_by_rows(
+                    model,
+                    model.active_session,
+                    delta_rows,
+                )),
+                ScrollInputRouting::PtyMouse => Ok(queue_session_mouse_scroll(
+                    model,
+                    model.active_session,
+                    mouse,
+                    delta_rows,
+                )),
             }
         }
         MouseEventKind::Up(MouseButton::Right) => {
@@ -5862,6 +6113,21 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
         .map(|region| region.url)
 }
 
+fn scroll_target_session_index(model: &Model, mouse: MouseEvent) -> Option<usize> {
+    match model.session_layout {
+        SessionLayout::Tab => {
+            mouse_hits_active_session(model, mouse).then_some(model.active_session)
+        }
+        SessionLayout::Grid => {
+            let session_area = visible_session_area(model)?;
+            (0..model.sessions.len()).find(|&session_idx| {
+                grid_session_pane_area(session_area, model.sessions.len(), session_idx)
+                    .is_some_and(|pane_area| mouse_hits_rect(mouse, pane_area))
+            })
+        }
+    }
+}
+
 fn mouse_hits_active_session(model: &Model, mouse: MouseEvent) -> bool {
     let Some(area) = active_session_content_area(model) else {
         return false;
@@ -5887,8 +6153,19 @@ fn mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell>
     })
 }
 
-fn clamped_mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell> {
-    let area = active_session_text_area(model)?;
+fn session_text_area_for_index(model: &Model, session_idx: usize) -> Option<Rect> {
+    let session_area = visible_session_area(model)?;
+    let area = session_content_area_for_index(model, session_area, session_idx)?;
+    let session = model.sessions.get(session_idx)?;
+    Some(session_text_area(session, area))
+}
+
+fn clamped_mouse_terminal_cell_for_index(
+    model: &Model,
+    mouse: MouseEvent,
+    session_idx: usize,
+) -> Option<TerminalCell> {
+    let area = session_text_area_for_index(model, session_idx)?;
     if area.width == 0 || area.height == 0 || mouse.row < area.y || mouse.row >= area.bottom() {
         return None;
     }
@@ -5914,6 +6191,13 @@ fn active_session_scroll_routing(model: &Model) -> ScrollInputRouting {
     session_scroll_routing(session)
 }
 
+fn session_scroll_routing_for_index(model: &Model, session_idx: usize) -> ScrollInputRouting {
+    let Some(session) = model.sessions.get(session_idx) else {
+        return ScrollInputRouting::LocalViewport;
+    };
+    session_scroll_routing(session)
+}
+
 fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRouting {
     if !matches!(session.tab_type, SessionTabType::Agent { .. }) {
         return ScrollInputRouting::LocalViewport;
@@ -5926,13 +6210,14 @@ fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRout
     ScrollInputRouting::LocalViewport
 }
 
-fn log_active_session_scroll_routing(
+fn log_session_scroll_routing(
     model: &Model,
+    session_idx: usize,
     routing: ScrollInputRouting,
     delta_rows: i16,
     source: &str,
 ) {
-    let Some(session) = model.active_session_tab() else {
+    let Some(session) = model.sessions.get(session_idx) else {
         return;
     };
     crate::scroll_debug::log_lazy(|| {
@@ -5952,8 +6237,25 @@ fn log_active_session_scroll_routing(
     });
 }
 
-fn queue_active_session_mouse_scroll(
+fn push_input_to_session(model: &mut Model, session_id: String, bytes: Vec<u8>) {
+    model
+        .pending_pty_inputs
+        .push_back(crate::model::PendingPtyInput { session_id, bytes });
+}
+
+fn reset_session_scrollback_for_input(model: &mut Model, session_idx: usize) {
+    let Some(session) = model.sessions.get_mut(session_idx) else {
+        return;
+    };
+    if session.vt.viewing_history() {
+        session.vt.clear_selection();
+        session.vt.set_follow_live(true);
+    }
+}
+
+fn queue_session_mouse_scroll(
     model: &mut Model,
+    session_idx: usize,
     mouse: MouseEvent,
     delta_rows: i16,
 ) -> bool {
@@ -5961,11 +6263,11 @@ fn queue_active_session_mouse_scroll(
         return false;
     }
 
-    let Some(cell) = clamped_mouse_terminal_cell(model, mouse) else {
+    let Some(cell) = clamped_mouse_terminal_cell_for_index(model, mouse, session_idx) else {
         return false;
     };
 
-    reset_active_session_scrollback_for_input(model);
+    reset_session_scrollback_for_input(model, session_idx);
     let steps = usize::from(delta_rows.unsigned_abs());
     let code = if delta_rows > 0 { 64 } else { 65 };
     let mut bytes = Vec::with_capacity(steps.saturating_mul(12));
@@ -5979,7 +6281,14 @@ fn queue_active_session_mouse_scroll(
             .as_bytes(),
         );
     }
-    push_input_to_active_session(model, bytes);
+    let Some(session_id) = model
+        .sessions
+        .get(session_idx)
+        .map(|session| session.id.clone())
+    else {
+        return false;
+    };
+    push_input_to_session(model, session_id, bytes);
     true
 }
 
@@ -5992,8 +6301,8 @@ fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     })
 }
 
-fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
-    let Some(session) = model.active_session_tab_mut() else {
+fn scroll_session_by_rows(model: &mut Model, session_idx: usize, delta_rows: i16) -> bool {
+    let Some(session) = model.sessions.get_mut(session_idx) else {
         return false;
     };
 
@@ -6073,7 +6382,7 @@ fn active_session_content_area(model: &Model) -> Option<Rect> {
         main_area
     };
 
-    session_content_area(model, session_area)
+    session_content_area_for_index(model, session_area, model.active_session)
 }
 
 fn active_session_text_area(model: &Model) -> Option<Rect> {
@@ -6105,55 +6414,38 @@ fn management_split(area: Rect) -> [Rect; 2] {
     [lr[0], lr[1]]
 }
 
-fn session_content_area(model: &Model, session_area: Rect) -> Option<Rect> {
+fn session_content_area_for_index(
+    model: &Model,
+    session_area: Rect,
+    session_idx: usize,
+) -> Option<Rect> {
     match model.session_layout {
         SessionLayout::Tab => {
-            model.active_session_tab()?;
+            model.sessions.get(session_idx)?;
             Some(
                 pane_block(
                     build_session_title(model, session_area.width),
-                    model.active_focus == FocusPane::Terminal,
+                    model.active_focus == FocusPane::Terminal
+                        && session_idx == model.active_session,
                 )
                 .inner(session_area),
             )
         }
-        SessionLayout::Grid => active_grid_session_content_area(model, session_area),
+        SessionLayout::Grid => active_grid_session_content_area(model, session_area, session_idx),
     }
 }
 
-fn active_grid_session_content_area(model: &Model, area: Rect) -> Option<Rect> {
+fn active_grid_session_content_area(model: &Model, area: Rect, session_idx: usize) -> Option<Rect> {
     let count = model.sessions.len();
-    if count == 0 || model.active_session >= count {
+    if count == 0 || session_idx >= count {
         return None;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
-
-    let target_row = model.active_session / cols;
-    let start = target_row * cols;
-    let end = (start + cols).min(count);
-    let n = end - start;
-    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-    let col_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_constraints)
-        .split(row_chunks[target_row]);
-
-    let target_col = model.active_session - start;
-    let session = model.sessions.get(model.active_session)?;
+    let pane_area = grid_session_pane_area(area, count, session_idx)?;
+    let session = model.sessions.get(session_idx)?;
     Some(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(session.name.as_str())
-            .inner(col_chunks[target_col]),
+        grid_session_block(session_idx, session, session_idx == model.active_session)
+            .inner(pane_area),
     )
 }
 
@@ -6923,56 +7215,47 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
-
-    for (row_idx, row_area) in row_chunks.iter().enumerate() {
-        let start = row_idx * cols;
-        let end = (start + cols).min(count);
-        let n = end - start;
-
-        let col_constraints: Vec<Constraint> =
-            (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-
-        let col_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints)
-            .split(*row_area);
-
-        for (col_idx, col_area) in col_chunks.iter().enumerate() {
-            let session_idx = start + col_idx;
-            if let Some(session) = model.sessions.get(session_idx) {
-                let is_active = session_idx == model.active_session;
-                let border_style = if is_active {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(grid_session_title(session_idx, session));
-                frame.render_widget(block, *col_area);
-            }
-        }
+    let terminal_focused = model.active_focus == FocusPane::Terminal;
+    for session_idx in 0..count {
+        let Some(session) = model.sessions.get(session_idx) else {
+            continue;
+        };
+        let Some(pane_area) = grid_session_pane_area(area, count, session_idx) else {
+            continue;
+        };
+        let is_active = session_idx == model.active_session;
+        let block = grid_session_block(session_idx, session, is_active);
+        let inner = block.inner(pane_area);
+        frame.render_widget(block, pane_area);
+        render_session_surface(session, frame, inner, is_active && terminal_focused);
     }
 }
 
+fn grid_session_block(
+    session_idx: usize,
+    session: &crate::model::SessionTab,
+    is_active: bool,
+) -> Block<'static> {
+    pane_block(
+        Line::from(grid_session_title(session_idx, session)),
+        is_active,
+    )
+}
+
 fn grid_session_title(session_idx: usize, session: &crate::model::SessionTab) -> String {
+    grid_session_title_with(session_idx, session, &gwt_sessions_dir())
+}
+
+fn grid_session_title_with(
+    session_idx: usize,
+    session: &crate::model::SessionTab,
+    sessions_dir: &Path,
+) -> String {
     format!(
         " {}: {} {} ",
         session_idx.saturating_add(1),
         session.tab_type.icon(),
-        session.name
+        session_title_label(session, sessions_dir)
     )
 }
 
@@ -7866,6 +8149,133 @@ mod tests {
 
         assert_eq!(model.active_session, 1);
         assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn render_model_text_grid_sessions_render_live_terminal_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+            shell_tab("shell-2", "Shell: feature/three"),
+        ];
+
+        update(&mut model, Message::Resize(120, 30));
+        append_session_line(&mut model, "shell-0", "grid-line-one");
+        append_session_line(&mut model, "shell-1", "grid-line-two");
+        append_session_line(&mut model, "shell-2", "grid-line-three");
+
+        let rendered = render_model_text(&model, 120, 30);
+
+        assert!(
+            rendered.contains("grid-line-one"),
+            "grid mode should render the first session's live surface, not just its pane title"
+        );
+        assert!(
+            rendered.contains("grid-line-two"),
+            "grid mode should render the second session's live surface, not just its pane title"
+        );
+        assert!(
+            rendered.contains("grid-line-three"),
+            "grid mode should render the third session's live surface, not just its pane title"
+        );
+    }
+
+    #[test]
+    fn grid_session_area_stacks_two_sessions_vertically_in_tall_layout() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+        ];
+
+        update(&mut model, Message::Resize(40, 80));
+
+        let session_area = test_main_area(&model);
+        let first = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("first grid session");
+        let second = grid_session_pane_area(session_area, model.sessions.len(), 1)
+            .expect("second grid session");
+
+        assert_eq!(
+            first.x, second.x,
+            "tall layouts should transpose the two-session grid into a vertical stack"
+        );
+        assert!(
+            second.y > first.y,
+            "the second session should appear below the first in a tall layout"
+        );
+        assert_eq!(
+            first.width, second.width,
+            "transposed two-session layouts should preserve equal widths"
+        );
+    }
+
+    #[test]
+    fn resize_grid_syncs_each_session_to_its_own_cell_size() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+            shell_tab("shell-2", "Shell: feature/three"),
+        ];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(120, 30));
+
+        let top_cols = model.sessions[0].vt.cols();
+        let bottom_cols = model.sessions[2].vt.cols();
+
+        assert!(
+            bottom_cols > top_cols,
+            "three-session grid layouts should resize the bottom full-width session wider than the top-row sessions"
+        );
+    }
+
+    #[test]
+    fn wheel_over_inactive_grid_session_scrolls_it_without_changing_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+        ];
+        model.active_session = 0;
+        update(&mut model, Message::Resize(120, 30));
+
+        for i in 0..40 {
+            append_session_line(&mut model, "shell-1", &format!("two-line-{i}"));
+        }
+
+        let second_area = grid_session_pane_area(test_main_area(&model), model.sessions.len(), 1)
+            .expect("second grid session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: second_area.x + 2,
+                row: second_area.y + 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_session, 0,
+            "wheel scrolling another grid session should not steal active input ownership"
+        );
+        assert!(
+            model.sessions[1].vt.viewing_history(),
+            "wheel scrolling over an inactive grid session should scroll that session's local viewport"
+        );
     }
 
     #[test]
@@ -9875,6 +10285,103 @@ mod tests {
     }
 
     #[test]
+    fn branch_live_session_rendering_highlights_the_active_agent_indicator() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
+        }];
+
+        let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
+        running.save(dir.path()).expect("persist running session");
+        SessionRuntimeState::from_hook_event("PostToolUse")
+            .expect("running runtime")
+            .save(&runtime_state_path(dir.path(), &running.id))
+            .expect("persist running runtime");
+
+        model.sessions = vec![crate::model::SessionTab {
+            id: running.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+
+        let rendered = render_model_buffer(&model, 80, 8);
+        let active_indicator = rendered
+            .content
+            .iter()
+            .find(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .expect("active agent indicator");
+
+        assert!(
+            active_indicator.modifier.contains(Modifier::REVERSED),
+            "the active agent's branch-row indicator should be visually highlighted"
+        );
+    }
+
+    #[test]
+    fn branch_live_session_rendering_adds_a_shell_indicator_for_the_active_branch_shell() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
+        }];
+        model.sessions = vec![crate::model::SessionTab {
+            id: "shell-0".to_string(),
+            name: "Shell: feature/test".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+
+        let rendered = render_model_buffer(&model, 80, 8);
+        let shell_indicator = rendered
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "▸")
+            .expect("active shell indicator");
+
+        assert!(
+            shell_indicator.modifier.contains(Modifier::REVERSED),
+            "the active shell branch indicator should use the same highlighted treatment as the active agent indicator"
+        );
+    }
+
+    #[test]
     fn render_model_text_terminal_hints_include_grouped_global_shortcuts() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -10335,6 +10842,49 @@ mod tests {
 
         update(&mut model, Message::ToggleSessionLayout);
         assert_eq!(model.session_layout, SessionLayout::Tab);
+    }
+
+    #[test]
+    fn update_move_grid_session_switches_to_adjacent_wide_layout_cells() {
+        let mut model = test_model();
+        update(&mut model, Message::NewShell);
+        update(&mut model, Message::NewShell);
+        model.active_session = 0;
+        model.session_layout = SessionLayout::Grid;
+        update(&mut model, Message::Resize(120, 30));
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Right),
+        );
+        assert_eq!(model.active_session, 1);
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Down),
+        );
+        assert_eq!(model.active_session, 2);
+    }
+
+    #[test]
+    fn update_move_grid_session_switches_to_adjacent_tall_layout_cells() {
+        let mut model = test_model();
+        update(&mut model, Message::NewShell);
+        model.active_session = 0;
+        model.session_layout = SessionLayout::Grid;
+        update(&mut model, Message::Resize(40, 80));
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Down),
+        );
+        assert_eq!(model.active_session, 1);
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Up),
+        );
+        assert_eq!(model.active_session, 0);
     }
 
     #[test]
@@ -11774,6 +12324,7 @@ mod tests {
                 created_at: std::time::Instant::now(),
             },
         ];
+        model.active_session = 1;
 
         let summaries = branch_live_session_summaries_with(&model, dir.path());
         let summary = summaries.get("feature/test").expect("branch live summary");
@@ -11876,6 +12427,7 @@ mod tests {
                 created_at: std::time::Instant::now(),
             },
         ];
+        model.active_session = 1;
 
         model.branches.live_session_summaries =
             branch_live_session_summaries_with(&model, dir.path());
@@ -11923,8 +12475,10 @@ mod tests {
             "feature/test".to_string(),
             screens::branches::BranchLiveSessionSummary {
                 indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Cyan,
+                    active: false,
                 }],
             },
         );
@@ -11953,8 +12507,10 @@ mod tests {
             "feature/test".to_string(),
             screens::branches::BranchLiveSessionSummary {
                 indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::WaitingInput,
                     color: crate::model::AgentColor::Yellow,
+                    active: false,
                 }],
             },
         );
@@ -11995,8 +12551,10 @@ mod tests {
             "feature/hidden".to_string(),
             screens::branches::BranchLiveSessionSummary {
                 indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Blue,
+                    active: false,
                 }],
             },
         );
@@ -12026,8 +12584,10 @@ mod tests {
             "feature/this-branch-name-is-too-wide".to_string(),
             screens::branches::BranchLiveSessionSummary {
                 indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Cyan,
+                    active: false,
                 }],
             },
         );
@@ -12056,8 +12616,10 @@ mod tests {
             "feature/test".to_string(),
             screens::branches::BranchLiveSessionSummary {
                 indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Cyan,
+                    active: false,
                 }],
             },
         );
@@ -12066,8 +12628,10 @@ mod tests {
             "feature/test".to_string(),
             screens::branches::BranchLiveSessionSummary {
                 indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::WaitingInput,
                     color: crate::model::AgentColor::Cyan,
+                    active: false,
                 }],
             },
         );

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::input::voice::VoiceInputMessage;
+use crate::message::GridSessionDirection;
 use crate::message::Message;
 use crate::model::ManagementTab;
 
@@ -106,6 +107,11 @@ impl KeybindRegistry {
             Keybinding {
                 keys: "Ctrl+G, 1-9".into(),
                 description: "Switch to session N".into(),
+                category: KeybindingCategory::Sessions,
+            },
+            Keybinding {
+                keys: "Ctrl+G, arrows".into(),
+                description: "Move active grid session".into(),
                 category: KeybindingCategory::Sessions,
             },
             Keybinding {
@@ -232,6 +238,10 @@ impl KeybindRegistry {
                     KeyCode::Char('g') => Some(Message::ToggleLayer),
                     KeyCode::Char(']') => Some(Message::NextSession),
                     KeyCode::Char('[') => Some(Message::PrevSession),
+                    KeyCode::Left => Some(Message::MoveGridSession(GridSessionDirection::Left)),
+                    KeyCode::Right => Some(Message::MoveGridSession(GridSessionDirection::Right)),
+                    KeyCode::Up => Some(Message::MoveGridSession(GridSessionDirection::Up)),
+                    KeyCode::Down => Some(Message::MoveGridSession(GridSessionDirection::Down)),
                     KeyCode::Char('z') => Some(Message::ToggleSessionLayout),
                     KeyCode::Tab => {
                         if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -323,6 +333,24 @@ mod tests {
         reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let result = reg.process_key(key(KeyCode::Char('3'), KeyModifiers::NONE));
         assert!(matches!(result, Some(Message::SwitchSession(2))));
+    }
+
+    #[test]
+    fn prefix_arrows_move_active_grid_session() {
+        let mut reg = KeybindRegistry::new();
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Right, KeyModifiers::NONE));
+        assert!(matches!(
+            result,
+            Some(Message::MoveGridSession(GridSessionDirection::Right))
+        ));
+
+        reg.process_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let result = reg.process_key(key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            result,
+            Some(Message::MoveGridSession(GridSessionDirection::Down))
+        ));
     }
 
     #[test]
@@ -491,6 +519,7 @@ mod tests {
             "Ctrl+G, c",
             "Ctrl+G, ?",
             "Ctrl+G, 1-9",
+            "Ctrl+G, arrows",
             "Ctrl+C, Ctrl+C",
         ] {
             assert!(
