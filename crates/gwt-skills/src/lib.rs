@@ -605,6 +605,257 @@ mod tests {
         }
     }
 
+    #[test]
+    fn local_github_issue_workflows_use_canonical_gwt_surfaces() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-issue/SKILL.md",
+            ".codex/skills/gwt-issue/SKILL.md",
+        ] {
+            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_skill.contains("gwt issue create --title ... -f ..."),
+                "expected canonical gwt issue create guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("gwt issue comment"),
+                "expected canonical gwt issue comment guidance in {relative}"
+            );
+            assert!(
+                issue_skill
+                    .contains("Direct `gh issue ...` commands are not part of the normal path."),
+                "expected skill to forbid direct gh issue usage in the normal path: {relative}"
+            );
+            assert!(
+                !issue_skill.contains("Plain Issue: create directly with `gh issue create`."),
+                "unexpected direct gh issue create guidance in {relative}"
+            );
+            assert!(
+                !issue_skill.contains("Before posting with `gh issue comment`"),
+                "unexpected direct gh issue comment guidance in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-spec-brainstorm/SKILL.md",
+            ".codex/skills/gwt-spec-brainstorm/SKILL.md",
+        ] {
+            let brainstorm_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                brainstorm_skill.contains("Check open SPEC Issues: `gwt issue spec list`."),
+                "expected brainstorm skill to use gwt issue spec list in {relative}"
+            );
+            assert!(
+                !brainstorm_skill.contains("gh issue list --label gwt-spec --state open"),
+                "unexpected direct gh issue list guidance in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-issue-search/SKILL.md",
+            ".codex/skills/gwt-issue-search/SKILL.md",
+        ] {
+            let issue_search_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_search_skill.contains("before manual `gwt issue view`"),
+                "expected issue search skill to steer users away from direct issue reads in {relative}"
+            );
+            assert!(
+                !issue_search_skill.contains("before manual `gh issue list`"),
+                "unexpected direct gh issue list guidance in {relative}"
+            );
+        }
+
+        assert!(
+            workspace_root
+                .join(".claude/commands/gwt-spec-brainstorm.md")
+                .exists(),
+            "expected tracked gwt-spec-brainstorm command to remain present"
+        );
+
+        for relative in [
+            ".claude/skills/gwt-pr/SKILL.md",
+            ".codex/skills/gwt-pr/SKILL.md",
+        ] {
+            let pr_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                pr_skill.contains("gwt pr current"),
+                "expected canonical gwt pr current guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt pr create"),
+                "expected canonical gwt pr create guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt pr edit"),
+                "expected canonical gwt pr edit guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt pr review-threads"),
+                "expected canonical gwt pr review-threads guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("no current pull request"),
+                "expected canonical no-PR sentinel guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("mergeable: CONFLICTING")
+                    || pr_skill.contains("`mergeable: CONFLICTING`"),
+                "expected conflict-first mergeable guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt actions logs"),
+                "expected canonical gwt actions log guidance in {relative}"
+            );
+            assert!(
+                !pr_skill.contains("Fallback: `gh pr create"),
+                "unexpected direct gh pr create guidance in {relative}"
+            );
+            assert!(
+                !pr_skill.contains("Fallback: `gh pr comment`."),
+                "unexpected direct gh pr comment guidance in {relative}"
+            );
+            assert!(
+                !pr_skill.contains(
+                    "gh api \"repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100\""
+                ),
+                "unexpected raw gh pull lookup guidance in {relative}"
+            );
+        }
+
+        for relative in [".claude/skills/gwt-pr/references/check-flow.md"] {
+            let check_flow = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                check_flow.contains("`gwt pr current`"),
+                "expected canonical gwt pr current guidance in {relative}"
+            );
+            assert!(
+                check_flow.contains("no current pull request"),
+                "expected canonical no-PR sentinel guidance in {relative}"
+            );
+            assert!(
+                check_flow.contains("mergeable: CONFLICTING")
+                    || check_flow.contains("`mergeable: CONFLICTING`"),
+                "expected conflict-first mergeable guidance in {relative}"
+            );
+            assert!(
+                !check_flow.contains("[ -z \"$pr_summary\" ]"),
+                "unexpected empty-string no-PR detection in {relative}"
+            );
+            assert!(
+                !check_flow.contains(
+                    "gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100"
+                ),
+                "unexpected direct gh pull list guidance in {relative}"
+            );
+        }
+
+        for relative in [".claude/skills/gwt-pr/references/create-flow.md"] {
+            let create_flow = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                create_flow.contains("Create: `gwt pr create"),
+                "expected canonical gwt pr create guidance in {relative}"
+            );
+            assert!(
+                create_flow.contains("Update: `gwt pr edit"),
+                "expected canonical gwt pr edit guidance in {relative}"
+            );
+            assert!(
+                create_flow.contains("no current pull request"),
+                "expected canonical no-PR sentinel guidance in {relative}"
+            );
+            assert!(
+                create_flow.contains("`CONFLICTING` / `DIRTY` / `BEHIND`")
+                    || create_flow.contains("CONFLICTING` / `DIRTY` / `BEHIND"),
+                "expected conflict-first routing guidance in {relative}"
+            );
+            assert!(
+                !create_flow.contains("[ -z \"$pr_summary\" ]"),
+                "unexpected empty-string no-PR detection in {relative}"
+            );
+            assert!(
+                !create_flow.contains("Create: `gh pr create"),
+                "unexpected direct gh pr create guidance in {relative}"
+            );
+            assert!(
+                !create_flow.contains("Update: `gh pr edit"),
+                "unexpected direct gh pr edit guidance in {relative}"
+            );
+        }
+
+        for relative in [".claude/skills/gwt-pr/references/fix-flow.md"] {
+            let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                fix_flow.contains("`gwt pr review-threads reply-and-resolve"),
+                "expected canonical gwt review-thread guidance in {relative}"
+            );
+            assert!(
+                fix_flow.contains("`gwt pr comment"),
+                "expected canonical gwt pr comment guidance in {relative}"
+            );
+            assert!(
+                !fix_flow.contains("--required-only"),
+                "unexpected nonexistent gwt pr checks --required-only guidance in {relative}"
+            );
+            assert!(
+                !fix_flow.contains("Fallback: `gh pr comment`."),
+                "unexpected direct gh pr comment guidance in {relative}"
+            );
+        }
+
+        let release_command = include_str!("../../../.claude/commands/release.md");
+        assert!(
+            release_command.contains("gwt issue comment"),
+            "expected release command to use gwt issue comment"
+        );
+        assert!(
+            release_command.contains("gwt pr current"),
+            "expected release command to use gwt pr current"
+        );
+        assert!(
+            release_command.contains("gwt pr create"),
+            "expected release command to use gwt pr create"
+        );
+        assert!(
+            release_command.contains("gwt pr edit"),
+            "expected release command to use gwt pr edit"
+        );
+        assert!(
+            !release_command.contains("gh issue comment"),
+            "unexpected direct gh issue comment guidance"
+        );
+
+        let pr_command = include_str!("../../../.claude/commands/gwt-pr.md");
+        assert!(
+            pr_command.contains("`gwt pr current` should succeed"),
+            "expected gwt-pr command wrapper to point to canonical gwt auth check"
+        );
+        assert!(
+            pr_command.contains("conflicting") || pr_command.contains("behind"),
+            "expected gwt-pr command wrapper to mention conflict/behind fix routing"
+        );
+
+        for relative in [
+            ".claude/skills/gwt-issue/scripts/inspect_issue.py",
+            ".codex/skills/gwt-issue/scripts/inspect_issue.py",
+        ] {
+            let inspect_issue_script = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                !inspect_issue_script.contains("Fetch issue metadata via gh issue view."),
+                "unexpected direct gh issue view docstring in {relative}"
+            );
+        }
+    }
+
     // ── Integration: full distribution pipeline ──
 
     #[test]

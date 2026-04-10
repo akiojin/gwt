@@ -33,22 +33,21 @@
 
 ## Step 5: Check existing PR for head branch
 
-- Use the REST pull-request list endpoint as the primary transport.
+- Use `gwt pr current` as the normal path for current-branch PR discovery.
+- Treat the literal line `no current pull request` as the canonical no-PR sentinel.
 - Treat `merged_at` as the source of truth for "merged".
 - Treat `state == open && merged_at == null` as the source of truth for "existing active PR".
+- Treat open PR `mergeable: CONFLICTING`, `DIRTY`, and `BEHIND` as blocking states that must enter fix flow before any push-only path.
 
 ### Decision rules
 
 1. **Do not create or switch branches.** Always use the current branch as head.
 2. **Only `develop` may target `main`.** Refuse any other branch targeting `main`.
 3. **No PR exists** --> create a new PR.
-4. **Open unmerged PR exists** --> push only (do not create a new PR). Only update title/body/labels if explicitly requested.
-5. **No open unmerged PR; at least one merged** --> post-merge commit check (see check-flow.md).
-6. **Only closed unmerged PRs** --> create a new PR.
-
-## Step 6: Post-merge commit check
-
-When all PRs are merged, determine whether new commits warrant a new PR. See `check-flow.md` for the full algorithm.
+4. **Open unmerged PR exists and merge state is clean** --> push only (do not create a new PR). Only update title/body/labels if explicitly requested.
+5. **Open unmerged PR exists and mergeable is `CONFLICTING` / `DIRTY` / `BEHIND`** --> switch to fix mode before push-only.
+6. **No open unmerged PR; at least one merged** --> treat `git rev-list --count "origin/$base..HEAD"` as the source of truth for new work.
+7. **Only closed unmerged PRs** --> create a new PR.
 
 ## Step 7: Ensure the head branch is pushed
 
@@ -97,17 +96,14 @@ When all PRs are merged, determine whether new commits warrant a new PR. See `ch
 
 ## Step 10: Create or update the PR
 
-- Primary path (REST-first):
-  - Create: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
-  - Update (only if user asked): `gh api repos/<owner>/<repo>/pulls/<number> --method PATCH --input <json-file>`
-- Fallback path:
-  - Create: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-  - Update: `gh pr edit <number> --title "<title>" --body-file <file>`
-- If one path fails with rate limit or `was submitted too quickly`, retry with the other path.
+- Canonical path:
+  - Create: `gwt pr create --base <base> [--head <head>] --title "<title>" -f <file> [--label <label>]* [--draft]`
+  - Update: `gwt pr edit <number> [--title "<title>"] [-f <file>] [--add-label <label>]*`
+- Transport note: the current implementation may still use GitHub REST / `gh` internally, but agent-facing workflow should stay on the `gwt pr` surface.
 
 ## Step 11: Return PR URL
 
-- `gh api repos/<owner>/<repo>/pulls/<number> --jq .html_url`
+- Read the URL from `gwt pr create` / `gwt pr edit` output, or use `gwt pr view <number>`.
 
 ## Step 12: Post-PR CI/merge check (automatic)
 
@@ -145,6 +141,7 @@ if [ -n "$status_lines" ] && [ "${ALLOW_DIRTY_WORKTREE:-0}" != "1" ]; then
 fi
 
 git fetch origin
+commit_count="$(git rev-list --count "origin/$base..HEAD" 2>/dev/null || echo "")"
 
 # Check branch sync against base
 divergence=$(git rev-list --left-right --count "HEAD...origin/$base" 2>/dev/null) || {
@@ -157,31 +154,19 @@ if [ "${behind_count:-0}" -gt 0 ]; then
   git push -u origin "$head"
 fi
 
-# Check existing PRs (REST-first)
-repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-owner="${repo_slug%%/*}"
-pr_json=$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")
-open_unmerged_count=$(echo "$pr_json" | jq 'map(select(.state == "open" and .merged_at == null)) | length')
-merged_count=$(echo "$pr_json" | jq 'map(select(.merged_at != null)) | length')
-pr_count=$(echo "$pr_json" | jq 'length')
+# Check existing PRs (canonical surface)
+pr_summary="$(gwt pr current 2>/tmp/gwt-pr-current.err || true)"
+merge_state="$(printf '%s\n' "$pr_summary" | sed -n 's/^mergeable: //p' | head -n1)"
 
-if [ "$pr_count" -eq 0 ]; then
+if printf '%s\n' "$pr_summary" | grep -qx 'no current pull request'; then
   action=create
-elif [ "$open_unmerged_count" -gt 0 ]; then
+elif printf '%s\n' "$merge_state" | grep -Eq '^(CONFLICTING|DIRTY|BEHIND)$'; then
+  action=fix
+elif printf '%s\n' "$pr_summary" | grep -q '\[OPEN\]'; then
   action=push_only
-elif [ "$merged_count" -eq 0 ]; then
-  action=create
 else
-  # Post-merge commit check (see check-flow.md for full logic)
-  merge_commit=$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')
-  new_commits=""
-  if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ] && \
-     git merge-base --is-ancestor "$merge_commit" HEAD 2>/dev/null; then
-    new_commits=$(git rev-list --count "$merge_commit"..HEAD 2>/dev/null || echo "")
-  fi
-  if [ -n "$new_commits" ] && [ "$new_commits" -gt 0 ]; then
-    compare_has_diff="$(base_compare_has_diff)"
-    [ "$compare_has_diff" = "yes" ] && action=create || action=none
+  if [ "${commit_count:-0}" -gt 0 ]; then
+    action=create
   else
     action=none
   fi
@@ -190,15 +175,15 @@ fi
 case "$action" in
   create)
     git push -u origin "$head"
-    jq -n --arg title "..." --arg head "$head" --arg base "$base" --rawfile body /tmp/pr-body.md \
-      '{title:$title, head:$head, base:$base, body:$body}' >/tmp/pr-create.json
-    gh api "repos/$repo_slug/pulls" --method POST --input /tmp/pr-create.json || {
-      gh pr create -B "$base" -H "$head" --title "..." --body-file /tmp/pr-body.md
-    }
+    gwt pr create --base "$base" --head "$head" --title "..." -f /tmp/pr-body.md
+    ;;
+  fix)
+    printf '%s\n' "$pr_summary"
+    echo "Existing PR is blocked by merge state; enter fix workflow before push-only." >&2
     ;;
   push_only)
     git push
-    echo "$pr_json" | jq -r 'map(select(.merged_at == null)) | sort_by(.updated_at) | last | .html_url'
+    printf '%s\n' "$pr_summary"
     ;;
   none)
     echo "No action needed"

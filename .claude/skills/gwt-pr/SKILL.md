@@ -9,7 +9,7 @@ description: "Use proactively after implementation work to create, check, or fix
 
 Single skill for the full PR lifecycle: create, check status, and fix blockers. Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user.
 
-REST-first `gh api` flows for all PR operations. GraphQL only for unresolved review threads and thread reply/resolve.
+Canonical agent-facing surface is `gwt pr ...` / `gwt actions ...` for PR inspection, create/update, and fix flows. The current implementation may still use GitHub REST / `gh` internally as transport, while GraphQL remains the transport for unresolved review threads and thread reply/resolve.
 
 ## Mode Auto-Detection
 
@@ -22,8 +22,9 @@ On invocation, run Shared Preflight, then route:
    - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
 3. **Auto-detect** (no explicit mode) — use the commit-count-first
    decision from Preflight Step 7:
+   - open PR + `mergeable: CONFLICTING|DIRTY|BEHIND` → **fix**
    - `N > 0` + no open PR → **create**
-   - `N > 0` + open PR → **create** (push-only + post-push fix)
+   - `N > 0` + open PR + clean merge state → **create** (push-only + post-push fix)
    - `N = 0` + open PR → **fix** (check CI / reviews / conflicts)
    - `N = 0` + no open PR → report **NO ACTION**
 
@@ -51,11 +52,12 @@ impossible.**
    > whether develop has your work. Confusing the two is the root
    > cause of the MERGED-state false NO ACTION bug.
 6. **PR lookup + open-PR check:**
-   - `repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
-   - `owner="${repo_slug%%/*}"`
-   - `gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100"`
+   - Prefer `gwt pr current` as the normal read path for the current branch.
+   - Treat the literal line `no current pull request` as the canonical no-PR sentinel.
+   - If create mode needs lower-level repo/head lookup, treat it as internal transport managed by the toolchain rather than part of the agent-facing workflow.
    - `has_open_pr` = any entry with `state == "open" && merged_at == null`
-7. **Route using the 2×2 matrix:**
+   - When an open PR exists, inspect `mergeable:`. `CONFLICTING`, `DIRTY`, and `BEHIND` are blocking merge states and immediately upgrade routing to **fix**.
+7. **Route using the 2×2 matrix, with merge-state override:**
 
    | Commits (N) | Open PR? | Action |
    |---|---|---|
@@ -64,9 +66,9 @@ impossible.**
    | N = 0 | Yes | **FIX** (CI / reviews / conflicts) |
    | N = 0 | No | **NO ACTION** |
 
-   This matrix is exhaustive. PR state (MERGED / CLOSED) is not
-   consulted — it is irrelevant when the commit count and open-PR
-   presence already determine the action.
+   If the open PR reports `mergeable: CONFLICTING`, `DIRTY`, or `BEHIND`,
+   use **FIX** immediately instead of push-only/create. Outside that
+   override, PR state (MERGED / CLOSED) is not consulted.
 
 ## Mode: Create
 
@@ -77,9 +79,10 @@ Detailed logic in `references/create-flow.md`.
 Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 1. **Do not create or switch branches.** Always use the current branch as head.
-2. **If open PR exists** → push only, return existing PR URL, enter Fix mode.
-3. **If no open PR** → create new PR.
-4. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+2. **If open PR exists and is `CONFLICTING` / `DIRTY` / `BEHIND`** → enter Fix mode before any push-only path.
+3. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode.
+4. **If no open PR** → create new PR.
+5. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
 
 ### PR Title Rules
 
@@ -100,19 +103,28 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 ### Create/Update Commands
 
-- Primary: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
-- Fallback: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-- Update (only if user asks): `PATCH` via REST or `gh pr edit`
+- Create: `gwt pr create --base <base> [--head <head>] --title "<title>" -f <file> [--label <label>]* [--draft]`
+- Update: `gwt pr edit <number> [--title "<title>"] [-f <file>] [--add-label <label>]*`
+- Transport note: the current implementation may still call GitHub REST / `gh` internally, but agent-facing workflow should stay on the `gwt pr` surface.
 
 ### Post-Create
 
-After PR creation or push, automatically enter **fix** mode to check CI/conflicts/reviews.
+After PR creation or push, automatically enter **fix** mode and use `gwt pr checks`, `gwt pr reviews`, `gwt pr review-threads`, and `gwt actions logs/job-logs` as the normal inspection path.
 
 ## Mode: Check
 
 Detailed logic in `references/check-flow.md`.
 
 **Read-only mode.** Do not create/switch branches, push, or create/edit PRs.
+
+### Canonical Read Surface
+
+- Current branch PR: `gwt pr current`
+- PR detail: `gwt pr view <number>`
+- Checks: `gwt pr checks <number>`
+- Reviews: `gwt pr reviews <number>`
+- Unresolved threads: `gwt pr review-threads <number>`
+- Actions logs: `gwt actions logs --run <id>` / `gwt actions job-logs --job <id>`
 
 ### Output Contract
 
@@ -131,7 +143,8 @@ Per-status templates:
 Templates map directly from the Preflight 2×2 matrix:
 
 - **N > 0, no open PR:** `>> CREATE PR -- <N> new commit(s) not covered by any PR.`
-- **N > 0, open PR:** `> PUSH ONLY -- Unmerged PR #<number> open for <head>.` + PR URL
+- **N > 0, open PR, clean merge state:** `> PUSH ONLY -- Unmerged PR #<number> open for <head>.` + PR URL
+- **Open PR with blocking merge state:** `~ FIX -- PR #<number> is <mergeable>; resolve base sync/conflicts before push-only.`
 - **N = 0, open PR:** `~ FIX -- PR #<number> open, checking CI/reviews/conflicts.`
 - **N = 0, no open PR:** `-- NO ACTION -- No commits ahead of <base>, no open PR.`
 - **Fallback:** `!! MANUAL CHECK -- Could not determine commit count.` + reason
@@ -145,7 +158,8 @@ computed in the Shared Preflight and is the primary routing signal.
 Check mode simply reports it:
 
 - `N > 0` + no open PR → `>> CREATE PR -- <N> new commit(s) not in any PR.`
-- `N > 0` + open PR → `> PUSH ONLY -- Unmerged PR open.` + PR URL
+- `N > 0` + open PR + clean merge state → `> PUSH ONLY -- Unmerged PR open.` + PR URL
+- open PR + `mergeable: CONFLICTING|DIRTY|BEHIND` → `~ FIX -- PR is blocked by merge state.`
 - `N = 0` + open PR → report CI / review / conflict status
 - `N = 0` + no open PR → `-- NO ACTION`
 
@@ -226,16 +240,14 @@ Blocking items: <N>
   - Not applicable: "Not applicable: <reason why no change is needed>."
   - Already addressed: "Already addressed in commit <sha>: <summary>."
   - Acknowledged: "Acknowledged: <brief response>." for informational comments.
-- After replying, **resolve the conversation** via GraphQL
-  `--reply-and-resolve` JSON array covering ALL threads.
-- If `--reply-and-resolve` is not available, resolve manually via
-  `gh api graphql` with `resolveReviewThread` mutation.
+- After preparing the reply body, use `gwt pr review-threads reply-and-resolve <number> -f <file>` to reply to and resolve all unresolved threads on the PR.
+- If that surface is unavailable, fall back to internal GraphQL transport with `resolveReviewThread`.
 - **Verification:** After resolving, re-check that no unresolved
   threads remain. Unresolved threads block the Merge Verdict.
 
 ### Reviewer Notification (mandatory)
 
-Post PR comment via REST summarizing all fixes. Fallback: `gh pr comment`.
+Post a PR summary comment via `gwt pr comment <number> -f <file>`.
 
 ### Verify Fix (mandatory)
 

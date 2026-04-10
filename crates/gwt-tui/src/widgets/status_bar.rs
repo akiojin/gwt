@@ -46,7 +46,7 @@ pub fn render_with_notification_and_hints(
         .map(|s| session_type_label(&s.tab_type))
         .unwrap_or_else(|| "None".to_string());
     let branch_context = derive_branch_context(model).unwrap_or_else(|| "n/a".to_string());
-    let compact_footer = notification.is_none() && hints.is_some() && area.width <= 80;
+    let compact_footer = hints.is_some() && area.width <= 80;
 
     let layout_icon = match model.session_layout {
         SessionLayout::Tab => theme::icon::LAYOUT_TAB,
@@ -117,7 +117,7 @@ pub fn render_with_notification_and_hints(
 
     if let Some(notification) = notification {
         spans.push(theme::status_separator());
-        spans.push(notification_span(notification));
+        spans.push(notification_span(notification, compact_footer));
     }
 
     if !compact_footer {
@@ -203,7 +203,7 @@ fn session_type_label(tab_type: &SessionTabType) -> String {
     }
 }
 
-fn notification_span(notification: &Notification) -> Span<'static> {
+fn notification_span(notification: &Notification, compact: bool) -> Span<'static> {
     let style = match notification.severity {
         Severity::Debug => Style::default().fg(theme::color::SURFACE),
         Severity::Info => theme::style::success_text(),
@@ -211,15 +211,24 @@ fn notification_span(notification: &Notification) -> Span<'static> {
         Severity::Error => theme::style::error_text(),
     };
 
-    let summary = match notification.detail.as_deref() {
-        Some(detail) if !detail.is_empty() => format!(
-            " {} {}: {} - {} ",
-            notification.severity, notification.source, notification.message, detail
-        ),
-        _ => format!(
-            " {} {}: {} ",
-            notification.severity, notification.source, notification.message
-        ),
+    let summary = if compact {
+        match notification.detail.as_deref() {
+            Some(detail) if !detail.is_empty() => {
+                format!(" {} - {} ", notification.message, detail)
+            }
+            _ => format!(" {} ", notification.message),
+        }
+    } else {
+        match notification.detail.as_deref() {
+            Some(detail) if !detail.is_empty() => format!(
+                " {} {}: {} - {} ",
+                notification.severity, notification.source, notification.message, detail
+            ),
+            _ => format!(
+                " {} {}: {} ",
+                notification.severity, notification.source, notification.message
+            ),
+        }
     };
 
     Span::styled(summary, style)
@@ -318,6 +327,33 @@ mod tests {
     }
 
     #[test]
+    fn render_with_info_notification_on_narrow_width_prioritizes_notification_summary() {
+        let mut model = Model::new(PathBuf::from("/tmp/test"));
+        model.active_layer = ActiveLayer::Management;
+        let notification =
+            Notification::new(Severity::Info, "cleanup", "Cannot select: not merged");
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_with_notification_and_hints(
+                    &model,
+                    Some(&notification),
+                    Some("↑↓ mv  ←→ tab  ↵ wiz  Sp sel  ⇧C clean  a all"),
+                    f,
+                    area,
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("Cannot select: not merged"), "{text}");
+    }
+
+    #[test]
     fn render_status_bar_shell_session_shows_branch_and_shell_type() {
         let mut model = Model::new(PathBuf::from("/tmp/test"));
         model.active_layer = ActiveLayer::Main;
@@ -366,6 +402,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-agent-context")),
+            upstream: None,
         }];
         model.branches.selected = 0;
 

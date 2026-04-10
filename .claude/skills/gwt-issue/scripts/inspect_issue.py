@@ -203,7 +203,7 @@ def resolve_issue(issue_value: str, repo_root: Path) -> str | None:
 # =============================================================================
 
 def fetch_issue_data(issue_number: str, repo_root: Path) -> dict[str, Any] | None:
-    """Fetch issue metadata via gh issue view."""
+    """Fetch issue metadata for inspection."""
     fields = "number,title,body,state,labels,assignees,author,createdAt,updatedAt,url"
     result = run_gh_command(
         ["issue", "view", issue_number, "--json", fields],
