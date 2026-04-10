@@ -1,6 +1,5 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 496
 expression: output
 ---
 ┌ Branches │...────┐┌ › Shell ─────────┐
@@ -17,4 +16,4 @@ expression: output
 │ No containers fou││                  │
 │                  ││                  │
 └──────────────────┘└──────────────────┘
- ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ mv  ←→ tab
+ ⎇n/a  │  P:default  │  ↑↓ mv  ←→ tab  ↵

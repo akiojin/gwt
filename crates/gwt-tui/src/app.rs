@@ -25,7 +25,7 @@ use gwt_agent::{
     GWT_SESSION_RUNTIME_PATH_ENV,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
-use gwt_config::{AISettings, Settings, VoiceConfig};
+use gwt_config::{AISettings, ConfigError, Settings, VoiceConfig};
 use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
@@ -50,9 +50,9 @@ use crate::{
     input_trace,
     message::Message,
     model::{
-        ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
-        ManagementTab, Model, PendingSessionConversion, ScrollbackStrategy, SessionLayout,
-        SessionTabType, TerminalCell, TerminalSelection,
+        ActiveLayer, ActiveProfileSummary, BranchDetailQueue, DockerProgressQueue,
+        DockerProgressResult, FocusPane, ManagementTab, Model, PendingSessionConversion,
+        ScrollbackStrategy, SessionLayout, SessionTabType, TerminalCell, TerminalSelection,
     },
     screens, theme,
 };
@@ -1521,6 +1521,119 @@ fn parse_current_pr_link_json(json: &str) -> gwt_core::Result<Option<String>> {
         .map(ToOwned::to_owned))
 }
 
+struct LoadedProfileSettings {
+    settings: Settings,
+    status: ActiveProfileSummary,
+}
+
+fn validation_error(reason: impl Into<String>) -> ConfigError {
+    ConfigError::ValidationError {
+        reason: reason.into(),
+    }
+}
+
+fn load_settings_with_active_profile_fallback() -> LoadedProfileSettings {
+    match Settings::load() {
+        Ok(mut settings) => {
+            let configured_active = settings.profiles.active.clone();
+            let resolution = settings.profiles.normalize_active_profile();
+            if resolution.fallback {
+                tracing::warn!(
+                    configured_active = ?configured_active,
+                    resolved_active = %resolution.name,
+                    "active profile missing or invalid; falling back to default"
+                );
+            }
+            LoadedProfileSettings {
+                settings,
+                status: ActiveProfileSummary {
+                    name: resolution.name,
+                    fallback: resolution.fallback,
+                },
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load settings; falling back to default profile");
+            LoadedProfileSettings {
+                settings: Settings::default(),
+                status: ActiveProfileSummary {
+                    name: "default".to_string(),
+                    fallback: true,
+                },
+            }
+        }
+    }
+}
+
+fn profiles_state_from_settings(
+    settings: &Settings,
+    preferred_selection: Option<&str>,
+) -> screens::profiles::ProfilesState {
+    let profiles: Vec<screens::profiles::ProfileItem> = settings
+        .profiles
+        .profiles
+        .iter()
+        .map(|profile| screens::profiles::ProfileItem {
+            name: profile.name.clone(),
+            active: settings.profiles.active.as_deref() == Some(profile.name.as_str()),
+            env_count: profile.env_vars.len(),
+            description: profile.description.clone(),
+        })
+        .collect();
+
+    let selected = preferred_selection
+        .and_then(|name| profiles.iter().position(|profile| profile.name == name))
+        .or_else(|| profiles.iter().position(|profile| profile.active))
+        .unwrap_or(0);
+
+    screens::profiles::ProfilesState {
+        profiles,
+        selected,
+        ..Default::default()
+    }
+}
+
+pub fn refresh_active_profile_state(model: &mut Model) {
+    model.active_profile = load_settings_with_active_profile_fallback().status;
+}
+
+fn sync_profiles_state_from_settings(model: &mut Model, preferred_selection: Option<&str>) {
+    let loaded = load_settings_with_active_profile_fallback();
+    model.active_profile = loaded.status;
+    model.profiles = profiles_state_from_settings(&loaded.settings, preferred_selection);
+}
+
+fn switch_active_profile_from_profiles_tab(model: &mut Model) {
+    let Some(profile_name) = model
+        .profiles
+        .selected_profile()
+        .map(|profile| profile.name.clone())
+    else {
+        return;
+    };
+
+    match Settings::update_global(|settings| {
+        settings
+            .profiles
+            .switch(&profile_name)
+            .map_err(validation_error)
+    }) {
+        Ok(()) => sync_profiles_state_from_settings(model, Some(&profile_name)),
+        Err(err) => {
+            apply_notification(
+                model,
+                Notification::new(
+                    Severity::Warn,
+                    "profiles",
+                    "Failed to switch active profile",
+                )
+                .with_detail(err.to_string()),
+            );
+            sync_profiles_state_from_settings(model, Some(&profile_name));
+        }
+    }
+}
+
 fn switch_management_tab(model: &mut Model, tab: ManagementTab) {
     switch_management_tab_with(
         model,
@@ -1550,6 +1663,13 @@ fn switch_management_tab_with<F, D>(
     };
     if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
         model.settings.load_category_fields();
+    }
+    if tab == ManagementTab::Profiles {
+        let preferred_selection = model
+            .profiles
+            .selected_profile()
+            .map(|profile| profile.name.clone());
+        sync_profiles_state_from_settings(model, preferred_selection.as_deref());
     }
     if tab == ManagementTab::Issues {
         reload_cached_issues(model);
@@ -2362,7 +2482,11 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
-                screens::profiles::update(&mut model.profiles, m);
+                if matches!(m, ProfilesMessage::ToggleActive) {
+                    switch_active_profile_from_profiles_tab(model);
+                } else {
+                    screens::profiles::update(&mut model.profiles, m);
+                }
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -3707,15 +3831,15 @@ fn request_branch_suggestions(context: &str) -> Result<Vec<String>, String> {
 }
 
 fn branch_suggestion_client() -> Result<AIClient, String> {
-    if let Ok(settings) = Settings::load() {
-        if let Some(ai_settings) = settings
-            .profiles
-            .active_profile()
-            .and_then(|profile| profile.ai_settings.as_ref())
-        {
-            if ai_settings.is_enabled() {
-                return ai_client_from_settings(ai_settings);
-            }
+    let loaded = load_settings_with_active_profile_fallback();
+    if let Some(ai_settings) = loaded
+        .settings
+        .profiles
+        .active_profile()
+        .and_then(|profile| profile.ai_settings.as_ref())
+    {
+        if ai_settings.is_enabled() {
+            return ai_client_from_settings(ai_settings);
         }
     }
 
@@ -15069,6 +15193,64 @@ CUSTOM_ENV = "enabled"
         assert_eq!(model.active_focus, FocusPane::TabContent);
         assert_eq!(model.profiles.mode, screens::profiles::ProfileMode::List);
         assert!(model.profiles.input_name.is_empty());
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_enter_persists_active_profile_and_updates_status_bar() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .unwrap();
+            settings.profiles.switch("default").unwrap();
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            assert_eq!(model.profiles.profiles.len(), 2);
+            model.profiles.selected = 1;
+
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            assert_eq!(reloaded.profiles.active.as_deref(), Some("dev"));
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(rendered.contains("profile: dev"), "{rendered}");
+        });
+    }
+
+    #[test]
+    fn refresh_active_profile_state_renders_default_fallback_when_active_is_invalid() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .unwrap();
+            settings.profiles.active = Some("missing".to_string());
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            refresh_active_profile_state(&mut model);
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(
+                rendered.contains("profile: default (fallback)"),
+                "{rendered}"
+            );
+        });
     }
 
     #[test]

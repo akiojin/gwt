@@ -59,6 +59,15 @@ pub struct ProfilesConfig {
     pub active: Option<String>,
 }
 
+/// Resolved active profile metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveProfileResolution {
+    /// Active profile name after applying fallback rules.
+    pub name: String,
+    /// Whether the configured active profile had to fall back.
+    pub fallback: bool,
+}
+
 impl Default for ProfilesConfig {
     fn default() -> Self {
         Self {
@@ -69,6 +78,31 @@ impl Default for ProfilesConfig {
 }
 
 impl ProfilesConfig {
+    /// Resolve the active profile, falling back to `default` when the current
+    /// active name is missing or invalid. Ensures the default profile exists.
+    pub fn normalize_active_profile(&mut self) -> ActiveProfileResolution {
+        if let Some(profile) = self.active_profile() {
+            return ActiveProfileResolution {
+                name: profile.name.clone(),
+                fallback: false,
+            };
+        }
+
+        if !self
+            .profiles
+            .iter()
+            .any(|profile| profile.name == "default")
+        {
+            self.profiles.push(Profile::new("default"));
+        }
+        self.active = Some("default".to_string());
+
+        ActiveProfileResolution {
+            name: "default".to_string(),
+            fallback: true,
+        }
+    }
+
     /// Get a reference to the active profile.
     pub fn active_profile(&self) -> Option<&Profile> {
         self.active
@@ -183,6 +217,29 @@ mod tests {
         c.add(Profile::new("dev")).unwrap();
         c.switch("dev").unwrap();
         assert_eq!(c.active_profile().unwrap().name, "dev");
+    }
+
+    #[test]
+    fn normalize_active_profile_falls_back_to_default_when_active_is_missing() {
+        let mut c = ProfilesConfig {
+            profiles: vec![Profile::new("default"), Profile::new("dev")],
+            active: Some("missing".to_string()),
+        };
+
+        let resolved = c.normalize_active_profile();
+
+        assert_eq!(
+            resolved,
+            ActiveProfileResolution {
+                name: "default".to_string(),
+                fallback: true,
+            }
+        );
+        assert_eq!(c.active.as_deref(), Some("default"));
+        assert_eq!(
+            c.active_profile().map(|profile| profile.name.as_str()),
+            Some("default")
+        );
     }
 
     #[test]

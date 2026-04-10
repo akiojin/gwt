@@ -528,6 +528,7 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    app::refresh_active_profile_state(&mut model);
     // SPEC-6 Phase 5: spawn the Logs-tab file watcher so the
     // `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL stream flows into
     // `LogsState.entries`. Keeping the handle alive for the lifetime
