@@ -355,7 +355,7 @@ pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
 #[cfg(test)]
 pub(crate) type BranchDetailDockerSnapshotter =
-    Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>;
+    Arc<dyn Fn() -> Vec<crate::screens::branches::DockerServiceInfo> + Send + Sync>;
 
 /// Tracked branch-detail preload worker state.
 pub(crate) struct BranchDetailWorker {
@@ -2105,7 +2105,7 @@ impl Model {
     #[cfg(test)]
     pub(crate) fn set_branch_detail_docker_snapshotter<F>(&mut self, snapshotter: F)
     where
-        F: Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync + 'static,
+        F: Fn() -> Vec<crate::screens::branches::DockerServiceInfo> + Send + Sync + 'static,
     {
         self.branch_detail_docker_snapshotter = Some(Arc::new(snapshotter));
     }

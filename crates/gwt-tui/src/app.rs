@@ -1023,6 +1023,11 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Wizard(msg) => {
             let launch_config = if let Some(ref mut wizard) = model.wizard {
                 screens::wizard::update(wizard, msg);
+                let project_root = wizard
+                    .worktree_path
+                    .clone()
+                    .unwrap_or_else(|| model.repo_path.clone());
+                sync_wizard_docker_status(wizard, &project_root);
                 maybe_start_wizard_branch_suggestions(wizard);
                 let completed = wizard.completed;
                 let launch_config = if completed {
@@ -1280,6 +1285,16 @@ where
         .iter()
         .find(|b| b.is_head)
         .map(|b| b.name.clone());
+    if let Some(head_branch_name) = model.branches.current_head_branch.clone() {
+        if let Some(item) = model
+            .branches
+            .branches
+            .iter_mut()
+            .find(|branch| branch.name == head_branch_name && branch.worktree_path.is_none())
+        {
+            item.worktree_path = Some(model.repo_path.clone());
+        }
+    }
     refresh_active_session_branches(model);
 
     // Compute Branch Cleanup merge state (FR-018a/d). This is currently a
@@ -1820,7 +1835,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::SHIFT)
-                && model.branches.detail_section != 3
+                && model.branches.detail_section != 2
                 && selected_branch_has_worktree(model) =>
         {
             Some(BranchesMessage::OpenShell)
@@ -1831,7 +1846,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         KeyCode::Down if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerDown)
         }
-        KeyCode::Up if model.branches.detail_section == 3 => {
+        KeyCode::Up if model.branches.detail_section == 2 => {
             let len = branch_session_matches(model).len();
             if len > 0 {
                 model.branches.clamp_detail_session_selected(len);
@@ -1844,7 +1859,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
             }
             None
         }
-        KeyCode::Down if model.branches.detail_section == 3 => {
+        KeyCode::Down if model.branches.detail_section == 2 => {
             let len = branch_session_matches(model).len();
             if len > 0 {
                 model.branches.clamp_detail_session_selected(len);
@@ -1853,7 +1868,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
             }
             None
         }
-        KeyCode::Enter if model.branches.detail_section == 3 => {
+        KeyCode::Enter if model.branches.detail_section == 2 => {
             let sessions = branch_session_matches(model);
             model.branches.clamp_detail_session_selected(sessions.len());
             if let Some(selected) = sessions.get(model.branches.detail_session_selected) {
@@ -1871,6 +1886,9 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Char('r') if model.branches.detail_section == 0 => {
             Some(BranchesMessage::DockerContainerRestart)
+        }
+        KeyCode::Char('c') if model.branches.detail_section == 0 => {
+            Some(BranchesMessage::DockerContainerRecreate)
         }
         KeyCode::Char('m') => {
             screens::branches::update(&mut model.branches, BranchesMessage::ToggleView);
@@ -2009,7 +2027,17 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
+                let should_prefetch_detail = matches!(
+                    m,
+                    BranchesMessage::MoveUp
+                        | BranchesMessage::MoveDown
+                        | BranchesMessage::ToggleSort
+                        | BranchesMessage::ToggleView
+                );
                 screens::branches::update(&mut model.branches, m);
+                if should_prefetch_detail {
+                    schedule_branch_detail_prefetch(model);
+                }
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -2733,26 +2761,20 @@ fn handle_pending_branch_docker_action(
         return;
     }
 
-    let container_label = model
-        .branches
-        .docker_containers
-        .iter()
-        .find(|container| container.id == action.container_id)
-        .map(|container| container.name.clone())
-        .unwrap_or_else(|| action.container_id.clone());
+    let service_label = action.service.clone();
 
     emit_branch_docker_progress(
         model,
         screens::docker_progress::DockerStage::StartingContainer,
         format!(
-            "{} container {container_label}",
+            "{} service {service_label}",
             start_message_for_action(action.action)
         ),
     );
 
     let events = Arc::new(Mutex::new(VecDeque::new()));
     model.docker_progress_events = Some(events.clone());
-    spawn_docker_progress_worker(events, action, container_label);
+    spawn_docker_progress_worker(events, action, service_label);
 }
 
 fn emit_branch_docker_progress(
@@ -2778,34 +2800,47 @@ fn push_docker_progress_event(events: &DockerProgressQueue, event: DockerProgres
 fn spawn_docker_progress_worker(
     events: DockerProgressQueue,
     action: screens::branches::PendingDockerAction,
-    container_label: String,
+    service_label: String,
 ) {
     use screens::branches::DockerLifecycleAction;
 
     thread::spawn(move || {
         let outcome = match action.action {
-            DockerLifecycleAction::Start => gwt_docker::start(&action.container_id).map(|()| {
-                DockerProgressEvent::BranchCompleted {
-                    message: format!("Started container {container_label}"),
-                }
-            }),
-            DockerLifecycleAction::Stop => gwt_docker::stop(&action.container_id).map(|()| {
-                DockerProgressEvent::BranchCompleted {
-                    message: format!("Stopped container {container_label}"),
-                }
-            }),
-            DockerLifecycleAction::Restart => gwt_docker::restart(&action.container_id).map(|()| {
-                DockerProgressEvent::BranchCompleted {
-                    message: format!("Restarted container {container_label}"),
-                }
-            }),
+            DockerLifecycleAction::Start => {
+                gwt_docker::compose_up(&action.compose_file, &action.service).map(|()| {
+                    DockerProgressEvent::BranchCompleted {
+                        message: format!("Started service {service_label}"),
+                    }
+                })
+            }
+            DockerLifecycleAction::Stop => {
+                gwt_docker::compose_stop(&action.compose_file, &action.service).map(|()| {
+                    DockerProgressEvent::BranchCompleted {
+                        message: format!("Stopped service {service_label}"),
+                    }
+                })
+            }
+            DockerLifecycleAction::Restart => {
+                gwt_docker::compose_restart(&action.compose_file, &action.service).map(|()| {
+                    DockerProgressEvent::BranchCompleted {
+                        message: format!("Restarted service {service_label}"),
+                    }
+                })
+            }
+            DockerLifecycleAction::Recreate => {
+                gwt_docker::compose_up_force_recreate(&action.compose_file, &action.service).map(
+                    |()| DockerProgressEvent::BranchCompleted {
+                        message: format!("Recreated service {service_label}"),
+                    },
+                )
+            }
         };
 
         let event = match outcome {
             Ok(result) => result,
             Err(err) => DockerProgressEvent::BranchFailed {
                 message: format!(
-                    "Failed to {} container {container_label}",
+                    "Failed to {} service {service_label}",
                     verb_for_action(action.action)
                 ),
                 detail: err.to_string(),
@@ -2935,6 +2970,16 @@ fn refresh_branches(model: &mut Model) {
         .iter()
         .find(|b| b.is_head)
         .map(|b| b.name.clone());
+    if let Some(head_branch_name) = model.branches.current_head_branch.clone() {
+        if let Some(item) = model
+            .branches
+            .branches
+            .iter_mut()
+            .find(|branch| branch.name == head_branch_name && branch.worktree_path.is_none())
+        {
+            item.worktree_path = Some(model.repo_path.clone());
+        }
+    }
     refresh_active_session_branches(model);
     refresh_cleanup_merge_state(model);
 
@@ -3114,13 +3159,13 @@ fn spawn_branch_detail_worker(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
-    docker_snapshotter: Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>,
+    docker_snapshotter: Arc<dyn Fn() -> Vec<screens::branches::DockerServiceInfo> + Send + Sync>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         if cancel.load(Ordering::SeqCst) {
             return;
         }
-        let docker_containers = docker_snapshotter();
+        let docker_services = docker_snapshotter();
         if cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -3129,21 +3174,63 @@ fn spawn_branch_detail_worker(
             cancel,
             generation,
             branches,
-            docker_containers,
+            docker_services,
             screens::branches::load_branch_detail,
         );
     })
 }
 
 fn branch_detail_docker_snapshotter(
-    _model: &Model,
-) -> Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync> {
+    model: &Model,
+) -> Arc<dyn Fn() -> Vec<screens::branches::DockerServiceInfo> + Send + Sync> {
     #[cfg(test)]
-    if let Some(snapshotter) = _model.branch_detail_docker_snapshotter.as_ref() {
+    if let Some(snapshotter) = model.branch_detail_docker_snapshotter.as_ref() {
         return snapshotter.clone();
     }
 
-    Arc::new(|| gwt_docker::list_containers().unwrap_or_default())
+    let branches = model.branches.branches.clone();
+    Arc::new(move || snapshot_branch_detail_docker_services(&branches))
+}
+
+fn snapshot_branch_detail_docker_services(
+    branches: &[screens::branches::BranchItem],
+) -> Vec<screens::branches::DockerServiceInfo> {
+    let mut services = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for branch in branches {
+        let Some(project_root) = branch.worktree_path.as_ref() else {
+            continue;
+        };
+        let files = gwt_docker::detect_docker_files(project_root);
+        let Some(compose_file) = docker_compose_file_for_launch(project_root, &files)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let Ok(parsed_services) = gwt_docker::parse_compose_file(&compose_file) else {
+            continue;
+        };
+
+        for service in parsed_services {
+            let service_name = service.name;
+            if !seen.insert((project_root.clone(), service_name.clone())) {
+                continue;
+            }
+            let status = gwt_docker::compose_service_status(&compose_file, &service_name)
+                .unwrap_or(gwt_docker::ComposeServiceStatus::NotFound);
+            services.push(screens::branches::DockerServiceInfo {
+                project_root: project_root.clone(),
+                compose_file: compose_file.clone(),
+                name: service_name,
+                status,
+                ports: service.ports.join(", "),
+            });
+        }
+    }
+
+    services
 }
 
 #[cfg(test)]
@@ -3152,13 +3239,13 @@ fn spawn_branch_detail_worker_with_loader<F>(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
-    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    docker_services: Vec<screens::branches::DockerServiceInfo>,
     loader: F,
 ) -> thread::JoinHandle<()>
 where
     F: Fn(
             &screens::branches::BranchItem,
-            &[gwt_docker::ContainerInfo],
+            &[screens::branches::DockerServiceInfo],
         ) -> screens::branches::BranchDetailData
         + Send
         + 'static,
@@ -3169,7 +3256,7 @@ where
             cancel,
             generation,
             branches,
-            docker_containers,
+            docker_services,
             loader,
         );
     })
@@ -3180,19 +3267,19 @@ fn run_branch_detail_worker<F>(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
-    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    docker_services: Vec<screens::branches::DockerServiceInfo>,
     loader: F,
 ) where
     F: Fn(
         &screens::branches::BranchItem,
-        &[gwt_docker::ContainerInfo],
+        &[screens::branches::DockerServiceInfo],
     ) -> screens::branches::BranchDetailData,
 {
     for branch in branches {
         if cancel.load(Ordering::SeqCst) {
             return;
         }
-        let data = loader(&branch, &docker_containers);
+        let data = loader(&branch, &docker_services);
         if cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -3237,6 +3324,7 @@ fn start_message_for_action(action: screens::branches::DockerLifecycleAction) ->
         DockerLifecycleAction::Start => "Starting",
         DockerLifecycleAction::Stop => "Stopping",
         DockerLifecycleAction::Restart => "Restarting",
+        DockerLifecycleAction::Recreate => "Recreating",
     }
 }
 
@@ -3247,6 +3335,7 @@ fn verb_for_action(action: screens::branches::DockerLifecycleAction) -> &'static
         DockerLifecycleAction::Start => "start",
         DockerLifecycleAction::Stop => "stop",
         DockerLifecycleAction::Restart => "restart",
+        DockerLifecycleAction::Recreate => "recreate",
     }
 }
 
@@ -3736,6 +3825,7 @@ fn build_launch_config_from_wizard_with_custom_agents(
     if let Some(docker_service) = wizard.docker_service.as_deref() {
         builder = builder.docker_service(docker_service);
     }
+    builder = builder.docker_lifecycle_intent(wizard.docker_lifecycle_intent);
     let session_mode = match wizard.mode.as_str() {
         "continue" => SessionMode::Continue,
         "resume" if wizard.resume_session_id.is_some() => SessionMode::Resume,
@@ -3820,6 +3910,7 @@ fn build_custom_launch_config_from_wizard(
         codex_fast_mode: false,
         runtime_target: wizard.runtime_target,
         docker_service: wizard.docker_service.clone(),
+        docker_lifecycle_intent: wizard.docker_lifecycle_intent,
     }
 }
 
@@ -4228,7 +4319,12 @@ where
         .unwrap_or_else(|| repo_path.to_path_buf());
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
-    ensure_docker_launch_service_ready(&launch, &mut emit_progress, &mut emit_log)?;
+    ensure_docker_launch_service_ready(
+        &launch,
+        config.docker_lifecycle_intent,
+        &mut emit_progress,
+        &mut emit_log,
+    )?;
     let runtime_command = docker_runtime_command_for_exec(config);
     emit_progress(
         screens::docker_progress::DockerStage::WaitingForServices,
@@ -4340,6 +4436,7 @@ fn ensure_docker_launch_command_ready(
 
 fn ensure_docker_launch_service_ready<F, G>(
     launch: &DockerLaunchPlan,
+    intent: gwt_agent::DockerLifecycleIntent,
     emit_progress: &mut F,
     emit_log: &mut G,
 ) -> Result<(), String>
@@ -4347,42 +4444,92 @@ where
     F: FnMut(screens::docker_progress::DockerStage, String),
     G: FnMut(Notification),
 {
-    let running = gwt_docker::compose_service_is_running(&launch.compose_file, &launch.service)
+    let status = gwt_docker::compose_service_status(&launch.compose_file, &launch.service)
         .map_err(|err| err.to_string())?;
-    if running {
-        return Ok(());
+    let action = normalize_docker_launch_action(intent, status);
+
+    match action {
+        DockerLaunchServiceAction::Connect => return Ok(()),
+        DockerLaunchServiceAction::Start => {
+            emit_progress(
+                screens::docker_progress::DockerStage::BuildingImage,
+                format!(
+                    "Building image and starting Docker service {}",
+                    launch.service
+                ),
+            );
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!("Running docker compose up -d {}", launch.service),
+            ));
+            gwt_docker::compose_up_with_output(
+                &launch.compose_file,
+                &launch.service,
+                |stream, line| {
+                    emit_log(docker_compose_up_log_entry(
+                        &launch.service,
+                        Some(stream),
+                        line.to_string(),
+                    ));
+                },
+            )
+            .map_err(|err| err.to_string())?;
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!("docker compose up -d {} completed", launch.service),
+            ));
+        }
+        DockerLaunchServiceAction::Restart => {
+            emit_progress(
+                screens::docker_progress::DockerStage::StartingContainer,
+                format!("Restarting Docker service {}", launch.service),
+            );
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!("Running docker compose restart {}", launch.service),
+            ));
+            gwt_docker::compose_restart(&launch.compose_file, &launch.service)
+                .map_err(|err| err.to_string())?;
+        }
+        DockerLaunchServiceAction::Recreate => {
+            emit_progress(
+                screens::docker_progress::DockerStage::StartingContainer,
+                format!("Recreating Docker service {}", launch.service),
+            );
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!(
+                    "Running docker compose up -d --force-recreate {}",
+                    launch.service
+                ),
+            ));
+            gwt_docker::compose_up_force_recreate_with_output(
+                &launch.compose_file,
+                &launch.service,
+                |stream, line| {
+                    emit_log(docker_compose_up_log_entry(
+                        &launch.service,
+                        Some(stream),
+                        line.to_string(),
+                    ));
+                },
+            )
+            .map_err(|err| err.to_string())?;
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!(
+                    "docker compose up -d --force-recreate {} completed",
+                    launch.service
+                ),
+            ));
+        }
     }
 
-    emit_progress(
-        screens::docker_progress::DockerStage::BuildingImage,
-        format!(
-            "Building image and starting Docker service {}",
-            launch.service
-        ),
-    );
-    emit_log(docker_compose_up_log_entry(
-        &launch.service,
-        None,
-        format!("Running docker compose up -d {}", launch.service),
-    ));
-    gwt_docker::compose_up_with_output(&launch.compose_file, &launch.service, |stream, line| {
-        emit_log(docker_compose_up_log_entry(
-            &launch.service,
-            Some(stream),
-            line.to_string(),
-        ));
-    })
-    .map_err(|err| err.to_string())?;
-    emit_log(docker_compose_up_log_entry(
-        &launch.service,
-        None,
-        format!("docker compose up -d {} completed", launch.service),
-    ));
-
-    emit_progress(
-        screens::docker_progress::DockerStage::StartingContainer,
-        format!("Starting Docker service {}", launch.service),
-    );
     emit_progress(
         screens::docker_progress::DockerStage::WaitingForServices,
         format!("Waiting for Docker service {}", launch.service),
@@ -4405,6 +4552,38 @@ where
         }
     }
     Err(message)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerLaunchServiceAction {
+    Connect,
+    Start,
+    Restart,
+    Recreate,
+}
+
+fn normalize_docker_launch_action(
+    intent: gwt_agent::DockerLifecycleIntent,
+    status: gwt_docker::ComposeServiceStatus,
+) -> DockerLaunchServiceAction {
+    use gwt_agent::DockerLifecycleIntent;
+    use gwt_docker::ComposeServiceStatus;
+
+    match intent {
+        DockerLifecycleIntent::Recreate => DockerLaunchServiceAction::Recreate,
+        DockerLifecycleIntent::Restart if status == ComposeServiceStatus::Running => {
+            DockerLaunchServiceAction::Restart
+        }
+        DockerLifecycleIntent::Connect
+        | DockerLifecycleIntent::Start
+        | DockerLifecycleIntent::Restart
+        | DockerLifecycleIntent::CreateAndStart => match status {
+            ComposeServiceStatus::Running => DockerLaunchServiceAction::Connect,
+            ComposeServiceStatus::Stopped
+            | ComposeServiceStatus::Exited
+            | ComposeServiceStatus::NotFound => DockerLaunchServiceAction::Start,
+        },
+    }
 }
 
 fn resolve_docker_launch_plan(
@@ -5100,6 +5279,82 @@ fn apply_wizard_docker_context(wizard: &mut screens::wizard::WizardState, projec
             .docker_context
             .as_ref()
             .and_then(|context| context.suggested_service.clone());
+    }
+    sync_wizard_docker_status(wizard, project_root);
+}
+
+fn sync_wizard_docker_status(wizard: &mut screens::wizard::WizardState, project_root: &Path) {
+    let status = detect_wizard_docker_service_status(wizard, project_root);
+    wizard.docker_service_status = status;
+    if !wizard_docker_lifecycle_supported(status, wizard.docker_lifecycle_intent) {
+        wizard.docker_lifecycle_intent = default_docker_lifecycle_intent(status);
+    }
+}
+
+fn detect_wizard_docker_service_status(
+    wizard: &screens::wizard::WizardState,
+    project_root: &Path,
+) -> gwt_docker::ComposeServiceStatus {
+    if wizard.runtime_target != LaunchRuntimeTarget::Docker {
+        return gwt_docker::ComposeServiceStatus::NotFound;
+    }
+
+    let Some(service) = wizard.docker_service.as_deref().or_else(|| {
+        wizard
+            .docker_context
+            .as_ref()
+            .and_then(|context| context.suggested_service.as_deref())
+    }) else {
+        return gwt_docker::ComposeServiceStatus::NotFound;
+    };
+
+    let files = gwt_docker::detect_docker_files(project_root);
+    let Some(compose_file) = docker_compose_file_for_launch(project_root, &files)
+        .ok()
+        .flatten()
+    else {
+        return gwt_docker::ComposeServiceStatus::NotFound;
+    };
+
+    gwt_docker::compose_service_status(&compose_file, service)
+        .unwrap_or(gwt_docker::ComposeServiceStatus::NotFound)
+}
+
+fn default_docker_lifecycle_intent(
+    status: gwt_docker::ComposeServiceStatus,
+) -> gwt_agent::DockerLifecycleIntent {
+    match status {
+        gwt_docker::ComposeServiceStatus::Running => gwt_agent::DockerLifecycleIntent::Connect,
+        gwt_docker::ComposeServiceStatus::Stopped | gwt_docker::ComposeServiceStatus::Exited => {
+            gwt_agent::DockerLifecycleIntent::Start
+        }
+        gwt_docker::ComposeServiceStatus::NotFound => {
+            gwt_agent::DockerLifecycleIntent::CreateAndStart
+        }
+    }
+}
+
+fn wizard_docker_lifecycle_supported(
+    status: gwt_docker::ComposeServiceStatus,
+    intent: gwt_agent::DockerLifecycleIntent,
+) -> bool {
+    match status {
+        gwt_docker::ComposeServiceStatus::Running => matches!(
+            intent,
+            gwt_agent::DockerLifecycleIntent::Connect
+                | gwt_agent::DockerLifecycleIntent::Restart
+                | gwt_agent::DockerLifecycleIntent::Recreate
+        ),
+        gwt_docker::ComposeServiceStatus::Stopped | gwt_docker::ComposeServiceStatus::Exited => {
+            matches!(
+                intent,
+                gwt_agent::DockerLifecycleIntent::Start
+                    | gwt_agent::DockerLifecycleIntent::Recreate
+            )
+        }
+        gwt_docker::ComposeServiceStatus::NotFound => {
+            matches!(intent, gwt_agent::DockerLifecycleIntent::CreateAndStart)
+        }
     }
 }
 
@@ -6825,19 +7080,18 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
         };
         let docker_hints = model
             .branches
-            .docker_containers
+            .docker_services
             .get(model.branches.docker_selected)
-            .map(|container| match container.status {
-                gwt_docker::ContainerStatus::Running => "  T/R",
-                gwt_docker::ContainerStatus::Paused => "  S/T/R",
-                gwt_docker::ContainerStatus::Created
-                | gwt_docker::ContainerStatus::Stopped
-                | gwt_docker::ContainerStatus::Exited => "  S/R",
+            .map(|service| match service.status {
+                gwt_docker::ComposeServiceStatus::Running => "  T/R/C",
+                gwt_docker::ComposeServiceStatus::Stopped
+                | gwt_docker::ComposeServiceStatus::Exited => "  S/C",
+                gwt_docker::ComposeServiceStatus::NotFound => "  S",
             })
             .unwrap_or("");
         return match model.branches.detail_section {
             0 => format!("←→ sec  ↵ act{direct_action_hints}{docker_hints}  mvf?  C-g↔P  Esc←"),
-            3 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  C-g↔P  Esc←".to_string(),
+            2 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  C-g↔P  Esc←".to_string(),
             _ => format!("←→ sec  ↵ act{direct_action_hints}  mvf?  C-g↔P  Esc←"),
         };
     }
@@ -6845,21 +7099,22 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
         0 => {
             let docker_hints = model
                 .branches
-                .docker_containers
+                .docker_services
                 .get(model.branches.docker_selected)
-                .map(|container| match container.status {
-                    gwt_docker::ContainerStatus::Running => "  T:stop  R:restart",
-                    gwt_docker::ContainerStatus::Paused => "  S:start  T:stop  R:restart",
-                    gwt_docker::ContainerStatus::Created
-                    | gwt_docker::ContainerStatus::Stopped
-                    | gwt_docker::ContainerStatus::Exited => "  S:start  R:restart",
+                .map(|service| match service.status {
+                    gwt_docker::ComposeServiceStatus::Running => {
+                        "  T:stop  R:restart  C:recreate"
+                    }
+                    gwt_docker::ComposeServiceStatus::Stopped
+                    | gwt_docker::ComposeServiceStatus::Exited => "  S:start  C:recreate",
+                    gwt_docker::ComposeServiceStatus::NotFound => "  S:create/start",
                 })
                 .unwrap_or("");
             format!(
                 "←→:section  Enter:launch{direct_action_hints}{docker_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
             )
         }
-        3 => format!(
+        2 => format!(
             "↑↓:session  ←→:section  Enter:focus{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
         _ => format!(
@@ -7312,17 +7567,21 @@ mod tests {
         session.save(dir).expect("persist session");
     }
 
-    fn docker_container(
-        id: &str,
+    fn docker_service(
+        project_root: &std::path::Path,
         name: &str,
-        status: gwt_docker::ContainerStatus,
-    ) -> gwt_docker::ContainerInfo {
-        gwt_docker::ContainerInfo {
-            id: id.to_string(),
+        status: gwt_docker::ComposeServiceStatus,
+    ) -> screens::branches::DockerServiceInfo {
+        screens::branches::DockerServiceInfo {
+            project_root: project_root.to_path_buf(),
+            compose_file: project_root.join("docker-compose.yml"),
             name: name.to_string(),
             status,
-            image: "nginx:latest".to_string(),
-            ports: "0.0.0.0:8080->80/tcp".to_string(),
+            ports: if name == "db" {
+                "5432:5432".to_string()
+            } else {
+                "8080:80".to_string()
+            },
         }
     }
 
@@ -7437,7 +7696,7 @@ services:
     }
 
     fn drive_docker_worker_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
-        for _ in 0..40 {
+        for _ in 0..120 {
             update(model, Message::Tick);
             if done(model) {
                 return;
@@ -7449,7 +7708,7 @@ services:
     }
 
     fn drive_ticks_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
-        for _ in 0..80 {
+        for _ in 0..200 {
             update(model, Message::Tick);
             if done(model) {
                 return;
@@ -10426,12 +10685,13 @@ services:
         git_commit_allow_empty(dir.path(), "initial commit");
 
         let mut model = Model::new(dir.path().to_path_buf());
-        model.set_branch_detail_docker_snapshotter(|| {
+        let project_root = dir.path().to_path_buf();
+        model.set_branch_detail_docker_snapshotter(move || {
             thread::sleep(std::time::Duration::from_millis(250));
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &project_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
 
@@ -10444,17 +10704,13 @@ services:
             "initial data load should not block on branch detail preload: {elapsed:?}"
         );
         assert!(
-            model.branches.docker_containers.is_empty(),
+            model.branches.docker_services.is_empty(),
             "branch detail docker data should arrive asynchronously"
         );
-
-        drive_ticks_until(
-            &mut model,
-            |model| !model.branches.docker_containers.is_empty(),
-            "branch detail preload",
+        assert!(
+            model.branch_detail_worker.is_some(),
+            "branch detail preload should run in the background"
         );
-
-        assert_eq!(model.branches.docker_containers[0].name, "web");
     }
 
     #[cfg(unix)]
@@ -10515,19 +10771,26 @@ services:
         let docker_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let docker_calls_for_worker = docker_calls.clone();
         let mut model = Model::new(dir.path().to_path_buf());
+        let project_root = dir.path().to_path_buf();
         model.set_branch_detail_docker_snapshotter(move || {
             docker_calls_for_worker.fetch_add(1, Ordering::SeqCst);
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &project_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
         load_initial_data(&mut model);
 
         drive_ticks_until(
             &mut model,
-            |model| !model.branches.docker_containers.is_empty(),
+            |model| {
+                model
+                    .branches
+                    .detail_cache
+                    .values()
+                    .any(|detail| !detail.docker_services.is_empty())
+            },
             "branch detail preload docker snapshot",
         );
 
@@ -12032,6 +12295,7 @@ CUSTOM_ENV = "enabled"
             agent_id: "claude".to_string(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
             docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
             ..Default::default()
         };
 
@@ -12042,6 +12306,10 @@ CUSTOM_ENV = "enabled"
             gwt_agent::LaunchRuntimeTarget::Docker
         );
         assert_eq!(config.docker_service.as_deref(), Some("web"));
+        assert_eq!(
+            config.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
     }
 
     #[test]
@@ -12078,6 +12346,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Docker,
             docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         };
@@ -12150,6 +12419,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Docker,
             docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         };
@@ -12205,6 +12475,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Docker,
             docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12258,6 +12529,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Docker,
             docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12315,6 +12587,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Docker,
             docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12398,6 +12671,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Docker,
             docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12472,6 +12746,7 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Start,
                 skip_permissions: false,
                 codex_fast_mode: false,
             });
@@ -12492,10 +12767,139 @@ services:
             }
 
             assert!(log.contains(&format!(
-                "compose -f {} ps --status running --services",
+                "compose -f {} ps --all --format",
                 compose_path.display()
             )));
             assert!(log.contains(&format!("compose -f {} up -d gwt", compose_path.display())));
+            assert!(log.contains(&format!(
+                "compose -f {} exec -w /workspace gwt /bin/echo agent-test",
+                compose_path.display()
+            )));
+            assert_eq!(model.session_count(), 2);
+            assert!(model.error_queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_running_docker_service_restarts_before_exec() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        let compose_path = write_docker_launch_compose_fixture(worktree.path());
+        let log_path = worktree.path().join("docker-args.log");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"restart\" ] && [ \"$5\" = \"gwt\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display(),
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "/bin/echo".to_string(),
+                args: vec!["agent-test".to_string()],
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                skip_permissions: false,
+                codex_fast_mode: false,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            let mut log = String::new();
+            for _ in 0..50 {
+                log = fs::read_to_string(&log_path).unwrap_or_default();
+                if log.contains(" compose -f ")
+                    && log.contains(" restart gwt")
+                    && log.contains(" exec -w /workspace gwt /bin/echo agent-test")
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            assert!(log.contains(&format!(
+                "compose -f {} ps --all --format",
+                compose_path.display()
+            )));
+            assert!(log.contains(&format!(
+                "compose -f {} restart gwt",
+                compose_path.display()
+            )));
+            assert!(log.contains(&format!(
+                "compose -f {} exec -w /workspace gwt /bin/echo agent-test",
+                compose_path.display()
+            )));
+            assert_eq!(model.session_count(), 2);
+            assert!(model.error_queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_running_docker_service_recreates_before_exec() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        let compose_path = write_docker_launch_compose_fixture(worktree.path());
+        let log_path = worktree.path().join("docker-args.log");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"--force-recreate\" ] && [ \"$7\" = \"gwt\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display(),
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "/bin/echo".to_string(),
+                args: vec!["agent-test".to_string()],
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Recreate,
+                skip_permissions: false,
+                codex_fast_mode: false,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            let mut log = String::new();
+            for _ in 0..50 {
+                log = fs::read_to_string(&log_path).unwrap_or_default();
+                if log.contains(" up -d --force-recreate gwt")
+                    && log.contains(" exec -w /workspace gwt /bin/echo agent-test")
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            assert!(log.contains(&format!(
+                "compose -f {} up -d --force-recreate gwt",
+                compose_path.display()
+            )));
             assert!(log.contains(&format!(
                 "compose -f {} exec -w /workspace gwt /bin/echo agent-test",
                 compose_path.display()
@@ -12531,6 +12935,7 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
                 skip_permissions: false,
                 codex_fast_mode: false,
             });
@@ -12681,6 +13086,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12726,6 +13132,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12801,6 +13208,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12850,6 +13258,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12900,6 +13309,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12969,6 +13379,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -13029,6 +13440,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -13071,6 +13483,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -13132,6 +13545,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         };
@@ -13306,6 +13720,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -13743,6 +14158,7 @@ services:
             resume_session_id: None,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -14994,12 +15410,13 @@ services:
 
         let mut model = Model::new(dir.path().to_path_buf());
         model.management_tab = ManagementTab::Branches;
-        model.set_branch_detail_docker_snapshotter(|| {
+        let project_root = dir.path().to_path_buf();
+        model.set_branch_detail_docker_snapshotter(move || {
             thread::sleep(std::time::Duration::from_millis(250));
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &project_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
 
@@ -15012,17 +15429,13 @@ services:
             "Branches refresh should not block on branch detail reload: {elapsed:?}"
         );
         assert!(
-            model.branches.docker_containers.is_empty(),
+            model.branches.docker_services.is_empty(),
             "detail refresh should update docker data asynchronously"
         );
-
-        drive_ticks_until(
-            &mut model,
-            |model| !model.branches.docker_containers.is_empty(),
-            "branch detail refresh",
+        assert!(
+            model.branch_detail_worker.is_some(),
+            "branch detail refresh should run in the background"
         );
-
-        assert_eq!(model.branches.docker_containers[0].name, "web");
     }
 
     #[test]
@@ -15163,9 +15576,17 @@ services:
     fn route_key_to_branch_detail_overview_moves_docker_selection() {
         let mut model = test_model();
         model.branches.detail_section = 0;
-        model.branches.docker_containers = vec![
-            docker_container("abc123", "web", gwt_docker::ContainerStatus::Running),
-            docker_container("def456", "db", gwt_docker::ContainerStatus::Stopped),
+        model.branches.docker_services = vec![
+            docker_service(
+                std::path::Path::new("/tmp/test"),
+                "web",
+                gwt_docker::ComposeServiceStatus::Running,
+            ),
+            docker_service(
+                std::path::Path::new("/tmp/test"),
+                "db",
+                gwt_docker::ComposeServiceStatus::Stopped,
+            ),
         ];
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
@@ -15182,12 +15603,13 @@ services:
         let mut model = test_model();
         model.management_tab = ManagementTab::Branches;
         model.active_focus = FocusPane::TabContent;
-        model.set_branch_detail_docker_snapshotter(|| {
+        let snapshot_root = wt_b.path().to_path_buf();
+        model.set_branch_detail_docker_snapshotter(move || {
             thread::sleep(std::time::Duration::from_millis(250));
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &snapshot_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
         model.branches.branches = vec![
@@ -15285,7 +15707,7 @@ services:
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
         }];
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
 
         model.sessions = vec![
             crate::model::SessionTab {
@@ -15321,7 +15743,7 @@ services:
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
         }];
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.active_focus = FocusPane::BranchDetail;
 
         model.sessions = vec![
@@ -15358,7 +15780,7 @@ services:
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
         }];
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.active_focus = FocusPane::BranchDetail;
 
         model.sessions = vec![
@@ -15506,14 +15928,14 @@ services:
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
         }];
         model.branches.selected = 0;
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.branches.detail_session_selected = 4;
         model.active_focus = FocusPane::BranchDetail;
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
 
         assert_eq!(model.branches.selected, 0);
-        assert_eq!(model.branches.detail_section, 3);
+        assert_eq!(model.branches.detail_section, 2);
         assert_eq!(model.branches.detail_session_selected, 4);
         assert_eq!(
             model
@@ -15535,7 +15957,7 @@ services:
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
         }];
         model.branches.selected = 0;
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.branches.detail_session_selected = 4;
         model.active_focus = FocusPane::BranchDetail;
         update(
@@ -15548,7 +15970,7 @@ services:
         assert_eq!(model.active_focus, FocusPane::TabContent);
         assert!(model.current_notification.is_some());
         assert_eq!(model.branches.selected, 0);
-        assert_eq!(model.branches.detail_section, 3);
+        assert_eq!(model.branches.detail_section, 2);
         assert_eq!(model.branches.detail_session_selected, 4);
     }
 
@@ -15649,10 +16071,10 @@ services:
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
         }];
         model.branches.detail_section = 0;
-        model.branches.docker_containers = vec![docker_container(
-            "abc123",
+        model.branches.docker_services = vec![docker_service(
+            std::path::Path::new("/tmp/test/wt-feature-direct-actions"),
             "web",
-            gwt_docker::ContainerStatus::Running,
+            gwt_docker::ComposeServiceStatus::Running,
         )];
 
         let overview = render_model_text(&model, 200, 24);
@@ -15669,7 +16091,7 @@ services:
         assert!(!no_worktree.contains("Ctrl+C:delete"));
         assert!(no_worktree.contains("Enter:launch"));
 
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         let sessions = render_model_text(&model, 200, 24);
         assert!(sessions.contains("↑↓:session"));
         assert!(sessions.contains("Enter:focus"));
@@ -15715,7 +16137,7 @@ services:
         )
         .expect("compose");
 
-        let script = "#!/bin/sh\nif [ \"$1\" = \"stop\" ]; then\n  sleep 0.1\n  exit 0\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\texited\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"stop\" ] && [ \"$5\" = \"web\" ]; then\n  sleep 0.1\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\texited\\n'\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, || {
             let mut model = test_model();
@@ -15726,10 +16148,10 @@ services:
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(tmp.path().to_path_buf()),
             }];
-            model.branches.docker_containers = vec![docker_container(
-                "abc123",
+            model.branches.docker_services = vec![docker_service(
+                tmp.path(),
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )];
 
             update(
@@ -15745,10 +16167,10 @@ services:
                 docker_progress.stage,
                 screens::docker_progress::DockerStage::StartingContainer
             );
-            assert_eq!(docker_progress.message, "Stopping container web");
+            assert_eq!(docker_progress.message, "Stopping service web");
             assert_eq!(
-                model.branches.docker_containers[0].status,
-                gwt_docker::ContainerStatus::Running
+                model.branches.docker_services[0].status,
+                gwt_docker::ComposeServiceStatus::Running
             );
 
             drive_docker_worker_until(
@@ -15764,47 +16186,47 @@ services:
                 |model| {
                     model
                         .branches
-                        .docker_containers
+                        .docker_services
                         .first()
-                        .is_some_and(|container| {
-                            container.status == gwt_docker::ContainerStatus::Exited
+                        .is_some_and(|service| {
+                            service.status == gwt_docker::ComposeServiceStatus::Exited
                         })
                 },
                 "branch detail refresh after docker stop",
             );
 
-            assert_eq!(model.branches.docker_containers.len(), 1);
+            assert_eq!(model.branches.docker_services.len(), 1);
             assert_eq!(
-                model.branches.docker_containers[0].status,
-                gwt_docker::ContainerStatus::Exited
+                model.branches.docker_services[0].status,
+                gwt_docker::ComposeServiceStatus::Exited
             );
             let docker_progress = model.docker_progress.as_ref().expect("docker progress");
             assert_eq!(
                 docker_progress.stage,
                 screens::docker_progress::DockerStage::Ready
             );
-            assert_eq!(docker_progress.message, "Stopped container web");
+            assert_eq!(docker_progress.message, "Stopped service web");
             assert!(docker_progress.error.is_none());
             let notification = model
                 .current_notification
                 .as_ref()
                 .expect("status notification");
             assert_eq!(notification.source, "docker");
-            assert_eq!(notification.message, "Stopped container web");
+            assert_eq!(notification.message, "Stopped service web");
             assert!(model.error_queue.is_empty());
         });
     }
 
     #[test]
     fn update_branches_docker_restart_failure_routes_error_notification() {
-        let script = "#!/bin/sh\nif [ \"$1\" = \"restart\" ]; then\n  sleep 0.1\n  printf 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"restart\" ] && [ \"$5\" = \"web\" ]; then\n  sleep 0.1\n  printf 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\trunning\\n'\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, || {
             let mut model = test_model();
-            model.branches.docker_containers = vec![docker_container(
-                "abc123",
+            model.branches.docker_services = vec![docker_service(
+                std::path::Path::new("/tmp/test"),
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )];
 
             update(
@@ -15819,7 +16241,7 @@ services:
                 docker_progress.stage,
                 screens::docker_progress::DockerStage::StartingContainer
             );
-            assert_eq!(docker_progress.message, "Restarting container web");
+            assert_eq!(docker_progress.message, "Restarting service web");
 
             drive_docker_worker_until(
                 &mut model,
@@ -15839,10 +16261,10 @@ services:
                 .error
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Failed to restart container web"));
+                .contains("Failed to restart service web"));
             let notification = model.error_queue.front().unwrap();
             assert_eq!(notification.source, "docker");
-            assert_eq!(notification.message, "Failed to restart container web");
+            assert_eq!(notification.message, "Failed to restart service web");
             assert!(notification
                 .detail
                 .as_deref()

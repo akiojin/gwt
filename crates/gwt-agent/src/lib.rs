@@ -19,5 +19,8 @@ pub use session::{
     runtime_state_dir_for_pid, runtime_state_path, runtime_state_path_for_pid, Session,
     SessionRuntimeState, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
 };
-pub use types::{AgentColor, AgentId, AgentInfo, AgentStatus, LaunchRuntimeTarget, SessionMode};
+pub use types::{
+    AgentColor, AgentId, AgentInfo, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget,
+    SessionMode,
+};
 pub use version_cache::{build_version_options, VersionCache, VersionOption};

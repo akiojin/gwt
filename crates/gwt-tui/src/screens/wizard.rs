@@ -23,6 +23,7 @@ pub enum WizardStep {
     ExecutionMode,
     RuntimeTarget,
     DockerServiceSelect,
+    DockerLifecycle,
     ConvertAgentSelect,
     ConvertSessionSelect,
     BranchTypeSelect,
@@ -46,6 +47,7 @@ impl WizardStep {
             Self::ExecutionMode => "Execution Mode",
             Self::RuntimeTarget => "Runtime Target",
             Self::DockerServiceSelect => "Docker Service",
+            Self::DockerLifecycle => "Docker Lifecycle",
             Self::ConvertAgentSelect => "Convert From Agent",
             Self::ConvertSessionSelect => "Select Session",
             Self::BranchTypeSelect => "Branch Type",
@@ -122,13 +124,16 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 && state.docker_service_prompt_required()
             {
                 Some(WizardStep::DockerServiceSelect)
+            } else if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                Some(WizardStep::DockerLifecycle)
             } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
                 Some(WizardStep::ExecutionMode)
             }
         }
-        WizardStep::DockerServiceSelect => {
+        WizardStep::DockerServiceSelect => Some(WizardStep::DockerLifecycle),
+        WizardStep::DockerLifecycle => {
             if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
@@ -187,12 +192,8 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::ModelSelect => Some(WizardStep::AgentSelect),
         WizardStep::ReasoningLevel => Some(WizardStep::ModelSelect),
         WizardStep::VersionSelect => {
-            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
-                && state.docker_service_prompt_required()
-            {
-                Some(WizardStep::DockerServiceSelect)
-            } else if state.has_docker_workflow() {
-                Some(WizardStep::RuntimeTarget)
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                Some(WizardStep::DockerLifecycle)
             } else if state.agent_is_codex() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
@@ -202,14 +203,10 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::ExecutionMode => {
-            if state.agent_has_npm_package() {
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                Some(WizardStep::DockerLifecycle)
+            } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
-            } else if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
-                && state.docker_service_prompt_required()
-            {
-                Some(WizardStep::DockerServiceSelect)
-            } else if state.has_docker_workflow() {
-                Some(WizardStep::RuntimeTarget)
             } else if state.agent_is_codex() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
@@ -228,6 +225,13 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::DockerServiceSelect => Some(WizardStep::RuntimeTarget),
+        WizardStep::DockerLifecycle => {
+            if state.docker_service_prompt_required() {
+                Some(WizardStep::DockerServiceSelect)
+            } else {
+                Some(WizardStep::RuntimeTarget)
+            }
+        }
         WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
         WizardStep::ConvertSessionSelect => Some(WizardStep::ConvertAgentSelect),
         WizardStep::BranchTypeSelect => {
@@ -402,6 +406,8 @@ pub struct WizardState {
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_context: Option<DockerWizardContext>,
+    pub docker_service_status: gwt_docker::ComposeServiceStatus,
+    pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub skip_perms: bool,
     pub codex_fast_mode: bool,
     pub convert_source_agents: Vec<String>,
@@ -442,6 +448,8 @@ impl Default for WizardState {
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_perms: false,
             codex_fast_mode: false,
             convert_source_agents: Vec::new(),
@@ -692,6 +700,55 @@ impl WizardState {
         })
     }
 
+    fn docker_lifecycle_options(&self) -> &'static [(&'static str, &'static str)] {
+        match self.docker_service_status {
+            gwt_docker::ComposeServiceStatus::Running => &[
+                ("Connect only", "Reuse the running Docker service"),
+                (
+                    "Restart then launch",
+                    "Restart the service before launching",
+                ),
+                (
+                    "Recreate then launch",
+                    "Force-recreate the service before launching",
+                ),
+            ],
+            gwt_docker::ComposeServiceStatus::Stopped
+            | gwt_docker::ComposeServiceStatus::Exited => &[
+                ("Start then launch", "Start the existing Docker service"),
+                (
+                    "Recreate then launch",
+                    "Force-recreate the service before launching",
+                ),
+            ],
+            gwt_docker::ComposeServiceStatus::NotFound => &[(
+                "Create and start then launch",
+                "Create the Docker service and launch into it",
+            )],
+        }
+    }
+
+    fn docker_lifecycle_default_intent(&self) -> gwt_agent::DockerLifecycleIntent {
+        match self.docker_service_status {
+            gwt_docker::ComposeServiceStatus::Running => gwt_agent::DockerLifecycleIntent::Connect,
+            gwt_docker::ComposeServiceStatus::Stopped
+            | gwt_docker::ComposeServiceStatus::Exited => gwt_agent::DockerLifecycleIntent::Start,
+            gwt_docker::ComposeServiceStatus::NotFound => {
+                gwt_agent::DockerLifecycleIntent::CreateAndStart
+            }
+        }
+    }
+
+    fn sync_docker_lifecycle_default(&mut self) {
+        let supported = self
+            .docker_lifecycle_options()
+            .iter()
+            .any(|(label, _)| *label == docker_lifecycle_label(self.docker_lifecycle_intent));
+        if !supported {
+            self.docker_lifecycle_intent = self.docker_lifecycle_default_intent();
+        }
+    }
+
     /// Number of selectable options for the current step.
     pub fn option_count(&self) -> usize {
         match self.step {
@@ -704,6 +761,7 @@ impl WizardState {
             WizardStep::ExecutionMode => 4, // normal, continue, resume, convert
             WizardStep::RuntimeTarget => 2, // host, docker
             WizardStep::DockerServiceSelect => self.docker_service_options().len().max(1),
+            WizardStep::DockerLifecycle => self.docker_lifecycle_options().len().max(1),
             WizardStep::ConvertAgentSelect => self.convert_source_agents.len().max(1),
             WizardStep::ConvertSessionSelect => self.convert_sessions.len().max(1),
             WizardStep::BranchTypeSelect => 4, // feature, bugfix, hotfix, release
@@ -802,6 +860,11 @@ impl WizardState {
                     options
                 }
             }
+            WizardStep::DockerLifecycle => self
+                .docker_lifecycle_options()
+                .iter()
+                .map(|(label, _)| (*label).to_string())
+                .collect(),
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     vec![]
@@ -1038,6 +1101,11 @@ fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
                     .position(|option| option == service)
             })
             .unwrap_or(0),
+        WizardStep::DockerLifecycle => state
+            .docker_lifecycle_options()
+            .iter()
+            .position(|(label, _)| *label == docker_lifecycle_label(state.docker_lifecycle_intent))
+            .unwrap_or(0),
         WizardStep::SkipPermissions => usize::from(!state.skip_perms),
         WizardStep::CodexFastMode => usize::from(!state.codex_fast_mode),
         _ => 0,
@@ -1054,6 +1122,7 @@ fn apply_selection(state: &mut WizardState) {
                 QuickStartAction::ChooseDifferent
             ) {
                 state.apply_quick_start_selection();
+                state.sync_docker_lifecycle_default();
             }
         }
         WizardStep::BranchAction => {
@@ -1120,10 +1189,17 @@ fn apply_selection(state: &mut WizardState) {
             } else if state.docker_service.is_none() {
                 state.docker_service = state.preferred_docker_service().map(str::to_string);
             }
+            state.sync_docker_lifecycle_default();
         }
         WizardStep::DockerServiceSelect => {
             if let Some(opt) = options.get(state.selected) {
                 state.docker_service = Some(opt.clone());
+            }
+            state.sync_docker_lifecycle_default();
+        }
+        WizardStep::DockerLifecycle => {
+            if let Some(opt) = options.get(state.selected) {
+                state.docker_lifecycle_intent = docker_lifecycle_intent_for_label(opt);
             }
         }
         WizardStep::ConvertAgentSelect => {}
@@ -1384,6 +1460,27 @@ fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOption] {
     }
 }
 
+fn docker_lifecycle_label(intent: gwt_agent::DockerLifecycleIntent) -> &'static str {
+    match intent {
+        gwt_agent::DockerLifecycleIntent::Connect => "Connect only",
+        gwt_agent::DockerLifecycleIntent::Start => "Start then launch",
+        gwt_agent::DockerLifecycleIntent::Restart => "Restart then launch",
+        gwt_agent::DockerLifecycleIntent::Recreate => "Recreate then launch",
+        gwt_agent::DockerLifecycleIntent::CreateAndStart => "Create and start then launch",
+    }
+}
+
+fn docker_lifecycle_intent_for_label(label: &str) -> gwt_agent::DockerLifecycleIntent {
+    match label {
+        "Connect only" => gwt_agent::DockerLifecycleIntent::Connect,
+        "Start then launch" => gwt_agent::DockerLifecycleIntent::Start,
+        "Restart then launch" => gwt_agent::DockerLifecycleIntent::Restart,
+        "Recreate then launch" => gwt_agent::DockerLifecycleIntent::Recreate,
+        "Create and start then launch" => gwt_agent::DockerLifecycleIntent::CreateAndStart,
+        _ => gwt_agent::DockerLifecycleIntent::Connect,
+    }
+}
+
 fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
     let char_count = text.chars().count();
     if char_count <= max_width {
@@ -1548,6 +1645,22 @@ fn render_runtime_target_step(state: &WizardState, frame: &mut Frame, area: Rect
         .map(|(idx, (label, description))| {
             let marker = if idx == state.selected { "> " } else { "  " };
             let text = format_fixed_width_line(marker, label, description, 8, available_width);
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
+        })
+        .collect();
+    render_list_content(frame, area, items);
+}
+
+fn render_docker_lifecycle_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width as usize;
+    let items = state
+        .docker_lifecycle_options()
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text =
+                format_label_description_line(marker, label, description, available_width, 24);
             ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
@@ -1729,6 +1842,11 @@ fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
             for &(label, desc) in &EXECUTION_MODE_DISPLAY_OPTIONS {
                 // marker(2) + max(label_width, label.len)(12) + space(1) + description
                 max_line = max_line.max(2 + 12.max(label.len()) + 1 + desc.len());
+            }
+        }
+        WizardStep::DockerLifecycle => {
+            for &(label, desc) in state.docker_lifecycle_options() {
+                max_line = max_line.max(2 + label.len() + 3 + desc.len());
             }
         }
         WizardStep::ReasoningLevel => {
@@ -2011,6 +2129,7 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::VersionSelect => render_version_step(state, frame, area),
         WizardStep::ExecutionMode => render_execution_mode_step(state, frame, area),
         WizardStep::RuntimeTarget => render_runtime_target_step(state, frame, area),
+        WizardStep::DockerLifecycle => render_docker_lifecycle_step(state, frame, area),
         WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, area),
         WizardStep::CodexFastMode => render_codex_fast_mode_step(state, frame, area),
         _ => {
@@ -2347,6 +2466,10 @@ mod tests {
         state.docker_service = Some("web".to_string());
         assert_eq!(
             next_step(WizardStep::DockerServiceSelect, &state),
+            Some(WizardStep::DockerLifecycle)
+        );
+        assert_eq!(
+            next_step(WizardStep::DockerLifecycle, &state),
             Some(WizardStep::VersionSelect)
         );
         assert_eq!(
@@ -2375,6 +2498,50 @@ mod tests {
         assert_eq!(
             next_step(WizardStep::VersionSelect, &state),
             Some(WizardStep::ExecutionMode)
+        );
+    }
+
+    #[test]
+    fn docker_lifecycle_options_follow_service_state() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::DockerLifecycle;
+
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Connect only".to_string(),
+                "Restart then launch".to_string(),
+                "Recreate then launch".to_string(),
+            ]
+        );
+
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Exited;
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Start then launch".to_string(),
+                "Recreate then launch".to_string(),
+            ]
+        );
+
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
+        assert_eq!(
+            state.current_options(),
+            vec!["Create and start then launch".to_string()]
+        );
+    }
+
+    #[test]
+    fn docker_lifecycle_step_defaults_to_connect_for_running_service() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::DockerLifecycle;
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        state.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Connect;
+
+        assert_eq!(
+            step_default_selection(WizardStep::DockerLifecycle, &state),
+            0
         );
     }
 

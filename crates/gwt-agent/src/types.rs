@@ -131,6 +131,17 @@ pub enum LaunchRuntimeTarget {
     Docker,
 }
 
+/// Non-persisted lifecycle intent for a Docker launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockerLifecycleIntent {
+    #[default]
+    Connect,
+    Start,
+    Restart,
+    Recreate,
+    CreateAndStart,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

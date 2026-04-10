@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
-use crate::types::{AgentColor, AgentId, LaunchRuntimeTarget, SessionMode};
+use crate::types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode};
 
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.
@@ -134,6 +134,7 @@ pub struct LaunchConfig {
     pub codex_fast_mode: bool,
     pub runtime_target: LaunchRuntimeTarget,
     pub docker_service: Option<String>,
+    pub docker_lifecycle_intent: DockerLifecycleIntent,
 }
 
 /// Permission mode for agent launch.
@@ -166,6 +167,7 @@ pub struct AgentLaunchBuilder {
     extra_args: Vec<String>,
     runtime_target: LaunchRuntimeTarget,
     docker_service: Option<String>,
+    docker_lifecycle_intent: DockerLifecycleIntent,
 }
 
 impl AgentLaunchBuilder {
@@ -187,6 +189,7 @@ impl AgentLaunchBuilder {
             extra_args: Vec::new(),
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
         }
     }
 
@@ -263,6 +266,11 @@ impl AgentLaunchBuilder {
 
     pub fn docker_service(mut self, service: impl Into<String>) -> Self {
         self.docker_service = Some(service.into());
+        self
+    }
+
+    pub fn docker_lifecycle_intent(mut self, intent: DockerLifecycleIntent) -> Self {
+        self.docker_lifecycle_intent = intent;
         self
     }
 
@@ -359,6 +367,7 @@ impl AgentLaunchBuilder {
             codex_fast_mode,
             runtime_target: self.runtime_target,
             docker_service: self.docker_service,
+            docker_lifecycle_intent: self.docker_lifecycle_intent,
         }
     }
 
