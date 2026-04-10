@@ -2,22 +2,88 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
 use crate::theme;
+
+/// A single environment variable row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvVarItem {
+    pub key: String,
+    pub value: String,
+}
+
+/// Focus target inside the Profiles tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfilesFocus {
+    #[default]
+    ProfileList,
+    EnvVars,
+    DisabledEnv,
+    Preview,
+}
+
+impl ProfilesFocus {
+    fn next(self) -> Self {
+        match self {
+            Self::ProfileList => Self::EnvVars,
+            Self::EnvVars => Self::DisabledEnv,
+            Self::DisabledEnv => Self::Preview,
+            Self::Preview => Self::ProfileList,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::ProfileList => Self::Preview,
+            Self::EnvVars => Self::ProfileList,
+            Self::DisabledEnv => Self::EnvVars,
+            Self::Preview => Self::DisabledEnv,
+        }
+    }
+}
 
 /// Current mode of the profiles screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProfileMode {
     #[default]
     List,
-    Create,
-    Edit,
-    ConfirmDelete,
+    CreateProfile,
+    EditProfile,
+    CreateEnvVar,
+    EditEnvVar,
+    CreateDisabledEnv,
+    EditDisabledEnv,
+    ConfirmDeleteProfile,
+    ConfirmDeleteEnvVar,
+    ConfirmDeleteDisabledEnv,
+}
+
+impl ProfileMode {
+    fn is_form(self) -> bool {
+        matches!(
+            self,
+            Self::CreateProfile
+                | Self::EditProfile
+                | Self::CreateEnvVar
+                | Self::EditEnvVar
+                | Self::CreateDisabledEnv
+                | Self::EditDisabledEnv
+        )
+    }
+
+    fn field_count(self) -> usize {
+        match self {
+            Self::CreateProfile | Self::EditProfile => 2,
+            Self::CreateEnvVar | Self::EditEnvVar => 2,
+            Self::CreateDisabledEnv | Self::EditDisabledEnv => 1,
+            _ => 0,
+        }
+    }
 }
 
 /// A single profile entry.
@@ -27,6 +93,10 @@ pub struct ProfileItem {
     pub active: bool,
     pub env_count: usize,
     pub description: String,
+    pub env_vars: Vec<EnvVarItem>,
+    pub disabled_env: Vec<String>,
+    pub merged_preview: Vec<EnvVarItem>,
+    pub deletable: bool,
 }
 
 /// State for the profiles screen.
@@ -34,10 +104,15 @@ pub struct ProfileItem {
 pub struct ProfilesState {
     pub(crate) profiles: Vec<ProfileItem>,
     pub(crate) selected: usize,
+    pub(crate) env_selected: usize,
+    pub(crate) disabled_selected: usize,
+    pub(crate) focus: ProfilesFocus,
     pub(crate) mode: ProfileMode,
     pub(crate) input_name: String,
     pub(crate) input_description: String,
-    /// 0 = name field, 1 = description field
+    pub(crate) input_key: String,
+    pub(crate) input_value: String,
+    /// Index of the active field in the current form.
     pub(crate) active_field: usize,
 }
 
@@ -47,16 +122,45 @@ impl ProfilesState {
         self.profiles.get(self.selected)
     }
 
-    /// Clamp selected index to list length.
-    fn clamp_selected(&mut self) {
-        super::clamp_index(&mut self.selected, self.profiles.len());
+    /// Get the currently selected environment variable, if any.
+    pub fn selected_env_var(&self) -> Option<&EnvVarItem> {
+        self.selected_profile()
+            .and_then(|profile| profile.env_vars.get(self.env_selected))
     }
 
-    /// Clear form input fields.
+    /// Get the currently selected disabled OS environment variable, if any.
+    pub fn selected_disabled_env(&self) -> Option<&str> {
+        self.selected_profile()
+            .and_then(|profile| profile.disabled_env.get(self.disabled_selected))
+            .map(String::as_str)
+    }
+
+    /// Clamp all selection indices to the currently available data.
+    pub fn clamp_selection(&mut self) {
+        super::clamp_index(&mut self.selected, self.profiles.len());
+        let env_len = self
+            .selected_profile()
+            .map(|profile| profile.env_vars.len())
+            .unwrap_or(0);
+        let disabled_len = self
+            .selected_profile()
+            .map(|profile| profile.disabled_env.len())
+            .unwrap_or(0);
+        super::clamp_index(&mut self.env_selected, env_len);
+        super::clamp_index(&mut self.disabled_selected, disabled_len);
+    }
+
     fn clear_form(&mut self) {
         self.input_name.clear();
         self.input_description.clear();
+        self.input_key.clear();
+        self.input_value.clear();
         self.active_field = 0;
+    }
+
+    fn exit_mode(&mut self) {
+        self.clear_form();
+        self.mode = ProfileMode::List;
     }
 }
 
@@ -65,6 +169,8 @@ impl ProfilesState {
 pub enum ProfilesMessage {
     MoveUp,
     MoveDown,
+    FocusLeft,
+    FocusRight,
     ToggleActive,
     StartCreate,
     StartEdit,
@@ -80,120 +186,224 @@ pub enum ProfilesMessage {
 pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
     match msg {
         ProfilesMessage::MoveUp => {
-            if state.mode == ProfileMode::List {
-                super::move_up(&mut state.selected, state.profiles.len());
+            if state.mode != ProfileMode::List {
+                return;
+            }
+            match state.focus {
+                ProfilesFocus::ProfileList => {
+                    super::move_up(&mut state.selected, state.profiles.len());
+                    state.clamp_selection();
+                }
+                ProfilesFocus::EnvVars => {
+                    let len = state
+                        .selected_profile()
+                        .map(|profile| profile.env_vars.len())
+                        .unwrap_or(0);
+                    super::move_up(&mut state.env_selected, len);
+                }
+                ProfilesFocus::DisabledEnv => {
+                    let len = state
+                        .selected_profile()
+                        .map(|profile| profile.disabled_env.len())
+                        .unwrap_or(0);
+                    super::move_up(&mut state.disabled_selected, len);
+                }
+                ProfilesFocus::Preview => {}
             }
         }
         ProfilesMessage::MoveDown => {
-            if state.mode == ProfileMode::List {
-                super::move_down(&mut state.selected, state.profiles.len());
+            if state.mode != ProfileMode::List {
+                return;
             }
-        }
-        ProfilesMessage::ToggleActive => {
-            if state.mode == ProfileMode::List {
-                if let Some(profile) = state.profiles.get_mut(state.selected) {
-                    profile.active = !profile.active;
+            match state.focus {
+                ProfilesFocus::ProfileList => {
+                    super::move_down(&mut state.selected, state.profiles.len());
+                    state.clamp_selection();
                 }
+                ProfilesFocus::EnvVars => {
+                    let len = state
+                        .selected_profile()
+                        .map(|profile| profile.env_vars.len())
+                        .unwrap_or(0);
+                    super::move_down(&mut state.env_selected, len);
+                }
+                ProfilesFocus::DisabledEnv => {
+                    let len = state
+                        .selected_profile()
+                        .map(|profile| profile.disabled_env.len())
+                        .unwrap_or(0);
+                    super::move_down(&mut state.disabled_selected, len);
+                }
+                ProfilesFocus::Preview => {}
             }
         }
+        ProfilesMessage::FocusLeft => {
+            if state.mode == ProfileMode::List {
+                state.focus = state.focus.prev();
+            }
+        }
+        ProfilesMessage::FocusRight => {
+            if state.mode == ProfileMode::List {
+                state.focus = state.focus.next();
+            }
+        }
+        ProfilesMessage::ToggleActive => {}
         ProfilesMessage::StartCreate => {
+            if state.mode != ProfileMode::List {
+                return;
+            }
             state.clear_form();
-            state.mode = ProfileMode::Create;
+            state.mode = match state.focus {
+                ProfilesFocus::ProfileList => ProfileMode::CreateProfile,
+                ProfilesFocus::EnvVars => ProfileMode::CreateEnvVar,
+                ProfilesFocus::DisabledEnv => ProfileMode::CreateDisabledEnv,
+                ProfilesFocus::Preview => ProfileMode::List,
+            };
         }
         ProfilesMessage::StartEdit => {
-            if let Some(profile) = state.profiles.get(state.selected) {
-                state.input_name = profile.name.clone();
-                state.input_description = profile.description.clone();
-                state.active_field = 0;
-                state.mode = ProfileMode::Edit;
+            if state.mode != ProfileMode::List {
+                return;
+            }
+            match state.focus {
+                ProfilesFocus::ProfileList => {
+                    if let Some(profile) = state.selected_profile().cloned() {
+                        state.input_name = profile.name.clone();
+                        state.input_description = profile.description.clone();
+                        state.active_field = 0;
+                        state.mode = ProfileMode::EditProfile;
+                    }
+                }
+                ProfilesFocus::EnvVars => {
+                    if let Some(env) = state.selected_env_var().cloned() {
+                        state.input_key = env.key.clone();
+                        state.input_value = env.value.clone();
+                        state.active_field = 0;
+                        state.mode = ProfileMode::EditEnvVar;
+                    }
+                }
+                ProfilesFocus::DisabledEnv => {
+                    if let Some(key) = state.selected_disabled_env() {
+                        state.input_key = key.to_string();
+                        state.active_field = 0;
+                        state.mode = ProfileMode::EditDisabledEnv;
+                    }
+                }
+                ProfilesFocus::Preview => {}
             }
         }
         ProfilesMessage::StartDelete => {
-            if !state.profiles.is_empty() {
-                state.mode = ProfileMode::ConfirmDelete;
+            if state.mode != ProfileMode::List {
+                return;
             }
-        }
-        ProfilesMessage::Confirm => match state.mode {
-            ProfileMode::Create => {
-                if !state.input_name.is_empty() {
-                    let profile = ProfileItem {
-                        name: state.input_name.clone(),
-                        active: false,
-                        env_count: 0,
-                        description: state.input_description.clone(),
-                    };
-                    state.profiles.push(profile);
-                    state.selected = state.profiles.len() - 1;
+            state.mode = match state.focus {
+                ProfilesFocus::ProfileList if state.selected_profile().is_some() => {
+                    ProfileMode::ConfirmDeleteProfile
                 }
-                state.clear_form();
-                state.mode = ProfileMode::List;
+                ProfilesFocus::EnvVars if state.selected_env_var().is_some() => {
+                    ProfileMode::ConfirmDeleteEnvVar
+                }
+                ProfilesFocus::DisabledEnv if state.selected_disabled_env().is_some() => {
+                    ProfileMode::ConfirmDeleteDisabledEnv
+                }
+                _ => ProfileMode::List,
+            };
+        }
+        ProfilesMessage::Confirm => state.exit_mode(),
+        ProfilesMessage::Cancel => state.exit_mode(),
+        ProfilesMessage::InputChar(ch) => {
+            if !state.mode.is_form() {
+                return;
             }
-            ProfileMode::Edit => {
-                if let Some(profile) = state.profiles.get_mut(state.selected) {
-                    if !state.input_name.is_empty() {
-                        profile.name = state.input_name.clone();
-                        profile.description = state.input_description.clone();
+            match state.mode {
+                ProfileMode::CreateProfile | ProfileMode::EditProfile => {
+                    if state.active_field == 0 {
+                        state.input_name.push(ch);
+                    } else {
+                        state.input_description.push(ch);
                     }
                 }
-                state.clear_form();
-                state.mode = ProfileMode::List;
-            }
-            ProfileMode::ConfirmDelete => {
-                if !state.profiles.is_empty() {
-                    state.profiles.remove(state.selected);
-                    state.clamp_selected();
+                ProfileMode::CreateEnvVar | ProfileMode::EditEnvVar => {
+                    if state.active_field == 0 {
+                        state.input_key.push(ch);
+                    } else {
+                        state.input_value.push(ch);
+                    }
                 }
-                state.mode = ProfileMode::List;
+                ProfileMode::CreateDisabledEnv | ProfileMode::EditDisabledEnv => {
+                    state.input_key.push(ch);
+                }
+                _ => {}
             }
-            ProfileMode::List => {}
-        },
-        ProfilesMessage::Cancel => {
-            state.clear_form();
-            state.mode = ProfileMode::List;
         }
-        ProfilesMessage::InputChar(ch) => match state.mode {
-            ProfileMode::Create | ProfileMode::Edit => {
-                if state.active_field == 0 {
-                    state.input_name.push(ch);
-                } else {
-                    state.input_description.push(ch);
+        ProfilesMessage::Backspace => {
+            if !state.mode.is_form() {
+                return;
+            }
+            match state.mode {
+                ProfileMode::CreateProfile | ProfileMode::EditProfile => {
+                    if state.active_field == 0 {
+                        state.input_name.pop();
+                    } else {
+                        state.input_description.pop();
+                    }
+                }
+                ProfileMode::CreateEnvVar | ProfileMode::EditEnvVar => {
+                    if state.active_field == 0 {
+                        state.input_key.pop();
+                    } else {
+                        state.input_value.pop();
+                    }
+                }
+                ProfileMode::CreateDisabledEnv | ProfileMode::EditDisabledEnv => {
+                    state.input_key.pop();
+                }
+                _ => {}
+            }
+        }
+        ProfilesMessage::NextField => {
+            if state.mode.is_form() {
+                let field_count = state.mode.field_count();
+                if field_count > 0 {
+                    state.active_field = (state.active_field + 1) % field_count;
                 }
             }
-            _ => {}
-        },
-        ProfilesMessage::Backspace => match state.mode {
-            ProfileMode::Create | ProfileMode::Edit => {
-                if state.active_field == 0 {
-                    state.input_name.pop();
-                } else {
-                    state.input_description.pop();
-                }
-            }
-            _ => {}
-        },
-        ProfilesMessage::NextField => match state.mode {
-            ProfileMode::Create | ProfileMode::Edit => {
-                state.active_field = (state.active_field + 1) % 2;
-            }
-            _ => {}
-        },
+        }
     }
 }
 
 /// Render the profiles screen.
 pub fn render(state: &ProfilesState, frame: &mut Frame, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    render_list(state, frame, chunks[0]);
     match state.mode {
-        ProfileMode::List => render_list(state, frame, area),
-        ProfileMode::Create | ProfileMode::Edit => render_form(state, frame, area),
-        ProfileMode::ConfirmDelete => render_confirm_delete(state, frame, area),
+        ProfileMode::List => render_detail(state, frame, chunks[1]),
+        ProfileMode::CreateProfile
+        | ProfileMode::EditProfile
+        | ProfileMode::CreateEnvVar
+        | ProfileMode::EditEnvVar
+        | ProfileMode::CreateDisabledEnv
+        | ProfileMode::EditDisabledEnv => render_form(state, frame, chunks[1]),
+        ProfileMode::ConfirmDeleteProfile
+        | ProfileMode::ConfirmDeleteEnvVar
+        | ProfileMode::ConfirmDeleteDisabledEnv => render_confirm_delete(state, frame, chunks[1]),
     }
 }
 
 /// Render the profile list view.
 fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
     if state.profiles.is_empty() {
-        let block = Block::default().title("Profiles");
-        let paragraph = Paragraph::new("No profiles. Press 'c' to create one.")
+        let (border_style, border_type) =
+            theme::pane_border(state.focus == ProfilesFocus::ProfileList);
+        let block = Block::default()
+            .title("Profiles")
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .border_type(border_type);
+        let paragraph = Paragraph::new("No profiles loaded.")
             .block(block)
             .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
@@ -205,15 +415,17 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, profile)| {
-            let active_marker = if profile.active { "[*] " } else { "[ ] " };
-
-            let style = super::list_item_style(idx == state.selected);
-
-            let line = Line::from(vec![
+            let style = if idx == state.selected {
+                theme::style::selected_item()
+            } else {
+                theme::style::text()
+            };
+            let active_marker = if profile.active { "[*]" } else { "[ ]" };
+            let mut spans = vec![
                 Span::styled(
-                    active_marker.to_string(),
+                    format!("{active_marker} "),
                     if profile.active {
-                        Style::default().fg(theme::color::SUCCESS)
+                        theme::style::success_text()
                     } else {
                         Style::default().fg(theme::color::SURFACE)
                     },
@@ -223,106 +435,414 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
                     format!("  ({} env vars)", profile.env_count),
                     Style::default().fg(theme::color::FOCUS),
                 ),
-                if !profile.description.is_empty() {
-                    Span::styled(
-                        format!(" - {}", profile.description),
-                        Style::default().fg(theme::color::SURFACE),
-                    )
-                } else {
-                    Span::raw("")
-                },
-            ]);
-            ListItem::new(line)
+            ];
+            if !profile.deletable {
+                spans.push(Span::styled(
+                    "  [default]".to_string(),
+                    theme::style::warning_text(),
+                ));
+            }
+            if !profile.description.is_empty() {
+                spans.push(Span::styled(
+                    format!(" - {}", profile.description),
+                    Style::default().fg(theme::color::SURFACE),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
-    let block = Block::default().title("Profiles");
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(theme::style::active_item());
-    let mut list_state = ratatui::widgets::ListState::default();
+    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::ProfileList);
+    let list = List::new(items).block(
+        Block::default()
+            .title("Profiles")
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .border_type(border_type),
+    );
+    let mut list_state = ListState::default();
     list_state.select(Some(state.selected));
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-/// Render a single form field with active/inactive styling.
+fn render_detail(state: &ProfilesState, frame: &mut Frame, area: Rect) {
+    let Some(profile) = state.selected_profile() else {
+        let block = Block::default()
+            .title("Profile Detail")
+            .borders(Borders::ALL)
+            .border_type(theme::border::default());
+        frame.render_widget(
+            Paragraph::new("No profile selected.")
+                .block(block)
+                .style(theme::style::muted_text()),
+            area,
+        );
+        return;
+    };
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(6),
+            Constraint::Length(6),
+            Constraint::Min(6),
+        ])
+        .split(area);
+
+    render_summary_block(state, profile, frame, sections[0]);
+    render_env_vars_block(state, profile, frame, sections[1]);
+    render_disabled_env_block(state, profile, frame, sections[2]);
+    render_preview_block(state, profile, frame, sections[3]);
+}
+
+fn render_summary_block(
+    state: &ProfilesState,
+    profile: &ProfileItem,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Name: ", theme::style::header()),
+            Span::raw(profile.name.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("Description: ", theme::style::header()),
+            Span::raw(if profile.description.is_empty() {
+                "(none)".to_string()
+            } else {
+                profile.description.clone()
+            }),
+        ]),
+        Line::from(vec![
+            Span::styled("Active: ", theme::style::header()),
+            Span::styled(
+                if profile.active { "yes" } else { "no" },
+                if profile.active {
+                    theme::style::success_text()
+                } else {
+                    theme::style::muted_text()
+                },
+            ),
+            Span::raw("  "),
+            Span::styled("Delete: ", theme::style::header()),
+            Span::styled(
+                if profile.deletable {
+                    "allowed"
+                } else {
+                    "locked (default)"
+                },
+                if profile.deletable {
+                    theme::style::text()
+                } else {
+                    theme::style::warning_text()
+                },
+            ),
+        ]),
+    ];
+
+    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::ProfileList);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Profile Detail")
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .border_type(border_type),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_env_vars_block(
+    state: &ProfilesState,
+    profile: &ProfileItem,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::EnvVars);
+    let items: Vec<ListItem> = if profile.env_vars.is_empty() {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "No profile-owned environment variables.".to_string(),
+            theme::style::muted_text(),
+        )]))]
+    } else {
+        profile
+            .env_vars
+            .iter()
+            .enumerate()
+            .map(|(idx, env)| {
+                let style = if state.focus == ProfilesFocus::EnvVars && idx == state.env_selected {
+                    theme::style::selected_item()
+                } else {
+                    theme::style::text()
+                };
+                ListItem::new(Line::from(vec![Span::styled(
+                    format!("{}={}", env.key, env.value),
+                    style,
+                )]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items).block(
+        Block::default()
+            .title("Environment")
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .border_type(border_type),
+    );
+    let mut list_state = ListState::default();
+    if !profile.env_vars.is_empty() {
+        list_state.select(Some(state.env_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn render_disabled_env_block(
+    state: &ProfilesState,
+    profile: &ProfileItem,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::DisabledEnv);
+    let items: Vec<ListItem> = if profile.disabled_env.is_empty() {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "No blocked OS environment variables.".to_string(),
+            theme::style::muted_text(),
+        )]))]
+    } else {
+        profile
+            .disabled_env
+            .iter()
+            .enumerate()
+            .map(|(idx, key)| {
+                let style = if state.focus == ProfilesFocus::DisabledEnv
+                    && idx == state.disabled_selected
+                {
+                    theme::style::selected_item()
+                } else {
+                    theme::style::text()
+                };
+                ListItem::new(Line::from(vec![Span::styled(key.clone(), style)]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items).block(
+        Block::default()
+            .title("Disabled OS Environment")
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .border_type(border_type),
+    );
+    let mut list_state = ListState::default();
+    if !profile.disabled_env.is_empty() {
+        list_state.select(Some(state.disabled_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn render_preview_block(
+    state: &ProfilesState,
+    profile: &ProfileItem,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::Preview);
+    let lines: Vec<Line> = if profile.merged_preview.is_empty() {
+        vec![Line::from(vec![Span::styled(
+            "No effective environment variables.".to_string(),
+            theme::style::muted_text(),
+        )])]
+    } else {
+        profile
+            .merged_preview
+            .iter()
+            .map(|env| Line::from(format!("{}={}", env.key, env.value)))
+            .collect()
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Effective Environment")
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .border_type(border_type),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_form(state: &ProfilesState, frame: &mut Frame, area: Rect) {
+    let title = match state.mode {
+        ProfileMode::CreateProfile => "Create Profile",
+        ProfileMode::EditProfile => "Edit Profile",
+        ProfileMode::CreateEnvVar => "Add Environment Variable",
+        ProfileMode::EditEnvVar => "Edit Environment Variable",
+        ProfileMode::CreateDisabledEnv => "Add Disabled OS Environment",
+        ProfileMode::EditDisabledEnv => "Edit Disabled OS Environment",
+        _ => "Profile Form",
+    };
+
+    let constraints = match state.mode {
+        ProfileMode::CreateProfile | ProfileMode::EditProfile => {
+            vec![
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(2),
+                Constraint::Min(0),
+            ]
+        }
+        ProfileMode::CreateEnvVar | ProfileMode::EditEnvVar => {
+            vec![
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(2),
+                Constraint::Min(0),
+            ]
+        }
+        ProfileMode::CreateDisabledEnv | ProfileMode::EditDisabledEnv => {
+            vec![
+                Constraint::Length(3),
+                Constraint::Length(2),
+                Constraint::Min(0),
+            ]
+        }
+        _ => vec![Constraint::Min(0)],
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    match state.mode {
+        ProfileMode::CreateProfile | ProfileMode::EditProfile => {
+            render_form_field(
+                title,
+                &format!("Name: {}", state.input_name),
+                state.active_field == 0,
+                frame,
+                chunks[0],
+            );
+            render_form_field(
+                "Description",
+                &state.input_description,
+                state.active_field == 1,
+                frame,
+                chunks[1],
+            );
+            frame.render_widget(
+                Paragraph::new("Tab: next field | Enter: confirm | Esc: cancel")
+                    .style(theme::style::muted_text()),
+                chunks[2],
+            );
+        }
+        ProfileMode::CreateEnvVar | ProfileMode::EditEnvVar => {
+            render_form_field(
+                title,
+                &format!("Key: {}", state.input_key),
+                state.active_field == 0,
+                frame,
+                chunks[0],
+            );
+            render_form_field(
+                "Value",
+                &state.input_value,
+                state.active_field == 1,
+                frame,
+                chunks[1],
+            );
+            frame.render_widget(
+                Paragraph::new("Tab: next field | Enter: confirm | Esc: cancel")
+                    .style(theme::style::muted_text()),
+                chunks[2],
+            );
+        }
+        ProfileMode::CreateDisabledEnv | ProfileMode::EditDisabledEnv => {
+            render_form_field(
+                title,
+                &format!("Key: {}", state.input_key),
+                true,
+                frame,
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new("Enter: confirm | Esc: cancel").style(theme::style::muted_text()),
+                chunks[1],
+            );
+        }
+        _ => {}
+    }
+}
+
 fn render_form_field(title: &str, value: &str, is_active: bool, frame: &mut Frame, area: Rect) {
+    let (border_style, border_type) = theme::pane_border(is_active);
     let text_style = if is_active {
-        Style::default().fg(theme::color::ACTIVE)
+        Style::default()
+            .fg(theme::color::ACTIVE)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme::color::TEXT_PRIMARY)
     };
-
     let display = if is_active {
         format!("{value}_")
     } else {
         value.to_string()
     };
-
-    let block = Block::default().title(title);
-    let paragraph = Paragraph::new(display).block(block).style(text_style);
-    frame.render_widget(paragraph, area);
+    frame.render_widget(
+        Paragraph::new(display)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .border_type(border_type),
+            )
+            .style(text_style),
+        area,
+    );
 }
 
-/// Render the create/edit form.
-fn render_form(state: &ProfilesState, frame: &mut Frame, area: Rect) {
-    let title = if state.mode == ProfileMode::Create {
-        "Create Profile"
-    } else {
-        "Edit Profile"
+fn render_confirm_delete(state: &ProfilesState, frame: &mut Frame, area: Rect) {
+    let (title, target) = match state.mode {
+        ProfileMode::ConfirmDeleteProfile => (
+            "Delete Profile",
+            state.selected_profile().map(|profile| profile.name.clone()),
+        ),
+        ProfileMode::ConfirmDeleteEnvVar => (
+            "Delete Environment Variable",
+            state.selected_env_var().map(|env| env.key.clone()),
+        ),
+        ProfileMode::ConfirmDeleteDisabledEnv => (
+            "Delete Disabled OS Environment",
+            state.selected_disabled_env().map(str::to_string),
+        ),
+        _ => ("Delete", None),
     };
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Name field
-            Constraint::Length(3), // Description field
-            Constraint::Length(2), // Hints
-            Constraint::Min(0),    // Spacer
-        ])
-        .split(area);
-
-    render_form_field(
-        title,
-        &format!("Name: {}", state.input_name),
-        state.active_field == 0,
-        frame,
-        chunks[0],
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Delete \"{}\"?\n\nEnter: confirm | Esc: cancel",
+            target.unwrap_or_else(|| "unknown".to_string())
+        ))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_type(theme::border::modal())
+                .border_style(theme::style::error_text()),
+        )
+        .style(theme::style::error_text())
+        .wrap(Wrap { trim: false }),
+        area,
     );
-    render_form_field(
-        "Description",
-        &state.input_description,
-        state.active_field == 1,
-        frame,
-        chunks[1],
-    );
-
-    let hints = Paragraph::new(" Tab: next field | Enter: confirm | Esc: cancel")
-        .style(theme::style::muted_text());
-    frame.render_widget(hints, chunks[2]);
-}
-
-/// Render the delete confirmation dialog.
-fn render_confirm_delete(state: &ProfilesState, frame: &mut Frame, area: Rect) {
-    let name = state
-        .selected_profile()
-        .map(|p| p.name.as_str())
-        .unwrap_or("unknown");
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(theme::border::default())
-        .title("Confirm Delete")
-        .border_style(Style::default().fg(theme::color::ERROR));
-
-    let text = Paragraph::new(format!(
-        "Delete profile \"{}\"?\n\nEnter: confirm | Esc: cancel",
-        name
-    ))
-    .block(block)
-    .style(Style::default().fg(theme::color::ERROR));
-
-    frame.render_widget(text, area);
 }
 
 #[cfg(test)]
@@ -337,20 +857,46 @@ mod tests {
             ProfileItem {
                 name: "default".to_string(),
                 active: true,
-                env_count: 3,
+                env_count: 1,
                 description: "Default profile".to_string(),
+                env_vars: vec![EnvVarItem {
+                    key: "TERM".to_string(),
+                    value: "xterm-256color".to_string(),
+                }],
+                disabled_env: vec!["SECRET".to_string()],
+                merged_preview: vec![
+                    EnvVarItem {
+                        key: "PATH".to_string(),
+                        value: "/bin".to_string(),
+                    },
+                    EnvVarItem {
+                        key: "TERM".to_string(),
+                        value: "xterm-256color".to_string(),
+                    },
+                ],
+                deletable: false,
             },
             ProfileItem {
                 name: "staging".to_string(),
                 active: false,
-                env_count: 5,
+                env_count: 2,
                 description: "Staging env".to_string(),
-            },
-            ProfileItem {
-                name: "production".to_string(),
-                active: false,
-                env_count: 8,
-                description: String::new(),
+                env_vars: vec![
+                    EnvVarItem {
+                        key: "API_URL".to_string(),
+                        value: "https://staging".to_string(),
+                    },
+                    EnvVarItem {
+                        key: "FEATURE_FLAG".to_string(),
+                        value: "1".to_string(),
+                    },
+                ],
+                disabled_env: vec![],
+                merged_preview: vec![EnvVarItem {
+                    key: "API_URL".to_string(),
+                    value: "https://staging".to_string(),
+                }],
+                deletable: true,
             },
         ]
     }
@@ -360,234 +906,80 @@ mod tests {
         let state = ProfilesState::default();
         assert!(state.profiles.is_empty());
         assert_eq!(state.selected, 0);
+        assert_eq!(state.env_selected, 0);
+        assert_eq!(state.disabled_selected, 0);
+        assert_eq!(state.focus, ProfilesFocus::ProfileList);
         assert_eq!(state.mode, ProfileMode::List);
-        assert!(state.input_name.is_empty());
-        assert!(state.input_description.is_empty());
-        assert_eq!(state.active_field, 0);
     }
 
     #[test]
-    fn move_down_wraps() {
+    fn focus_and_selection_follow_current_section() {
         let mut state = ProfilesState::default();
         state.profiles = sample_profiles();
 
+        update(&mut state, ProfilesMessage::FocusRight);
+        assert_eq!(state.focus, ProfilesFocus::EnvVars);
         update(&mut state, ProfilesMessage::MoveDown);
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.env_selected, 0);
 
+        state.selected = 1;
+        state.clamp_selection();
         update(&mut state, ProfilesMessage::MoveDown);
-        assert_eq!(state.selected, 2);
+        assert_eq!(state.env_selected, 1);
 
-        update(&mut state, ProfilesMessage::MoveDown);
-        assert_eq!(state.selected, 0); // wraps
+        update(&mut state, ProfilesMessage::FocusRight);
+        assert_eq!(state.focus, ProfilesFocus::DisabledEnv);
     }
 
     #[test]
-    fn move_up_wraps() {
+    fn start_create_uses_focus_specific_modes() {
         let mut state = ProfilesState::default();
         state.profiles = sample_profiles();
-
-        update(&mut state, ProfilesMessage::MoveUp);
-        assert_eq!(state.selected, 2); // wraps to last
-    }
-
-    #[test]
-    fn move_on_empty_is_noop() {
-        let mut state = ProfilesState::default();
-        update(&mut state, ProfilesMessage::MoveDown);
-        assert_eq!(state.selected, 0);
-        update(&mut state, ProfilesMessage::MoveUp);
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn toggle_active_flips() {
-        let mut state = ProfilesState::default();
-        state.profiles = sample_profiles();
-        assert!(state.profiles[0].active);
-
-        update(&mut state, ProfilesMessage::ToggleActive);
-        assert!(!state.profiles[0].active);
-
-        update(&mut state, ProfilesMessage::ToggleActive);
-        assert!(state.profiles[0].active);
-    }
-
-    #[test]
-    fn start_create_sets_mode() {
-        let mut state = ProfilesState::default();
-        state.input_name = "leftover".to_string();
 
         update(&mut state, ProfilesMessage::StartCreate);
-        assert_eq!(state.mode, ProfileMode::Create);
-        assert!(state.input_name.is_empty()); // cleared
+        assert_eq!(state.mode, ProfileMode::CreateProfile);
+
+        state.exit_mode();
+        state.focus = ProfilesFocus::EnvVars;
+        update(&mut state, ProfilesMessage::StartCreate);
+        assert_eq!(state.mode, ProfileMode::CreateEnvVar);
+
+        state.exit_mode();
+        state.focus = ProfilesFocus::DisabledEnv;
+        update(&mut state, ProfilesMessage::StartCreate);
+        assert_eq!(state.mode, ProfileMode::CreateDisabledEnv);
     }
 
     #[test]
-    fn start_edit_populates_fields() {
+    fn start_edit_prefills_selected_item() {
         let mut state = ProfilesState::default();
         state.profiles = sample_profiles();
         state.selected = 1;
+        state.focus = ProfilesFocus::EnvVars;
 
         update(&mut state, ProfilesMessage::StartEdit);
-        assert_eq!(state.mode, ProfileMode::Edit);
-        assert_eq!(state.input_name, "staging");
-        assert_eq!(state.input_description, "Staging env");
+        assert_eq!(state.mode, ProfileMode::EditEnvVar);
+        assert_eq!(state.input_key, "API_URL");
+        assert_eq!(state.input_value, "https://staging");
     }
 
     #[test]
-    fn start_edit_on_empty_is_noop() {
+    fn next_field_cycles_inside_active_form() {
         let mut state = ProfilesState::default();
-        update(&mut state, ProfilesMessage::StartEdit);
-        assert_eq!(state.mode, ProfileMode::List);
-    }
-
-    #[test]
-    fn start_delete_sets_mode() {
-        let mut state = ProfilesState::default();
-        state.profiles = sample_profiles();
-
-        update(&mut state, ProfilesMessage::StartDelete);
-        assert_eq!(state.mode, ProfileMode::ConfirmDelete);
-    }
-
-    #[test]
-    fn start_delete_on_empty_is_noop() {
-        let mut state = ProfilesState::default();
-        update(&mut state, ProfilesMessage::StartDelete);
-        assert_eq!(state.mode, ProfileMode::List);
-    }
-
-    #[test]
-    fn confirm_create_adds_profile() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-        state.input_name = "new-profile".to_string();
-        state.input_description = "A new one".to_string();
-
-        update(&mut state, ProfilesMessage::Confirm);
-        assert_eq!(state.mode, ProfileMode::List);
-        assert_eq!(state.profiles.len(), 1);
-        assert_eq!(state.profiles[0].name, "new-profile");
-        assert_eq!(state.profiles[0].description, "A new one");
-        assert!(!state.profiles[0].active);
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn confirm_create_empty_name_does_not_add() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-        // input_name is empty
-
-        update(&mut state, ProfilesMessage::Confirm);
-        assert_eq!(state.mode, ProfileMode::List);
-        assert!(state.profiles.is_empty());
-    }
-
-    #[test]
-    fn confirm_edit_updates_profile() {
-        let mut state = ProfilesState::default();
-        state.profiles = sample_profiles();
-        state.selected = 0;
-        state.mode = ProfileMode::Edit;
-        state.input_name = "renamed".to_string();
-        state.input_description = "Updated desc".to_string();
-
-        update(&mut state, ProfilesMessage::Confirm);
-        assert_eq!(state.mode, ProfileMode::List);
-        assert_eq!(state.profiles[0].name, "renamed");
-        assert_eq!(state.profiles[0].description, "Updated desc");
-    }
-
-    #[test]
-    fn confirm_delete_removes_profile() {
-        let mut state = ProfilesState::default();
-        state.profiles = sample_profiles();
-        state.selected = 1;
-        state.mode = ProfileMode::ConfirmDelete;
-
-        update(&mut state, ProfilesMessage::Confirm);
-        assert_eq!(state.mode, ProfileMode::List);
-        assert_eq!(state.profiles.len(), 2);
-        assert_eq!(state.profiles[0].name, "default");
-        assert_eq!(state.profiles[1].name, "production");
-        assert_eq!(state.selected, 1); // clamped
-    }
-
-    #[test]
-    fn cancel_returns_to_list() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-        state.input_name = "something".to_string();
-
-        update(&mut state, ProfilesMessage::Cancel);
-        assert_eq!(state.mode, ProfileMode::List);
-        assert!(state.input_name.is_empty());
-    }
-
-    #[test]
-    fn input_char_appends_to_active_field() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-
-        update(&mut state, ProfilesMessage::InputChar('a'));
-        update(&mut state, ProfilesMessage::InputChar('b'));
-        assert_eq!(state.input_name, "ab");
-        assert!(state.input_description.is_empty());
-
-        state.active_field = 1;
-        update(&mut state, ProfilesMessage::InputChar('x'));
-        assert_eq!(state.input_description, "x");
-    }
-
-    #[test]
-    fn backspace_removes_from_active_field() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-        state.input_name = "abc".to_string();
-
-        update(&mut state, ProfilesMessage::Backspace);
-        assert_eq!(state.input_name, "ab");
-
-        state.active_field = 1;
-        state.input_description = "xy".to_string();
-        update(&mut state, ProfilesMessage::Backspace);
-        assert_eq!(state.input_description, "x");
-    }
-
-    #[test]
-    fn backspace_on_empty_is_noop() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-        update(&mut state, ProfilesMessage::Backspace);
-        assert!(state.input_name.is_empty());
-    }
-
-    #[test]
-    fn next_field_cycles() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-        assert_eq!(state.active_field, 0);
+        state.mode = ProfileMode::CreateEnvVar;
 
         update(&mut state, ProfilesMessage::NextField);
         assert_eq!(state.active_field, 1);
-
         update(&mut state, ProfilesMessage::NextField);
         assert_eq!(state.active_field, 0);
     }
 
     #[test]
-    fn next_field_noop_in_list_mode() {
-        let mut state = ProfilesState::default();
-        update(&mut state, ProfilesMessage::NextField);
-        assert_eq!(state.active_field, 0);
-    }
-
-    #[test]
-    fn render_list_does_not_panic() {
+    fn render_shows_detail_sections_and_default_lock() {
         let mut state = ProfilesState::default();
         state.profiles = sample_profiles();
-        let backend = TestBackend::new(80, 24);
+
+        let backend = TestBackend::new(140, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
@@ -595,77 +987,17 @@ mod tests {
                 render(&state, f, area);
             })
             .unwrap();
+
         let buf = terminal.backend().buffer().clone();
-        let text: String = (0..buf.area.width)
-            .map(|x| buf[(x, 0)].symbol().to_string())
-            .collect();
-        assert!(text.contains("Profiles"));
-    }
-
-    #[test]
-    fn render_empty_list_does_not_panic() {
-        let state = ProfilesState::default();
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f, area);
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn render_form_does_not_panic() {
-        let mut state = ProfilesState::default();
-        state.mode = ProfileMode::Create;
-        state.input_name = "test".to_string();
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f, area);
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn render_confirm_delete_does_not_panic() {
-        let mut state = ProfilesState::default();
-        state.profiles = sample_profiles();
-        state.mode = ProfileMode::ConfirmDelete;
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                render(&state, f, area);
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn input_ignored_in_list_mode() {
-        let mut state = ProfilesState::default();
-        update(&mut state, ProfilesMessage::InputChar('z'));
-        assert!(state.input_name.is_empty());
-    }
-
-    #[test]
-    fn delete_last_item_clamps() {
-        let mut state = ProfilesState::default();
-        state.profiles = vec![ProfileItem {
-            name: "only".to_string(),
-            active: false,
-            env_count: 0,
-            description: String::new(),
-        }];
-        state.selected = 0;
-        state.mode = ProfileMode::ConfirmDelete;
-
-        update(&mut state, ProfilesMessage::Confirm);
-        assert!(state.profiles.is_empty());
-        assert_eq!(state.selected, 0);
+        let text = buf
+            .content
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<String>();
+        assert!(text.contains("Profiles"), "{text}");
+        assert!(text.contains("Environment"), "{text}");
+        assert!(text.contains("Disabled OS Environment"), "{text}");
+        assert!(text.contains("Effective Environment"), "{text}");
+        assert!(text.contains("locked (default)"), "{text}");
     }
 }

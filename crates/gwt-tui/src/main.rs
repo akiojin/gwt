@@ -635,12 +635,15 @@ fn run_app(
         if let Some(s) = model.active_session_tab_mut() {
             s.vt.resize(rows, cols);
         }
+        let (env, remove_env) =
+            app::spawn_env_with_active_profile(std::collections::HashMap::new());
         let config = gwt_terminal::pty::SpawnConfig {
             command: shell,
             args: vec![],
             cols,
             rows,
-            env: std::collections::HashMap::new(),
+            env,
+            remove_env,
             cwd: Some(model.repo_path().to_path_buf()),
         };
         if let Err(e) = app::spawn_pty_for_session(&mut model, "shell-0", config) {
@@ -954,6 +957,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: std::collections::HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             },
         )
@@ -995,6 +999,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: std::collections::HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             },
         )

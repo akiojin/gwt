@@ -3,26 +3,26 @@ source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
 ┌...│ Specs │ Profiles │ Git View │...─┐┌ › Shell ─────────────────────────────┐
-│Profiles                              ││Session: Shell (80x24)                │
-│No profiles. Press 'c' to create one. ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│┏Profiles━━━┓╭Profile Detail─────────╮││Session: Shell (80x24)                │
+│┃No profiles┃│No profile selected.   │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┃           ┃│                       │││                                      │
+│┗━━━━━━━━━━━┛╰───────────────────────╯││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ⎇n/a  │  P:default  │  ↑↓ sel  ↵ tog  n new  e edit  d del  C-g Tab  Esc term
+ ⎇n/a  │  P:default  │  C-←→ pane  ↑↓ sel  ↵ act  n new  e edit  d del  Esc term

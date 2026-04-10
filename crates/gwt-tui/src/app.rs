@@ -877,12 +877,14 @@ pub fn update(model: &mut Model, msg: Message) {
             }
 
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let (env, remove_env) = spawn_env_with_active_profile(HashMap::new());
             let config = gwt_terminal::pty::SpawnConfig {
                 command: shell,
                 args: vec![],
                 cols,
                 rows,
-                env: HashMap::new(),
+                env,
+                remove_env,
                 cwd: Some(model.repo_path.clone()),
             };
             if let Err(e) = spawn_pty_for_session(model, &session_id, config) {
@@ -1567,30 +1569,68 @@ fn load_settings_with_active_profile_fallback() -> LoadedProfileSettings {
 
 fn profiles_state_from_settings(
     settings: &Settings,
+    previous: Option<&screens::profiles::ProfilesState>,
     preferred_selection: Option<&str>,
 ) -> screens::profiles::ProfilesState {
     let profiles: Vec<screens::profiles::ProfileItem> = settings
         .profiles
         .profiles
         .iter()
-        .map(|profile| screens::profiles::ProfileItem {
-            name: profile.name.clone(),
-            active: settings.profiles.active.as_deref() == Some(profile.name.as_str()),
-            env_count: profile.env_vars.len(),
-            description: profile.description.clone(),
+        .map(|profile| {
+            let mut env_vars: Vec<screens::profiles::EnvVarItem> = profile
+                .env_vars
+                .iter()
+                .map(|(key, value)| screens::profiles::EnvVarItem {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+            env_vars.sort_by(|left, right| left.key.cmp(&right.key));
+            let mut disabled_env = profile.disabled_env.clone();
+            disabled_env.sort();
+            let merged_preview = profile
+                .merged_env_pairs(std::env::vars())
+                .into_iter()
+                .map(|(key, value)| screens::profiles::EnvVarItem { key, value })
+                .collect();
+
+            screens::profiles::ProfileItem {
+                name: profile.name.clone(),
+                active: settings.profiles.active.as_deref() == Some(profile.name.as_str()),
+                env_count: profile.env_vars.len(),
+                description: profile.description.clone(),
+                env_vars,
+                disabled_env,
+                merged_preview,
+                deletable: profile.name != "default",
+            }
         })
         .collect();
 
+    let previous_selection = previous
+        .and_then(|state| state.selected_profile())
+        .map(|profile| profile.name.as_str());
     let selected = preferred_selection
         .and_then(|name| profiles.iter().position(|profile| profile.name == name))
+        .or_else(|| {
+            previous_selection
+                .and_then(|name| profiles.iter().position(|profile| profile.name == name))
+        })
         .or_else(|| profiles.iter().position(|profile| profile.active))
         .unwrap_or(0);
 
-    screens::profiles::ProfilesState {
+    let mut state = screens::profiles::ProfilesState {
         profiles,
         selected,
+        focus: previous.map(|state| state.focus).unwrap_or_default(),
+        env_selected: previous.map(|state| state.env_selected).unwrap_or_default(),
+        disabled_selected: previous
+            .map(|state| state.disabled_selected)
+            .unwrap_or_default(),
         ..Default::default()
-    }
+    };
+    state.clamp_selection();
+    state
 }
 
 pub fn refresh_active_profile_state(model: &mut Model) {
@@ -1600,7 +1640,397 @@ pub fn refresh_active_profile_state(model: &mut Model) {
 fn sync_profiles_state_from_settings(model: &mut Model, preferred_selection: Option<&str>) {
     let loaded = load_settings_with_active_profile_fallback();
     model.active_profile = loaded.status;
-    model.profiles = profiles_state_from_settings(&loaded.settings, preferred_selection);
+    model.profiles =
+        profiles_state_from_settings(&loaded.settings, Some(&model.profiles), preferred_selection);
+}
+
+pub fn spawn_env_with_active_profile(
+    mut base_env: HashMap<String, String>,
+) -> (HashMap<String, String>, Vec<String>) {
+    let loaded = load_settings_with_active_profile_fallback();
+    let Some(profile) = loaded.settings.profiles.active_profile() else {
+        return (base_env, Vec::new());
+    };
+
+    let mut remove_env = Vec::new();
+    for key in &profile.disabled_env {
+        if !base_env.contains_key(key) && !profile.env_vars.contains_key(key) {
+            remove_env.push(key.clone());
+        }
+    }
+    remove_env.sort();
+    remove_env.dedup();
+
+    for (key, value) in &profile.env_vars {
+        base_env.insert(key.clone(), value.clone());
+    }
+
+    (base_env, remove_env)
+}
+
+fn apply_profiles_warning(
+    model: &mut Model,
+    summary: impl Into<String>,
+    detail: impl Into<String>,
+) {
+    apply_notification(
+        model,
+        Notification::new(Severity::Warn, "profiles", summary.into()).with_detail(detail.into()),
+    );
+}
+
+fn apply_profiles_info(model: &mut Model, message: impl Into<String>) {
+    apply_notification(
+        model,
+        Notification::new(Severity::Info, "profiles", message.into()),
+    );
+}
+
+fn current_profile_name(model: &Model) -> Option<String> {
+    model
+        .profiles
+        .selected_profile()
+        .map(|profile| profile.name.clone())
+}
+
+fn refresh_profiles_with_focus(
+    model: &mut Model,
+    preferred_selection: Option<&str>,
+    focus: screens::profiles::ProfilesFocus,
+    env_key: Option<&str>,
+    disabled_key: Option<&str>,
+) {
+    sync_profiles_state_from_settings(model, preferred_selection);
+    model.profiles.focus = focus;
+    if let Some(key) = env_key {
+        if let Some(profile) = model.profiles.selected_profile() {
+            if let Some(index) = profile.env_vars.iter().position(|env| env.key == key) {
+                model.profiles.env_selected = index;
+            }
+        }
+    }
+    if let Some(key) = disabled_key {
+        if let Some(profile) = model.profiles.selected_profile() {
+            if let Some(index) = profile.disabled_env.iter().position(|item| item == key) {
+                model.profiles.disabled_selected = index;
+            }
+        }
+    }
+    model.profiles.clamp_selection();
+}
+
+fn submit_profiles_form(model: &mut Model) {
+    use screens::profiles::{ProfileMode, ProfilesFocus};
+
+    match model.profiles.mode {
+        ProfileMode::CreateProfile => {
+            let name = model.profiles.input_name.trim().to_string();
+            let description = model.profiles.input_description.clone();
+            match Settings::update_global(|settings| {
+                let mut profile = gwt_config::Profile::new(&name);
+                profile.description = description.clone();
+                settings.profiles.add(profile).map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&name),
+                        ProfilesFocus::ProfileList,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(model, format!("Created profile '{name}'"));
+                }
+                Err(err) => {
+                    apply_profiles_warning(model, "Failed to create profile", err.to_string());
+                }
+            }
+        }
+        ProfileMode::EditProfile => {
+            let Some(current_name) = current_profile_name(model) else {
+                return;
+            };
+            let new_name = model.profiles.input_name.trim().to_string();
+            let description = model.profiles.input_description.clone();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .update_profile(&current_name, &new_name, &description)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&new_name),
+                        ProfilesFocus::ProfileList,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(model, format!("Updated profile '{new_name}'"));
+                }
+                Err(err) => {
+                    apply_profiles_warning(model, "Failed to update profile", err.to_string());
+                }
+            }
+        }
+        ProfileMode::CreateEnvVar => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let key = model.profiles.input_key.trim().to_string();
+            let value = model.profiles.input_value.clone();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .set_env_var(&profile_name, &key, &value)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::EnvVars,
+                        Some(&key),
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Saved environment variable '{key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to save environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        ProfileMode::EditEnvVar => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(current_key) = model.profiles.selected_env_var().map(|env| env.key.clone())
+            else {
+                return;
+            };
+            let new_key = model.profiles.input_key.trim().to_string();
+            let new_value = model.profiles.input_value.clone();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .update_env_var(&profile_name, &current_key, &new_key, &new_value)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::EnvVars,
+                        Some(&new_key),
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Updated environment variable '{new_key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to update environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        ProfileMode::CreateDisabledEnv => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let key = model.profiles.input_key.trim().to_string();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .add_disabled_env(&profile_name, &key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::DisabledEnv,
+                        None,
+                        Some(&key),
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Blocked OS environment variable '{key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to block OS environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        ProfileMode::EditDisabledEnv => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(current_key) = model.profiles.selected_disabled_env().map(str::to_string)
+            else {
+                return;
+            };
+            let new_key = model.profiles.input_key.trim().to_string();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .update_disabled_env(&profile_name, &current_key, &new_key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::DisabledEnv,
+                        None,
+                        Some(&new_key),
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Updated blocked OS environment variable '{new_key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to update blocked OS environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn delete_profiles_selection(model: &mut Model) {
+    use screens::profiles::{ProfileMode, ProfilesFocus};
+
+    match model.profiles.mode {
+        ProfileMode::ConfirmDeleteProfile => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .delete_profile(&profile_name)
+                    .map(|_| ())
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    let preferred = if profile_name == "default" {
+                        Some("default")
+                    } else {
+                        None
+                    };
+                    refresh_profiles_with_focus(
+                        model,
+                        preferred,
+                        ProfilesFocus::ProfileList,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(model, format!("Deleted profile '{profile_name}'"));
+                }
+                Err(err) => {
+                    apply_profiles_warning(model, "Failed to delete profile", err.to_string());
+                    model.profiles.mode = ProfileMode::List;
+                }
+            }
+        }
+        ProfileMode::ConfirmDeleteEnvVar => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(key) = model.profiles.selected_env_var().map(|env| env.key.clone()) else {
+                return;
+            };
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .remove_env_var(&profile_name, &key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::EnvVars,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Deleted environment variable '{key}' from '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to delete environment variable",
+                        err.to_string(),
+                    );
+                    model.profiles.mode = ProfileMode::List;
+                }
+            }
+        }
+        ProfileMode::ConfirmDeleteDisabledEnv => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(key) = model.profiles.selected_disabled_env().map(str::to_string) else {
+                return;
+            };
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .remove_disabled_env(&profile_name, &key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::DisabledEnv,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!(
+                            "Removed blocked OS environment variable '{key}' from '{profile_name}'"
+                        ),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to remove blocked OS environment variable",
+                        err.to_string(),
+                    );
+                    model.profiles.mode = ProfileMode::List;
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn switch_active_profile_from_profiles_tab(model: &mut Model) {
@@ -2469,26 +2899,92 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Profiles => {
-            let msg = match key.code {
-                KeyCode::Down => Some(ProfilesMessage::MoveDown),
-                KeyCode::Up => Some(ProfilesMessage::MoveUp),
-                KeyCode::Enter => Some(ProfilesMessage::ToggleActive),
-                KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
-                KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
-                KeyCode::Char('d') => Some(ProfilesMessage::StartDelete),
-                KeyCode::Esc if model.profiles.mode != screens::profiles::ProfileMode::List => {
-                    Some(ProfilesMessage::Cancel)
+            use screens::profiles::{ProfileMode, ProfilesFocus};
+
+            match model.profiles.mode {
+                ProfileMode::List => {
+                    let msg = match key.code {
+                        KeyCode::Down => Some(ProfilesMessage::MoveDown),
+                        KeyCode::Up => Some(ProfilesMessage::MoveUp),
+                        KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Some(ProfilesMessage::FocusLeft)
+                        }
+                        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Some(ProfilesMessage::FocusRight)
+                        }
+                        KeyCode::Enter => match model.profiles.focus {
+                            ProfilesFocus::ProfileList => Some(ProfilesMessage::ToggleActive),
+                            ProfilesFocus::EnvVars
+                                if model.profiles.selected_env_var().is_some() =>
+                            {
+                                Some(ProfilesMessage::StartEdit)
+                            }
+                            ProfilesFocus::DisabledEnv
+                                if model.profiles.selected_disabled_env().is_some() =>
+                            {
+                                Some(ProfilesMessage::StartEdit)
+                            }
+                            _ => None,
+                        },
+                        KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
+                        KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
+                        KeyCode::Char('d') => Some(ProfilesMessage::StartDelete),
+                        _ => None,
+                    };
+                    if let Some(m) = msg {
+                        if matches!(m, ProfilesMessage::ToggleActive) {
+                            switch_active_profile_from_profiles_tab(model);
+                        } else if matches!(m, ProfilesMessage::StartDelete)
+                            && model.profiles.focus == ProfilesFocus::ProfileList
+                            && model
+                                .profiles
+                                .selected_profile()
+                                .is_some_and(|profile| !profile.deletable)
+                        {
+                            apply_profiles_warning(
+                                model,
+                                "Default profile cannot be deleted",
+                                "The permanent default profile remains available even when no custom profiles exist.",
+                            );
+                        } else {
+                            screens::profiles::update(&mut model.profiles, m);
+                        }
+                    } else if key.code == KeyCode::Esc {
+                        fallback_management_escape(model);
+                    }
                 }
-                _ => None,
-            };
-            if let Some(m) = msg {
-                if matches!(m, ProfilesMessage::ToggleActive) {
-                    switch_active_profile_from_profiles_tab(model);
-                } else {
-                    screens::profiles::update(&mut model.profiles, m);
+                ProfileMode::CreateProfile
+                | ProfileMode::EditProfile
+                | ProfileMode::CreateEnvVar
+                | ProfileMode::EditEnvVar
+                | ProfileMode::CreateDisabledEnv
+                | ProfileMode::EditDisabledEnv => {
+                    let msg = match key.code {
+                        KeyCode::Enter => Some(ProfilesMessage::Confirm),
+                        KeyCode::Esc => Some(ProfilesMessage::Cancel),
+                        KeyCode::Backspace => Some(ProfilesMessage::Backspace),
+                        KeyCode::Tab => Some(ProfilesMessage::NextField),
+                        KeyCode::Char(ch) => Some(ProfilesMessage::InputChar(ch)),
+                        _ => None,
+                    };
+                    if let Some(m) = msg {
+                        match m {
+                            ProfilesMessage::Confirm => submit_profiles_form(model),
+                            _ => screens::profiles::update(&mut model.profiles, m),
+                        }
+                    } else if key.code == KeyCode::Esc {
+                        fallback_management_escape(model);
+                    }
                 }
-            } else if key.code == KeyCode::Esc {
-                fallback_management_escape(model);
+                ProfileMode::ConfirmDeleteProfile
+                | ProfileMode::ConfirmDeleteEnvVar
+                | ProfileMode::ConfirmDeleteDisabledEnv => match key.code {
+                    KeyCode::Enter => delete_profiles_selection(model),
+                    KeyCode::Esc => {
+                        screens::profiles::update(&mut model.profiles, ProfilesMessage::Cancel);
+                    }
+                    _ => {}
+                },
             }
         }
         ManagementTab::Specs => {
@@ -2601,12 +3097,14 @@ fn check_branch_pending_actions(model: &mut Model) {
                 }
 
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                let (env, remove_env) = spawn_env_with_active_profile(HashMap::new());
                 let config = gwt_terminal::pty::SpawnConfig {
                     command: shell,
                     args: vec![],
                     cols,
                     rows,
-                    env: HashMap::new(),
+                    env,
+                    remove_env,
                     cwd: Some(wt_path.clone()),
                 };
                 if let Err(e) = spawn_pty_for_session(model, &session_id, config) {
@@ -3645,6 +4143,17 @@ fn route_non_terminal_paste(model: &mut Model, text: &str) -> bool {
                     });
                     true
                 }
+                ManagementTab::Profiles
+                    if model.profiles.mode != screens::profiles::ProfileMode::List =>
+                {
+                    paste_text_input_chars(text, |ch| {
+                        screens::profiles::update(
+                            &mut model.profiles,
+                            screens::profiles::ProfilesMessage::InputChar(ch),
+                        );
+                    });
+                    true
+                }
                 _ => false,
             }
         }
@@ -4149,14 +4658,16 @@ where
     refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch");
 
     // Spawn PTY process for the agent session.
-    let mut pty_env = config.env_vars.clone();
+    let (mut pty_env, mut remove_env) = spawn_env_with_active_profile(config.env_vars.clone());
     inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
+    remove_env.retain(|key| !pty_env.contains_key(key));
     let pty_config = gwt_terminal::pty::SpawnConfig {
         command: config.command.clone(),
         args: config.args.clone(),
         cols,
         rows,
         env: pty_env,
+        remove_env,
         cwd: config.working_dir.clone(),
     };
     let repo_path_for_watcher = model.repo_path.clone();
@@ -6913,12 +7424,37 @@ fn pr_dashboard_hint_text(model: &Model, compact: bool) -> String {
 }
 
 fn profiles_hint_text(model: &Model, compact: bool) -> String {
-    if model.profiles.mode != screens::profiles::ProfileMode::List {
+    use screens::profiles::{ProfileMode, ProfilesFocus};
+
+    if model.profiles.mode != ProfileMode::List {
         generic_management_hint_text(compact, false, "cancel")
     } else if compact {
-        "↑↓ sel  ↵ tog  n new  e edit  d del  C-g Tab  Esc term".to_string()
+        match model.profiles.focus {
+            ProfilesFocus::ProfileList => {
+                "C-←→ pane  ↑↓ sel  ↵ act  n new  e edit  d del  Esc term".to_string()
+            }
+            ProfilesFocus::EnvVars => {
+                "C-←→ pane  ↑↓ env  ↵ edit  n new  d del  Esc term".to_string()
+            }
+            ProfilesFocus::DisabledEnv => {
+                "C-←→ pane  ↑↓ blk  ↵ edit  n new  d del  Esc term".to_string()
+            }
+            ProfilesFocus::Preview => "C-←→ pane  preview  Esc term".to_string(),
+        }
     } else {
-        "↑↓:select  Enter:toggle  n:new  e:edit  d:delete  Ctrl+G, Tab:focus  Esc:term".to_string()
+        match model.profiles.focus {
+            ProfilesFocus::ProfileList => {
+                "Ctrl+←→:focus  ↑↓:select  Enter:activate  n:new  e:edit  d:delete  Esc:term"
+                    .to_string()
+            }
+            ProfilesFocus::EnvVars => {
+                "Ctrl+←→:focus  ↑↓:env  Enter/edit  n:new  d:delete  Esc:term".to_string()
+            }
+            ProfilesFocus::DisabledEnv => {
+                "Ctrl+←→:focus  ↑↓:blocked  Enter/edit  n:new  d:delete  Esc:term".to_string()
+            }
+            ProfilesFocus::Preview => "Ctrl+←→:focus  Preview is read-only  Esc:term".to_string(),
+        }
     }
 }
 
@@ -9391,6 +9927,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             },
         )
@@ -9460,7 +9997,7 @@ mod tests {
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Profiles;
         model.active_focus = FocusPane::TabContent;
-        model.profiles.mode = screens::profiles::ProfileMode::Create;
+        model.profiles.mode = screens::profiles::ProfileMode::CreateProfile;
 
         let rendered = render_model_text(&model, 220, 24);
 
@@ -13394,6 +13931,7 @@ CUSTOM_ENV = "enabled"
                 cols: 80,
                 rows: 24,
                 env: HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
             },
         )
@@ -15185,7 +15723,7 @@ CUSTOM_ENV = "enabled"
         let mut model = test_model();
         model.management_tab = ManagementTab::Profiles;
         model.active_focus = FocusPane::TabContent;
-        model.profiles.mode = screens::profiles::ProfileMode::Create;
+        model.profiles.mode = screens::profiles::ProfileMode::CreateProfile;
         model.profiles.input_name = "demo".into();
 
         route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
@@ -15250,6 +15788,153 @@ CUSTOM_ENV = "enabled"
                 rendered.contains("profile: default (fallback)"),
                 "{rendered}"
             );
+        });
+    }
+
+    #[test]
+    fn spawn_env_with_active_profile_overrides_and_removes_inherited_keys() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev").with_env("API_URL", "https://example.test"))
+                .expect("add profile");
+            settings
+                .profiles
+                .update_disabled_env("dev", "MISSING", "HOME")
+                .expect("disable home");
+            settings.profiles.switch("dev").expect("switch active");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut explicit_env = HashMap::new();
+            explicit_env.insert("HOME".to_string(), "/tmp/override-home".to_string());
+            explicit_env.insert("GWT_KEEP".to_string(), "1".to_string());
+            let (env, remove_env) = spawn_env_with_active_profile(explicit_env);
+
+            assert_eq!(
+                env.get("API_URL").map(String::as_str),
+                Some("https://example.test")
+            );
+            assert_eq!(
+                env.get("HOME").map(String::as_str),
+                Some("/tmp/override-home")
+            );
+            assert!(remove_env.is_empty());
+
+            let (env, remove_env) = spawn_env_with_active_profile(HashMap::new());
+            assert_eq!(
+                env.get("API_URL").map(String::as_str),
+                Some("https://example.test")
+            );
+            assert!(remove_env.contains(&"HOME".to_string()));
+        });
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_create_profile_persists_metadata() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+            gwt_config::Settings::default()
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+
+            route_key_to_management(&mut model, key(KeyCode::Char('n'), KeyModifiers::NONE));
+            for ch in "dev".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+            for ch in "Dev profile".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            let dev = reloaded.profiles.get("dev").expect("dev profile");
+            assert_eq!(dev.description, "Dev profile");
+        });
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_add_env_var_persists_and_renders_preview() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .expect("add profile");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            model.profiles.selected = 1;
+
+            route_key_to_management(&mut model, key(KeyCode::Right, KeyModifiers::CONTROL));
+            route_key_to_management(&mut model, key(KeyCode::Char('n'), KeyModifiers::NONE));
+            for ch in "API_URL".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+            for ch in "https://example.test".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            let dev = reloaded.profiles.get("dev").expect("dev profile");
+            assert_eq!(
+                dev.env_vars.get("API_URL").map(String::as_str),
+                Some("https://example.test")
+            );
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(rendered.contains("API_URL"), "{rendered}");
+            assert!(rendered.contains("https://example.test"), "{rendered}");
+        });
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_delete_active_profile_switches_to_default() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .expect("add profile");
+            settings.profiles.switch("dev").expect("switch active");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            model.profiles.selected = 1;
+
+            route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            assert!(reloaded.profiles.get("dev").is_none());
+            assert_eq!(reloaded.profiles.active.as_deref(), Some("default"));
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(rendered.contains("profile: default"), "{rendered}");
         });
     }
 
