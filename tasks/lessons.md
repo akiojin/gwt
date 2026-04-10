@@ -25,6 +25,27 @@ tracked な `.claude/commands/gwt-spec-brainstorm.md` が一度消えると
 3. startup repair を追加するときは、empty repo を不用意に dirty にしない gate
    まで同時にテストで固定する。
 
+## 2026-04-10 — fix: vt100 renderer は `chars().next()` で cell を潰さず、visible area の右端 crop も見る
+
+### 事象
+
+Codex agent terminal で日本語や emoji を含む行が右端で見切れた。特に
+emoji presentation sequence は先頭 codepoint だけに潰れ、wide glyph は
+visible pane が vt100 幅より狭いときに右端で半端表示され得た。
+
+### 原因
+
+- `crates/gwt-tui/src/renderer.rs` が `vt100::Cell::contents()` 全体ではなく
+  `chars().next()` だけを使っており、cell 内の grapheme cluster を失っていた。
+- renderer が「vt100 screen 幅には収まるが、現在の visible area には trailing cell が
+  入らない」ケースを見ておらず、wide glyph をそのまま描こうとしていた。
+
+### 再発防止策
+
+1. vt100 renderer を触るときは、`cell.contents()` を「表示用の完全な terminal grapheme」として扱い、先頭 codepoint のみへ落とさない。
+2. wide glyph の描画では terminal 全体の列数だけでなく、現在の visible area 幅で trailing cell が収まるかを必ず判定する。
+3. renderer 回帰テストには「emoji grapheme 保持」と「cropped right edge での wide glyph 抑止」をセットで追加する。
+
 ## 2026-04-10 — feat: `~/.gwt/cache/issues/` を SPEC 専用と決め打ちしない
 
 ### 事象

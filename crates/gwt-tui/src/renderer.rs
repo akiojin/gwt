@@ -5,6 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::model::{TerminalCell, TerminalSelection};
 
@@ -131,25 +132,34 @@ fn build_row_text(screen: &vt100::Screen, row: u16, cols: u16) -> (String, Vec<u
     let mut byte_to_col: Vec<u16> = Vec::with_capacity(cols as usize);
 
     for col in 0..cols {
-        if let Some(cell) = screen.cell(row, col) {
-            let ch = cell.contents().chars().next().unwrap_or(' ');
-            let byte_start = row_text.len();
-            row_text.push(ch);
-            let byte_end = row_text.len();
-            for _ in byte_start..byte_end {
-                byte_to_col.push(col);
-            }
-        } else {
-            let byte_start = row_text.len();
-            row_text.push(' ');
-            let byte_end = row_text.len();
-            for _ in byte_start..byte_end {
-                byte_to_col.push(col);
-            }
+        let symbol = screen
+            .cell(row, col)
+            .map(|cell| renderable_cell_symbol(cell, col, cols))
+            .unwrap_or_else(|| " ".to_string());
+        let byte_start = row_text.len();
+        row_text.push_str(&symbol);
+        let byte_end = row_text.len();
+        for _ in byte_start..byte_end {
+            byte_to_col.push(col);
         }
     }
 
     (row_text, byte_to_col)
+}
+
+fn renderable_cell_symbol(cell: &vt100::Cell, col: u16, cols: u16) -> String {
+    let symbol = cell.contents();
+    let symbol = if symbol.is_empty() {
+        " ".to_string()
+    } else {
+        symbol
+    };
+    let symbol_width = UnicodeWidthStr::width(symbol.as_str()).max(1);
+    if symbol_width > 1 && usize::from(col).saturating_add(symbol_width) > usize::from(cols) {
+        " ".to_string()
+    } else {
+        symbol
+    }
 }
 
 /// Collect detected URL regions for the visible screen area.
@@ -269,7 +279,8 @@ pub fn render_vt_screen_with_selection_and_urls(
 
                 if x < buf.area().right() && y < buf.area().bottom() {
                     let buf_cell = &mut buf[(x, y)];
-                    buf_cell.set_char(cell.contents().chars().next().unwrap_or(' '));
+                    buf_cell.reset();
+                    buf_cell.set_symbol(&renderable_cell_symbol(cell, col, cols));
 
                     let is_url = url_cells.contains(&(row, col));
                     let is_selected = selection
@@ -592,6 +603,38 @@ mod tests {
         assert!(regions[1].end_col > 0);
         assert_eq!(buf[(0, 1)].fg, Color::Cyan);
         assert!(buf[(0, 1)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn render_vt_screen_preserves_full_emoji_grapheme() {
+        let mut parser = vt100::Parser::new(1, 6, 0);
+        parser.process("⭐️ ok".as_bytes());
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_vt_screen(parser.screen(), &mut buf, area);
+
+        assert_eq!(
+            buf[(0, 0)].symbol(),
+            "⭐️",
+            "renderer should preserve the full grapheme cluster stored in the vt100 cell",
+        );
+    }
+
+    #[test]
+    fn render_vt_screen_drops_wide_char_when_visible_area_crops_trailing_cell() {
+        let mut parser = vt100::Parser::new(1, 6, 0);
+        parser.process("abcdあ".as_bytes());
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_vt_screen(parser.screen(), &mut buf, area);
+
+        assert_eq!(
+            buf[(4, 0)].symbol(),
+            " ",
+            "renderer should avoid drawing a half-visible wide character at the right edge",
+        );
     }
 
     #[test]
