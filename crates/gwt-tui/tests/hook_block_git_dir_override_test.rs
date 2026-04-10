@@ -17,7 +17,7 @@ fn allow(cmd: &str) {
 }
 
 #[test]
-fn git_dir_flag_on_git_invocation_is_blocked() {
+fn git_dir_flag_on_git_invocation_is_allowed() {
     // The original MJS helper actually keys off the ENV override forms
     // (`GIT_DIR=...`, `env GIT_DIR=...`, `export GIT_DIR=...`,
     // `declare -x GIT_DIR=...`). A bare `git --git-dir=...` flag is
