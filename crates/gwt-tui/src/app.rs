@@ -3600,8 +3600,8 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.version(&wizard.version);
     }
 
-    if !wizard.reasoning.is_empty() && wizard.reasoning != "medium" {
-        builder = builder.reasoning_level(&wizard.reasoning);
+    if let Some(reasoning_level) = wizard_reasoning_level_for_launch(wizard) {
+        builder = builder.reasoning_level(reasoning_level);
     }
 
     if wizard.agent_id == "codex" && wizard.codex_fast_mode {
@@ -3622,11 +3622,7 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.resume_session_id(resume_session_id);
     }
 
-    let mut config = builder.build();
-    if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
-        config.reasoning_level = Some(wizard.reasoning.clone());
-    }
-    config
+    builder.build()
 }
 
 fn build_custom_launch_config_from_wizard(
@@ -3695,6 +3691,22 @@ fn build_custom_launch_config_from_wizard(
 
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
+}
+
+fn wizard_reasoning_level_for_launch(wizard: &screens::wizard::WizardState) -> Option<&str> {
+    match wizard.agent_id.as_str() {
+        "codex" if !wizard.reasoning.is_empty() => Some(wizard.reasoning.as_str()),
+        "claude"
+            if !wizard.reasoning.is_empty()
+                && matches!(
+                    wizard.model.as_str(),
+                    "Default (Opus 4.6)" | "opus" | "sonnet"
+                ) =>
+        {
+            Some(wizard.reasoning.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<String> {
@@ -11354,6 +11366,39 @@ CUSTOM_ENV = "enabled"
         assert!(!config
             .args
             .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_auto_persists_without_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "auto".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("auto"));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_high_exports_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "high".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"high".to_string())
+        );
     }
 
     // SPEC-6 Phase 5: `append_agent_launch_log_with` and its redaction
