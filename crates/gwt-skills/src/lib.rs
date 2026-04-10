@@ -627,6 +627,14 @@ mod tests {
             "expected canonical gwt pr current guidance"
         );
         assert!(
+            pr_skill.contains("gwt pr create"),
+            "expected canonical gwt pr create guidance"
+        );
+        assert!(
+            pr_skill.contains("gwt pr edit"),
+            "expected canonical gwt pr edit guidance"
+        );
+        assert!(
             pr_skill.contains("gwt pr review-threads"),
             "expected canonical gwt pr review-threads guidance"
         );
@@ -639,6 +647,18 @@ mod tests {
         assert!(
             release_command.contains("gwt issue comment"),
             "expected release command to use gwt issue comment"
+        );
+        assert!(
+            release_command.contains("gwt pr current"),
+            "expected release command to use gwt pr current"
+        );
+        assert!(
+            release_command.contains("gwt pr create"),
+            "expected release command to use gwt pr create"
+        );
+        assert!(
+            release_command.contains("gwt pr edit"),
+            "expected release command to use gwt pr edit"
         );
         assert!(
             !release_command.contains("gh issue comment"),

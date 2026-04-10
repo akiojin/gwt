@@ -95,6 +95,26 @@ pub struct PrReviewThread {
     pub comments: Vec<PrReviewThreadComment>,
 }
 
+/// Test-visible log entry for `gwt pr create`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCreateCall {
+    pub base: String,
+    pub head: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub draft: bool,
+}
+
+/// Test-visible log entry for `gwt pr edit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrEditCall {
+    pub number: u64,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub add_labels: Vec<String>,
+}
+
 /// Top-level argv parse result for the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -139,6 +159,22 @@ pub enum CliCommand {
     IssueComment { number: u64, file: String },
     /// `gwt pr current` — print the PR associated with the current branch.
     PrCurrent,
+    /// `gwt pr create --base <branch> [--head <branch>] --title <t> -f <body_file>`.
+    PrCreate {
+        base: String,
+        head: Option<String>,
+        title: String,
+        file: String,
+        labels: Vec<String>,
+        draft: bool,
+    },
+    /// `gwt pr edit <n> [--title <t>] [-f <body_file>] [--add-label <label>]*`.
+    PrEdit {
+        number: u64,
+        title: Option<String>,
+        file: Option<String>,
+        add_labels: Vec<String>,
+    },
     /// `gwt pr view <n>` — print a PR by number.
     PrView { number: u64 },
     /// `gwt pr comment <n> -f <body_file>` — create a PR issue comment.
@@ -176,7 +212,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwt issue spec <n> [--section <name>|--edit <name> -f <file>] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id>"
+                "usage: gwt issue spec <n> [--section <name>|--edit <name> -f <file>] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id>"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -221,6 +257,8 @@ pub fn parse_pr_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
         Some("current") if it.peek().is_none() => Ok(CliCommand::PrCurrent),
+        Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
+        Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
         Some("view") => Ok(CliCommand::PrView {
             number: parse_required_number(it.next())?,
         }),
@@ -293,6 +331,118 @@ fn parse_required_number(arg: Option<&String>) -> Result<u64, CliParseError> {
     value
         .parse()
         .map_err(|_| CliParseError::InvalidNumber(value.clone()))
+}
+
+fn parse_pr_create_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
+    let mut base: Option<String> = None;
+    let mut head: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut file: Option<String> = None;
+    let mut labels: Vec<String> = Vec::new();
+    let mut draft = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--base" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--base"));
+                }
+                base = Some(args[i].clone());
+            }
+            "--head" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--head"));
+                }
+                head = Some(args[i].clone());
+            }
+            "--title" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--title"));
+                }
+                title = Some(args[i].clone());
+            }
+            "-f" | "--file" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("-f"));
+                }
+                file = Some(args[i].clone());
+            }
+            "--label" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--label"));
+                }
+                labels.push(args[i].clone());
+            }
+            "--draft" => draft = true,
+            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+        }
+        i += 1;
+    }
+
+    Ok(CliCommand::PrCreate {
+        base: base.ok_or(CliParseError::MissingFlag("--base"))?,
+        head,
+        title: title.ok_or(CliParseError::MissingFlag("--title"))?,
+        file: file.ok_or(CliParseError::MissingFlag("-f"))?,
+        labels,
+        draft,
+    })
+}
+
+fn parse_pr_edit_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
+    let Some(number_arg) = args.first() else {
+        return Err(CliParseError::Usage);
+    };
+    let number = number_arg
+        .parse()
+        .map_err(|_| CliParseError::InvalidNumber((*number_arg).clone()))?;
+    let mut title: Option<String> = None;
+    let mut file: Option<String> = None;
+    let mut add_labels: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--title" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--title"));
+                }
+                title = Some(args[i].clone());
+            }
+            "-f" | "--file" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("-f"));
+                }
+                file = Some(args[i].clone());
+            }
+            "--add-label" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--add-label"));
+                }
+                add_labels.push(args[i].clone());
+            }
+            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+        }
+        i += 1;
+    }
+
+    if title.is_none() && file.is_none() && add_labels.is_empty() {
+        return Err(CliParseError::Usage);
+    }
+
+    Ok(CliCommand::PrEdit {
+        number,
+        title,
+        file,
+        add_labels,
+    })
 }
 
 /// Parse the tail of a `gwt hook ...` argv slice into a [`CliCommand::Hook`].
@@ -563,6 +713,22 @@ pub trait CliEnv {
     fn read_file(&self, path: &str) -> io::Result<String>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn create_pr(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        title: &str,
+        body: &str,
+        labels: &[String],
+        draft: bool,
+    ) -> io::Result<PrStatus>;
+    fn edit_pr(
+        &mut self,
+        number: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+        add_labels: &[String],
+    ) -> io::Result<PrStatus>;
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus>;
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;
     fn fetch_pr_reviews(&mut self, number: u64) -> io::Result<Vec<PrReview>>;
@@ -802,6 +968,39 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
                 Some(pr) => render_pr(&mut out, &pr),
                 None => out.push_str("no current pull request\n"),
             }
+            0
+        }
+        CliCommand::PrCreate {
+            base,
+            head,
+            title,
+            file,
+            labels,
+            draft,
+        } => {
+            let body = env.read_file(&file).map_err(io_as_api_error)?;
+            let pr = env
+                .create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
+                .map_err(io_as_api_error)?;
+            out.push_str("created pull request\n");
+            render_pr(&mut out, &pr);
+            0
+        }
+        CliCommand::PrEdit {
+            number,
+            title,
+            file,
+            add_labels,
+        } => {
+            let body = file
+                .as_deref()
+                .map(|path| env.read_file(path).map_err(io_as_api_error))
+                .transpose()?;
+            let pr = env
+                .edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
+                .map_err(io_as_api_error)?;
+            out.push_str("updated pull request\n");
+            render_pr(&mut out, &pr);
             0
         }
         CliCommand::PrView { number } => {
@@ -1226,6 +1425,102 @@ fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrS
     let pr = gwt_git::pr_status::parse_pr_status_json(&stdout)
         .map_err(|err| io::Error::other(err.to_string()))?;
     Ok(Some(pr))
+}
+
+fn create_pr_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    request: &PrCreateCall,
+) -> io::Result<PrStatus> {
+    let mut args = vec![
+        "pr".to_string(),
+        "create".to_string(),
+        "--base".to_string(),
+        request.base.clone(),
+        "--title".to_string(),
+        request.title.clone(),
+        "--body".to_string(),
+        request.body.clone(),
+    ];
+    if let Some(head) = &request.head {
+        args.push("--head".to_string());
+        args.push(head.clone());
+    }
+    for label in &request.labels {
+        args.push("--label".to_string());
+        args.push(label.clone());
+    }
+    if request.draft {
+        args.push("--draft".to_string());
+    }
+
+    let output = Command::new("gh")
+        .args(&args)
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "gh pr create: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let url = extract_pr_url(&stdout).ok_or_else(|| {
+        io::Error::other(format!("gh pr create: missing PR URL in output: {stdout}"))
+    })?;
+    let number = parse_pr_number_from_url(&url)
+        .ok_or_else(|| io::Error::other(format!("gh pr create: invalid PR URL: {url}")))?;
+    gwt_git::pr_status::fetch_pr_status(repo_slug, number)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn edit_pr_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    number: u64,
+    title: Option<&str>,
+    body: Option<&str>,
+    add_labels: &[String],
+) -> io::Result<PrStatus> {
+    let mut args = vec!["pr".to_string(), "edit".to_string(), number.to_string()];
+    if let Some(title) = title {
+        args.push("--title".to_string());
+        args.push(title.to_string());
+    }
+    if let Some(body) = body {
+        args.push("--body".to_string());
+        args.push(body.to_string());
+    }
+    for label in add_labels {
+        args.push("--add-label".to_string());
+        args.push(label.clone());
+    }
+
+    let output = Command::new("gh")
+        .args(&args)
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "gh pr edit: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    gwt_git::pr_status::fetch_pr_status(repo_slug, number)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn extract_pr_url(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("https://"))
+        .map(ToOwned::to_owned)
+}
+
+fn parse_pr_number_from_url(url: &str) -> Option<u64> {
+    url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
 fn comment_on_pr_via_gh(repo_path: &std::path::Path, number: u64, body: &str) -> io::Result<()> {
@@ -1906,6 +2201,47 @@ impl CliEnv for DefaultCliEnv {
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         fetch_current_pr_via_gh(&self.repo_path)
     }
+    fn create_pr(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        title: &str,
+        body: &str,
+        labels: &[String],
+        draft: bool,
+    ) -> io::Result<PrStatus> {
+        edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        let request = PrCreateCall {
+            base: base.to_string(),
+            head: head.map(ToOwned::to_owned),
+            title: title.to_string(),
+            body: body.to_string(),
+            labels: labels.to_vec(),
+            draft,
+        };
+        create_pr_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            &request,
+        )
+    }
+    fn edit_pr(
+        &mut self,
+        number: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+        add_labels: &[String],
+    ) -> io::Result<PrStatus> {
+        edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        edit_pr_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+            title,
+            body,
+            add_labels,
+        )
+    }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
         gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
             .map_err(|err| io::Error::other(err.to_string()))
@@ -1988,7 +2324,10 @@ pub struct TestEnv {
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
     pub prs: std::collections::HashMap<u64, PrStatus>,
+    pub created_pr: Option<PrStatus>,
     pub pr_comments: Vec<(u64, String)>,
+    pub pr_create_call_log: Vec<PrCreateCall>,
+    pub pr_edit_call_log: Vec<PrEditCall>,
     pub pr_reviews: std::collections::HashMap<u64, Vec<PrReview>>,
     pub pr_review_threads: std::collections::HashMap<u64, Vec<PrReviewThread>>,
     pub pr_checks: std::collections::HashMap<u64, PrChecksSummary>,
@@ -2016,7 +2355,10 @@ impl TestEnv {
             linked_pr_call_log: Vec::new(),
             current_pr: None,
             prs: std::collections::HashMap::new(),
+            created_pr: None,
             pr_comments: Vec::new(),
+            pr_create_call_log: Vec::new(),
+            pr_edit_call_log: Vec::new(),
             pr_reviews: std::collections::HashMap::new(),
             pr_review_threads: std::collections::HashMap::new(),
             pr_checks: std::collections::HashMap::new(),
@@ -2051,6 +2393,10 @@ impl TestEnv {
 
     pub fn seed_pr(&mut self, number: u64, pr: PrStatus) {
         self.prs.insert(number, pr);
+    }
+
+    pub fn seed_created_pr(&mut self, pr: PrStatus) {
+        self.created_pr = Some(pr);
     }
 
     pub fn seed_pr_reviews(&mut self, number: u64, reviews: Vec<PrReview>) {
@@ -2101,6 +2447,45 @@ impl CliEnv for TestEnv {
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         self.pr_current_call_count += 1;
         Ok(self.current_pr.clone())
+    }
+    fn create_pr(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        title: &str,
+        body: &str,
+        labels: &[String],
+        draft: bool,
+    ) -> io::Result<PrStatus> {
+        self.pr_create_call_log.push(PrCreateCall {
+            base: base.to_string(),
+            head: head.map(ToOwned::to_owned),
+            title: title.to_string(),
+            body: body.to_string(),
+            labels: labels.to_vec(),
+            draft,
+        });
+        self.created_pr
+            .clone()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no created pr seeded"))
+    }
+    fn edit_pr(
+        &mut self,
+        number: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+        add_labels: &[String],
+    ) -> io::Result<PrStatus> {
+        self.pr_edit_call_log.push(PrEditCall {
+            number,
+            title: title.map(ToOwned::to_owned),
+            body: body.map(ToOwned::to_owned),
+            add_labels: add_labels.to_vec(),
+        });
+        self.prs
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_view_call_log.push(number);
@@ -2164,4 +2549,13 @@ impl CliEnv for TestEnv {
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no job log: {job_id}")))
     }
+}
+
+fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
+    if owner.is_empty() || repo.is_empty() {
+        return Err(io::Error::other(
+            "missing repository context for PR create/edit operation",
+        ));
+    }
+    Ok(())
 }

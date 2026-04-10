@@ -7,8 +7,8 @@ use gwt_github::client::{
 use gwt_github::Cache;
 use gwt_tui::cli::{
     dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli, CliCommand,
-    CliParseError, LinkedPrSummary, PrCheckItem, PrChecksSummary, PrReview, PrReviewThread,
-    PrReviewThreadComment, TestEnv,
+    CliParseError, LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall,
+    PrReview, PrReviewThread, PrReviewThreadComment, TestEnv,
 };
 use tempfile::TempDir;
 
@@ -284,6 +284,60 @@ fn red_103_parse_pr_current() {
 fn red_104_parse_pr_view() {
     let cmd = parse_pr_args(&[s("view"), s("42")]).unwrap();
     assert_eq!(cmd, CliCommand::PrView { number: 42 });
+}
+
+#[test]
+fn red_104a_parse_pr_create() {
+    let cmd = parse_pr_args(&[
+        s("create"),
+        s("--base"),
+        s("develop"),
+        s("--head"),
+        s("feature/hooks"),
+        s("--title"),
+        s("feat(hooks): canonical gwt pr create"),
+        s("-f"),
+        s("/tmp/pr-body.md"),
+        s("--label"),
+        s("release"),
+        s("--draft"),
+    ])
+    .unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::PrCreate {
+            base: "develop".into(),
+            head: Some("feature/hooks".into()),
+            title: "feat(hooks): canonical gwt pr create".into(),
+            file: "/tmp/pr-body.md".into(),
+            labels: vec!["release".into()],
+            draft: true,
+        }
+    );
+}
+
+#[test]
+fn red_104b_parse_pr_edit() {
+    let cmd = parse_pr_args(&[
+        s("edit"),
+        s("42"),
+        s("--title"),
+        s("feat(hooks): updated title"),
+        s("-f"),
+        s("/tmp/pr-body.md"),
+        s("--add-label"),
+        s("release"),
+    ])
+    .unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::PrEdit {
+            number: 42,
+            title: Some("feat(hooks): updated title".into()),
+            file: Some("/tmp/pr-body.md".into()),
+            add_labels: vec!["release".into()],
+        }
+    );
 }
 
 #[test]
@@ -764,6 +818,113 @@ fn red_108_dispatch_pr_current_is_live_first() {
     let out = String::from_utf8(env.stdout.clone()).unwrap();
     assert!(out.contains("#77 [OPEN] Current PR"));
     assert!(out.contains("https://example.com/pr/77"));
+}
+
+#[test]
+fn red_108a_dispatch_pr_create_uses_live_transport() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.files.insert(
+        "/virtual/pr-body.md".to_string(),
+        "## Summary\n\nBody".to_string(),
+    );
+    env.seed_created_pr(PrStatus {
+        number: 88,
+        title: "Created PR".to_string(),
+        state: gwt_git::pr_status::PrState::Open,
+        url: "https://example.com/pr/88".to_string(),
+        ci_status: "PENDING".to_string(),
+        mergeable: "UNKNOWN".to_string(),
+        review_status: "REVIEW_REQUIRED".to_string(),
+    });
+
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "pr",
+            "create",
+            "--base",
+            "develop",
+            "--head",
+            "feature/hooks",
+            "--title",
+            "Created PR",
+            "-f",
+            "/virtual/pr-body.md",
+            "--label",
+            "release",
+            "--draft",
+        ]),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        env.pr_create_call_log,
+        vec![PrCreateCall {
+            base: "develop".to_string(),
+            head: Some("feature/hooks".to_string()),
+            title: "Created PR".to_string(),
+            body: "## Summary\n\nBody".to_string(),
+            labels: vec!["release".to_string()],
+            draft: true,
+        }]
+    );
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("created pull request"));
+    assert!(out.contains("#88 [OPEN] Created PR"));
+}
+
+#[test]
+fn red_108b_dispatch_pr_edit_uses_live_transport() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.files.insert(
+        "/virtual/pr-body.md".to_string(),
+        "## Summary\n\nUpdated".to_string(),
+    );
+    env.seed_pr(
+        42,
+        PrStatus {
+            number: 42,
+            title: "Updated PR".to_string(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://example.com/pr/42".to_string(),
+            ci_status: "SUCCESS".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            review_status: "APPROVED".to_string(),
+        },
+    );
+
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "pr",
+            "edit",
+            "42",
+            "--title",
+            "Updated PR",
+            "-f",
+            "/virtual/pr-body.md",
+            "--add-label",
+            "release",
+        ]),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        env.pr_edit_call_log,
+        vec![PrEditCall {
+            number: 42,
+            title: Some("Updated PR".to_string()),
+            body: Some("## Summary\n\nUpdated".to_string()),
+            add_labels: vec!["release".to_string()],
+        }]
+    );
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("updated pull request"));
+    assert!(out.contains("#42 [OPEN] Updated PR"));
 }
 
 #[test]

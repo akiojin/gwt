@@ -9,7 +9,7 @@ description: "Use proactively after implementation work to create, check, or fix
 
 Single skill for the full PR lifecycle: create, check status, and fix blockers. Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user.
 
-Canonical agent-facing surface is `gwt pr ...` / `gwt actions ...` for PR inspection and fix flows. Create/update still use REST-first `gh api` / `gh pr` transport internally until `gwt pr create/edit` parity lands. GraphQL remains the transport for unresolved review threads and thread reply/resolve.
+Canonical agent-facing surface is `gwt pr ...` / `gwt actions ...` for PR inspection, create/update, and fix flows. The current implementation may still use GitHub REST / `gh` internally as transport, while GraphQL remains the transport for unresolved review threads and thread reply/resolve.
 
 ## Mode Auto-Detection
 
@@ -102,9 +102,9 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 ### Create/Update Commands
 
-- Primary: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
-- Fallback: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-- Update (only if user asks): `PATCH` via REST or `gh pr edit`
+- Create: `gwt pr create --base <base> [--head <head>] --title "<title>" -f <file> [--label <label>]* [--draft]`
+- Update: `gwt pr edit <number> [--title "<title>"] [-f <file>] [--add-label <label>]*`
+- Transport note: the current implementation may still call GitHub REST / `gh` internally, but agent-facing workflow should stay on the `gwt pr` surface.
 
 ### Post-Create
 
