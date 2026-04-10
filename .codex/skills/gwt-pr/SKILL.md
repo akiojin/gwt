@@ -52,10 +52,7 @@ impossible.**
    > cause of the MERGED-state false NO ACTION bug.
 6. **PR lookup + open-PR check:**
    - Prefer `gwt pr current` as the normal read path for the current branch.
-   - If create mode needs raw repo/head lookup, use:
-     - `repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
-     - `owner="${repo_slug%%/*}"`
-     - `gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100"`
+   - If create mode needs lower-level repo/head lookup, treat it as internal transport managed by the toolchain rather than part of the agent-facing workflow.
    - `has_open_pr` = any entry with `state == "open" && merged_at == null`
 7. **Route using the 2×2 matrix:**
 

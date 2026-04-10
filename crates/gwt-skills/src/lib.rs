@@ -711,6 +711,12 @@ mod tests {
                 !pr_skill.contains("Fallback: `gh pr comment`."),
                 "unexpected direct gh pr comment guidance in {relative}"
             );
+            assert!(
+                !pr_skill.contains(
+                    "gh api \"repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100\""
+                ),
+                "unexpected raw gh pull lookup guidance in {relative}"
+            );
         }
 
         for relative in [".claude/skills/gwt-pr/references/check-flow.md"] {
@@ -793,6 +799,18 @@ mod tests {
             pr_command.contains("`gwt pr current` should succeed"),
             "expected gwt-pr command wrapper to point to canonical gwt auth check"
         );
+
+        for relative in [
+            ".claude/skills/gwt-issue/scripts/inspect_issue.py",
+            ".codex/skills/gwt-issue/scripts/inspect_issue.py",
+        ] {
+            let inspect_issue_script = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                !inspect_issue_script.contains("Fetch issue metadata via gh issue view."),
+                "unexpected direct gh issue view docstring in {relative}"
+            );
+        }
     }
 
     // ── Integration: full distribution pipeline ──
