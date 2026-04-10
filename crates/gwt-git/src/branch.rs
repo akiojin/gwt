@@ -8,9 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// Branches that must never be deleted by Branch Cleanup (FR-018b).
 ///
-/// Mirrors the protected list from the old GUI/TUI cleanup flow plus
-/// `development` so the longer release-branch alias is also covered.
-const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop", "development", "release"];
+/// Mirrors the protected list from the current Branch Cleanup contract.
+const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop"];
 
 /// Returns true when `name` matches one of the hard-coded protected branches
 /// (FR-018b). Comparisons strip a leading `origin/` so a remote tracking ref
@@ -505,9 +504,9 @@ mod tests {
         assert!(is_protected_branch("main"));
         assert!(is_protected_branch("master"));
         assert!(is_protected_branch("develop"));
-        assert!(is_protected_branch("development"));
-        assert!(is_protected_branch("release"));
         assert!(is_protected_branch("origin/main"));
+        assert!(!is_protected_branch("development"));
+        assert!(!is_protected_branch("release"));
         assert!(!is_protected_branch("feature/foo"));
         assert!(!is_protected_branch("bugfix/bar"));
         assert!(!is_protected_branch("hotfix/baz"));

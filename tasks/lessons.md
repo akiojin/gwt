@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-10 — feat: Branch Cleanup の selectable/blocked/risky 契約は glyph・toast・confirm を同時に更新する
+
+### 事象
+
+Branch Cleanup の仕様議論で「`·` は warning 付きで選択可能、`–` だけ blocked」に寄せたあとも、
+実装の一部が旧契約のままで、未マージブランチや remote-tracking 行の選択可否が
+表示と一致しない状態になった。
+
+### 原因
+
+- cleanup 可否判定、gutter glyph、blocked toast、confirm warning、SPEC artifacts が
+  別々に更新されていた。
+- 特に `safe-selectable` / `unsafe-selectable` / `blocked` の3段階モデルが
+  1つの型や表で管理されておらず、読み手が `✔ だけ selectable` と誤解しやすかった。
+
+### 再発防止策
+
+1. Branch Cleanup の選択契約を変更するときは、`BranchesState` の判定API、gutter glyph、`Space` の toast、confirm modal の warning、footer hint、SPEC/quickstart を同じ変更セットで更新する。
+2. `origin/foo` のような remote-tracking 行は「表示名」と「実行対象 local branch」がズレるため、UI 表示用データと execution metadata を分けてテストで固定する。
+3. 「押しても何も起きない」報告が来たら、通知 state や描画だけでなく、対象行が safe/risky/blocked のどこに分類されているかを最初に確認する。
+
 ## 2026-04-09 — fix: `tracing_appender::rolling::daily` の日付境界は思い込みで local 扱いしない
 
 ### 事象

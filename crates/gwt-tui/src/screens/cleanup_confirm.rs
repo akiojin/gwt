@@ -15,13 +15,17 @@ use ratatui::{
 
 use gwt_git::MergeTarget;
 
+use super::branches::CleanupSelectionRisk;
 use crate::theme;
 
 /// One row in the confirm modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupConfirmRow {
     pub branch: String,
-    pub target: MergeTarget,
+    pub target: Option<MergeTarget>,
+    pub execution_branch: String,
+    pub upstream: Option<String>,
+    pub risks: Vec<CleanupSelectionRisk>,
 }
 
 /// State of the Branch Cleanup confirm modal.
@@ -48,6 +52,10 @@ impl CleanupConfirmState {
     /// Number of branches that will be deleted on confirm.
     pub fn count(&self) -> usize {
         self.rows.len()
+    }
+
+    fn has_risky_rows(&self) -> bool {
+        self.rows.iter().any(|row| !row.risks.is_empty())
     }
 }
 
@@ -101,7 +109,9 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
     }
 
     let width = 60_u16.min(area.width);
-    let body_height = (state.rows.len() as u16).saturating_add(8).min(area.height);
+    let body_height = (state.rows.len() as u16)
+        .saturating_add(if state.has_risky_rows() { 9 } else { 8 })
+        .min(area.height);
     let height = body_height.max(9);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -126,6 +136,7 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             Constraint::Length(2),
+            Constraint::Length(if state.has_risky_rows() { 1 } else { 0 }),
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -154,26 +165,50 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
     ]));
     frame.render_widget(header, layout[0]);
 
+    if state.has_risky_rows() {
+        let warning = Paragraph::new(Line::from(vec![Span::styled(
+            "  Warning: includes unmerged / remote-tracking branches.",
+            Style::default().fg(theme::color::WARNING),
+        )]));
+        frame.render_widget(warning, layout[1]);
+    }
+
     let body_lines: Vec<Line> = state
         .rows
         .iter()
         .map(|row| {
-            Line::from(vec![
+            let status = row
+                .target
+                .map(|target| target.label().to_string())
+                .unwrap_or_else(|| "not merged".to_string());
+            let mut risk_labels = row
+                .risks
+                .iter()
+                .map(|risk| risk.label())
+                .collect::<Vec<_>>();
+            risk_labels.sort_unstable();
+
+            let mut spans = vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     row.branch.clone(),
                     Style::default().fg(theme::color::TEXT_PRIMARY),
                 ),
                 Span::styled("    ", Style::default()),
-                Span::styled(
-                    row.target.label().to_string(),
-                    Style::default().fg(theme::color::TEXT_SECONDARY),
-                ),
-            ])
+                Span::styled(status, Style::default().fg(theme::color::TEXT_SECONDARY)),
+            ];
+            if !risk_labels.is_empty() {
+                spans.push(Span::styled("    ", Style::default()));
+                spans.push(Span::styled(
+                    risk_labels.join(", "),
+                    Style::default().fg(theme::color::WARNING),
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
     let body = Paragraph::new(body_lines);
-    frame.render_widget(body, layout[1]);
+    frame.render_widget(body, layout[2]);
 
     let toggle = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -189,13 +224,13 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
             Style::default().fg(theme::color::TEXT_SECONDARY),
         ),
     ]));
-    frame.render_widget(toggle, layout[2]);
+    frame.render_widget(toggle, layout[3]);
 
     let hint = Paragraph::new(Line::from(vec![Span::styled(
         "  [r] Toggle remote   [Enter] Confirm   [Esc] Cancel",
         Style::default().fg(theme::color::TEXT_SECONDARY),
     )]));
-    frame.render_widget(hint, layout[3]);
+    frame.render_widget(hint, layout[4]);
 }
 
 #[cfg(test)]
@@ -208,15 +243,24 @@ mod tests {
         vec![
             CleanupConfirmRow {
                 branch: "feature/foo".to_string(),
-                target: MergeTarget::Main,
+                target: Some(MergeTarget::Main),
+                execution_branch: "feature/foo".to_string(),
+                upstream: Some("origin/feature/foo".to_string()),
+                risks: Vec::new(),
             },
             CleanupConfirmRow {
                 branch: "feature/bar".to_string(),
-                target: MergeTarget::Develop,
+                target: Some(MergeTarget::Develop),
+                execution_branch: "feature/bar".to_string(),
+                upstream: Some("origin/feature/bar".to_string()),
+                risks: Vec::new(),
             },
             CleanupConfirmRow {
                 branch: "feature/abandoned".to_string(),
-                target: MergeTarget::Gone,
+                target: Some(MergeTarget::Gone),
+                execution_branch: "feature/abandoned".to_string(),
+                upstream: Some("origin/feature/abandoned".to_string()),
+                risks: Vec::new(),
             },
         ]
     }
@@ -297,6 +341,36 @@ mod tests {
         state.show(rows(), false);
         let text = render_text(&state);
         assert!(text.contains("Also delete remote"), "{text}");
+    }
+
+    #[test]
+    fn render_shows_warning_summary_for_risky_rows() {
+        let mut state = CleanupConfirmState::default();
+        state.show(
+            vec![
+                CleanupConfirmRow {
+                    branch: "feature/unmerged".to_string(),
+                    target: None,
+                    execution_branch: "feature/unmerged".to_string(),
+                    upstream: None,
+                    risks: vec![CleanupSelectionRisk::Unmerged],
+                },
+                CleanupConfirmRow {
+                    branch: "origin/feature/foo".to_string(),
+                    target: Some(MergeTarget::Main),
+                    execution_branch: "feature/foo".to_string(),
+                    upstream: Some("origin/feature/foo".to_string()),
+                    risks: vec![CleanupSelectionRisk::RemoteTracking],
+                },
+            ],
+            false,
+        );
+        let text = render_text(&state);
+        assert!(text.contains("unmerged / remote-tracking"), "{text}");
+        assert!(text.contains("feature/unmerged"), "{text}");
+        assert!(text.contains("not merged"), "{text}");
+        assert!(text.contains("origin/feature/foo"), "{text}");
+        assert!(text.contains("remote-tracking"), "{text}");
     }
 
     #[test]

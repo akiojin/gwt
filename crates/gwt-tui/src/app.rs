@@ -4193,7 +4193,6 @@ fn handle_confirm_message(model: &mut Model, msg: screens::confirm::ConfirmMessa
 // ---------------- Branch Cleanup integration (FR-018) ----------------
 
 fn open_cleanup_confirm_for_selection(model: &mut Model) {
-    use screens::branches::MergeState;
     use screens::cleanup_confirm::CleanupConfirmRow;
 
     // FR-018c: the selection set persists across view-mode / sort / search
@@ -4208,13 +4207,18 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
             if !model.branches.is_cleanup_selected(&branch.name) {
                 return None;
             }
-            match model.branches.merge_state(&branch.name) {
-                MergeState::Cleanable(target) => Some(CleanupConfirmRow {
-                    branch: branch.name.clone(),
-                    target,
-                }),
-                _ => None,
-            }
+            let execution_branch = model.branches.cleanup_execution_branch(&branch.name)?;
+            Some(CleanupConfirmRow {
+                branch: branch.name.clone(),
+                target: model.branches.cleanup_target(&branch.name),
+                execution_branch,
+                upstream: if branch.is_local {
+                    branch.upstream.clone()
+                } else {
+                    Some(origin_remote_ref(&branch.name))
+                },
+                risks: model.branches.cleanup_selection_risks(&branch.name),
+            })
         })
         .collect();
     rows.sort_by(|a, b| a.branch.cmp(&b.branch));
@@ -4225,7 +4229,7 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
             Notification::new(
                 gwt_core::logging::LogLevel::Warn,
                 "cleanup",
-                "No cleanable branches selected",
+                "No cleanup branches selected",
             ),
         );
         return;
@@ -4318,8 +4322,9 @@ fn start_cleanup_run(model: &mut Model) {
         return;
     }
 
+    let rows = model.cleanup_confirm.rows.clone();
     let delete_remote = model.cleanup_confirm.delete_remote;
-    model.cleanup_progress.show(branches.len(), delete_remote);
+    model.cleanup_progress.show(rows.len(), delete_remote);
 
     let queue: crate::model::CleanupEventQueue =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -4342,16 +4347,11 @@ fn start_cleanup_run(model: &mut Model) {
                 .map(|path| (item.name.clone(), path.clone()))
         })
         .collect();
-    let upstreams: std::collections::HashMap<String, Option<String>> = model
-        .branches
-        .branches
-        .iter()
-        .map(|item| (item.name.clone(), item.upstream.clone()))
-        .collect();
-
     std::thread::spawn(move || {
         let manager = gwt_git::WorktreeManager::new(&repo_path);
-        for branch in branches {
+        for row in rows {
+            let branch = row.branch.clone();
+            let execution_branch = row.execution_branch.clone();
             queue
                 .lock()
                 .unwrap()
@@ -4363,11 +4363,11 @@ fn start_cleanup_run(model: &mut Model) {
             // Branches with their own worktree are still candidates — the
             // whole point of Branch Cleanup is to remove the worktree along
             // with the branch.
-            let blocked_reason = if gwt_git::is_protected_branch(&branch) {
+            let blocked_reason = if gwt_git::is_protected_branch(&execution_branch) {
                 Some("protected branch".to_string())
-            } else if current_head_branch.as_deref() == Some(branch.as_str()) {
+            } else if current_head_branch.as_deref() == Some(execution_branch.as_str()) {
                 Some("current HEAD".to_string())
-            } else if active_session_branches.contains(&branch) {
+            } else if active_session_branches.contains(&execution_branch) {
                 Some("active session".to_string())
             } else {
                 None
@@ -4376,7 +4376,7 @@ fn start_cleanup_run(model: &mut Model) {
             let (success, message) = if let Some(reason) = blocked_reason {
                 (false, Some(reason))
             } else {
-                match manager.cleanup_branch(&branch) {
+                match manager.cleanup_branch(&execution_branch) {
                     Ok(()) => {
                         // Phase 8: shut the per-worktree index watcher down
                         // and drop the on-disk index dir ONLY after git has
@@ -4385,14 +4385,13 @@ fn start_cleanup_run(model: &mut Model) {
                         // (dirty worktree, git error, ...), the surviving
                         // worktree would stop being indexed until something
                         // explicitly recreated the watcher.
-                        if let Some(path) = worktree_paths.get(&branch) {
+                        if let Some(path) = worktree_paths.get(&execution_branch) {
                             let _ = crate::index_worker::shutdown_and_remove(&repo_path, path);
                         }
                         if delete_remote {
-                            match manager.delete_remote_branch(
-                                &branch,
-                                upstreams.get(&branch).and_then(|value| value.as_deref()),
-                            ) {
+                            match manager
+                                .delete_remote_branch(&execution_branch, row.upstream.as_deref())
+                            {
                                 Ok(gwt_git::RemoteDeleteOutcome::Deleted)
                                 | Ok(gwt_git::RemoteDeleteOutcome::SkippedMissing) => (true, None),
                                 Err(err) => (false, Some(format!("remote delete failed: {err}"))),
@@ -14210,8 +14209,7 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn route_key_to_management_branches_space_on_unmerged_branch_keeps_list_focus_and_shows_info_toast(
-    ) {
+    fn route_key_to_management_branches_space_on_unmerged_branch_selects_without_toast() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Branches;
@@ -14235,23 +14233,12 @@ CUSTOM_ENV = "enabled"
         );
 
         assert_eq!(model.active_focus, FocusPane::TabContent);
-        assert!(!model.branches.is_cleanup_selected("feature/not-merged"));
-        let notification = model
-            .current_notification
-            .as_ref()
-            .expect("cleanup selection info toast");
-        assert_eq!(notification.severity, Severity::Info);
-        assert_eq!(notification.source, "cleanup");
-        assert_eq!(notification.message, "Cannot select: not merged");
-        assert_eq!(
-            model.current_notification_ttl,
-            Some(std::time::Duration::from_secs(5))
-        );
+        assert!(model.branches.is_cleanup_selected("feature/not-merged"));
+        assert!(model.current_notification.is_none());
     }
 
     #[test]
-    fn route_key_to_branch_detail_space_on_unmerged_branch_keeps_detail_focus_and_shows_info_toast()
-    {
+    fn route_key_to_branch_detail_space_on_unmerged_branch_selects_without_toast() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Branches;
@@ -14275,18 +14262,39 @@ CUSTOM_ENV = "enabled"
         );
 
         assert_eq!(model.active_focus, FocusPane::BranchDetail);
-        assert!(!model.branches.is_cleanup_selected("feature/not-merged"));
-        let notification = model
-            .current_notification
-            .as_ref()
-            .expect("cleanup selection info toast from detail");
-        assert_eq!(notification.severity, Severity::Info);
-        assert_eq!(notification.source, "cleanup");
-        assert_eq!(notification.message, "Cannot select: not merged");
+        assert!(model.branches.is_cleanup_selected("feature/not-merged"));
+        assert!(model.current_notification.is_none());
     }
 
     #[test]
     fn render_model_text_branches_blocked_cleanup_toast_is_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/computing".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        let rendered = render_model_text(&model, 80, 24);
+        assert!(
+            rendered.contains("Cannot select: merge check running"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn route_key_input_shift_c_on_unmerged_selection_opens_confirm_with_warning() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Branches;
@@ -14308,9 +14316,17 @@ CUSTOM_ENV = "enabled"
             &mut model,
             Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
         );
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char('C'), KeyModifiers::SHIFT)),
+        );
 
-        let rendered = render_model_text(&model, 80, 24);
-        assert!(rendered.contains("Cannot select: not merged"), "{rendered}");
+        assert!(model.cleanup_confirm.visible);
+        assert_eq!(model.cleanup_confirm.rows.len(), 1);
+        assert_eq!(
+            model.cleanup_confirm.rows[0].risks,
+            vec![screens::branches::CleanupSelectionRisk::Unmerged]
+        );
     }
 
     #[test]
@@ -14330,7 +14346,10 @@ CUSTOM_ENV = "enabled"
         model.cleanup_confirm.show(
             vec![screens::cleanup_confirm::CleanupConfirmRow {
                 branch: "feature/cleanup-remote".to_string(),
-                target: gwt_git::MergeTarget::Main,
+                target: Some(gwt_git::MergeTarget::Main),
+                execution_branch: "feature/cleanup-remote".to_string(),
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+                risks: Vec::new(),
             }],
             false,
         );
@@ -14379,6 +14398,100 @@ CUSTOM_ENV = "enabled"
         assert!(
             !remote_output.status.success(),
             "remote branch should be deleted: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
+    }
+
+    #[test]
+    fn update_key_input_cleanup_confirm_enter_on_remote_tracking_row_deletes_local_only() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_create_branch(&repo_path, "feature/cleanup-remote");
+        git_push_branch(&repo_path, "feature/cleanup-remote");
+
+        let mut model = Model::new(repo_path.clone());
+        model.cleanup_confirm.show(
+            vec![screens::cleanup_confirm::CleanupConfirmRow {
+                branch: "origin/feature/cleanup-remote".to_string(),
+                target: Some(gwt_git::MergeTarget::Main),
+                execution_branch: "feature/cleanup-remote".to_string(),
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+                risks: vec![screens::branches::CleanupSelectionRisk::RemoteTracking],
+            }],
+            false,
+        );
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/cleanup-remote".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+            },
+            screens::branches::BranchItem {
+                name: "origin/feature/cleanup-remote".to_string(),
+                is_head: false,
+                is_local: false,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+                upstream: None,
+            },
+        ];
+        model.branches.current_head_branch = Some("master".to_string());
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| {
+                model
+                    .cleanup_progress
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.phase == screens::branches::CleanupRunPhase::Done)
+            },
+            "cleanup progress completion",
+        );
+
+        let local_output = std::process::Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read local branch");
+        assert!(
+            !local_output.status.success(),
+            "local branch should be deleted"
+        );
+
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            remote_output.status.success(),
+            "remote branch should remain when delete_remote is off: {}",
             String::from_utf8_lossy(&remote_output.stderr)
         );
     }
