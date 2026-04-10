@@ -4281,6 +4281,18 @@ struct DockerLaunchPlan {
     container_cwd: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerExecProgram {
+    executable: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerPackageRunnerCandidate {
+    executable: &'static str,
+    base_args: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct DevContainerLaunchDefaults {
     service: Option<String>,
@@ -4325,15 +4337,14 @@ where
         &mut emit_progress,
         &mut emit_log,
     )?;
-    let runtime_command = docker_runtime_command_for_exec(config);
     emit_progress(
         screens::docker_progress::DockerStage::WaitingForServices,
         format!(
-            "Checking runtime command in Docker service {}",
+            "Checking launch command in Docker service {}",
             launch.service
         ),
     );
-    ensure_docker_launch_command_ready(&launch, &runtime_command)?;
+    let runtime_program = resolve_docker_exec_program(&launch, config)?;
 
     let mut args = vec![
         "compose".to_string(),
@@ -4343,9 +4354,9 @@ where
         "-w".to_string(),
         launch.container_cwd.clone(),
         launch.service.clone(),
-        runtime_command,
+        runtime_program.executable,
     ];
-    args.extend(config.args.clone());
+    args.extend(runtime_program.args);
 
     config.command = docker_binary_for_launch();
     config.args = args;
@@ -4386,24 +4397,6 @@ fn docker_compose_up_log_entry(
     event
 }
 
-fn docker_runtime_command_for_exec(config: &LaunchConfig) -> String {
-    if config.agent_id.package_name().is_some()
-        && config
-            .tool_version
-            .as_deref()
-            .is_some_and(|version| version != "installed")
-    {
-        return Path::new(&config.command)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(config.command.as_str())
-            .to_string();
-    }
-
-    config.command.clone()
-}
-
 fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     if !gwt_docker::docker_available() {
         return Err("Docker is not installed or not available on PATH".to_string());
@@ -4415,6 +4408,108 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
         return Err("Docker daemon is not running".to_string());
     }
     Ok(())
+}
+
+fn resolve_docker_exec_program(
+    launch: &DockerLaunchPlan,
+    config: &LaunchConfig,
+) -> Result<DockerExecProgram, String> {
+    let Some(version_spec) = docker_package_version_spec(config) else {
+        ensure_docker_launch_command_ready(launch, &config.command)?;
+        return Ok(DockerExecProgram {
+            executable: config.command.clone(),
+            args: config.args.clone(),
+        });
+    };
+
+    resolve_docker_package_runner(launch, config, &version_spec)
+}
+
+fn docker_package_version_spec(config: &LaunchConfig) -> Option<String> {
+    let package = config.agent_id.package_name()?;
+    let version = config.tool_version.as_deref()?;
+    if version == "installed" || version.is_empty() {
+        return None;
+    }
+
+    Some(if version == "latest" {
+        format!("{package}@latest")
+    } else {
+        format!("{package}@{version}")
+    })
+}
+
+fn resolve_docker_package_runner(
+    launch: &DockerLaunchPlan,
+    config: &LaunchConfig,
+    version_spec: &str,
+) -> Result<DockerExecProgram, String> {
+    let agent_args = strip_docker_package_runner_args(&config.args, version_spec);
+    let candidates = vec![
+        DockerPackageRunnerCandidate {
+            executable: "bunx",
+            base_args: vec![version_spec.to_string()],
+        },
+        DockerPackageRunnerCandidate {
+            executable: "npx",
+            base_args: vec!["--yes".to_string(), version_spec.to_string()],
+        },
+    ];
+    let mut failures = Vec::new();
+
+    for candidate in candidates {
+        let output = gwt_docker::compose_service_exec_capture(
+            &launch.compose_file,
+            &launch.service,
+            Some(&launch.container_cwd),
+            &candidate.probe_args(),
+        )
+        .map_err(|err| err.to_string())?;
+        if output.status.success() {
+            return Ok(candidate.into_exec_program(agent_args.clone()));
+        }
+        failures.push(format!(
+            "{}: {}",
+            candidate.executable,
+            docker_compose_exec_failure_detail(&output)
+        ));
+    }
+
+    Err(format!(
+        "Selected Docker runtime cannot launch {version_spec} in service '{}'. {}",
+        launch.service,
+        failures.join(" | ")
+    ))
+}
+
+fn strip_docker_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
+    if args.first().is_some_and(|first| first == "--yes")
+        && args.get(1).is_some_and(|arg| arg == version_spec)
+    {
+        return args[2..].to_vec();
+    }
+    if args.first().is_some_and(|arg| arg == version_spec) {
+        return args[1..].to_vec();
+    }
+    args.to_vec()
+}
+
+fn docker_compose_exec_failure_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    output
+        .status
+        .code()
+        .map(|code| format!("exit code {code}"))
+        .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
 fn ensure_docker_launch_command_ready(
@@ -4432,6 +4527,24 @@ fn ensure_docker_launch_command_ready(
         "Command '{command}' is not available in Docker service '{}'",
         launch.service
     ))
+}
+
+impl DockerPackageRunnerCandidate {
+    fn probe_args(&self) -> Vec<String> {
+        let mut args = vec![self.executable.to_string()];
+        args.extend(self.base_args.clone());
+        args.push("--version".to_string());
+        args
+    }
+
+    fn into_exec_program(self, mut agent_args: Vec<String>) -> DockerExecProgram {
+        let mut args = self.base_args;
+        args.append(&mut agent_args);
+        DockerExecProgram {
+            executable: self.executable.to_string(),
+            args,
+        }
+    }
 }
 
 fn ensure_docker_launch_service_ready<F, G>(
@@ -12425,7 +12538,7 @@ services:
         };
 
         with_fake_docker(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"web\" ] && [ \"$9\" = \"bunx\" ] && [ \"${10}\" = \"@anthropic-ai/claude-code@latest\" ] && [ \"${11}\" = \"--version\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
             || {
                 let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
                 apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
@@ -12449,6 +12562,82 @@ services:
                 );
             },
         );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_falls_back_to_npx_when_bunx_package_exec_fails() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        let log_path = project_root.path().join("docker-args.log");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "/opt/homebrew/bin/bunx".to_string(),
+            args: vec![
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("latest".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+        };
+
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"web\" ] && [ \"$9\" = \"bunx\" ] && [ \"${{10}}\" = \"@anthropic-ai/claude-code@latest\" ] && [ \"${{11}}\" = \"--version\" ]; then\n  printf 'could not determine executable to run for package @anthropic-ai/claude-code\\n' >&2\n  exit 1\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"web\" ] && [ \"$9\" = \"npx\" ] && [ \"${{10}}\" = \"--yes\" ] && [ \"${{11}}\" = \"@anthropic-ai/claude-code@latest\" ] && [ \"${{12}}\" = \"--version\" ]; then\n  printf '2.1.100 (Claude Code)\\n'\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display()
+        );
+
+        with_fake_docker(&script, || {
+            let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
+            apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                .expect("apply docker runtime");
+
+            let log = fs::read_to_string(&log_path).expect("read invocation log");
+            assert!(log.contains(" bunx @anthropic-ai/claude-code@latest --version"));
+            assert!(log.contains(" npx --yes @anthropic-ai/claude-code@latest --version"));
+            assert_eq!(config.command, expected_docker);
+            assert_eq!(
+                config.args,
+                vec![
+                    "compose".to_string(),
+                    "-f".to_string(),
+                    compose_path.display().to_string(),
+                    "exec".to_string(),
+                    "-w".to_string(),
+                    "/workspace".to_string(),
+                    "web".to_string(),
+                    "npx".to_string(),
+                    "--yes".to_string(),
+                    "@anthropic-ai/claude-code@latest".to_string(),
+                    "--print".to_string(),
+                ]
+            );
+        });
     }
 
     #[test]
@@ -12558,6 +12747,65 @@ services:
                 .next()
                 .is_none(),
             "launch must not persist a session when the Docker runtime command is missing"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_missing_docker_package_runner_routes_visible_error_without_session(
+    ) {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "/opt/homebrew/bin/bunx".to_string(),
+            args: vec![
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("latest".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: true,
+            codex_fast_mode: false,
+        });
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$9\" = \"bunx\" ]; then\n  printf 'could not determine executable to run for package @anthropic-ai/claude-code\\n' >&2\n  exit 1\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$9\" = \"npx\" ]; then\n  printf 'npm ERR! missing executable\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                materialize_pending_launch_with(&mut model, sessions_dir.path())
+                    .expect("materialize launch");
+            },
+        );
+
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.error_queue.len(), 1);
+        let notification = model.error_queue.front().expect("error notification");
+        assert_eq!(notification.source, "docker");
+        assert_eq!(notification.message, "Docker launch failed");
+        let detail = notification.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("@anthropic-ai/claude-code@latest"));
+        assert!(detail.contains("bunx"));
+        assert!(detail.contains("npx"));
+        assert!(
+            fs::read_dir(sessions_dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "launch must not persist a session when no Docker package runner can start the agent"
         );
     }
 

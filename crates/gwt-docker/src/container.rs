@@ -538,6 +538,32 @@ pub fn compose_service_has_command(
     Err(GwtError::Docker(stderr))
 }
 
+/// Execute a command inside a compose service and capture stdout/stderr.
+///
+/// Transport failures such as spawn errors and timeouts return `Err`. A
+/// non-zero exit status from the command itself is returned via `Output`.
+pub fn compose_service_exec_capture(
+    compose_file: &std::path::Path,
+    service: &str,
+    working_dir: Option<&str>,
+    args: &[String],
+) -> Result<Output> {
+    let compose_file = compose_file.display().to_string();
+    let mut docker_args = vec!["compose", "-f", &compose_file, "exec", "-T"];
+    if let Some(working_dir) = working_dir {
+        docker_args.push("-w");
+        docker_args.push(working_dir);
+    }
+    docker_args.push(service);
+    docker_args.extend(args.iter().map(String::as_str));
+
+    run_docker_with_timeout_in_dir(
+        &docker_args,
+        "docker compose exec",
+        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+    )
+}
+
 /// Stop a compose service.
 pub fn compose_stop(compose_file: &std::path::Path, service: &str) -> Result<()> {
     let compose_file = compose_file.display().to_string();
@@ -1147,5 +1173,46 @@ mod tests {
             err.to_string().contains("service is not running"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn compose_service_exec_capture_preserves_non_zero_output() {
+        let log_dir = tempfile::tempdir().expect("temp log dir");
+        let log_path = log_dir.path().join("args.txt");
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"app\" ]; then\n  printf 'could not determine executable to run\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display()
+        );
+
+        with_fake_docker(&script, |_| {
+            let output = compose_service_exec_capture(
+                &compose_path,
+                "app",
+                Some("/workspace"),
+                &[
+                    "bunx".to_string(),
+                    "@anthropic-ai/claude-code@latest".to_string(),
+                    "--version".to_string(),
+                ],
+            )
+            .expect("exec capture");
+
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("could not determine"));
+            assert_eq!(
+                read_invocation(&log_path),
+                format!(
+                    "compose\n-f\n{}\nexec\n-T\n-w\n/workspace\napp\nbunx\n@anthropic-ai/claude-code@latest\n--version\n",
+                    compose_path.display()
+                )
+            );
+        });
     }
 }
