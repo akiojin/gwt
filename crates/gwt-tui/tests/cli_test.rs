@@ -31,7 +31,7 @@ fn red_70_should_dispatch_cli_when_first_arg_is_issue_or_hook() {
     assert!(should_dispatch_cli(&argv(&[
         "gwt",
         "hook",
-        "block-git-branch-ops"
+        "block-bash-policy"
     ])));
     assert!(!should_dispatch_cli(&argv(&["gwt"])));
     assert!(!should_dispatch_cli(&argv(&["gwt", "/some/repo/path"])));
@@ -53,11 +53,11 @@ fn red_90_parse_hook_runtime_state() {
 #[test]
 fn red_91_parse_hook_block_without_args() {
     use gwt_tui::cli::parse_hook_args;
-    let cmd = parse_hook_args(&[s("block-git-branch-ops")]).unwrap();
+    let cmd = parse_hook_args(&[s("block-bash-policy")]).unwrap();
     assert_eq!(
         cmd,
         CliCommand::Hook {
-            name: "block-git-branch-ops".to_string(),
+            name: "block-bash-policy".to_string(),
             rest: vec![],
         }
     );

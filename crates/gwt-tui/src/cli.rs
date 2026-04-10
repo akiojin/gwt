@@ -116,10 +116,7 @@ pub fn parse_issue_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 /// point for every in-binary hook handler. The known hook names are:
 ///
 /// - `runtime-state <event>`
-/// - `block-git-branch-ops`
-/// - `block-cd-command`
-/// - `block-file-ops`
-/// - `block-git-dir-override`
+/// - `block-bash-policy`
 /// - `forward <target>`
 ///
 /// Unknown names still parse (we don't maintain an allowlist here) so that
@@ -479,10 +476,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
 /// handlers exit 1 with the error chain on stderr; they are never turned
 /// into `decision=block` to avoid false positives under partial outages.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{
-        block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, forward,
-        runtime_state, BlockDecision, HookKind,
-    };
+    use crate::cli::hook::{block_bash_policy, forward, runtime_state, BlockDecision, HookKind};
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -528,22 +522,7 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
-        HookKind::BlockGitBranchOps => match block_git_branch_ops::handle() {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
-            Err(err) => Ok(emit_hook_error(env, name, err)),
-        },
-        HookKind::BlockCdCommand => match block_cd_command::handle() {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
-            Err(err) => Ok(emit_hook_error(env, name, err)),
-        },
-        HookKind::BlockFileOps => match block_file_ops::handle() {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
-            Err(err) => Ok(emit_hook_error(env, name, err)),
-        },
-        HookKind::BlockGitDirOverride => match block_git_dir_override::handle() {
+        HookKind::BlockBashPolicy => match block_bash_policy::handle() {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),

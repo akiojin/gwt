@@ -11440,7 +11440,8 @@ CUSTOM_ENV = "enabled"
         let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
             .as_str()
             .expect("hook command");
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state UserPromptSubmit"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
@@ -11483,7 +11484,8 @@ CUSTOM_ENV = "enabled"
             .as_str()
             .expect("hook command");
 
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state SessionStart"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
     }
 
@@ -11557,7 +11559,8 @@ CUSTOM_ENV = "enabled"
             .as_str()
             .expect("hook command");
 
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state SessionStart"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!content.contains("gwt-forward-hook.mjs"));
         assert!(!command.contains("node"));
     }
