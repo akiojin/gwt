@@ -46,8 +46,27 @@ fn blocks_git_dir_override_env_vars() {
 }
 
 #[test]
+fn blocks_issue_focused_github_cli_commands() {
+    block("gh issue view 1942");
+    block("gh issue create --title \"fix: issue\" --body \"details\"");
+    block("gh issue comment 1942 --body \"done\"");
+    block("env GH_TOKEN=test gh issue view 1942");
+    block("gh api repos/akiojin/gwt/issues/1942");
+    block("gh api /repos/akiojin/gwt/issues/1942/comments");
+    block("gh api graphql -f query='query { repository(owner:\"akiojin\", name:\"gwt\") { issue(number:1942) { id } } }'");
+}
+
+#[test]
 fn allows_read_only_and_in_worktree_commands() {
     allow("git branch --list");
     allow("git checkout HEAD -- foo.rs");
     allow("mkdir /tmp/gwt-test-worktree/new-dir");
+    allow("gh auth status");
+    allow("gh repo view");
+    allow("gh release list");
+    allow("gh pr create --base main --head feature/x --title test --body body");
+    allow("gh pr checks 1949");
+    allow("gh api repos/akiojin/gwt/pulls/1949");
+    allow("gh api graphql -f query='query { repository(owner:\"akiojin\", name:\"gwt\") { pullRequest(number:1949) { id } } }'");
+    allow("gh run view 123456789");
 }

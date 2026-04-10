@@ -345,9 +345,14 @@ PR_NUMBER=$(gh pr list --base main --head develop --state open --json number --j
 各 Issue にコメントを追記：
 
 ```bash
+COMMENT_FILE=$(mktemp)
+printf 'Included in release v%s (#%s)\n' "{NEW_VERSION}" "$PR_NUMBER" > "$COMMENT_FILE"
+
 for NUM in $ISSUE_NUMBERS; do
-  gh issue comment "$NUM" --body "Included in release v{NEW_VERSION} (#${PR_NUMBER})" || true
+  gwt issue comment "$NUM" -f "$COMMENT_FILE" || true
 done
+
+rm -f "$COMMENT_FILE"
 ```
 
 - `ISSUE_NUMBERS` が空の場合はこのステップ全体をスキップ

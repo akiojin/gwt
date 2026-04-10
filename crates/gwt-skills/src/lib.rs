@@ -605,6 +605,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn local_github_issue_workflows_use_canonical_gwt_surfaces() {
+        let issue_skill = include_str!("../../../.codex/skills/gwt-issue/SKILL.md");
+        assert!(
+            issue_skill.contains("gwt issue create --title ... -f ..."),
+            "expected canonical gwt issue create guidance"
+        );
+        assert!(
+            issue_skill.contains("gwt issue comment"),
+            "expected canonical gwt issue comment guidance"
+        );
+        assert!(
+            issue_skill.contains("Direct `gh issue ...` commands are not part of the normal path."),
+            "expected skill to forbid direct gh issue usage in the normal path"
+        );
+
+        let pr_skill = include_str!("../../../.codex/skills/gwt-pr/SKILL.md");
+        assert!(
+            pr_skill.contains("gwt pr current"),
+            "expected canonical gwt pr current guidance"
+        );
+        assert!(
+            pr_skill.contains("gwt pr review-threads"),
+            "expected canonical gwt pr review-threads guidance"
+        );
+        assert!(
+            pr_skill.contains("gwt actions logs"),
+            "expected canonical gwt actions log guidance"
+        );
+
+        let release_command = include_str!("../../../.claude/commands/release.md");
+        assert!(
+            release_command.contains("gwt issue comment"),
+            "expected release command to use gwt issue comment"
+        );
+        assert!(
+            !release_command.contains("gh issue comment"),
+            "unexpected direct gh issue comment guidance"
+        );
+    }
+
     // ── Integration: full distribution pipeline ──
 
     #[test]
