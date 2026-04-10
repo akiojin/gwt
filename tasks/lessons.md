@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-10 — fix: managed asset の startup sweep は prune だけで終わらせず、missing tracked file も restore する
+
+### 事象
+
+`GWT_MANAGED_HOOK=runtime-state` や split bash blocker が一部 worktree の
+`.codex/hooks.json` / `.claude/settings.local.json` に残り続け、さらに
+tracked な `.claude/commands/gwt-spec-brainstorm.md` が一度消えると
+最新 binary を入れても自然復旧しなかった。
+
+### 原因
+
+- startup 時の repo/worktree sweep が `prune_stale_gwt_assets` だけで、
+  distribute / hook regeneration / exclude update を回していなかった。
+- `distribute_to_worktree` は tracked path を常に skip しており、
+  既に削除された tracked managed asset まで restore できなかった。
+
+### 再発防止策
+
+1. managed asset の migration を commit したら、「新規 launch 時」だけでなく
+   「既存 repo/worktree の startup self-heal」で反映されるかを確認する。
+2. tracked asset の preserve ロジックでは「既存 file を上書きしない」と
+   「missing file を復旧しない」を混同しない。
+3. startup repair を追加するときは、empty repo を不用意に dirty にしない gate
+   まで同時にテストで固定する。
+
 ## 2026-04-10 — feat: `~/.gwt/cache/issues/` を SPEC 専用と決め打ちしない
 
 ### 事象

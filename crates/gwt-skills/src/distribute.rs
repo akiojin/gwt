@@ -159,7 +159,10 @@ fn write_dir_assets(
 ) -> io::Result<()> {
     for file in source.files() {
         let target = dest.join(file.path().file_name().unwrap_or_default());
-        if should_skip_tracked_path(worktree, &target, tracked_paths) {
+        // Preserve existing tracked files so we do not overwrite user-checked-in
+        // assets with an older bundle snapshot, but still recreate missing
+        // tracked files so worktrees can self-heal after an accidental delete.
+        if target.exists() && should_skip_tracked_path(worktree, &target, tracked_paths) {
             continue;
         }
         if let Some(parent) = target.parent() {
@@ -619,6 +622,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&tracked_command).unwrap(),
             "tracked brainstorm command"
+        );
+    }
+
+    #[test]
+    fn distribute_restores_missing_tracked_bundled_spec_brainstorm_command() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
+        fs::write(&tracked_command, "tracked brainstorm command").unwrap();
+
+        track_path(dir.path(), ".claude/commands/gwt-spec-brainstorm.md");
+        fs::remove_file(&tracked_command).unwrap();
+
+        distribute_to_worktree(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&tracked_command).unwrap();
+        assert!(
+            content.contains("SPEC Brainstorm Command"),
+            "missing tracked bundled command should be restored from the current bundle"
         );
     }
 
