@@ -131,25 +131,38 @@ fn build_row_text(screen: &vt100::Screen, row: u16, cols: u16) -> (String, Vec<u
     let mut byte_to_col: Vec<u16> = Vec::with_capacity(cols as usize);
 
     for col in 0..cols {
-        if let Some(cell) = screen.cell(row, col) {
-            let ch = cell.contents().chars().next().unwrap_or(' ');
-            let byte_start = row_text.len();
-            row_text.push(ch);
-            let byte_end = row_text.len();
-            for _ in byte_start..byte_end {
-                byte_to_col.push(col);
-            }
-        } else {
-            let byte_start = row_text.len();
-            row_text.push(' ');
-            let byte_end = row_text.len();
-            for _ in byte_start..byte_end {
-                byte_to_col.push(col);
-            }
+        let symbol = screen
+            .cell(row, col)
+            .map(|cell| renderable_cell_symbol(cell, col, cols))
+            .unwrap_or_else(|| " ".to_string());
+        let byte_start = row_text.len();
+        row_text.push_str(&symbol);
+        let byte_end = row_text.len();
+        for _ in byte_start..byte_end {
+            byte_to_col.push(col);
         }
     }
 
     (row_text, byte_to_col)
+}
+
+fn renderable_cell_symbol(cell: &vt100::Cell, col: u16, cols: u16) -> String {
+    if cell.is_wide_continuation() {
+        return " ".to_string();
+    }
+
+    let symbol = cell.contents();
+    let symbol = if symbol.is_empty() {
+        " ".to_string()
+    } else {
+        symbol
+    };
+    let symbol_width = if cell.is_wide() { 2 } else { 1 };
+    if symbol_width > 1 && usize::from(col).saturating_add(symbol_width) > usize::from(cols) {
+        " ".to_string()
+    } else {
+        symbol
+    }
 }
 
 /// Collect detected URL regions for the visible screen area.
@@ -268,12 +281,23 @@ pub fn render_vt_screen_with_selection_and_urls(
                 let y = area.y + row;
 
                 if x < buf.area().right() && y < buf.area().bottom() {
-                    let buf_cell = &mut buf[(x, y)];
-                    buf_cell.set_char(cell.contents().chars().next().unwrap_or(' '));
+                    if cell.is_wide_continuation() {
+                        buf[(x, y)].reset();
+                        continue;
+                    }
 
-                    let is_url = url_cells.contains(&(row, col));
+                    let covered_end = (col + if cell.is_wide() { 2 } else { 1 }).min(cols);
+                    let buf_cell = &mut buf[(x, y)];
+                    buf_cell.reset();
+                    buf_cell.set_symbol(&renderable_cell_symbol(cell, col, cols));
+
+                    let is_url = (col..covered_end)
+                        .any(|covered_col| url_cells.contains(&(row, covered_col)));
                     let is_selected = selection
-                        .map(|selection| selection_contains(selection, row, col))
+                        .map(|selection| {
+                            (col..covered_end)
+                                .any(|covered_col| selection_contains(selection, row, covered_col))
+                        })
                         .unwrap_or(false);
                     let fg = if is_url {
                         Some(Color::Cyan)
@@ -592,6 +616,98 @@ mod tests {
         assert!(regions[1].end_col > 0);
         assert_eq!(buf[(0, 1)].fg, Color::Cyan);
         assert!(buf[(0, 1)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn render_vt_screen_preserves_full_emoji_grapheme() {
+        let mut parser = vt100::Parser::new(1, 6, 0);
+        parser.process("⭐️ ok".as_bytes());
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_vt_screen(parser.screen(), &mut buf, area);
+
+        assert_eq!(
+            buf[(0, 0)].symbol(),
+            "⭐️",
+            "renderer should preserve the full grapheme cluster stored in the vt100 cell",
+        );
+    }
+
+    #[test]
+    fn render_vt_screen_drops_wide_char_when_visible_area_crops_trailing_cell() {
+        let mut parser = vt100::Parser::new(1, 6, 0);
+        parser.process("abcdあ".as_bytes());
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_vt_screen(parser.screen(), &mut buf, area);
+
+        assert_eq!(
+            buf[(4, 0)].symbol(),
+            " ",
+            "renderer should avoid drawing a half-visible wide character at the right edge",
+        );
+    }
+
+    #[test]
+    fn render_vt_screen_keeps_wide_continuation_cells_hidden() {
+        let mut parser = vt100::Parser::new(1, 3, 0);
+        parser.process("\x1b[31mあ".as_bytes());
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::filled(area, ratatui::buffer::Cell::new("x"));
+
+        render_vt_screen(parser.screen(), &mut buf, area);
+
+        assert_eq!(buf[(0, 0)].symbol(), "あ");
+        assert_eq!(
+            buf[(1, 0)],
+            ratatui::buffer::Cell::default(),
+            "wide continuation cells should stay hidden so the backend does not overdraw the glyph",
+        );
+    }
+
+    #[test]
+    fn render_vt_screen_selection_on_wide_continuation_styles_leading_glyph() {
+        let mut parser = vt100::Parser::new(1, 3, 0);
+        parser.process("あ".as_bytes());
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_vt_screen_with_selection(
+            parser.screen(),
+            &mut buf,
+            area,
+            Some(TerminalSelection {
+                anchor: TerminalCell { row: 0, col: 1 },
+                focus: TerminalCell { row: 0, col: 1 },
+            }),
+        );
+
+        assert!(
+            buf[(0, 0)].modifier.contains(Modifier::REVERSED),
+            "selecting the trailing half of a wide glyph should still style the visible glyph",
+        );
+    }
+
+    #[test]
+    fn render_vt_screen_emits_trailing_clear_for_cjk_wide_glyph_diff() {
+        let area = Rect::new(0, 0, 3, 1);
+        let mut previous = Buffer::empty(area);
+        previous.set_string(0, 0, "abc", Style::default());
+
+        let mut parser = vt100::Parser::new(1, 3, 0);
+        parser.process("aあ".as_bytes());
+        let mut next = previous.clone();
+        render_vt_screen(parser.screen(), &mut next, area);
+
+        let updates = previous.diff(&next);
+        assert!(
+            updates
+                .iter()
+                .any(|(x, y, cell)| (*x, *y, cell.symbol()) == (2, 0, " ")),
+            "wide CJK glyph redraw should explicitly clear the trailing cell so full-screen updates do not leave stale text behind",
+        );
     }
 
     #[test]

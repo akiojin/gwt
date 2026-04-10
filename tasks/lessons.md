@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-10 — fix: wide glyph の見切れは renderer だけでなく backend diff の trailing clear まで確認する
+
+### 事象
+
+Codex agent terminal で、日本語の wide glyph が full-screen redraw のたびに
+右端や行中でまだ見切れた。`cell.contents()` を保持する修正後も、
+前フレームの trailing cell の文字が右半分に残った。
+
+### 原因
+
+- `renderer.rs` 側では grapheme cluster と visible-right-edge crop を直していたが、
+  `ratatui-core::Buffer::diff` が CJK wide glyph では trailing clear を明示出力せず、
+  stale trailing cell が残る端末条件を見落としていた。
+- 併せて、selection overlay が wide continuation cell 側だけを選択したケースで、
+  可視 glyph 側へ style を集約できていなかった。
+
+### 再発防止策
+
+1. wide glyph の不具合では `vt100 cell -> Buffer` だけで完了扱いせず、`Buffer::diff -> backend Print` まで追って trailing clear の有無を確認する。
+2. 回帰テストには「CJK wide glyph redraw で trailing clear が diff に出ること」を必ず含める。
+3. wide continuation cell は hidden cell として扱い、selection / URL overlay は glyph 幅全体に集約する。
+
 ## 2026-04-10 — spec: skill 文面だけで満足せず、質問UI契約は asset contract test まで固定する
 
 ### 事象
@@ -45,6 +67,27 @@ tracked な `.claude/commands/gwt-spec-brainstorm.md` が一度消えると
    「missing file を復旧しない」を混同しない。
 3. startup repair を追加するときは、empty repo を不用意に dirty にしない gate
    まで同時にテストで固定する。
+
+## 2026-04-10 — fix: vt100 renderer は `chars().next()` で cell を潰さず、visible area の右端 crop も見る
+
+### 事象
+
+Codex agent terminal で日本語や emoji を含む行が右端で見切れた。特に
+emoji presentation sequence は先頭 codepoint だけに潰れ、wide glyph は
+visible pane が vt100 幅より狭いときに右端で半端表示され得た。
+
+### 原因
+
+- `crates/gwt-tui/src/renderer.rs` が `vt100::Cell::contents()` 全体ではなく
+  `chars().next()` だけを使っており、cell 内の grapheme cluster を失っていた。
+- renderer が「vt100 screen 幅には収まるが、現在の visible area には trailing cell が
+  入らない」ケースを見ておらず、wide glyph をそのまま描こうとしていた。
+
+### 再発防止策
+
+1. vt100 renderer を触るときは、`cell.contents()` を「表示用の完全な terminal grapheme」として扱い、先頭 codepoint のみへ落とさない。
+2. wide glyph の描画では terminal 全体の列数だけでなく、現在の visible area 幅で trailing cell が収まるかを必ず判定する。
+3. renderer 回帰テストには「emoji grapheme 保持」と「cropped right edge での wide glyph 抑止」をセットで追加する。
 
 ## 2026-04-10 — feat: `~/.gwt/cache/issues/` を SPEC 専用と決め打ちしない
 
