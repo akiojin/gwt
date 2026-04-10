@@ -397,6 +397,12 @@ impl AgentLaunchBuilder {
             args.push("--model".to_string());
             args.push(model.clone());
         }
+
+        if let Some(ref level) = self.reasoning_level {
+            if level != "auto" {
+                env_vars.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), level.clone());
+            }
+        }
     }
 
     fn build_codex_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
@@ -596,6 +602,31 @@ mod tests {
         assert!(config
             .args
             .contains(&"claude-sonnet-4-20250514".to_string()));
+    }
+
+    #[test]
+    fn build_claude_with_auto_reasoning_does_not_export_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("auto")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("auto"));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+        assert!(!config.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn build_claude_with_reasoning_level_exports_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("high")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"high".to_string())
+        );
+        assert!(!config.args.contains(&"--effort".to_string()));
     }
 
     #[test]

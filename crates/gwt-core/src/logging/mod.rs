@@ -15,7 +15,7 @@
 //! forwarder channel is only used to drive ephemeral surfaces that
 //! must react within one UI tick.
 //!
-//! See `specs/SPEC-6/spec.md` Phase 5 and `specs/SPEC-6/plan.md` Phase 5
+//! See GitHub Issue #1924 (SPEC-6) spec/plan sections, Phase 5
 //! for the architectural background.
 
 pub mod config;
