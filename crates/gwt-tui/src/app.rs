@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
+use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -1679,6 +1680,34 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
 ///
 /// This keeps non-terminal surfaces animated while allowing terminal-focused
 /// IME composition to proceed without idle repaints.
+fn visible_branch_live_indicator_rows(
+    model: &Model,
+) -> Vec<crate::screens::branches::VisibleBranchLiveIndicatorRow> {
+    visible_branches_list_area(model)
+        .map(|area| model.branches.visible_live_indicator_rows(area))
+        .unwrap_or_default()
+}
+
+pub fn visible_branch_live_indicator_signature(model: &Model) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in visible_branch_live_indicator_rows(model) {
+        row.branch_name.hash(&mut hasher);
+        for indicator in row.indicators {
+            branch_live_indicator_status_tag(indicator.status).hash(&mut hasher);
+            branch_live_indicator_color_tag(indicator.color).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+pub fn should_render_after_tick_with_visible_branch_signature(
+    visible_branch_signature_before: u64,
+    model: &Model,
+) -> bool {
+    visible_branch_signature_before != visible_branch_live_indicator_signature(model)
+        || tick_redraw_required(model)
+}
+
 pub fn tick_redraw_required(model: &Model) -> bool {
     if model.active_focus != FocusPane::Terminal {
         return true;
@@ -1686,7 +1715,8 @@ pub fn tick_redraw_required(model: &Model) -> bool {
 
     if model.active_layer == ActiveLayer::Management
         && model.management_tab == ManagementTab::Branches
-        && model.branches.has_running_live_sessions()
+        && visible_branches_list_area(model)
+            .is_some_and(|area| model.branches.has_running_live_sessions(area))
     {
         return true;
     }
@@ -1700,6 +1730,47 @@ pub fn tick_redraw_required(model: &Model) -> bool {
             .as_ref()
             .is_some_and(|progress| progress.visible)
         || model.voice.is_active()
+}
+
+fn visible_branches_list_area(model: &Model) -> Option<Rect> {
+    if model.active_layer != ActiveLayer::Management
+        || model.management_tab != ManagementTab::Branches
+    {
+        return None;
+    }
+
+    let management = visible_management_area(model)?;
+    let top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(management)[0];
+    let list_inner = pane_block(management_tab_title(model, top.width), false).inner(top);
+    Some(
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(list_inner)[1],
+    )
+}
+
+fn branch_live_indicator_status_tag(status: gwt_agent::AgentStatus) -> u8 {
+    match status {
+        gwt_agent::AgentStatus::Unknown => 0,
+        gwt_agent::AgentStatus::Running => 1,
+        gwt_agent::AgentStatus::WaitingInput => 2,
+        gwt_agent::AgentStatus::Stopped => 3,
+    }
+}
+
+fn branch_live_indicator_color_tag(color: crate::model::AgentColor) -> u8 {
+    match color {
+        crate::model::AgentColor::Green => 0,
+        crate::model::AgentColor::Blue => 1,
+        crate::model::AgentColor::Cyan => 2,
+        crate::model::AgentColor::Yellow => 3,
+        crate::model::AgentColor::Magenta => 4,
+        crate::model::AgentColor::Gray => 5,
+    }
 }
 
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
@@ -11024,6 +11095,13 @@ mod tests {
         model.active_layer = ActiveLayer::Management;
         model.active_focus = FocusPane::Terminal;
         model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+        }];
         model.branches.live_session_summaries.insert(
             "feature/test".to_string(),
             screens::branches::BranchLiveSessionSummary {
@@ -11046,6 +11124,13 @@ mod tests {
         model.active_layer = ActiveLayer::Management;
         model.active_focus = FocusPane::Terminal;
         model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+        }];
         model.branches.live_session_summaries.insert(
             "feature/test".to_string(),
             screens::branches::BranchLiveSessionSummary {
@@ -11059,6 +11144,115 @@ mod tests {
         assert!(
             !tick_redraw_required(&model),
             "waiting-only live-session indicators should stay static and must not re-enable idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_filtered_out_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.view_mode = screens::branches::ViewMode::All;
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/visible".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-visible")),
+            },
+            screens::branches::BranchItem {
+                name: "feature/hidden".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-hidden")),
+            },
+        ];
+        model.branches.search_query = "visible".to_string();
+        model.branches.live_session_summaries.insert(
+            "feature/hidden".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators on filtered-out rows must not force idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_running_branch_indicators_without_visible_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.terminal_size = (24, 8);
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/this-branch-name-is-too-wide".to_string(),
+            is_head: true,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-wide")),
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/this-branch-name-is-too-wide".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators with no visible summary strip must not re-enable idle redraws"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_repaints_visible_branch_indicator_state_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+        let before = visible_branch_live_indicator_signature(&model);
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+
+        assert!(
+            should_render_after_tick_with_visible_branch_signature(before, &model),
+            "a visible running spinner must repaint once when it transitions to a static waiting dot"
         );
     }
 

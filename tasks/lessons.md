@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-10 — fix: terminal-focus redraw gate は raw summary 全体ではなく visible surface と tick 前後差分で判定する
+
+### 事象
+
+Branches の live session indicator で、filter/search で見えていない branch や
+summary strip が表示できない狭い row に `Running` session があるだけで
+terminal focus 中の idle redraw が復活した。
+さらに visible な spinner が `Running -> WaitingInput` に変わる tick で、
+最後の 1 回の repaint が落ちて古い spinner が残り得た。
+
+### 原因
+
+- redraw gate が `live_session_summaries` 全体を見ており、
+  実際に描画中の branch row / summary width / viewport を反映していなかった。
+- tick 後の `needs_render` 判定が post-update state だけを見ていたため、
+  `Running` が消えた tick 自体は redraw 不要と誤判定した。
+
+### 再発防止策
+
+1. redraw suppression / animation gate は backing store 全体ではなく、実際に render される visible surface から計算する。
+2. tick-driven animation が static state や hidden state に切り替わる UI は、post-tick の要否だけでなく pre/post の visible snapshot 差分で final repaint を保証する。
+3. render と gate で幅計算や visibility 判定を二重実装しない。少なくとも同じ helper を通して narrow-row / filtered-row の挙動を揃える。
+
 ## 2026-04-10 — fix: `SessionStart` は「起動した」だけで `Running` とみなさない
 
 ### 事象
