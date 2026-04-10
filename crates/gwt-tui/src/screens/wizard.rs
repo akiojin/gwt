@@ -81,6 +81,8 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::AgentSelect => {
             if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
@@ -90,6 +92,8 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::ModelSelect => {
             if state.agent_is_codex() {
                 Some(WizardStep::ReasoningLevel)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
@@ -97,7 +101,9 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::ReasoningLevel => {
-            if state.agent_has_npm_package() {
+            if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
+            } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
                 Some(WizardStep::ExecutionMode)
@@ -107,8 +113,6 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::ExecutionMode => {
             if state.mode == "convert" {
                 Some(WizardStep::ConvertAgentSelect)
-            } else if state.has_docker_workflow() {
-                Some(WizardStep::RuntimeTarget)
             } else {
                 Some(WizardStep::SkipPermissions)
             }
@@ -118,11 +122,19 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 && state.docker_service_prompt_required()
             {
                 Some(WizardStep::DockerServiceSelect)
+            } else if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
             } else {
-                Some(WizardStep::SkipPermissions)
+                Some(WizardStep::ExecutionMode)
             }
         }
-        WizardStep::DockerServiceSelect => Some(WizardStep::SkipPermissions),
+        WizardStep::DockerServiceSelect => {
+            if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
+            } else {
+                Some(WizardStep::ExecutionMode)
+            }
+        }
         WizardStep::ConvertAgentSelect => Some(WizardStep::ConvertSessionSelect),
         WizardStep::ConvertSessionSelect => Some(WizardStep::SkipPermissions),
         WizardStep::BranchTypeSelect => {
@@ -175,7 +187,13 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::ModelSelect => Some(WizardStep::AgentSelect),
         WizardStep::ReasoningLevel => Some(WizardStep::ModelSelect),
         WizardStep::VersionSelect => {
-            if state.agent_is_codex() {
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+                && state.docker_service_prompt_required()
+            {
+                Some(WizardStep::DockerServiceSelect)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
+            } else if state.agent_is_codex() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
@@ -186,6 +204,12 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::ExecutionMode => {
             if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
+            } else if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+                && state.docker_service_prompt_required()
+            {
+                Some(WizardStep::DockerServiceSelect)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else if state.agent_is_codex() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
@@ -194,7 +218,15 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::AgentSelect)
             }
         }
-        WizardStep::RuntimeTarget => Some(WizardStep::ExecutionMode),
+        WizardStep::RuntimeTarget => {
+            if state.agent_is_codex() {
+                Some(WizardStep::ReasoningLevel)
+            } else if state.agent_has_models() {
+                Some(WizardStep::ModelSelect)
+            } else {
+                Some(WizardStep::AgentSelect)
+            }
+        }
         WizardStep::DockerServiceSelect => Some(WizardStep::RuntimeTarget),
         WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
         WizardStep::ConvertSessionSelect => Some(WizardStep::ConvertAgentSelect),
@@ -487,6 +519,8 @@ impl WizardState {
         }
         if let Some(version) = entry.version {
             self.version = version;
+        } else if self.agent_has_npm_package() {
+            self.version = "installed".to_string();
         }
         self.skip_perms = entry.skip_permissions;
         self.codex_fast_mode = entry.codex_fast_mode;
@@ -604,17 +638,28 @@ impl WizardState {
             &agent.versions,
         );
 
-        if let Some(first_version) = self.version_options.first() {
+        if self.version_options.is_empty() {
+            self.version.clear();
+        } else {
+            let default_value = if self.agent_has_npm_package() {
+                "latest"
+            } else {
+                "installed"
+            };
             if self.version.is_empty()
                 || !self
                     .version_options
                     .iter()
                     .any(|option| option.value == self.version)
             {
-                self.version = first_version.value.clone();
+                self.version = self
+                    .version_options
+                    .iter()
+                    .find(|option| option.value == default_value)
+                    .or_else(|| self.version_options.first())
+                    .map(|option| option.value.clone())
+                    .unwrap_or_default();
             }
-        } else {
-            self.version.clear();
         }
 
         if !self.agent_is_codex() {
@@ -976,6 +1021,11 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
 
 fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
     match step {
+        WizardStep::VersionSelect => state
+            .version_options
+            .iter()
+            .position(|option| option.value == state.version)
+            .unwrap_or(0),
         WizardStep::RuntimeTarget => {
             usize::from(state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
         }
@@ -1419,7 +1469,7 @@ fn wizard_row_style_with_fg(is_selected: bool, fg: Color) -> Style {
 
 fn version_option_description(option: &VersionOption) -> &'static str {
     match option.value.as_str() {
-        "installed" => "Use installed version",
+        "installed" => "Use direct command",
         "latest" => "Always use the latest version",
         _ => "Use cached version",
     }
@@ -2284,7 +2334,7 @@ mod tests {
         });
 
         assert_eq!(
-            next_step(WizardStep::ExecutionMode, &state),
+            next_step(WizardStep::ModelSelect, &state),
             Some(WizardStep::RuntimeTarget)
         );
 
@@ -2297,6 +2347,14 @@ mod tests {
         state.docker_service = Some("web".to_string());
         assert_eq!(
             next_step(WizardStep::DockerServiceSelect, &state),
+            Some(WizardStep::VersionSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::VersionSelect, &state),
+            Some(WizardStep::ExecutionMode)
+        );
+        assert_eq!(
+            next_step(WizardStep::ExecutionMode, &state),
             Some(WizardStep::SkipPermissions)
         );
     }
@@ -2421,7 +2479,7 @@ mod tests {
         let mut state = WizardState::default();
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -2432,7 +2490,7 @@ mod tests {
         state.step = WizardStep::VersionSelect;
         assert_eq!(state.option_count(), 2);
         let opts = state.current_options();
-        assert_eq!(opts[0], "Installed (v1.0.0)");
+        assert_eq!(opts[0], "Installed");
         assert_eq!(opts[1], "latest");
     }
 
@@ -2443,7 +2501,7 @@ mod tests {
         state.step = WizardStep::VersionSelect;
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -2644,11 +2702,29 @@ mod tests {
         assert_eq!(
             state.current_options(),
             vec![
-                "Installed (v1.0.54)".to_string(),
+                "Installed".to_string(),
                 "latest".to_string(),
+                "1.0.54".to_string(),
                 "1.0.53".to_string()
             ]
         );
+        assert_eq!(state.version, "latest");
+    }
+
+    #[test]
+    fn select_on_model_step_with_docker_context_routes_to_runtime_target_before_version() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.step = WizardStep::ModelSelect;
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::RuntimeTarget);
     }
 
     #[test]
@@ -2803,6 +2879,30 @@ mod tests {
         assert_eq!(state.resume_session_id.as_deref(), Some("sess-claude"));
         assert!(state.skip_perms);
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn select_on_quick_start_legacy_installed_version_restores_installed_mode() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.detected_agents = sample_agents();
+        state.quick_start_entries = vec![QuickStartEntry {
+            agent_id: "claude".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: None,
+            version: None,
+            resume_session_id: Some("sess-legacy".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+        }];
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.version, "installed");
     }
 
     #[test]
@@ -3619,7 +3719,7 @@ mod tests {
         state.selected = 4;
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -3675,7 +3775,7 @@ mod tests {
         state.step = WizardStep::VersionSelect;
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -3686,7 +3786,8 @@ mod tests {
 
         let text = render_text(&state, 90, 24);
 
-        assert!(text.contains("Installed (v1.0.0) - Use installed version"));
+        assert!(text.contains("Installed"));
+        assert!(text.contains("Use direct command"));
         assert!(text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1);
     }
 

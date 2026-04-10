@@ -3627,6 +3627,9 @@ fn build_launch_config_from_wizard_with_custom_agents(
     }
 
     let mut config = builder.build();
+    if !wizard.version.is_empty() {
+        config.tool_version = Some(wizard.version.clone());
+    }
     if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
         config.reasoning_level = Some(wizard.reasoning.clone());
     }
@@ -4022,6 +4025,8 @@ fn apply_docker_runtime_to_launch_config(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch)?;
+    let runtime_command = docker_runtime_command_for_exec(config);
+    ensure_docker_launch_command_ready(&launch, &runtime_command)?;
 
     let mut args = vec![
         "compose".to_string(),
@@ -4031,7 +4036,7 @@ fn apply_docker_runtime_to_launch_config(
         "-w".to_string(),
         launch.container_cwd.clone(),
         launch.service.clone(),
-        config.command.clone(),
+        runtime_command,
     ];
     args.extend(config.args.clone());
 
@@ -4045,6 +4050,24 @@ fn apply_docker_runtime_to_launch_config(
     Ok(())
 }
 
+fn docker_runtime_command_for_exec(config: &LaunchConfig) -> String {
+    if config.agent_id.package_name().is_some()
+        && config
+            .tool_version
+            .as_deref()
+            .is_some_and(|version| version != "installed")
+    {
+        return Path::new(&config.command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(config.command.as_str())
+            .to_string();
+    }
+
+    config.command.clone()
+}
+
 fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     if !gwt_docker::docker_available() {
         return Err("Docker is not installed or not available on PATH".to_string());
@@ -4056,6 +4079,23 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
         return Err("Docker daemon is not running".to_string());
     }
     Ok(())
+}
+
+fn ensure_docker_launch_command_ready(
+    launch: &DockerLaunchPlan,
+    command: &str,
+) -> Result<(), String> {
+    let available =
+        gwt_docker::compose_service_has_command(&launch.compose_file, &launch.service, command)
+            .map_err(|err| err.to_string())?;
+    if available {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Command '{command}' is not available in Docker service '{}'",
+        launch.service
+    ))
 }
 
 fn ensure_docker_launch_service_ready(launch: &DockerLaunchPlan) -> Result<(), String> {
@@ -4338,7 +4378,12 @@ fn load_quick_start_entries(
             tool_label: session.display_name.clone(),
             model: session.model.clone(),
             reasoning: session.reasoning_level.clone(),
-            version: session.tool_version.clone(),
+            version: session.tool_version.clone().or_else(|| {
+                session
+                    .agent_id
+                    .package_name()
+                    .map(|_| "installed".to_string())
+            }),
             resume_session_id: session.agent_session_id.clone(),
             skip_permissions: session.skip_permissions,
             codex_fast_mode: session.codex_fast_mode,
@@ -10840,8 +10885,9 @@ services:
                 .iter()
                 .map(|option| option.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Installed (v1.0.55)", "latest", "1.0.54", "1.0.53"]
+            vec!["Installed", "latest", "1.0.54", "1.0.53"]
         );
+        assert_eq!(wizard.version, "latest");
         assert_eq!(refresh_targets, vec![AgentId::Codex, AgentId::Gemini]);
     }
 
@@ -10909,8 +10955,9 @@ services:
                 .iter()
                 .map(|option| option.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Installed (v1.0.55)", "latest"]
+            vec!["Installed", "latest"]
         );
+        assert_eq!(wizard.version, "latest");
         assert!(wizard.detected_agents[0].cache_outdated);
         assert!(!wizard.detected_agents[1].available); // Codex not installed
         assert!(!wizard.detected_agents[2].available); // Gemini not installed
@@ -11598,6 +11645,23 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_preserves_installed_version_mode() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            version: "installed".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.agent_id, AgentId::ClaudeCode);
+        assert_eq!(config.tool_version.as_deref(), Some("installed"));
+        assert_eq!(config.command, "claude");
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_uses_resume_session_id_for_quick_start_resume() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -11770,6 +11834,74 @@ services:
     }
 
     #[test]
+    fn apply_docker_runtime_to_launch_config_normalizes_package_runner_for_container_exec() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "/opt/homebrew/bin/bunx".to_string(),
+            args: vec![
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("latest".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert_eq!(config.command, expected_docker);
+                assert_eq!(
+                    config.args,
+                    vec![
+                        "compose".to_string(),
+                        "-f".to_string(),
+                        compose_path.display().to_string(),
+                        "exec".to_string(),
+                        "-w".to_string(),
+                        "/workspace".to_string(),
+                        "web".to_string(),
+                        "bunx".to_string(),
+                        "@anthropic-ai/claude-code@latest".to_string(),
+                        "--print".to_string(),
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
     fn materialize_pending_launch_with_missing_docker_routes_visible_error_without_session() {
         let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = tempfile::tempdir().expect("temp worktree");
@@ -11818,6 +11950,62 @@ services:
                 .next()
                 .is_none(),
             "failing Docker launch must not persist a session entry"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_missing_docker_runtime_command_routes_visible_error_without_session(
+    ) {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("installed".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                materialize_pending_launch_with(&mut model, sessions_dir.path())
+                    .expect("materialize launch");
+            },
+        );
+
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.error_queue.len(), 1);
+        let notification = model.error_queue.front().expect("error notification");
+        assert_eq!(notification.source, "docker");
+        assert_eq!(notification.message, "Docker launch failed");
+        assert!(notification
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Command 'claude' is not available in Docker service 'gwt'"));
+        assert!(
+            fs::read_dir(sessions_dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "launch must not persist a session when the Docker runtime command is missing"
         );
     }
 

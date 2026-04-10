@@ -206,6 +206,42 @@ pub fn compose_service_logs(compose_file: &std::path::Path, service: &str) -> Re
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Return whether a compose service can resolve a command inside the container.
+pub fn compose_service_has_command(
+    compose_file: &std::path::Path,
+    service: &str,
+    command: &str,
+) -> Result<bool> {
+    let compose_file = compose_file.display().to_string();
+    let output = run_docker_with_timeout_in_dir(
+        &[
+            "compose",
+            "-f",
+            &compose_file,
+            "exec",
+            "-T",
+            service,
+            "sh",
+            "-lc",
+            "command -v \"$1\" >/dev/null 2>&1",
+            "sh",
+            command,
+        ],
+        "docker compose exec command check",
+        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+    )?;
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        return Ok(false);
+    }
+
+    Err(GwtError::Docker(stderr))
+}
+
 /// List all containers (including stopped ones).
 pub fn list_containers() -> Result<Vec<ContainerInfo>> {
     let output = run_docker_with_timeout(
@@ -555,5 +591,61 @@ mod tests {
             assert!(logs.contains("boot failed"));
             assert!(logs.contains("stack line"));
         });
+    }
+
+    #[test]
+    fn compose_service_has_command_returns_true_when_command_exists() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"app\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n";
+
+        with_fake_docker(script, |_| {
+            assert!(
+                compose_service_has_command(&compose_path, "app", "claude").expect("command check")
+            );
+        });
+    }
+
+    #[test]
+    fn compose_service_has_command_returns_false_when_command_is_missing() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ]; then\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n";
+
+        with_fake_docker(script, |_| {
+            assert!(!compose_service_has_command(&compose_path, "app", "claude")
+                .expect("command check"));
+        });
+    }
+
+    #[test]
+    fn compose_service_has_command_returns_docker_error_output() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ]; then\n  printf 'service is not running\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n";
+
+        let err = with_fake_docker(script, |_| {
+            compose_service_has_command(&compose_path, "app", "claude").expect_err("docker error")
+        });
+
+        assert!(
+            err.to_string().contains("service is not running"),
+            "unexpected error: {err}"
+        );
     }
 }
