@@ -1,11 +1,11 @@
 ---
 name: gwt-spec-search
-description: "Semantic search over local SPEC files (specs/SPEC-{N}/) using vector embeddings. Use when searching for existing specs, finding related specs, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. Use when user says 'search specs', 'find related specs', 'check for duplicate specs', or asks which spec owns a scope."
+description: "Semantic search over SPEC Issues (GitHub Issue cache at ~/.gwt/cache/issues/) using vector embeddings. Use when searching for existing specs, finding related specs, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-design and gwt-issue. Use when user says 'search specs', 'find related specs', 'check for duplicate specs', or asks which spec owns a scope."
 ---
 
 # SPEC Search
 
-gwt maintains a vector search index of local SPEC files using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is maintained by the gwt TUI's resident filesystem watcher. When invoked outside the TUI, the runner auto-builds the index on the first call.
+gwt maintains a vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is rebuilt from the cache. Use `gwt issue spec pull --all` to refresh the cache before searching.
 
 ## SPEC search first for spec integration
 
