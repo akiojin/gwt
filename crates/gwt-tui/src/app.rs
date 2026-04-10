@@ -49,7 +49,7 @@ use crate::{
     input_trace,
     message::Message,
     model::{
-        ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
+        ActiveLayer, BranchDetailQueue, DockerProgressEvent, DockerProgressQueue, FocusPane,
         ManagementTab, Model, PendingSessionConversion, ScrollbackStrategy, SessionLayout,
         SessionTabType, TerminalCell, TerminalSelection,
     },
@@ -2689,6 +2689,12 @@ fn emit_branch_docker_progress(
     );
 }
 
+fn push_docker_progress_event(events: &DockerProgressQueue, event: DockerProgressEvent) {
+    if let Ok(mut queue) = events.lock() {
+        queue.push_back(event);
+    }
+}
+
 fn spawn_docker_progress_worker(
     events: DockerProgressQueue,
     action: screens::branches::PendingDockerAction,
@@ -2698,18 +2704,18 @@ fn spawn_docker_progress_worker(
 
     thread::spawn(move || {
         let outcome = match action.action {
-            DockerLifecycleAction::Start => {
-                gwt_docker::start(&action.container_id).map(|()| DockerProgressResult::Completed {
+            DockerLifecycleAction::Start => gwt_docker::start(&action.container_id).map(|()| {
+                DockerProgressEvent::BranchCompleted {
                     message: format!("Started container {container_label}"),
-                })
-            }
-            DockerLifecycleAction::Stop => {
-                gwt_docker::stop(&action.container_id).map(|()| DockerProgressResult::Completed {
+                }
+            }),
+            DockerLifecycleAction::Stop => gwt_docker::stop(&action.container_id).map(|()| {
+                DockerProgressEvent::BranchCompleted {
                     message: format!("Stopped container {container_label}"),
-                })
-            }
+                }
+            }),
             DockerLifecycleAction::Restart => gwt_docker::restart(&action.container_id).map(|()| {
-                DockerProgressResult::Completed {
+                DockerProgressEvent::BranchCompleted {
                     message: format!("Restarted container {container_label}"),
                 }
             }),
@@ -2717,7 +2723,7 @@ fn spawn_docker_progress_worker(
 
         let event = match outcome {
             Ok(result) => result,
-            Err(err) => DockerProgressResult::Failed {
+            Err(err) => DockerProgressEvent::BranchFailed {
                 message: format!(
                     "Failed to {} container {container_label}",
                     verb_for_action(action.action)
@@ -2726,9 +2732,7 @@ fn spawn_docker_progress_worker(
             },
         };
 
-        if let Ok(mut queue) = events.lock() {
-            queue.push_back(event);
-        }
+        push_docker_progress_event(&events, event);
     });
 }
 
@@ -2742,9 +2746,12 @@ fn drain_docker_progress_events(model: &mut Model) {
         return;
     };
 
-    model.docker_progress_events = None;
     match event {
-        DockerProgressResult::Completed { message } => {
+        DockerProgressEvent::Stage { stage, message } => {
+            emit_branch_docker_progress(model, stage, message);
+        }
+        DockerProgressEvent::BranchCompleted { message } => {
+            model.docker_progress_events = None;
             emit_branch_docker_progress(
                 model,
                 screens::docker_progress::DockerStage::Ready,
@@ -2756,7 +2763,8 @@ fn drain_docker_progress_events(model: &mut Model) {
                 Message::Notify(Notification::new(Severity::Info, "docker", message)),
             );
         }
-        DockerProgressResult::Failed { message, detail } => {
+        DockerProgressEvent::BranchFailed { message, detail } => {
+            model.docker_progress_events = None;
             update(
                 model,
                 Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetError(
@@ -2766,6 +2774,36 @@ fn drain_docker_progress_events(model: &mut Model) {
             update(
                 model,
                 Message::Notify(
+                    Notification::new(Severity::Error, "docker", message).with_detail(detail),
+                ),
+            );
+        }
+        DockerProgressEvent::LaunchReady { config } => {
+            model.docker_progress_events = None;
+            let result = persist_and_spawn_launch(model, &gwt_sessions_dir(), *config);
+            update(
+                model,
+                Message::DockerProgress(screens::docker_progress::DockerProgressMessage::Hide),
+            );
+            if let Err(err) = result {
+                update(
+                    model,
+                    Message::PushErrorNotification(
+                        Notification::new(Severity::Error, "session", "Agent launch failed")
+                            .with_detail(err),
+                    ),
+                );
+            }
+        }
+        DockerProgressEvent::LaunchFailed { message, detail } => {
+            model.docker_progress_events = None;
+            update(
+                model,
+                Message::DockerProgress(screens::docker_progress::DockerProgressMessage::Hide),
+            );
+            update(
+                model,
+                Message::PushErrorNotification(
                     Notification::new(Severity::Error, "docker", message).with_detail(detail),
                 ),
             );
@@ -3720,6 +3758,28 @@ fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<St
 }
 
 fn materialize_pending_launch(model: &mut Model) {
+    if model
+        .pending_launch_config
+        .as_ref()
+        .is_some_and(|config| config.runtime_target == LaunchRuntimeTarget::Docker)
+    {
+        if model.docker_progress_events.is_some() {
+            update(
+                model,
+                Message::PushErrorNotification(Notification::new(
+                    Severity::Error,
+                    "docker",
+                    "Docker launch already running",
+                )),
+            );
+            return;
+        }
+        if let Some(config) = model.pending_launch_config.take() {
+            start_async_docker_launch(model, config);
+        }
+        return;
+    }
+
     if let Err(err) = materialize_pending_launch_with(model, &gwt_sessions_dir()) {
         update(
             model,
@@ -3761,7 +3821,62 @@ fn materialize_pending_launch_with(
         );
         return Ok(());
     }
+    persist_and_spawn_launch(model, sessions_dir, config)
+}
 
+fn start_async_docker_launch(model: &mut Model, config: LaunchConfig) {
+    update(
+        model,
+        Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetStage {
+            stage: screens::docker_progress::DockerStage::DetectingFiles,
+            message: "Preparing Docker launch".to_string(),
+        }),
+    );
+
+    let events = Arc::new(Mutex::new(VecDeque::new()));
+    model.docker_progress_events = Some(events.clone());
+    spawn_docker_launch_worker(events, model.repo_path.clone(), config);
+}
+
+fn spawn_docker_launch_worker(
+    events: DockerProgressQueue,
+    repo_path: PathBuf,
+    mut config: LaunchConfig,
+) {
+    thread::spawn(move || {
+        let outcome = (|| -> Result<LaunchConfig, String> {
+            resolve_launch_worktree(&repo_path, &mut config)?;
+            apply_docker_runtime_to_launch_config_with_progress(
+                &repo_path,
+                &mut config,
+                |stage, message| {
+                    push_docker_progress_event(
+                        &events,
+                        DockerProgressEvent::Stage { stage, message },
+                    );
+                },
+            )?;
+            Ok(config)
+        })();
+
+        let event = match outcome {
+            Ok(config) => DockerProgressEvent::LaunchReady {
+                config: Box::new(config),
+            },
+            Err(detail) => DockerProgressEvent::LaunchFailed {
+                message: "Docker launch failed".to_string(),
+                detail,
+            },
+        };
+        push_docker_progress_event(&events, event);
+    });
+}
+
+fn persist_and_spawn_launch(
+    model: &mut Model,
+    sessions_dir: &std::path::Path,
+    mut config: LaunchConfig,
+) -> Result<(), String> {
     let worktree = config
         .working_dir
         .clone()
@@ -3803,15 +3918,11 @@ fn materialize_pending_launch_with(
     model.active_session = model.sessions.len().saturating_sub(1);
     model.active_layer = ActiveLayer::Main;
 
-    // Use actual pane content area for PTY size.
     let (cols, rows) = session_content_size(model);
     if let Some(s) = model.sessions.last_mut() {
         s.vt.resize(rows, cols);
     }
 
-    // Prepare hook assets before the agent process starts so the first turn
-    // can emit runtime state immediately. Take an owned PathBuf so the borrow
-    // does not outlive the immutable borrow of `model`.
     let worktree: std::path::PathBuf = config
         .working_dir
         .clone()
@@ -3829,7 +3940,6 @@ fn materialize_pending_launch_with(
         tracing::warn!("hooks.json generation failed: {e}");
     }
 
-    // Spawn PTY process for the agent session.
     let mut pty_env = config.env_vars.clone();
     inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
     let pty_config = gwt_terminal::pty::SpawnConfig {
@@ -3841,9 +3951,6 @@ fn materialize_pending_launch_with(
         cwd: config.working_dir.clone(),
     };
     let repo_path_for_watcher = model.repo_path.clone();
-    // Emit the agent-launch audit event before delegating to the
-    // shared PTY helper. The helper itself logs only generic
-    // metadata (FR-020 / reviewer comment B2).
     emit_agent_launch_event(&model.repo_path, &tab_id, &pty_config);
     if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
         apply_notification(
@@ -3856,13 +3963,7 @@ fn materialize_pending_launch_with(
         );
     } else {
         bootstrap_agent_session_running(sessions_dir, &session.id);
-        // Phase 8: ensure a watcher is running for this Worktree so live
-        // SPEC/file edits feed the incremental indexer.
         crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
-        // Kick an initial integrity build for this worktree (only when a
-        // pane actually opens) so the index reflects current on-disk state
-        // before the first search. Throttled by a global semaphore so
-        // multiple pane opens don't overwhelm the system.
         crate::index_worker::kick_initial_build_for_worktree(&repo_path_for_watcher, &worktree);
     }
 
@@ -4014,18 +4115,40 @@ fn apply_docker_runtime_to_launch_config(
     repo_path: &Path,
     config: &mut LaunchConfig,
 ) -> Result<(), String> {
+    apply_docker_runtime_to_launch_config_with_progress(repo_path, config, |_, _| {})
+}
+
+fn apply_docker_runtime_to_launch_config_with_progress<F>(
+    repo_path: &Path,
+    config: &mut LaunchConfig,
+    mut emit_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(screens::docker_progress::DockerStage, String),
+{
     if config.runtime_target != LaunchRuntimeTarget::Docker {
         return Ok(());
     }
 
+    emit_progress(
+        screens::docker_progress::DockerStage::DetectingFiles,
+        "Resolving Docker launch configuration".to_string(),
+    );
     let worktree = config
         .working_dir
         .clone()
         .unwrap_or_else(|| repo_path.to_path_buf());
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
-    ensure_docker_launch_service_ready(&launch)?;
+    ensure_docker_launch_service_ready(&launch, &mut emit_progress)?;
     let runtime_command = docker_runtime_command_for_exec(config);
+    emit_progress(
+        screens::docker_progress::DockerStage::WaitingForServices,
+        format!(
+            "Checking runtime command in Docker service {}",
+            launch.service
+        ),
+    );
     ensure_docker_launch_command_ready(&launch, &runtime_command)?;
 
     let mut args = vec![
@@ -4098,15 +4221,36 @@ fn ensure_docker_launch_command_ready(
     ))
 }
 
-fn ensure_docker_launch_service_ready(launch: &DockerLaunchPlan) -> Result<(), String> {
+fn ensure_docker_launch_service_ready<F>(
+    launch: &DockerLaunchPlan,
+    emit_progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(screens::docker_progress::DockerStage, String),
+{
     let running = gwt_docker::compose_service_is_running(&launch.compose_file, &launch.service)
         .map_err(|err| err.to_string())?;
     if running {
         return Ok(());
     }
 
+    emit_progress(
+        screens::docker_progress::DockerStage::BuildingImage,
+        format!(
+            "Building image and starting Docker service {}",
+            launch.service
+        ),
+    );
     gwt_docker::compose_up(&launch.compose_file, &launch.service).map_err(|err| err.to_string())?;
 
+    emit_progress(
+        screens::docker_progress::DockerStage::StartingContainer,
+        format!("Starting Docker service {}", launch.service),
+    );
+    emit_progress(
+        screens::docker_progress::DockerStage::WaitingForServices,
+        format!("Waiting for Docker service {}", launch.service),
+    );
     let running = gwt_docker::compose_service_is_running(&launch.compose_file, &launch.service)
         .map_err(|err| err.to_string())?;
     if running {
@@ -12007,6 +12151,90 @@ services:
                 .is_none(),
             "launch must not persist a session when the Docker runtime command is missing"
         );
+    }
+
+    #[test]
+    fn materialize_pending_launch_async_docker_launch_shows_progress_and_hides_overlay_on_failure()
+    {
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+        let release_flag = worktree.path().join("release-compose-up");
+        let running_flag = worktree.path().join("service-running");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("installed".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+        });
+
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ -f '{}' ]; then\n    printf 'gwt\\n'\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  while [ ! -f '{}' ]; do\n    sleep 0.01\n  done\n  : > '{}'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            running_flag.display(),
+            release_flag.display(),
+            running_flag.display(),
+        );
+
+        with_fake_docker(&script, || {
+            materialize_pending_launch(&mut model);
+
+            assert!(model.docker_progress_events.is_some());
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert!(docker_progress.visible);
+            assert_eq!(
+                docker_progress.stage,
+                screens::docker_progress::DockerStage::DetectingFiles
+            );
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| {
+                    model.docker_progress.as_ref().is_some_and(|progress| {
+                        progress.stage == screens::docker_progress::DockerStage::BuildingImage
+                    })
+                },
+                "docker build progress stage",
+            );
+
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert!(docker_progress
+                .message
+                .contains("Building image and starting Docker service gwt"));
+
+            fs::write(&release_flag, "").expect("release compose up");
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| model.docker_progress_events.is_none() && !model.error_queue.is_empty(),
+                "docker launch failure",
+            );
+
+            assert!(model.docker_progress.is_none());
+            assert_eq!(model.session_count(), 1);
+            let notification = model.error_queue.front().expect("error notification");
+            assert_eq!(notification.source, "docker");
+            assert_eq!(notification.message, "Docker launch failed");
+            assert!(notification
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Command 'claude' is not available in Docker service 'gwt'"));
+        });
     }
 
     #[test]

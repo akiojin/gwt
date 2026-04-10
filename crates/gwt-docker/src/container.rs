@@ -66,6 +66,16 @@ fn docker_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS))
 }
 
+fn docker_compose_up_timeout() -> Duration {
+    const DEFAULT_TIMEOUT_MS: u64 = 300_000;
+    std::env::var("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS))
+}
+
 fn run_docker_with_timeout(args: &[&str], action: &str) -> Result<Output> {
     run_docker_with_timeout_in_dir(args, action, None)
 }
@@ -74,6 +84,15 @@ fn run_docker_with_timeout_in_dir(
     args: &[&str],
     action: &str,
     current_dir: Option<&std::path::Path>,
+) -> Result<Output> {
+    run_docker_with_timeout_in_dir_and_timeout(args, action, current_dir, docker_timeout())
+}
+
+fn run_docker_with_timeout_in_dir_and_timeout(
+    args: &[&str],
+    action: &str,
+    current_dir: Option<&std::path::Path>,
+    timeout: Duration,
 ) -> Result<Output> {
     let mut command = Command::new(docker_binary());
     command
@@ -87,7 +106,6 @@ fn run_docker_with_timeout_in_dir(
         .spawn()
         .map_err(|e| GwtError::Docker(format!("failed to run {action}: {e}")))?;
 
-    let timeout = docker_timeout();
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -125,10 +143,11 @@ fn compose_parent_dir(compose_file: &std::path::Path) -> &std::path::Path {
 /// Start a compose service in detached mode.
 pub fn compose_up(compose_file: &std::path::Path, service: &str) -> Result<()> {
     let compose_file = compose_file.display().to_string();
-    let output = run_docker_with_timeout_in_dir(
+    let output = run_docker_with_timeout_in_dir_and_timeout(
         &["compose", "-f", &compose_file, "up", "-d", service],
         "docker compose up",
         Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        docker_compose_up_timeout(),
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -529,6 +548,38 @@ mod tests {
                 err.to_string().contains("docker ps timed out"),
                 "unexpected timeout error: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn compose_up_uses_longer_timeout_than_default_docker_commands() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ]; then\n  sleep 0.1\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, |_| {
+            let previous_timeout = std::env::var_os("GWT_DOCKER_TIMEOUT_MS");
+            let previous_compose_up_timeout = std::env::var_os("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS");
+            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "50");
+            std::env::set_var("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS", "500");
+
+            let result = compose_up(&compose_path, "app");
+
+            match previous_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_TIMEOUT_MS"),
+            }
+            match previous_compose_up_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS"),
+            }
+
+            result.expect("compose up should use compose-up timeout");
         });
     }
 
