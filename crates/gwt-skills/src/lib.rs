@@ -516,6 +516,10 @@ mod tests {
             .collect();
         assert!(files.contains(&"gwt-pr.md"), "missing gwt-pr.md command");
         assert!(
+            files.contains(&"gwt-spec-brainstorm.md"),
+            "missing gwt-spec-brainstorm.md command"
+        );
+        assert!(
             files.contains(&"gwt-spec-design.md"),
             "missing gwt-spec-design.md command"
         );

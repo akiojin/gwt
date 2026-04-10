@@ -268,6 +268,13 @@ pub struct BranchLiveSessionIndicator {
     pub color: crate::model::AgentColor,
 }
 
+/// Visible live-session indicators for a single rendered branch row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisibleBranchLiveIndicatorRow {
+    pub(crate) branch_name: String,
+    pub(crate) indicators: Vec<BranchLiveSessionIndicator>,
+}
+
 /// Lifecycle action requested for a Docker container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockerLifecycleAction {
@@ -547,6 +554,21 @@ impl BranchesState {
             && !self.detail_cache.contains_key(&branch_name)
     }
 
+    /// Select a branch row by its visible index in `filtered_branches()`.
+    ///
+    /// Returns `true` when the index was valid and the selection changed or
+    /// was reaffirmed. The visible detail payload is synchronized from cache
+    /// so mouse-driven selection stays consistent with keyboard routing.
+    pub(crate) fn select_filtered_index(&mut self, index: usize) -> bool {
+        if index >= self.filtered_branches().len() {
+            return false;
+        }
+        self.selected = index;
+        self.detail_session_selected = 0;
+        self.sync_selected_detail_from_cache(true);
+        true
+    }
+
     pub(crate) fn knows_branch(&self, branch_name: &str) -> bool {
         self.branches
             .iter()
@@ -739,6 +761,62 @@ impl BranchesState {
     /// while `has_computing_branches()` is true.
     pub fn tick_merge_spinner(&mut self) {
         self.merge_spinner_tick = self.merge_spinner_tick.wrapping_add(1);
+    }
+
+    /// Returns the visible live-session indicators for the currently rendered
+    /// branch rows in `area`.
+    pub(crate) fn visible_live_indicator_rows(
+        &self,
+        area: Rect,
+    ) -> Vec<VisibleBranchLiveIndicatorRow> {
+        if area.width == 0 || area.height == 0 {
+            return Vec::new();
+        }
+
+        let filtered = self.filtered_branches();
+        if filtered.is_empty() {
+            return Vec::new();
+        }
+
+        let selected = self.selected.min(filtered.len().saturating_sub(1));
+        let visible_rows = (area.height as usize).min(filtered.len());
+        let first_visible = selected.saturating_add(1).saturating_sub(visible_rows);
+
+        filtered
+            .iter()
+            .enumerate()
+            .skip(first_visible)
+            .take(visible_rows)
+            .filter_map(|(idx, branch)| {
+                let left_width = branch_row_leading_width(self, branch, idx == selected);
+                let available_width =
+                    (area.width as usize).saturating_sub(left_width.saturating_add(1));
+                let indicators = self
+                    .live_session_summaries
+                    .get(&branch.name)
+                    .into_iter()
+                    .flat_map(|summary| visible_branch_live_indicators(summary, available_width))
+                    .collect::<Vec<_>>();
+                if indicators.is_empty() {
+                    None
+                } else {
+                    Some(VisibleBranchLiveIndicatorRow {
+                        branch_name: branch.name.clone(),
+                        indicators,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    /// Returns true when at least one visible live-session indicator is in
+    /// the animated `Running` state.
+    pub fn has_running_live_sessions(&self, area: Rect) -> bool {
+        self.visible_live_indicator_rows(area).iter().any(|row| {
+            row.indicators
+                .iter()
+                .any(|indicator| indicator.status == AgentStatus::Running)
+        })
     }
 
     /// Current spinner glyph for the `⋯` gutter slot. Cycles through a
@@ -1069,55 +1147,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, branch)| {
-            let worktree_icon = if branch.worktree_path.is_some() {
-                theme::icon::WORKTREE_ACTIVE
-            } else {
-                theme::icon::WORKTREE_INACTIVE
-            };
-            let head_indicator = if branch.is_head {
-                theme::icon::HEAD_INDICATOR
-            } else {
-                ""
-            };
-            // Branch Cleanup gutter glyphs (FR-018c/d):
-            //   `●` (cyan)   — selected for cleanup
-            //   `✔` (green)  — safe-selectable local branch
-            //   spinner      — merge detection still running (blocked)
-            //   `·` (gray)   — unsafe-selectable unmerged local branch
-            //   `–` (dim)    — protected / current HEAD / active session
-            //   ` ` (blank)  — remote-tracking row
-            let spinner_glyph = state.merge_spinner_glyph();
-            let blocked_reason = state.cleanup_selection_blocked_reason(&branch.name);
-            let risks = state.cleanup_selection_risks(&branch.name);
-            let (gutter_glyph, gutter_color) = if state.is_cleanup_selected(&branch.name) {
-                ("\u{25CF}", theme::color::ACTIVE)
-            } else if matches!(
-                blocked_reason,
-                Some(CleanupSelectionBlockedReason::MergeCheckRunning)
-            ) {
-                (spinner_glyph, theme::color::ACTIVE)
-            } else if !branch.is_local {
-                (" ", theme::color::TEXT_DISABLED)
-            } else if blocked_reason.is_some() {
-                ("\u{2013}", theme::color::TEXT_DISABLED)
-            } else if risks.contains(&CleanupSelectionRisk::Unmerged) {
-                ("\u{00B7}", theme::color::TEXT_SECONDARY)
-            } else {
-                ("\u{2714}", theme::color::SUCCESS)
-            };
-
-            let mut spans = vec![
-                super::selection_prefix(idx == state.selected),
-                Span::styled(gutter_glyph, Style::default().fg(gutter_color)),
-                Span::raw(" "),
-                Span::styled(
-                    &branch.name,
-                    Style::default().fg(theme::color::TEXT_PRIMARY),
-                ),
-                Span::raw(" "),
-                Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
-                Span::styled(head_indicator, Style::default().fg(theme::color::SUCCESS)),
-            ];
+            let mut spans = branch_row_leading_spans(state, branch, idx == state.selected);
             let left_width = spans_width(&spans);
             let available_summary_width = area.width as usize;
             if let Some(summary_spans) =
@@ -1152,6 +1182,70 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
+fn branch_row_leading_spans<'a>(
+    state: &BranchesState,
+    branch: &'a BranchItem,
+    is_selected: bool,
+) -> Vec<Span<'a>> {
+    let worktree_icon = if branch.worktree_path.is_some() {
+        theme::icon::WORKTREE_ACTIVE
+    } else {
+        theme::icon::WORKTREE_INACTIVE
+    };
+    let head_indicator = if branch.is_head {
+        theme::icon::HEAD_INDICATOR
+    } else {
+        ""
+    };
+    // Branch Cleanup gutter glyphs (FR-018c/d):
+    //   `●` (cyan)   — selected for cleanup
+    //   `✔` (green)  — safe-selectable local branch
+    //   spinner      — merge detection still running (blocked)
+    //   `·` (gray)   — unsafe-selectable unmerged local branch
+    //   `–` (dim)    — protected / current HEAD / active session
+    //   ` ` (blank)  — remote-tracking row
+    let spinner_glyph = state.merge_spinner_glyph();
+    let blocked_reason = state.cleanup_selection_blocked_reason(&branch.name);
+    let risks = state.cleanup_selection_risks(&branch.name);
+    let (gutter_glyph, gutter_color) = if state.is_cleanup_selected(&branch.name) {
+        ("\u{25CF}", theme::color::ACTIVE)
+    } else if matches!(
+        blocked_reason,
+        Some(CleanupSelectionBlockedReason::MergeCheckRunning)
+    ) {
+        (spinner_glyph, theme::color::ACTIVE)
+    } else if !branch.is_local {
+        (" ", theme::color::TEXT_DISABLED)
+    } else if blocked_reason.is_some() {
+        ("\u{2013}", theme::color::TEXT_DISABLED)
+    } else if risks.contains(&CleanupSelectionRisk::Unmerged) {
+        ("\u{00B7}", theme::color::TEXT_SECONDARY)
+    } else {
+        ("\u{2714}", theme::color::SUCCESS)
+    };
+
+    vec![
+        super::selection_prefix(is_selected),
+        Span::styled(gutter_glyph, Style::default().fg(gutter_color)),
+        Span::raw(" "),
+        Span::styled(
+            &branch.name,
+            Style::default().fg(theme::color::TEXT_PRIMARY),
+        ),
+        Span::raw(" "),
+        Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
+        Span::styled(head_indicator, Style::default().fg(theme::color::SUCCESS)),
+    ]
+}
+
+fn branch_row_leading_width(
+    state: &BranchesState,
+    branch: &BranchItem,
+    is_selected: bool,
+) -> usize {
+    spans_width(&branch_row_leading_spans(state, branch, is_selected))
+}
+
 fn build_branch_live_summary(
     summary: &BranchLiveSessionSummary,
     animation_tick: usize,
@@ -1161,14 +1255,13 @@ fn build_branch_live_summary(
         return None;
     }
 
-    let spinner = running_spinner_frame(animation_tick);
-    let visible_indicators = summary.indicators.iter().take(available_width);
-    let spans: Vec<Span<'static>> = visible_indicators
-        .map(|indicator| {
-            Span::styled(
-                spinner.to_string(),
+    let spans: Vec<Span<'static>> = visible_branch_live_indicators(summary, available_width)
+        .filter_map(|indicator| {
+            let glyph = branch_live_indicator_glyph(indicator.status, animation_tick)?;
+            Some(Span::styled(
+                glyph.to_string(),
                 Style::default().fg(branch_live_indicator_color(indicator.color)),
-            )
+            ))
         })
         .collect();
 
@@ -1176,6 +1269,26 @@ fn build_branch_live_summary(
         None
     } else {
         Some(spans)
+    }
+}
+
+fn visible_branch_live_indicators(
+    summary: &BranchLiveSessionSummary,
+    available_width: usize,
+) -> impl Iterator<Item = BranchLiveSessionIndicator> + '_ {
+    summary
+        .indicators
+        .iter()
+        .take(available_width)
+        .filter(|indicator| branch_live_indicator_glyph(indicator.status, 0).is_some())
+        .copied()
+}
+
+fn branch_live_indicator_glyph(status: AgentStatus, animation_tick: usize) -> Option<char> {
+    match status {
+        AgentStatus::Running => Some(running_spinner_frame(animation_tick)),
+        AgentStatus::WaitingInput => Some('●'),
+        AgentStatus::Unknown | AgentStatus::Stopped => None,
     }
 }
 
@@ -2378,9 +2491,12 @@ mod tests {
         let lines = buffer_to_lines(terminal.backend().buffer());
         assert!(
             lines.iter().any(|line| line.contains("feature/wait"))
-                && lines.iter().any(|line| line.contains("◐"))
+                && lines.iter().any(|line| line.contains("●"))
+                && !lines
+                    .iter()
+                    .any(|line| line.contains("◐") || line.contains("◓") || line.contains("◑") || line.contains("◒"))
                 && !lines.iter().any(|line| line.contains(" wait ")),
-            "waiting rows should keep a spinner-only indicator instead of a textual wait label"
+            "waiting rows should stay visible with a static dot indicator instead of an animated spinner or textual wait label"
         );
     }
 
@@ -2417,6 +2533,76 @@ mod tests {
         assert!(
             lines.iter().any(|line| line.contains("feature/narrow")),
             "narrow rows should preserve the branch label even if the spinner strip must disappear"
+        );
+    }
+
+    #[test]
+    fn visible_live_indicator_rows_ignore_filtered_out_running_branches() {
+        let mut state = BranchesState::default();
+        state.view_mode = ViewMode::All;
+        state.branches = vec![
+            BranchItem {
+                name: "feature/visible".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-visible")),
+                upstream: None,
+            },
+            BranchItem {
+                name: "feature/hidden".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-hidden")),
+                upstream: None,
+            },
+        ];
+        state.search_query = "visible".to_string();
+        state.live_session_summaries.insert(
+            "feature/hidden".to_string(),
+            BranchLiveSessionSummary {
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                }],
+            },
+        );
+
+        let rows = state.visible_live_indicator_rows(Rect::new(0, 0, 80, 4));
+
+        assert!(
+            rows.is_empty(),
+            "filtered-out branches must not keep the tick redraw gate open"
+        );
+    }
+
+    #[test]
+    fn visible_live_indicator_rows_ignore_running_summaries_without_renderable_width() {
+        let mut state = BranchesState::default();
+        state.branches = vec![BranchItem {
+            name: "feature/this-branch-name-is-too-wide".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-wide")),
+            upstream: None,
+        }];
+        state.live_session_summaries.insert(
+            "feature/this-branch-name-is-too-wide".to_string(),
+            BranchLiveSessionSummary {
+                indicators: vec![BranchLiveSessionIndicator {
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                }],
+            },
+        );
+
+        let rows = state.visible_live_indicator_rows(Rect::new(0, 0, 24, 1));
+
+        assert!(
+            rows.is_empty(),
+            "rows that cannot render even one live indicator must not count as visible animation"
         );
     }
 

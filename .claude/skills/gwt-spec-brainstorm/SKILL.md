@@ -1,13 +1,14 @@
 ---
 name: gwt-spec-brainstorm
-description: "Use when the user has a rough idea, a concern about existing design, or wants to discuss before committing to implementation. Also use when implementation reveals a gap or inconsistency that needs investigation. Triggers: 'brainstorm', '壁打ち', 'SPECにする前に相談', 'これって問題じゃない?', 'ここ足りなくない?', 'should this be a new spec?', 'この設計どう思う?', '依存関係を整理して'."
+description: "Use when the user has a rough idea, a concern about existing design, wants iterative selection-UI questioning before committing to implementation, or when implementation reveals a gap or inconsistency that needs investigation. Triggers: 'brainstorm', '壁打ち', 'SPECにする前に相談', '質問UIで議論', '選択UIで質問して', 'これって問題じゃない?', 'ここ足りなくない?', 'should this be a new spec?', 'この設計どう思う?', '依存関係を整理して'."
 ---
 
 # gwt-spec-brainstorm
 
 A thinking partner for exploration and judgment. Stays in investigation
-space — does not produce specs, plans, or code until the user explicitly
-decides to move forward.
+space during discovery — does not produce new specs, plans, or code
+while the discussion is still fluid, but may update an existing owner
+SPEC once the direction is stable.
 
 ## When to use
 
@@ -19,8 +20,10 @@ decides to move forward.
 
 ## Core principles
 
-1. **Do not produce artifacts prematurely.** No spec.md, no plan.md,
-   no tasks.md, no code until the user says "進めて" or equivalent.
+1. **Do not produce artifacts prematurely.** During investigation and
+   discussion, do not write new SPEC artifacts, plans, tasks, or code.
+   If the clear owner is an existing SPEC, update that owner only after
+   the discussion stabilizes, and do it in one batch.
 2. **Investigate before asking.** Read code, grep for patterns, check
    existing SPECs and Issues, run experiments before forming a
    question. Informed questions are high-value; generic questions
@@ -28,13 +31,35 @@ decides to move forward.
 3. **Analyze dependencies before discussing changes.** Every proposed
    change has upstream prerequisites, downstream impacts, and
    atomicity boundaries. Map these before presenting options.
-4. **One question at a time.** Use the platform question tool when
-   available. Never ask a wall of questions.
-5. **Present findings, not conclusions.** Show what you found (table,
+4. **One question at a time, selection UI first.** Use a platform
+   question tool rather than hard-coding a product-specific API.
+   Prefer 2-3 mutually exclusive options and put the recommended
+   option first. Fall back to plain text only when no question UI is
+   available, or when the decision cannot be represented honestly with
+   options.
+5. **Keep asking until uncertainty is resolved.** Do not stop after one
+   answer if high-impact unknowns remain. Maintain an internal list of
+   unresolved questions and continue through it in priority order.
+6. **Present findings, not conclusions.** Show what you found (table,
    diff, dependency chain) and let the user drive the decision.
-6. **Track the thread.** Maintain an Intake Memo in the conversation.
-   Update it as the discussion evolves.
-7. **Multiple exits are valid.** Not every discussion becomes a SPEC.
+7. **Track the thread.** Maintain an Intake Memo in the conversation.
+   Update it as the discussion evolves, along with candidate SPEC deltas
+   when an existing owner is identified.
+8. **Multiple exits are valid.** Not every discussion becomes a SPEC.
+
+## Platform question tool
+
+Use the platform's selection-style question tool instead of naming a
+single API in the skill contract.
+
+| Platform | Preferred tool |
+|---|---|
+| Codex | `request_user_input` (requires Plan mode) |
+| Claude Code | `AskUserQuestionTool` |
+| Other runtimes | Closest equivalent selection-style question UI |
+
+If no selection UI exists in the current runtime, ask in plain text as
+the exception path. Keep the same one-question-at-a-time discipline.
 
 ## Flow
 
@@ -95,6 +120,20 @@ Do not propose a solution yet. Let the user absorb the findings first.
 Ask the user one question at a time about the findings.
 Wait for their answer before asking the next question.
 
+Use the platform question tool first. Each question should:
+
+- Use a selection UI when available
+- Offer 2-3 mutually exclusive options
+- Put the recommended option first
+- Avoid freeform text unless options would distort the decision
+
+After each answer:
+
+- Update the Intake Memo
+- Remove or refine the resolved unknown
+- Re-rank the remaining unresolved questions
+- Ask the next highest-impact question if any remain
+
 Prioritize questions by impact:
 
 1. Questions that change the scope (in/out of scope)
@@ -110,6 +149,9 @@ on cycles. The discussion continues until:
 - The user decides on an action (Phase 6)
 - The user says "enough" or moves to another topic
 - All open questions are resolved
+
+Do not end the brainstorm after a single answer when unresolved
+high-impact items still exist.
 
 ### Phase 6: Exit
 
@@ -128,6 +170,10 @@ Reason: <one sentence>
 ### Dependency Chain
 - <key dependencies identified>
 
+### SPEC Delta
+- Section: <spec|plan|tasks>
+  Change: <what will be added or changed>
+
 ### Proposed Action
 - <specific next step>
 ```
@@ -137,7 +183,7 @@ Reason: <one sentence>
 | Path | Handoff |
 |---|---|
 | NEW-SPEC | → `gwt-spec-design` (pass Intake Memo; design skips Phase 1) |
-| UPDATE-SPEC | → `gwt-spec-design --deepen` |
+| UPDATE-SPEC | Update the owner SPEC artifact set in one batch (`spec` required, `tasks` / `plan` when the discussion changed them), then use `gwt-spec-design --deepen` only if more design work remains |
 | ISSUE | → `gwt-issue` |
 | CODE-FIX | → `gwt-spec-build` standalone (pass dependency chain as task context) |
 | LESSON | → Write directly to `tasks/lessons.md` |
@@ -149,11 +195,17 @@ Reason: <one sentence>
 
 - **Asking without investigating.** If you can find the answer by
   reading code, do that instead of asking the user.
+- **Using plain text when selection UI exists.** If the runtime offers
+  a question UI, use it instead of dumping text questions into the chat.
 - **Ignoring dependencies.** Every change has downstream effects.
   Present the dependency chain before discussing the change itself.
-- **Writing code during brainstorm.** Brainstorm produces insight,
-  not artifacts. If you catch yourself writing implementation code,
-  stop and present the finding instead.
+- **Stopping after the first answer.** A brainstorm turn is not done
+  until high-impact unknowns are resolved or intentionally deferred.
+- **Updating SPECs incrementally mid-discussion.** Collect candidate
+  deltas while discussing; apply them only once the direction is stable.
+- **Writing code during brainstorm.** Brainstorm may update an owner
+  SPEC at the end, but it should not drift into implementation. If you
+  catch yourself writing code, stop and present the finding instead.
 - **Defaulting to "let's make a SPEC."** Many brainstorms end with
   a code fix, a lessons.md entry, or "no action needed." That is
   fine. The goal is the right decision, not the most formal one.
@@ -168,7 +220,7 @@ Reason: <one sentence>
 ```
 gwt-spec-brainstorm (this skill)
   ├─ NEW-SPEC → gwt-spec-design (Phase 2+, Intake Memo handed off)
-  ├─ UPDATE-SPEC → gwt-spec-design --deepen
+  ├─ UPDATE-SPEC → owner SPEC updated in one batch, then optionally gwt-spec-design --deepen
   ├─ ISSUE → gwt-issue
   ├─ CODE-FIX → gwt-spec-build (standalone)
   ├─ LESSON → tasks/lessons.md
