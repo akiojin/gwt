@@ -11,8 +11,9 @@
    - `git status --porcelain`
    - Report as context only; do not mutate files.
 3. Fetch latest remote refs: `git fetch origin`
-4. List PRs for head branch (REST-first):
-   - `gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100`
+4. Resolve the current branch PR with `gwt pr current`.
+   - Use `gwt pr view <number>` for detailed inspection when a PR exists.
+   - Treat any lower-level GitHub REST lookup as internal transport, not the normal path.
 5. Classify:
    - No PR found --> `NO_PR` + `CREATE_PR`
    - Any OPEN PR where `merged_at == null` --> `UNMERGED_PR_EXISTS` + `PUSH_ONLY`
@@ -117,61 +118,20 @@ if [ -n "$(git status --porcelain)" ]; then dirty=1; fi
 
 git fetch origin
 
-repo_slug="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
-owner="${repo_slug%%/*}"
-pr_json="$(gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100")"
-pr_count="$(echo "$pr_json" | jq 'length')"
-open_unmerged_count="$(echo "$pr_json" | jq 'map(select(.state == "open" and .merged_at == null)) | length')"
-merged_count="$(echo "$pr_json" | jq 'map(select(.merged_at != null)) | length')"
+commit_count="$(git rev-list --count "origin/$base..HEAD")"
+pr_summary="$(gwt pr current 2>/tmp/gwt-pr-current.err || true)"
 
-if [ "$pr_count" -eq 0 ]; then
+if [ -z "$pr_summary" ]; then
   status="NO_PR"; action="CREATE_PR"
-elif [ "$open_unmerged_count" -gt 0 ]; then
+elif printf '%s\n' "$pr_summary" | grep -q '\[OPEN\]'; then
   status="UNMERGED_PR_EXISTS"; action="PUSH_ONLY"
-elif [ "$merged_count" -eq 0 ]; then
-  status="CLOSED_UNMERGED_ONLY"; action="CREATE_PR"
 else
-  merge_commit="$(echo "$pr_json" | jq -r 'map(select(.merged_at != null)) | sort_by(.updated_at) | last | .merge_commit_sha')"
-  new_commits=""
-  if [ -n "$merge_commit" ] && [ "$merge_commit" != "null" ] && \
-     git merge-base --is-ancestor "$merge_commit" HEAD 2>/dev/null; then
-    new_commits="$(git rev-list --count "$merge_commit"..HEAD 2>/dev/null || echo "")"
-  fi
-
-  if [ -n "$new_commits" ] && [ "$new_commits" -gt 0 ]; then
-    git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
-    case $? in
-      1) status="ALL_MERGED_WITH_NEW_COMMITS"; action="CREATE_PR" ;;
-      0) status="ALL_MERGED_NO_PR_DIFF"; action="NO_ACTION" ;;
-      *) status="CHECK_FAILED"; action="MANUAL_CHECK" ;;
-    esac
-  elif [ -n "$new_commits" ]; then
-    status="ALL_MERGED_NO_PR_DIFF"; action="NO_ACTION"
-  else
-    # Fallback: upstream then base comparison
-    upstream_commits="$(git rev-list --count "origin/$head"..HEAD 2>/dev/null || echo "")"
-    fallback_commits="$(git rev-list --count "origin/$base"..HEAD 2>/dev/null || echo "")"
-    if [ -n "$upstream_commits" ] && [ "$upstream_commits" -gt 0 ]; then
-      git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
-      case $? in
-        1) status="ALL_MERGED_WITH_NEW_COMMITS"; action="CREATE_PR" ;;
-        0) status="ALL_MERGED_NO_PR_DIFF"; action="NO_ACTION" ;;
-        *) status="CHECK_FAILED"; action="MANUAL_CHECK" ;;
-      esac
-    elif [ -n "$fallback_commits" ] && [ "$fallback_commits" -gt 0 ]; then
-      git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
-      case $? in
-        1) status="ALL_MERGED_WITH_NEW_COMMITS"; action="CREATE_PR" ;;
-        0) status="ALL_MERGED_NO_PR_DIFF"; action="NO_ACTION" ;;
-        *) status="CHECK_FAILED"; action="MANUAL_CHECK" ;;
-      esac
-    elif [ -n "$fallback_commits" ]; then
-      status="ALL_MERGED_NO_PR_DIFF"; action="NO_ACTION"
-    else
-      status="CHECK_FAILED"; action="MANUAL_CHECK"
-    fi
-  fi
+  status="CHECK_FAILED"; action="MANUAL_CHECK"
 fi
 
-# Output (see per-status format above)
+# For checks/reviews/threads, continue with:
+# gwt pr view <number>
+# gwt pr checks <number>
+# gwt pr reviews <number>
+# gwt pr review-threads <number>
 ```

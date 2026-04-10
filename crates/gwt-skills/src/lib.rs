@@ -677,27 +677,94 @@ mod tests {
             "expected tracked gwt-spec-brainstorm command to remain present"
         );
 
-        let pr_skill = include_str!("../../../.codex/skills/gwt-pr/SKILL.md");
-        assert!(
-            pr_skill.contains("gwt pr current"),
-            "expected canonical gwt pr current guidance"
-        );
-        assert!(
-            pr_skill.contains("gwt pr create"),
-            "expected canonical gwt pr create guidance"
-        );
-        assert!(
-            pr_skill.contains("gwt pr edit"),
-            "expected canonical gwt pr edit guidance"
-        );
-        assert!(
-            pr_skill.contains("gwt pr review-threads"),
-            "expected canonical gwt pr review-threads guidance"
-        );
-        assert!(
-            pr_skill.contains("gwt actions logs"),
-            "expected canonical gwt actions log guidance"
-        );
+        for relative in [
+            ".claude/skills/gwt-pr/SKILL.md",
+            ".codex/skills/gwt-pr/SKILL.md",
+        ] {
+            let pr_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                pr_skill.contains("gwt pr current"),
+                "expected canonical gwt pr current guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt pr create"),
+                "expected canonical gwt pr create guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt pr edit"),
+                "expected canonical gwt pr edit guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt pr review-threads"),
+                "expected canonical gwt pr review-threads guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("gwt actions logs"),
+                "expected canonical gwt actions log guidance in {relative}"
+            );
+            assert!(
+                !pr_skill.contains("Fallback: `gh pr create"),
+                "unexpected direct gh pr create guidance in {relative}"
+            );
+            assert!(
+                !pr_skill.contains("Fallback: `gh pr comment`."),
+                "unexpected direct gh pr comment guidance in {relative}"
+            );
+        }
+
+        for relative in [".claude/skills/gwt-pr/references/check-flow.md"] {
+            let check_flow = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                check_flow.contains("`gwt pr current`"),
+                "expected canonical gwt pr current guidance in {relative}"
+            );
+            assert!(
+                !check_flow.contains(
+                    "gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100"
+                ),
+                "unexpected direct gh pull list guidance in {relative}"
+            );
+        }
+
+        for relative in [".claude/skills/gwt-pr/references/create-flow.md"] {
+            let create_flow = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                create_flow.contains("Create: `gwt pr create"),
+                "expected canonical gwt pr create guidance in {relative}"
+            );
+            assert!(
+                create_flow.contains("Update: `gwt pr edit"),
+                "expected canonical gwt pr edit guidance in {relative}"
+            );
+            assert!(
+                !create_flow.contains("Create: `gh pr create"),
+                "unexpected direct gh pr create guidance in {relative}"
+            );
+            assert!(
+                !create_flow.contains("Update: `gh pr edit"),
+                "unexpected direct gh pr edit guidance in {relative}"
+            );
+        }
+
+        for relative in [".claude/skills/gwt-pr/references/fix-flow.md"] {
+            let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                fix_flow.contains("`gwt pr review-threads reply-and-resolve"),
+                "expected canonical gwt review-thread guidance in {relative}"
+            );
+            assert!(
+                fix_flow.contains("`gwt pr comment"),
+                "expected canonical gwt pr comment guidance in {relative}"
+            );
+            assert!(
+                !fix_flow.contains("Fallback: `gh pr comment`."),
+                "unexpected direct gh pr comment guidance in {relative}"
+            );
+        }
 
         let release_command = include_str!("../../../.claude/commands/release.md");
         assert!(
@@ -719,6 +786,12 @@ mod tests {
         assert!(
             !release_command.contains("gh issue comment"),
             "unexpected direct gh issue comment guidance"
+        );
+
+        let pr_command = include_str!("../../../.claude/commands/gwt-pr.md");
+        assert!(
+            pr_command.contains("`gwt pr current` should succeed"),
+            "expected gwt-pr command wrapper to point to canonical gwt auth check"
         );
     }
 

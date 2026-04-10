@@ -17,7 +17,7 @@ Unified GitHub PR lifecycle manager. Auto-detects mode: creates PRs when none ex
 ## Steps
 
 1. Load `.claude/skills/gwt-pr/SKILL.md` and follow the workflow.
-2. Ensure `gh auth status` succeeds before running PR commands.
+2. Ensure GitHub auth is healthy; `gwt pr current` should succeed before deeper PR actions.
 3. Auto-detect the appropriate action based on current branch and PR state.
 
 ## Examples

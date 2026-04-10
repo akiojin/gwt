@@ -9,7 +9,7 @@ description: "Use proactively after implementation work to create, check, or fix
 
 Single skill for the full PR lifecycle: create, check status, and fix blockers. Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user.
 
-REST-first `gh api` flows for all PR operations. GraphQL only for unresolved review threads and thread reply/resolve.
+Canonical agent-facing surface is `gwt pr ...` / `gwt actions ...` for PR inspection, create/update, and fix flows. The current implementation may still use GitHub REST / `gh` internally as transport, while GraphQL remains the transport for unresolved review threads and thread reply/resolve.
 
 ## Mode Auto-Detection
 
@@ -51,9 +51,11 @@ impossible.**
    > whether develop has your work. Confusing the two is the root
    > cause of the MERGED-state false NO ACTION bug.
 6. **PR lookup + open-PR check:**
-   - `repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
-   - `owner="${repo_slug%%/*}"`
-   - `gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100"`
+   - Prefer `gwt pr current` as the normal read path for the current branch.
+   - If create mode needs raw repo/head lookup, use:
+     - `repo_slug=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
+     - `owner="${repo_slug%%/*}"`
+     - `gh api "repos/$repo_slug/pulls?state=all&head=$owner:$head&per_page=100"`
    - `has_open_pr` = any entry with `state == "open" && merged_at == null`
 7. **Route using the 2×2 matrix:**
 
@@ -100,19 +102,28 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 ### Create/Update Commands
 
-- Primary: `gh api repos/<owner>/<repo>/pulls --method POST --input <json-file>`
-- Fallback: `gh pr create -B <base> -H <head> --title "<title>" --body-file <file>`
-- Update (only if user asks): `PATCH` via REST or `gh pr edit`
+- Create: `gwt pr create --base <base> [--head <head>] --title "<title>" -f <file> [--label <label>]* [--draft]`
+- Update: `gwt pr edit <number> [--title "<title>"] [-f <file>] [--add-label <label>]*`
+- Transport note: the current implementation may still call GitHub REST / `gh` internally, but agent-facing workflow should stay on the `gwt pr` surface.
 
 ### Post-Create
 
-After PR creation or push, automatically enter **fix** mode to check CI/conflicts/reviews.
+After PR creation or push, automatically enter **fix** mode and use `gwt pr checks`, `gwt pr reviews`, `gwt pr review-threads`, and `gwt actions logs/job-logs` as the normal inspection path.
 
 ## Mode: Check
 
 Detailed logic in `references/check-flow.md`.
 
 **Read-only mode.** Do not create/switch branches, push, or create/edit PRs.
+
+### Canonical Read Surface
+
+- Current branch PR: `gwt pr current`
+- PR detail: `gwt pr view <number>`
+- Checks: `gwt pr checks <number>`
+- Reviews: `gwt pr reviews <number>`
+- Unresolved threads: `gwt pr review-threads <number>`
+- Actions logs: `gwt actions logs --run <id>` / `gwt actions job-logs --job <id>`
 
 ### Output Contract
 
@@ -226,16 +237,14 @@ Blocking items: <N>
   - Not applicable: "Not applicable: <reason why no change is needed>."
   - Already addressed: "Already addressed in commit <sha>: <summary>."
   - Acknowledged: "Acknowledged: <brief response>." for informational comments.
-- After replying, **resolve the conversation** via GraphQL
-  `--reply-and-resolve` JSON array covering ALL threads.
-- If `--reply-and-resolve` is not available, resolve manually via
-  `gh api graphql` with `resolveReviewThread` mutation.
+- After preparing the reply body, use `gwt pr review-threads reply-and-resolve <number> -f <file>` to reply to and resolve all unresolved threads on the PR.
+- If that surface is unavailable, fall back to internal GraphQL transport with `resolveReviewThread`.
 - **Verification:** After resolving, re-check that no unresolved
   threads remain. Unresolved threads block the Merge Verdict.
 
 ### Reviewer Notification (mandatory)
 
-Post PR comment via REST summarizing all fixes. Fallback: `gh pr comment`.
+Post a PR summary comment via `gwt pr comment <number> -f <file>`.
 
 ### Verify Fix (mandatory)
 

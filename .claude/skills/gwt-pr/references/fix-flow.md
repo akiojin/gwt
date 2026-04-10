@@ -8,7 +8,7 @@
 
 ## Step 2: Resolve the PR
 
-- Prefer the current branch PR through a REST head-branch lookup.
+- Prefer the current branch PR through `gwt pr current`.
 - If the user provides a PR number or URL, use that directly.
 
 ## Step 3: Inspect based on mode
@@ -30,9 +30,9 @@
 
 ### Checks Mode (`--mode checks`)
 
-- Inspect failing CI checks through REST check-runs.
+- Inspect failing CI checks through `gwt pr checks <number>`.
 - Add `--required-only` to limit output when available.
-- Fetch GitHub Actions logs and extract failure snippets.
+- Fetch GitHub Actions logs through `gwt actions logs --run <id>` or `gwt actions job-logs --job <id>` and extract failure snippets.
 - For external checks (Buildkite, etc.), report URL only.
 
 ### All Mode (`--mode all`)
@@ -119,7 +119,7 @@ Blocking items: <N>
 - For each unresolved thread:
   - Addressed: "Fixed: <what was done in commit abc1234>."
   - Not addressed: "Not addressed: <reason>."
-- Use `--reply-and-resolve` with JSON array covering ALL threads.
+- Use `gwt pr review-threads reply-and-resolve <number> -f <file>` with coverage for ALL threads.
 - Script validates completeness; rejects if any thread missing.
 - Requires `Repository Permissions > Contents: Read and Write`.
 - Resolve threads after code fix is pushed. Do not wait for CI.
@@ -136,9 +136,8 @@ Blocking items: <N>
 
 ## Step 8: Notify reviewers (mandatory)
 
-- Post comment via REST: `POST /repos/<owner>/<repo>/issues/<pr_number>/comments`
+- Post comment via `gwt pr comment <number> -f <file>`.
 - Include summary of what was fixed (list each B-item and action taken).
-- Fallback: `gh pr comment`.
 - This step is not optional.
 
 ## Step 9: Verify fix (mandatory)
