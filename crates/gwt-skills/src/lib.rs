@@ -607,18 +607,74 @@ mod tests {
 
     #[test]
     fn local_github_issue_workflows_use_canonical_gwt_surfaces() {
-        let issue_skill = include_str!("../../../.codex/skills/gwt-issue/SKILL.md");
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-issue/SKILL.md",
+            ".codex/skills/gwt-issue/SKILL.md",
+        ] {
+            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_skill.contains("gwt issue create --title ... -f ..."),
+                "expected canonical gwt issue create guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("gwt issue comment"),
+                "expected canonical gwt issue comment guidance in {relative}"
+            );
+            assert!(
+                issue_skill
+                    .contains("Direct `gh issue ...` commands are not part of the normal path."),
+                "expected skill to forbid direct gh issue usage in the normal path: {relative}"
+            );
+            assert!(
+                !issue_skill.contains("Plain Issue: create directly with `gh issue create`."),
+                "unexpected direct gh issue create guidance in {relative}"
+            );
+            assert!(
+                !issue_skill.contains("Before posting with `gh issue comment`"),
+                "unexpected direct gh issue comment guidance in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-spec-brainstorm/SKILL.md",
+            ".codex/skills/gwt-spec-brainstorm/SKILL.md",
+        ] {
+            let brainstorm_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                brainstorm_skill.contains("Check open SPEC Issues: `gwt issue spec list`."),
+                "expected brainstorm skill to use gwt issue spec list in {relative}"
+            );
+            assert!(
+                !brainstorm_skill.contains("gh issue list --label gwt-spec --state open"),
+                "unexpected direct gh issue list guidance in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-issue-search/SKILL.md",
+            ".codex/skills/gwt-issue-search/SKILL.md",
+        ] {
+            let issue_search_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_search_skill.contains("before manual `gwt issue view`"),
+                "expected issue search skill to steer users away from direct issue reads in {relative}"
+            );
+            assert!(
+                !issue_search_skill.contains("before manual `gh issue list`"),
+                "unexpected direct gh issue list guidance in {relative}"
+            );
+        }
+
         assert!(
-            issue_skill.contains("gwt issue create --title ... -f ..."),
-            "expected canonical gwt issue create guidance"
-        );
-        assert!(
-            issue_skill.contains("gwt issue comment"),
-            "expected canonical gwt issue comment guidance"
-        );
-        assert!(
-            issue_skill.contains("Direct `gh issue ...` commands are not part of the normal path."),
-            "expected skill to forbid direct gh issue usage in the normal path"
+            workspace_root
+                .join(".claude/commands/gwt-spec-brainstorm.md")
+                .exists(),
+            "expected tracked gwt-spec-brainstorm command to remain present"
         );
 
         let pr_skill = include_str!("../../../.codex/skills/gwt-pr/SKILL.md");

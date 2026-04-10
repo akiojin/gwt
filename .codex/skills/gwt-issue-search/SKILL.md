@@ -9,7 +9,7 @@ gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings.
 
 ## Issues search first
 
-When the user asks any of the following, use GitHub Issues search **before** manual `gh issue list`,
+When the user asks any of the following, use GitHub Issues search before manual `gwt issue view`,
 title grep, or file search:
 
 - "既存 Issue を探して"
@@ -35,7 +35,7 @@ Suggested query patterns:
 
 ## GitHub Issues search command
 
-First, update the Issues index (fetches all GitHub Issues via `gh` CLI):
+First, update the Issues index:
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
