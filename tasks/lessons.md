@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-10 — spec: 旧 GitHub-backed SPEC を更新する前に `gwt issue spec --section` / `repair` の健全性を先に確認する
+
+### 事象
+
+SPEC 更新作業で `#1930` を `gwt issue spec 1930 --section spec` と
+`gwt issue spec repair 1930` で扱おうとしたところ、どちらも
+`body parse error: malformed marker: nested BEGIN for 'spec' inside 'tasks'`
+で失敗した。
+
+### 原因
+
+- 旧 GitHub-backed SPEC の artifact 配置が current parser の前提とずれており、
+  section 読み取り前提の CLI 経路自体が壊れていた。
+- 「既に GitHub Issue 化されている SPEC なら `gwt issue spec` で必ず
+  section 単位に読める」と思い込んで更新フローを組み立てた。
+
+### 再発防止策
+
+1. 旧 SPEC の更新前に `gwt issue spec <n> --section spec` と
+   `gwt issue spec repair <n>` の smoke check を先に実行し、section parser
+   が生きていることを確認する。
+2. parser が壊れている legacy SPEC は、無理に section CLI に載せず、
+   raw issue body / comment を直接更新する暫定経路へ切り替える。
+3. 暫定経路を使った場合は、後続で artifact format 自体を repair する
+   follow-up を SPEC / tasks に明記し、同じ壊れ方を放置しない。
+
 ## 2026-04-09 — fix: `tracing_appender::rolling::daily` の日付境界は思い込みで local 扱いしない
 
 ### 事象
