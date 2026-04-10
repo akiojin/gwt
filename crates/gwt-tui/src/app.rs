@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use gwt_agent::{
     custom::CustomAgentType, persist_session_status, runtime_state_path, AgentDetector, AgentId,
-    AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig, Session as AgentSession,
-    SessionMode, SessionRuntimeState, VersionCache, GWT_SESSION_ID_ENV,
+    AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig, LaunchRuntimeTarget,
+    Session as AgentSession, SessionMode, SessionRuntimeState, VersionCache, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
@@ -3611,6 +3611,10 @@ fn build_launch_config_from_wizard_with_custom_agents(
     if wizard.skip_perms {
         builder = builder.skip_permissions(true);
     }
+    builder = builder.runtime_target(wizard.runtime_target);
+    if let Some(docker_service) = wizard.docker_service.as_deref() {
+        builder = builder.docker_service(docker_service);
+    }
     let session_mode = match wizard.mode.as_str() {
         "continue" => SessionMode::Continue,
         "resume" if wizard.resume_session_id.is_some() => SessionMode::Resume,
@@ -3690,6 +3694,8 @@ fn build_custom_launch_config_from_wizard(
         resume_session_id: wizard.resume_session_id.clone(),
         skip_permissions: wizard.skip_perms,
         codex_fast_mode: false,
+        runtime_target: wizard.runtime_target,
+        docker_service: wizard.docker_service.clone(),
     }
 }
 
@@ -3738,6 +3744,7 @@ fn materialize_pending_launch_with(
     };
 
     resolve_launch_worktree(&model.repo_path, &mut config)?;
+    apply_docker_runtime_to_launch_config(&model.repo_path, &mut config)?;
 
     let worktree = config
         .working_dir
@@ -3757,6 +3764,8 @@ fn materialize_pending_launch_with(
     session.agent_session_id = config.resume_session_id.clone();
     session.skip_permissions = config.skip_permissions;
     session.codex_fast_mode = config.codex_fast_mode;
+    session.runtime_target = config.runtime_target;
+    session.docker_service = config.docker_service.clone();
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
     augment_agent_hook_runtime_launch_config(&mut config, sessions_dir, &session.id);
@@ -3971,6 +3980,175 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct DockerLaunchPlan {
+    compose_file: PathBuf,
+    service: String,
+    container_cwd: String,
+}
+
+#[derive(Debug, Clone)]
+struct DevContainerLaunchDefaults {
+    service: Option<String>,
+    workspace_folder: Option<String>,
+    compose_file: Option<PathBuf>,
+}
+
+fn apply_docker_runtime_to_launch_config(
+    repo_path: &Path,
+    config: &mut LaunchConfig,
+) -> Result<(), String> {
+    if config.runtime_target != LaunchRuntimeTarget::Docker {
+        return Ok(());
+    }
+
+    let worktree = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
+
+    let mut args = vec![
+        "compose".to_string(),
+        "-f".to_string(),
+        launch.compose_file.display().to_string(),
+        "exec".to_string(),
+        "-w".to_string(),
+        launch.container_cwd.clone(),
+        launch.service.clone(),
+        config.command.clone(),
+    ];
+    args.extend(config.args.clone());
+
+    config.command = docker_binary_for_launch();
+    config.args = args;
+    config
+        .env_vars
+        .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    config.docker_service = Some(launch.service);
+
+    Ok(())
+}
+
+fn resolve_docker_launch_plan(
+    worktree: &Path,
+    selected_service: Option<&str>,
+) -> Result<DockerLaunchPlan, String> {
+    let files = gwt_docker::detect_docker_files(worktree);
+    let compose_file = docker_compose_file_for_launch(worktree, &files)?.ok_or_else(|| {
+        "Docker launch requires a docker-compose.yml or devcontainer compose target".to_string()
+    })?;
+    let services = gwt_docker::parse_compose_file(&compose_file).map_err(|err| err.to_string())?;
+    if services.is_empty() {
+        return Err("Docker launch requires at least one compose service".to_string());
+    }
+
+    let devcontainer_defaults = docker_devcontainer_defaults(worktree, &files);
+    let service_name = selected_service
+        .map(str::to_string)
+        .or_else(|| {
+            devcontainer_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.service.clone())
+        })
+        .or_else(|| {
+            if services.len() == 1 {
+                services.first().map(|service| service.name.clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            "Multiple Docker services detected; select a Docker service in Launch Agent Wizard"
+                .to_string()
+        })?;
+
+    let service = services
+        .iter()
+        .find(|service| service.name == service_name)
+        .ok_or_else(|| {
+            format!("Selected Docker service was not found in compose file: {service_name}")
+        })?;
+
+    let container_cwd = devcontainer_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.workspace_folder.clone())
+        .or_else(|| service.working_dir.clone())
+        .or_else(|| compose_workspace_mount_target(service))
+        .ok_or_else(|| {
+            format!(
+                "Docker service {} is missing working_dir/workspaceFolder and no project-root volume mount was detected",
+                service.name
+            )
+        })?;
+
+    Ok(DockerLaunchPlan {
+        compose_file,
+        service: service.name.clone(),
+        container_cwd,
+    })
+}
+
+fn docker_binary_for_launch() -> String {
+    std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
+}
+
+fn docker_compose_file_for_launch(
+    project_root: &Path,
+    files: &gwt_docker::DockerFiles,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(path) = files.compose_file.clone() {
+        return Ok(Some(path));
+    }
+
+    Ok(
+        docker_devcontainer_defaults(project_root, files)
+            .and_then(|defaults| defaults.compose_file),
+    )
+}
+
+fn docker_devcontainer_defaults(
+    project_root: &Path,
+    files: &gwt_docker::DockerFiles,
+) -> Option<DevContainerLaunchDefaults> {
+    let devcontainer_dir = files.devcontainer_dir.as_ref()?;
+    let path = devcontainer_dir.join("devcontainer.json");
+    if !path.is_file() {
+        return None;
+    }
+
+    let config = gwt_docker::DevContainerConfig::load(&path).ok()?;
+    let compose_file = config
+        .docker_compose_file
+        .as_ref()
+        .and_then(|value| {
+            value
+                .to_vec()
+                .into_iter()
+                .map(|candidate| devcontainer_dir.join(candidate))
+                .find(|path| path.is_file())
+        })
+        .or_else(|| files.compose_file.clone())
+        .or_else(|| {
+            let fallback = project_root.join("docker-compose.yml");
+            fallback.is_file().then_some(fallback)
+        });
+
+    Some(DevContainerLaunchDefaults {
+        service: config.service,
+        workspace_folder: config.workspace_folder,
+        compose_file,
+    })
+}
+
+fn compose_workspace_mount_target(service: &gwt_docker::ComposeService) -> Option<String> {
+    service
+        .volumes
+        .iter()
+        .find(|mount| mount.source == "." || mount.source == "./")
+        .map(|mount| mount.target.clone())
+}
+
 fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
@@ -4041,6 +4219,7 @@ fn configure_existing_branch_wizard_with_sessions(
 ) {
     wizard.is_new_branch = false;
     wizard.branch_name = branch_name.to_string();
+    apply_wizard_docker_context(wizard, repo_path);
     wizard.quick_start_entries = load_quick_start_entries(repo_path, sessions_dir, branch_name);
     wizard.has_quick_start = !wizard.quick_start_entries.is_empty();
     wizard.step = if wizard.has_quick_start {
@@ -4106,6 +4285,8 @@ fn load_quick_start_entries(
             resume_session_id: session.agent_session_id.clone(),
             skip_permissions: session.skip_permissions,
             codex_fast_mode: session.codex_fast_mode,
+            runtime_target: session.runtime_target,
+            docker_service: session.docker_service.clone(),
         })
         .collect()
 }
@@ -4114,7 +4295,8 @@ fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecCont
     let cache_path = wizard_version_cache_path();
     let cache = VersionCache::load(&cache_path);
     let detected_agents = AgentDetector::detect_all();
-    let (wizard, refresh_targets) = prepare_wizard_startup(spec_context, detected_agents, &cache);
+    let (wizard, refresh_targets) =
+        prepare_wizard_startup(&model.repo_path, spec_context, detected_agents, &cache);
 
     model.wizard = Some(wizard);
     schedule_wizard_version_cache_refresh(cache_path, refresh_targets);
@@ -4487,6 +4669,7 @@ fn schedule_startup_version_cache_refresh_with<Detect, Spawn, Schedule>(
 }
 
 fn prepare_wizard_startup(
+    repo_path: &Path,
     spec_context: Option<screens::wizard::SpecContext>,
     detected_agents: Vec<DetectedAgent>,
     cache: &VersionCache,
@@ -4510,6 +4693,7 @@ fn prepare_wizard_startup(
         spec_context,
         ..Default::default()
     };
+    apply_wizard_docker_context(&mut wizard, repo_path);
 
     let (agents, refresh_targets) = build_wizard_agent_options(detected_agents, cache);
     if !agents.is_empty() {
@@ -4520,6 +4704,44 @@ fn prepare_wizard_startup(
     }
 
     (wizard, refresh_targets)
+}
+
+fn apply_wizard_docker_context(wizard: &mut screens::wizard::WizardState, project_root: &Path) {
+    wizard.docker_context = detect_wizard_docker_context(project_root);
+    wizard.runtime_target = if wizard.docker_context.is_some() {
+        LaunchRuntimeTarget::Docker
+    } else {
+        LaunchRuntimeTarget::Host
+    };
+    if wizard.docker_service.is_none() {
+        wizard.docker_service = wizard
+            .docker_context
+            .as_ref()
+            .and_then(|context| context.suggested_service.clone());
+    }
+}
+
+fn detect_wizard_docker_context(
+    project_root: &Path,
+) -> Option<screens::wizard::DockerWizardContext> {
+    let files = gwt_docker::detect_docker_files(project_root);
+
+    let compose_file = docker_compose_file_for_launch(project_root, &files)
+        .ok()
+        .flatten()?;
+    let services = gwt_docker::parse_compose_file(&compose_file).ok()?;
+    if services.is_empty() {
+        return None;
+    }
+
+    let suggested_service = docker_devcontainer_defaults(project_root, &files)
+        .and_then(|defaults| defaults.service)
+        .or_else(|| services.first().map(|service| service.name.clone()));
+
+    Some(screens::wizard::DockerWizardContext {
+        services: services.into_iter().map(|service| service.name).collect(),
+        suggested_service,
+    })
 }
 /// All builtin agent IDs in display order.
 const BUILTIN_AGENTS: [AgentId; 4] = [
@@ -10458,6 +10680,7 @@ mod tests {
 
     #[test]
     fn prepare_wizard_startup_prefills_spec_context_and_versions() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let mut cache = VersionCache::new();
         cache.entries.insert(
             "claude-code".into(),
@@ -10474,6 +10697,7 @@ mod tests {
         ];
 
         let (wizard, refresh_targets) = prepare_wizard_startup(
+            project_root.path(),
             Some(screens::wizard::SpecContext::new(
                 "SPEC-42",
                 "My Feature",
@@ -10532,9 +10756,11 @@ mod tests {
 
     #[test]
     fn prepare_wizard_startup_starts_spec_prefill_at_branch_type_select() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let cache = VersionCache::new();
 
         let (wizard, _) = prepare_wizard_startup(
+            project_root.path(),
             Some(screens::wizard::SpecContext::new(
                 "SPEC-42",
                 "My Feature",
@@ -10550,9 +10776,11 @@ mod tests {
 
     #[test]
     fn prepare_wizard_startup_disables_ai_branch_suggestions_by_default() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let cache = VersionCache::new();
 
         let (wizard, _) = prepare_wizard_startup(
+            project_root.path(),
             Some(screens::wizard::SpecContext::new(
                 "SPEC-99",
                 "AI-disabled flow",
@@ -10567,10 +10795,12 @@ mod tests {
 
     #[test]
     fn prepare_wizard_startup_uses_detected_version_when_cache_is_missing() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let cache = VersionCache::new();
         let detected = vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))];
 
-        let (wizard, refresh_targets) = prepare_wizard_startup(None, detected, &cache);
+        let (wizard, refresh_targets) =
+            prepare_wizard_startup(project_root.path(), None, detected, &cache);
 
         assert!(wizard.spec_context.is_none());
         assert!(wizard.branch_name.is_empty());
@@ -10601,6 +10831,50 @@ mod tests {
     }
 
     #[test]
+    fn prepare_wizard_startup_detects_compose_workflow_and_defaults_to_docker() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+  db:
+    image: postgres:16
+"#,
+        )
+        .expect("write compose");
+        fs::create_dir_all(project_root.path().join(".devcontainer"))
+            .expect("create .devcontainer");
+        fs::write(
+            project_root.path().join(".devcontainer/devcontainer.json"),
+            r#"{
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "web",
+  "workspaceFolder": "/workspace"
+}"#,
+        )
+        .expect("write devcontainer");
+        let cache = VersionCache::new();
+
+        let (wizard, _) = prepare_wizard_startup(project_root.path(), None, vec![], &cache);
+
+        let docker_context = wizard.docker_context.as_ref().expect("docker context");
+        assert_eq!(wizard.runtime_target, LaunchRuntimeTarget::Docker);
+        assert_eq!(wizard.docker_service.as_deref(), Some("web"));
+        assert_eq!(docker_context.suggested_service.as_deref(), Some("web"));
+        assert!(docker_context
+            .services
+            .iter()
+            .any(|service| service == "web"));
+        assert!(docker_context
+            .services
+            .iter()
+            .any(|service| service == "db"));
+    }
+
+    #[test]
     fn configure_existing_branch_wizard_with_sessions_loads_newest_entry_per_agent() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let cache = VersionCache::new();
@@ -10625,19 +10899,22 @@ mod tests {
             false,
             false,
         );
-        persist_agent_session(
-            dir.path(),
-            repo_path.to_str().unwrap(),
-            branch,
-            AgentId::Codex,
-            now - Duration::minutes(1),
-            Some("gpt-5.3-codex"),
-            Some("high"),
-            Some("latest"),
-            Some("sess-new"),
-            true,
-            true,
-        );
+        let mut latest_codex =
+            AgentSession::new(repo_path.to_str().unwrap(), branch, AgentId::Codex);
+        latest_codex.model = Some("gpt-5.3-codex".to_string());
+        latest_codex.reasoning_level = Some("high".to_string());
+        latest_codex.tool_version = Some("latest".to_string());
+        latest_codex.agent_session_id = Some("sess-new".to_string());
+        latest_codex.skip_permissions = true;
+        latest_codex.codex_fast_mode = true;
+        latest_codex.runtime_target = LaunchRuntimeTarget::Docker;
+        latest_codex.docker_service = Some("web".to_string());
+        latest_codex.updated_at = now - Duration::minutes(1);
+        latest_codex.created_at = latest_codex.updated_at;
+        latest_codex.last_activity_at = latest_codex.updated_at;
+        latest_codex
+            .save(dir.path())
+            .expect("persist latest codex session");
         persist_agent_session(
             dir.path(),
             repo_path.to_str().unwrap(),
@@ -10665,7 +10942,7 @@ mod tests {
             false,
         );
 
-        let (mut wizard, _) = prepare_wizard_startup(None, detected, &cache);
+        let (mut wizard, _) = prepare_wizard_startup(repo_path.as_path(), None, detected, &cache);
         configure_existing_branch_wizard_with_sessions(&mut wizard, &repo_path, dir.path(), branch);
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::QuickStart);
@@ -10683,6 +10960,14 @@ mod tests {
         );
         assert!(wizard.quick_start_entries[0].skip_permissions);
         assert!(wizard.quick_start_entries[0].codex_fast_mode);
+        assert_eq!(
+            wizard.quick_start_entries[0].runtime_target,
+            LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(
+            wizard.quick_start_entries[0].docker_service.as_deref(),
+            Some("web")
+        );
         assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
         assert!(!wizard.quick_start_entries[1].codex_fast_mode);
     }
@@ -11307,6 +11592,90 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_carries_docker_runtime_and_service_selection() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(
+            config.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(config.docker_service.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_wraps_command_for_selected_service() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+        };
+
+        with_fake_docker("#!/bin/sh\nexit 0\n", || {
+            let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
+            apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                .expect("apply docker runtime");
+
+            assert_eq!(config.command, expected_docker);
+            assert_eq!(
+                config.args,
+                vec![
+                    "compose".to_string(),
+                    "-f".to_string(),
+                    compose_path.display().to_string(),
+                    "exec".to_string(),
+                    "-w".to_string(),
+                    "/workspace".to_string(),
+                    "web".to_string(),
+                    "claude".to_string(),
+                    "--print".to_string(),
+                ]
+            );
+            assert_eq!(
+                config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
+                Some("/workspace")
+            );
+            assert_eq!(config.docker_service.as_deref(), Some("web"));
+        });
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_codex_skip_permissions_does_not_imply_fast_mode() {
         let wizard = screens::wizard::WizardState {
             agent_id: "codex".to_string(),
@@ -11427,6 +11796,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11470,6 +11841,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11543,6 +11916,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11590,6 +11965,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11638,6 +12015,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11705,6 +12084,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11763,6 +12144,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11803,6 +12186,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -11862,6 +12247,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         };
@@ -12034,6 +12421,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });
@@ -12469,6 +12858,8 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             skip_permissions: false,
             codex_fast_mode: false,
         });

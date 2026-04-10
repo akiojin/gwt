@@ -123,6 +123,14 @@ pub enum SessionMode {
     Resume,
 }
 
+/// Runtime target for launching an agent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaunchRuntimeTarget {
+    #[default]
+    Host,
+    Docker,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

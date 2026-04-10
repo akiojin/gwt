@@ -21,6 +21,8 @@ pub enum WizardStep {
     ReasoningLevel,
     VersionSelect,
     ExecutionMode,
+    RuntimeTarget,
+    DockerServiceSelect,
     ConvertAgentSelect,
     ConvertSessionSelect,
     BranchTypeSelect,
@@ -42,6 +44,8 @@ impl WizardStep {
             Self::ReasoningLevel => "Reasoning Level",
             Self::VersionSelect => "Select Version",
             Self::ExecutionMode => "Execution Mode",
+            Self::RuntimeTarget => "Runtime Target",
+            Self::DockerServiceSelect => "Docker Service",
             Self::ConvertAgentSelect => "Convert From Agent",
             Self::ConvertSessionSelect => "Select Session",
             Self::BranchTypeSelect => "Branch Type",
@@ -103,10 +107,22 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::ExecutionMode => {
             if state.mode == "convert" {
                 Some(WizardStep::ConvertAgentSelect)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else {
                 Some(WizardStep::SkipPermissions)
             }
         }
+        WizardStep::RuntimeTarget => {
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+                && state.docker_service_prompt_required()
+            {
+                Some(WizardStep::DockerServiceSelect)
+            } else {
+                Some(WizardStep::SkipPermissions)
+            }
+        }
+        WizardStep::DockerServiceSelect => Some(WizardStep::SkipPermissions),
         WizardStep::ConvertAgentSelect => Some(WizardStep::ConvertSessionSelect),
         WizardStep::ConvertSessionSelect => Some(WizardStep::SkipPermissions),
         WizardStep::BranchTypeSelect => {
@@ -178,6 +194,8 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::AgentSelect)
             }
         }
+        WizardStep::RuntimeTarget => Some(WizardStep::ExecutionMode),
+        WizardStep::DockerServiceSelect => Some(WizardStep::RuntimeTarget),
         WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
         WizardStep::ConvertSessionSelect => Some(WizardStep::ConvertAgentSelect),
         WizardStep::BranchTypeSelect => {
@@ -280,6 +298,14 @@ pub struct QuickStartEntry {
     pub resume_session_id: Option<String>,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub docker_service: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DockerWizardContext {
+    pub services: Vec<String>,
+    pub suggested_service: Option<String>,
 }
 
 /// SPEC context for prefilling the wizard.
@@ -341,6 +367,9 @@ pub struct WizardState {
     pub resume_session_id: Option<String>,
     pub branch_name: String,
     pub issue_id: String,
+    pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub docker_service: Option<String>,
+    pub docker_context: Option<DockerWizardContext>,
     pub skip_perms: bool,
     pub codex_fast_mode: bool,
     pub convert_source_agents: Vec<String>,
@@ -378,6 +407,9 @@ impl Default for WizardState {
             resume_session_id: None,
             branch_name: String::new(),
             issue_id: String::new(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_context: None,
             skip_perms: false,
             codex_fast_mode: false,
             convert_source_agents: Vec::new(),
@@ -458,6 +490,8 @@ impl WizardState {
         }
         self.skip_perms = entry.skip_permissions;
         self.codex_fast_mode = entry.codex_fast_mode;
+        self.runtime_target = entry.runtime_target;
+        self.docker_service = entry.docker_service.clone();
         if !self.agent_is_codex() {
             self.codex_fast_mode = false;
         }
@@ -588,6 +622,31 @@ impl WizardState {
         }
     }
 
+    fn has_docker_workflow(&self) -> bool {
+        self.docker_context.is_some()
+    }
+
+    fn docker_service_prompt_required(&self) -> bool {
+        self.docker_context
+            .as_ref()
+            .is_some_and(|context| context.services.len() > 1)
+    }
+
+    fn docker_service_options(&self) -> Vec<String> {
+        self.docker_context
+            .as_ref()
+            .map(|context| context.services.clone())
+            .unwrap_or_default()
+    }
+
+    fn preferred_docker_service(&self) -> Option<&str> {
+        self.docker_service.as_deref().or_else(|| {
+            self.docker_context
+                .as_ref()
+                .and_then(|context| context.suggested_service.as_deref())
+        })
+    }
+
     /// Number of selectable options for the current step.
     pub fn option_count(&self) -> usize {
         match self.step {
@@ -598,6 +657,8 @@ impl WizardState {
             WizardStep::ReasoningLevel => 4, // low, medium, high, xhigh
             WizardStep::VersionSelect => self.version_options.len().max(1),
             WizardStep::ExecutionMode => 4, // normal, continue, resume, convert
+            WizardStep::RuntimeTarget => 2, // host, docker
+            WizardStep::DockerServiceSelect => self.docker_service_options().len().max(1),
             WizardStep::ConvertAgentSelect => self.convert_source_agents.len().max(1),
             WizardStep::ConvertSessionSelect => self.convert_sessions.len().max(1),
             WizardStep::BranchTypeSelect => 4, // feature, bugfix, hotfix, release
@@ -623,6 +684,7 @@ impl WizardState {
             WizardStep::BranchAction => vec!["Use selected branch", "Create new from selected"],
             WizardStep::ReasoningLevel => vec!["Low", "Medium", "High", "XHigh"],
             WizardStep::ExecutionMode => vec!["Normal", "Continue", "Resume", "Convert"],
+            WizardStep::RuntimeTarget => vec!["Host", "Docker"],
             WizardStep::BranchTypeSelect => vec!["feature/", "bugfix/", "hotfix/", "release/"],
             WizardStep::SkipPermissions => vec!["Yes", "No"],
             WizardStep::CodexFastMode => vec!["On", "Off"],
@@ -685,6 +747,14 @@ impl WizardState {
                     vec!["(no sessions available)".to_string()]
                 } else {
                     self.convert_sessions.clone()
+                }
+            }
+            WizardStep::DockerServiceSelect => {
+                let options = self.docker_service_options();
+                if options.is_empty() {
+                    vec!["(no docker services detected)".to_string()]
+                } else {
+                    options
                 }
             }
             WizardStep::AIBranchSuggest => {
@@ -906,6 +976,18 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
 
 fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
     match step {
+        WizardStep::RuntimeTarget => {
+            usize::from(state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
+        }
+        WizardStep::DockerServiceSelect => state
+            .preferred_docker_service()
+            .and_then(|service| {
+                state
+                    .docker_service_options()
+                    .iter()
+                    .position(|option| option == service)
+            })
+            .unwrap_or(0),
         WizardStep::SkipPermissions => usize::from(!state.skip_perms),
         WizardStep::CodexFastMode => usize::from(!state.codex_fast_mode),
         _ => 0,
@@ -975,6 +1057,23 @@ fn apply_selection(state: &mut WizardState) {
         WizardStep::ExecutionMode => {
             if let Some(opt) = options.get(state.selected) {
                 state.mode = opt.to_lowercase();
+            }
+        }
+        WizardStep::RuntimeTarget => {
+            state.runtime_target = if state.selected == 0 {
+                gwt_agent::LaunchRuntimeTarget::Host
+            } else {
+                gwt_agent::LaunchRuntimeTarget::Docker
+            };
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                state.docker_service = None;
+            } else if state.docker_service.is_none() {
+                state.docker_service = state.preferred_docker_service().map(str::to_string);
+            }
+        }
+        WizardStep::DockerServiceSelect => {
+            if let Some(opt) = options.get(state.selected) {
+                state.docker_service = Some(opt.clone());
             }
         }
         WizardStep::ConvertAgentSelect => {}
@@ -1211,6 +1310,11 @@ const EXECUTION_MODE_DISPLAY_OPTIONS: [(&str, &str); 4] = [
     ("Convert", "Convert session from another agent"),
 ];
 
+const RUNTIME_TARGET_DISPLAY_OPTIONS: [(&str, &str); 2] = [
+    ("Host", "Run directly on the host"),
+    ("Docker", "Run inside the detected container"),
+];
+
 const SKIP_PERMISSION_DISPLAY_OPTIONS: [(&str, &str); 2] = [
     ("Yes", "Skip permission prompts"),
     ("No", "Show permission prompts"),
@@ -1380,6 +1484,20 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
         .map(|(idx, (label, description))| {
             let marker = if idx == state.selected { "> " } else { "  " };
             let text = format_fixed_width_line(marker, label, description, 12, available_width);
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
+        })
+        .collect();
+    render_list_content(frame, area, items);
+}
+
+fn render_runtime_target_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width as usize;
+    let items = RUNTIME_TARGET_DISPLAY_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text = format_fixed_width_line(marker, label, description, 8, available_width);
             ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
@@ -1842,6 +1960,7 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::ReasoningLevel => render_reasoning_level_step(state, frame, area),
         WizardStep::VersionSelect => render_version_step(state, frame, area),
         WizardStep::ExecutionMode => render_execution_mode_step(state, frame, area),
+        WizardStep::RuntimeTarget => render_runtime_target_step(state, frame, area),
         WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, area),
         WizardStep::CodexFastMode => render_codex_fast_mode_step(state, frame, area),
         _ => {
@@ -2022,6 +2141,8 @@ mod tests {
                 resume_session_id: Some("sess-12345678".to_string()),
                 skip_permissions: true,
                 codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -2032,6 +2153,8 @@ mod tests {
                 resume_session_id: None,
                 skip_permissions: false,
                 codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
             },
         ]
     }
@@ -2149,6 +2272,33 @@ mod tests {
             Some(WizardStep::CodexFastMode)
         );
         assert_eq!(next_step(WizardStep::CodexFastMode, &state), None);
+    }
+
+    #[test]
+    fn step_transitions_docker_enabled_inserts_runtime_and_service_steps() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string(), "db".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+
+        assert_eq!(
+            next_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::RuntimeTarget)
+        );
+
+        state.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        assert_eq!(
+            next_step(WizardStep::RuntimeTarget, &state),
+            Some(WizardStep::DockerServiceSelect)
+        );
+
+        state.docker_service = Some("web".to_string());
+        assert_eq!(
+            next_step(WizardStep::DockerServiceSelect, &state),
+            Some(WizardStep::SkipPermissions)
+        );
     }
 
     #[test]
@@ -2641,6 +2791,8 @@ mod tests {
             resume_session_id: Some("sess-claude".to_string()),
             skip_permissions: true,
             codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
         }];
 
         update(&mut state, WizardMessage::Select);
@@ -2844,6 +2996,8 @@ mod tests {
             resume_session_id: Some("sess-12345678".to_string()),
             skip_permissions: true,
             codex_fast_mode: true,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
         }];
 
         let text = render_text(&state, 100, 24);
@@ -2919,6 +3073,8 @@ mod tests {
                 resume_session_id: Some("sess-12345678".to_string()),
                 skip_permissions: true,
                 codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -2929,6 +3085,8 @@ mod tests {
                 resume_session_id: Some("sess-abcdefgh".to_string()),
                 skip_permissions: false,
                 codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
             },
         ];
         state.selected = 0;

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::{AgentId, AgentStatus};
+use crate::types::{AgentId, AgentStatus, LaunchRuntimeTarget};
 
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
@@ -36,6 +36,10 @@ pub struct Session {
     pub skip_permissions: bool,
     #[serde(default)]
     pub codex_fast_mode: bool,
+    #[serde(default)]
+    pub runtime_target: LaunchRuntimeTarget,
+    #[serde(default)]
+    pub docker_service: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -73,6 +77,8 @@ impl Session {
             reasoning_level: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -257,6 +263,8 @@ mod tests {
         assert!(session.reasoning_level.is_none());
         assert!(!session.skip_permissions);
         assert!(!session.codex_fast_mode);
+        assert_eq!(session.runtime_target, LaunchRuntimeTarget::Host);
+        assert!(session.docker_service.is_none());
     }
 
     #[test]
@@ -301,6 +309,8 @@ mod tests {
         session.reasoning_level = Some("high".into());
         session.skip_permissions = true;
         session.codex_fast_mode = true;
+        session.runtime_target = LaunchRuntimeTarget::Docker;
+        session.docker_service = Some("web".into());
 
         session.save(dir.path()).unwrap();
 
@@ -317,6 +327,8 @@ mod tests {
         assert_eq!(loaded.reasoning_level, Some("high".into()));
         assert!(loaded.skip_permissions);
         assert!(loaded.codex_fast_mode);
+        assert_eq!(loaded.runtime_target, LaunchRuntimeTarget::Docker);
+        assert_eq!(loaded.docker_service, Some("web".into()));
         assert_eq!(loaded.display_name, "Gemini CLI");
     }
 
