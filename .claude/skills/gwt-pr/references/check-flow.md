@@ -13,41 +13,15 @@
 3. Fetch latest remote refs: `git fetch origin`
 4. Resolve the current branch PR with `gwt pr current`.
    - Use `gwt pr view <number>` for detailed inspection when a PR exists.
+   - Treat the literal line `no current pull request` as the canonical no-PR sentinel.
+   - If the PR reports `mergeable: CONFLICTING`, `DIRTY`, or `BEHIND`, route to `FIX` immediately.
    - Treat any lower-level GitHub REST lookup as internal transport, not the normal path.
 5. Classify:
    - No PR found --> `NO_PR` + `CREATE_PR`
-   - Any OPEN PR where `merged_at == null` --> `UNMERGED_PR_EXISTS` + `PUSH_ONLY`
+   - Any OPEN PR where `merged_at == null` and merge state is clean --> `UNMERGED_PR_EXISTS` + `PUSH_ONLY`
+   - Any OPEN PR where `merged_at == null` and `mergeable: CONFLICTING|DIRTY|BEHIND` --> `OPEN_PR_BLOCKED` + `FIX`
    - Only CLOSED and unmerged PRs exist --> `CLOSED_UNMERGED_ONLY` + `CREATE_PR`
    - At least one merged, no open unmerged --> post-merge commit check
-
-## Post-Merge Commit Check (critical)
-
-When all PRs for the head are merged:
-
-1. Select latest merged PR by `merged_at`.
-2. Get `merge_commit_sha` from REST payload.
-3. Verify merge commit ancestry: `git merge-base --is-ancestor <merge_commit> HEAD`
-4. **If ancestor of HEAD**, count commits after merge:
-   - `git rev-list --count <merge_commit>..HEAD`
-5. **If count > 0**, verify diff against base:
-   - `git diff --quiet origin/<base>...HEAD --`
-   - Exit 1 (diff exists) --> `ALL_MERGED_WITH_NEW_COMMITS` + `CREATE_PR`
-   - Exit 0 (no diff) --> `ALL_MERGED_NO_PR_DIFF` + `NO_ACTION`
-   - Other --> `CHECK_FAILED` + `MANUAL_CHECK`
-6. **If count == 0** --> `ALL_MERGED_NO_PR_DIFF` + `NO_ACTION`
-7. **Fallback** when merge commit SHA missing or not ancestor:
-   - First: `git rev-list --count origin/<head>..HEAD`
-   - If > 0 and diff exists --> `CREATE_PR`
-   - If upstream count is 0, still check: `git rev-list --count origin/<base>..HEAD`
-   - Base count > 0 and diff exists --> `CREATE_PR` (fallback)
-   - Base count > 0, no diff --> `NO_ACTION`
-   - Base count == 0 --> `NO_ACTION`
-   - Both fail --> `CHECK_FAILED` + `MANUAL_CHECK`
-
-### Why this matters
-
-- **Scenario A**: PR merged --> user pushes local changes --> changes NOT in merged PR. Without this check, changes would be lost.
-- **Scenario B**: PR merged --> user says "create PR" without new changes --> would create empty/duplicate PR.
 
 ## Output Contract
 
@@ -59,9 +33,7 @@ Human-readable summary by default. JSON only if explicitly requested.
 |--------|--------|--------|
 | `NO_PR` | `>>` | `CREATE PR` |
 | `UNMERGED_PR_EXISTS` | `>` | `PUSH ONLY` |
-| `CLOSED_UNMERGED_ONLY` | `>>` | `CREATE PR` |
-| `ALL_MERGED_WITH_NEW_COMMITS` | `>>` | `CREATE PR` |
-| `ALL_MERGED_NO_PR_DIFF` | `--` | `NO ACTION` |
+| `OPEN_PR_BLOCKED` | `~` | `FIX` |
 | `CHECK_FAILED` | `!!` | `MANUAL CHECK` |
 
 ### Per-status format
@@ -76,22 +48,19 @@ Human-readable summary by default. JSON only if explicitly requested.
      PR: #<number> <url>
   ```
 
+- **OPEN_PR_BLOCKED:**
+
+  ```text
+  ~ FIX -- PR #<number> is blocked by `mergeable: CONFLICTING|DIRTY|BEHIND`.
+     PR: #<number> <url>
+  ```
+
 - **CLOSED_UNMERGED_ONLY:**
 
   ```text
   >> CREATE PR -- No open PR exists for <head> -> <base>; only closed unmerged PRs were found.
      Last closed PR: #<number> <url>
   ```
-
-- **ALL_MERGED_WITH_NEW_COMMITS:**
-
-  ```text
-  >> CREATE PR -- <N> new commit(s) after last merge (#<pr_number>).
-     head: <head> -> base: <base>
-  ```
-
-- **ALL_MERGED_NO_PR_DIFF:**
-  `-- NO ACTION -- All PRs merged, no PR-worthy diff on <head>.`
 
 - **CHECK_FAILED:**
 
@@ -120,13 +89,16 @@ git fetch origin
 
 commit_count="$(git rev-list --count "origin/$base..HEAD")"
 pr_summary="$(gwt pr current 2>/tmp/gwt-pr-current.err || true)"
+merge_state="$(printf '%s\n' "$pr_summary" | sed -n 's/^mergeable: //p' | head -n1)"
 
-if [ -z "$pr_summary" ]; then
+if printf '%s\n' "$pr_summary" | grep -qx 'no current pull request'; then
   status="NO_PR"; action="CREATE_PR"
+elif printf '%s\n' "$merge_state" | grep -Eq '^(CONFLICTING|DIRTY|BEHIND)$'; then
+  status="OPEN_PR_BLOCKED"; action="FIX"
 elif printf '%s\n' "$pr_summary" | grep -q '\[OPEN\]'; then
   status="UNMERGED_PR_EXISTS"; action="PUSH_ONLY"
 else
-  status="CHECK_FAILED"; action="MANUAL_CHECK"
+  status="NO_ACTION"; action="NO_ACTION"
 fi
 
 # For checks/reviews/threads, continue with:

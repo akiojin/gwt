@@ -31,7 +31,6 @@
 ### Checks Mode (`--mode checks`)
 
 - Inspect failing CI checks through `gwt pr checks <number>`.
-- Add `--required-only` to limit output when available.
 - Fetch GitHub Actions logs through `gwt actions logs --run <id>` or `gwt actions job-logs --job <id>` and extract failure snippets.
 - For external checks (Buildkite, etc.), report URL only.
 

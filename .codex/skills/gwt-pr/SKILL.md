@@ -22,8 +22,9 @@ On invocation, run Shared Preflight, then route:
    - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
 3. **Auto-detect** (no explicit mode) — use the commit-count-first
    decision from Preflight Step 7:
+   - open PR + `mergeable: CONFLICTING|DIRTY|BEHIND` → **fix**
    - `N > 0` + no open PR → **create**
-   - `N > 0` + open PR → **create** (push-only + post-push fix)
+   - `N > 0` + open PR + clean merge state → **create** (push-only + post-push fix)
    - `N = 0` + open PR → **fix** (check CI / reviews / conflicts)
    - `N = 0` + no open PR → report **NO ACTION**
 
@@ -52,9 +53,11 @@ impossible.**
    > cause of the MERGED-state false NO ACTION bug.
 6. **PR lookup + open-PR check:**
    - Prefer `gwt pr current` as the normal read path for the current branch.
+   - Treat the literal line `no current pull request` as the canonical no-PR sentinel.
    - If create mode needs lower-level repo/head lookup, treat it as internal transport managed by the toolchain rather than part of the agent-facing workflow.
    - `has_open_pr` = any entry with `state == "open" && merged_at == null`
-7. **Route using the 2×2 matrix:**
+   - When an open PR exists, inspect `mergeable:`. `CONFLICTING`, `DIRTY`, and `BEHIND` are blocking merge states and immediately upgrade routing to **fix**.
+7. **Route using the 2×2 matrix, with merge-state override:**
 
    | Commits (N) | Open PR? | Action |
    |---|---|---|
@@ -63,9 +66,9 @@ impossible.**
    | N = 0 | Yes | **FIX** (CI / reviews / conflicts) |
    | N = 0 | No | **NO ACTION** |
 
-   This matrix is exhaustive. PR state (MERGED / CLOSED) is not
-   consulted — it is irrelevant when the commit count and open-PR
-   presence already determine the action.
+   If the open PR reports `mergeable: CONFLICTING`, `DIRTY`, or `BEHIND`,
+   use **FIX** immediately instead of push-only/create. Outside that
+   override, PR state (MERGED / CLOSED) is not consulted.
 
 ## Mode: Create
 
@@ -76,9 +79,10 @@ Detailed logic in `references/create-flow.md`.
 Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 1. **Do not create or switch branches.** Always use the current branch as head.
-2. **If open PR exists** → push only, return existing PR URL, enter Fix mode.
-3. **If no open PR** → create new PR.
-4. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+2. **If open PR exists and is `CONFLICTING` / `DIRTY` / `BEHIND`** → enter Fix mode before any push-only path.
+3. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode.
+4. **If no open PR** → create new PR.
+5. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
 
 ### PR Title Rules
 
@@ -139,7 +143,8 @@ Per-status templates:
 Templates map directly from the Preflight 2×2 matrix:
 
 - **N > 0, no open PR:** `>> CREATE PR -- <N> new commit(s) not covered by any PR.`
-- **N > 0, open PR:** `> PUSH ONLY -- Unmerged PR #<number> open for <head>.` + PR URL
+- **N > 0, open PR, clean merge state:** `> PUSH ONLY -- Unmerged PR #<number> open for <head>.` + PR URL
+- **Open PR with blocking merge state:** `~ FIX -- PR #<number> is <mergeable>; resolve base sync/conflicts before push-only.`
 - **N = 0, open PR:** `~ FIX -- PR #<number> open, checking CI/reviews/conflicts.`
 - **N = 0, no open PR:** `-- NO ACTION -- No commits ahead of <base>, no open PR.`
 - **Fallback:** `!! MANUAL CHECK -- Could not determine commit count.` + reason
@@ -153,7 +158,8 @@ computed in the Shared Preflight and is the primary routing signal.
 Check mode simply reports it:
 
 - `N > 0` + no open PR → `>> CREATE PR -- <N> new commit(s) not in any PR.`
-- `N > 0` + open PR → `> PUSH ONLY -- Unmerged PR open.` + PR URL
+- `N > 0` + open PR + clean merge state → `> PUSH ONLY -- Unmerged PR open.` + PR URL
+- open PR + `mergeable: CONFLICTING|DIRTY|BEHIND` → `~ FIX -- PR is blocked by merge state.`
 - `N = 0` + open PR → report CI / review / conflict status
 - `N = 0` + no open PR → `-- NO ACTION`
 

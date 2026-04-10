@@ -700,6 +700,15 @@ mod tests {
                 "expected canonical gwt pr review-threads guidance in {relative}"
             );
             assert!(
+                pr_skill.contains("no current pull request"),
+                "expected canonical no-PR sentinel guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("mergeable: CONFLICTING")
+                    || pr_skill.contains("`mergeable: CONFLICTING`"),
+                "expected conflict-first mergeable guidance in {relative}"
+            );
+            assert!(
                 pr_skill.contains("gwt actions logs"),
                 "expected canonical gwt actions log guidance in {relative}"
             );
@@ -727,6 +736,19 @@ mod tests {
                 "expected canonical gwt pr current guidance in {relative}"
             );
             assert!(
+                check_flow.contains("no current pull request"),
+                "expected canonical no-PR sentinel guidance in {relative}"
+            );
+            assert!(
+                check_flow.contains("mergeable: CONFLICTING")
+                    || check_flow.contains("`mergeable: CONFLICTING`"),
+                "expected conflict-first mergeable guidance in {relative}"
+            );
+            assert!(
+                !check_flow.contains("[ -z \"$pr_summary\" ]"),
+                "unexpected empty-string no-PR detection in {relative}"
+            );
+            assert!(
                 !check_flow.contains(
                     "gh api repos/<owner>/<repo>/pulls?state=all&head=<owner>:<head>&per_page=100"
                 ),
@@ -744,6 +766,19 @@ mod tests {
             assert!(
                 create_flow.contains("Update: `gwt pr edit"),
                 "expected canonical gwt pr edit guidance in {relative}"
+            );
+            assert!(
+                create_flow.contains("no current pull request"),
+                "expected canonical no-PR sentinel guidance in {relative}"
+            );
+            assert!(
+                create_flow.contains("`CONFLICTING` / `DIRTY` / `BEHIND`")
+                    || create_flow.contains("CONFLICTING` / `DIRTY` / `BEHIND"),
+                "expected conflict-first routing guidance in {relative}"
+            );
+            assert!(
+                !create_flow.contains("[ -z \"$pr_summary\" ]"),
+                "unexpected empty-string no-PR detection in {relative}"
             );
             assert!(
                 !create_flow.contains("Create: `gh pr create"),
@@ -765,6 +800,10 @@ mod tests {
             assert!(
                 fix_flow.contains("`gwt pr comment"),
                 "expected canonical gwt pr comment guidance in {relative}"
+            );
+            assert!(
+                !fix_flow.contains("--required-only"),
+                "unexpected nonexistent gwt pr checks --required-only guidance in {relative}"
             );
             assert!(
                 !fix_flow.contains("Fallback: `gh pr comment`."),
@@ -798,6 +837,10 @@ mod tests {
         assert!(
             pr_command.contains("`gwt pr current` should succeed"),
             "expected gwt-pr command wrapper to point to canonical gwt auth check"
+        );
+        assert!(
+            pr_command.contains("conflicting") || pr_command.contains("behind"),
+            "expected gwt-pr command wrapper to mention conflict/behind fix routing"
         );
 
         for relative in [
