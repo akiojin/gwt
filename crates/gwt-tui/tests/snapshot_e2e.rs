@@ -4,10 +4,12 @@
 //! Each test renders a screen to a fixed-size buffer and compares
 //! against a stored snapshot (.snap file).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use gwt_config::Settings;
 use gwt_core::logging::LogLevel as Severity;
 use gwt_tui::app;
 use gwt_tui::input::keybind::KeybindRegistry;
@@ -47,6 +49,37 @@ impl Drop for HomeEnvGuard {
             std::env::set_var("HOME", previous);
         } else {
             std::env::remove_var("HOME");
+        }
+    }
+}
+
+struct TestEnvGuard {
+    previous: Vec<(String, Option<std::ffi::OsString>)>,
+}
+
+impl TestEnvGuard {
+    fn new<const N: usize>(entries: [(&str, &str); N]) -> Self {
+        let previous = entries
+            .iter()
+            .map(|(key, value)| {
+                let key = (*key).to_string();
+                let previous = std::env::var_os(&key);
+                std::env::set_var(&key, value);
+                (key, previous)
+            })
+            .collect();
+        Self { previous }
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        for (key, previous) in self.previous.drain(..) {
+            if let Some(previous) = previous {
+                std::env::set_var(&key, previous);
+            } else {
+                std::env::remove_var(&key);
+            }
         }
     }
 }
@@ -358,7 +391,42 @@ fn snapshot_pr_dashboard_tab() {
 
 #[test]
 fn snapshot_profiles_tab() {
-    let _home = HomeEnvGuard::new();
+    let home = HomeEnvGuard::new();
+    let config_dir = home._home.path().join(".gwt");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let mut settings = Settings::default();
+    let default = settings
+        .profiles
+        .active_profile_mut()
+        .expect("default profile exists");
+    default.env_vars = HashMap::from([
+        ("A10_OVERRIDE".to_string(), "override-a".to_string()),
+        ("A11_OVERRIDE".to_string(), "override-b".to_string()),
+        ("A12_OVERRIDE".to_string(), "override-c".to_string()),
+        ("A13_OVERRIDE".to_string(), "override-d".to_string()),
+    ]);
+    default.disabled_env = vec![
+        "A20_DISABLED".to_string(),
+        "A21_DISABLED".to_string(),
+        "A22_DISABLED".to_string(),
+        "A23_DISABLED".to_string(),
+    ];
+    settings
+        .save(&config_dir.join("config.toml"))
+        .expect("save settings");
+
+    let _env = TestEnvGuard::new([
+        ("A00_BASE", "/usr/bin"),
+        ("A01_BASE", "/bin"),
+        ("A02_BASE", "/opt/bin"),
+        ("A03_BASE", "/usr/local/bin"),
+        ("A20_DISABLED", "hidden-a"),
+        ("A21_DISABLED", "hidden-b"),
+        ("A22_DISABLED", "hidden-c"),
+        ("A23_DISABLED", "hidden-d"),
+    ]);
+
     let mut model = test_model();
     app::update(
         &mut model,

@@ -16,16 +16,10 @@ pub(crate) struct LayoutAreas {
     pub detail: Rect,
     pub summary: Rect,
     pub env: Rect,
-    pub disabled: Rect,
-    pub preview: Rect,
     pub list_hint: Rect,
     pub list_content: Rect,
     pub env_hint: Rect,
     pub env_content: Rect,
-    pub disabled_hint: Rect,
-    pub disabled_content: Rect,
-    pub preview_hint: Rect,
-    pub preview_content: Rect,
 }
 
 fn bordered_inner(area: Rect) -> Rect {
@@ -48,33 +42,20 @@ pub(crate) fn layout_areas(area: Rect) -> LayoutAreas {
         .split(area);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7),
-            Constraint::Min(5),
-            Constraint::Length(5),
-            Constraint::Min(5),
-        ])
+        .constraints([Constraint::Length(7), Constraint::Min(8)])
         .split(chunks[1]);
     let (list_hint, list_content) = split_with_hint(chunks[0]);
     let (env_hint, env_content) = split_with_hint(sections[1]);
-    let (disabled_hint, disabled_content) = split_with_hint(sections[2]);
-    let (preview_hint, preview_content) = split_with_hint(sections[3]);
 
     LayoutAreas {
         list: chunks[0],
         detail: chunks[1],
         summary: sections[0],
         env: sections[1],
-        disabled: sections[2],
-        preview: sections[3],
         list_hint,
         list_content,
         env_hint,
         env_content,
-        disabled_hint,
-        disabled_content,
-        preview_hint,
-        preview_content,
     }
 }
 
@@ -85,32 +66,40 @@ pub struct EnvVarItem {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileEnvRowKind {
+    Base,
+    Override,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileEnvRow {
+    pub key: String,
+    pub value: Option<String>,
+    pub kind: ProfileEnvRowKind,
+}
+
 /// Focus target inside the Profiles tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProfilesFocus {
     #[default]
     ProfileList,
-    EnvVars,
-    DisabledEnv,
-    Preview,
+    Environment,
 }
 
 impl ProfilesFocus {
     fn next(self) -> Self {
         match self {
-            Self::ProfileList => Self::EnvVars,
-            Self::EnvVars => Self::DisabledEnv,
-            Self::DisabledEnv => Self::Preview,
-            Self::Preview => Self::ProfileList,
+            Self::ProfileList => Self::Environment,
+            Self::Environment => Self::ProfileList,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::ProfileList => Self::Preview,
-            Self::EnvVars => Self::ProfileList,
-            Self::DisabledEnv => Self::EnvVars,
-            Self::Preview => Self::DisabledEnv,
+            Self::ProfileList => Self::Environment,
+            Self::Environment => Self::ProfileList,
         }
     }
 }
@@ -163,6 +152,7 @@ pub struct ProfileItem {
     pub description: String,
     pub env_vars: Vec<EnvVarItem>,
     pub disabled_env: Vec<String>,
+    pub env_rows: Vec<ProfileEnvRow>,
     pub merged_preview: Vec<EnvVarItem>,
     pub deletable: bool,
 }
@@ -192,15 +182,25 @@ impl ProfilesState {
 
     /// Get the currently selected environment variable, if any.
     pub fn selected_env_var(&self) -> Option<&EnvVarItem> {
+        let row = self.selected_env_row()?;
+        if row.kind != ProfileEnvRowKind::Override {
+            return None;
+        }
         self.selected_profile()
-            .and_then(|profile| profile.env_vars.get(self.env_selected))
+            .and_then(|profile| profile.env_vars.iter().find(|env| env.key == row.key))
+    }
+
+    /// Get the currently selected environment row, if any.
+    pub fn selected_env_row(&self) -> Option<&ProfileEnvRow> {
+        self.selected_profile()
+            .and_then(|profile| profile.env_rows.get(self.env_selected))
     }
 
     /// Get the currently selected disabled OS environment variable, if any.
     pub fn selected_disabled_env(&self) -> Option<&str> {
-        self.selected_profile()
-            .and_then(|profile| profile.disabled_env.get(self.disabled_selected))
-            .map(String::as_str)
+        self.selected_env_row()
+            .filter(|row| row.kind == ProfileEnvRowKind::Disabled)
+            .map(|row| row.key.as_str())
     }
 
     /// Clamp all selection indices to the currently available data.
@@ -208,14 +208,10 @@ impl ProfilesState {
         super::clamp_index(&mut self.selected, self.profiles.len());
         let env_len = self
             .selected_profile()
-            .map(|profile| profile.env_vars.len())
-            .unwrap_or(0);
-        let disabled_len = self
-            .selected_profile()
-            .map(|profile| profile.disabled_env.len())
+            .map(|profile| profile.env_rows.len())
             .unwrap_or(0);
         super::clamp_index(&mut self.env_selected, env_len);
-        super::clamp_index(&mut self.disabled_selected, disabled_len);
+        self.disabled_selected = self.env_selected;
     }
 
     fn clear_form(&mut self) {
@@ -262,21 +258,13 @@ pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
                     super::move_up(&mut state.selected, state.profiles.len());
                     state.clamp_selection();
                 }
-                ProfilesFocus::EnvVars => {
+                ProfilesFocus::Environment => {
                     let len = state
                         .selected_profile()
-                        .map(|profile| profile.env_vars.len())
+                        .map(|profile| profile.env_rows.len())
                         .unwrap_or(0);
                     super::move_up(&mut state.env_selected, len);
                 }
-                ProfilesFocus::DisabledEnv => {
-                    let len = state
-                        .selected_profile()
-                        .map(|profile| profile.disabled_env.len())
-                        .unwrap_or(0);
-                    super::move_up(&mut state.disabled_selected, len);
-                }
-                ProfilesFocus::Preview => {}
             }
         }
         ProfilesMessage::MoveDown => {
@@ -288,21 +276,13 @@ pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
                     super::move_down(&mut state.selected, state.profiles.len());
                     state.clamp_selection();
                 }
-                ProfilesFocus::EnvVars => {
+                ProfilesFocus::Environment => {
                     let len = state
                         .selected_profile()
-                        .map(|profile| profile.env_vars.len())
+                        .map(|profile| profile.env_rows.len())
                         .unwrap_or(0);
                     super::move_down(&mut state.env_selected, len);
                 }
-                ProfilesFocus::DisabledEnv => {
-                    let len = state
-                        .selected_profile()
-                        .map(|profile| profile.disabled_env.len())
-                        .unwrap_or(0);
-                    super::move_down(&mut state.disabled_selected, len);
-                }
-                ProfilesFocus::Preview => {}
             }
         }
         ProfilesMessage::FocusLeft => {
@@ -323,9 +303,7 @@ pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
             state.clear_form();
             state.mode = match state.focus {
                 ProfilesFocus::ProfileList => ProfileMode::CreateProfile,
-                ProfilesFocus::EnvVars => ProfileMode::CreateEnvVar,
-                ProfilesFocus::DisabledEnv => ProfileMode::CreateDisabledEnv,
-                ProfilesFocus::Preview => ProfileMode::List,
+                ProfilesFocus::Environment => ProfileMode::CreateEnvVar,
             };
         }
         ProfilesMessage::StartEdit => {
@@ -341,22 +319,18 @@ pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
                         state.mode = ProfileMode::EditProfile;
                     }
                 }
-                ProfilesFocus::EnvVars => {
-                    if let Some(env) = state.selected_env_var().cloned() {
-                        state.input_key = env.key.clone();
-                        state.input_value = env.value.clone();
+                ProfilesFocus::Environment => {
+                    if let Some(row) = state.selected_env_row().cloned() {
+                        state.input_key = row.key.clone();
+                        state.input_value = row.value.unwrap_or_default();
                         state.active_field = 0;
-                        state.mode = ProfileMode::EditEnvVar;
+                        state.mode = match row.kind {
+                            ProfileEnvRowKind::Base => ProfileMode::CreateEnvVar,
+                            ProfileEnvRowKind::Override => ProfileMode::EditEnvVar,
+                            ProfileEnvRowKind::Disabled => ProfileMode::EditDisabledEnv,
+                        };
                     }
                 }
-                ProfilesFocus::DisabledEnv => {
-                    if let Some(key) = state.selected_disabled_env() {
-                        state.input_key = key.to_string();
-                        state.active_field = 0;
-                        state.mode = ProfileMode::EditDisabledEnv;
-                    }
-                }
-                ProfilesFocus::Preview => {}
             }
         }
         ProfilesMessage::StartDelete => {
@@ -367,10 +341,10 @@ pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
                 ProfilesFocus::ProfileList if state.selected_profile().is_some() => {
                     ProfileMode::ConfirmDeleteProfile
                 }
-                ProfilesFocus::EnvVars if state.selected_env_var().is_some() => {
+                ProfilesFocus::Environment if state.selected_env_var().is_some() => {
                     ProfileMode::ConfirmDeleteEnvVar
                 }
-                ProfilesFocus::DisabledEnv if state.selected_disabled_env().is_some() => {
+                ProfilesFocus::Environment if state.selected_disabled_env().is_some() => {
                     ProfileMode::ConfirmDeleteDisabledEnv
                 }
                 _ => ProfileMode::List,
@@ -550,29 +524,13 @@ fn render_detail(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
     };
 
     render_summary_block(state, profile, frame, areas.summary);
-    render_env_vars_block(
+    render_environment_block(
         state,
         profile,
         frame,
         areas.env,
         areas.env_hint,
         areas.env_content,
-    );
-    render_disabled_env_block(
-        state,
-        profile,
-        frame,
-        areas.disabled,
-        areas.disabled_hint,
-        areas.disabled_content,
-    );
-    render_preview_block(
-        state,
-        profile,
-        frame,
-        areas.preview,
-        areas.preview_hint,
-        areas.preview_content,
     );
 }
 
@@ -642,7 +600,7 @@ fn render_summary_block(
     );
 }
 
-fn render_env_vars_block(
+fn render_environment_block(
     state: &ProfilesState,
     profile: &ProfileItem,
     frame: &mut Frame,
@@ -650,7 +608,7 @@ fn render_env_vars_block(
     hint_area: Rect,
     content_area: Rect,
 ) {
-    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::EnvVars);
+    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::Environment);
     frame.render_widget(
         Block::default()
             .title("Environment")
@@ -665,25 +623,26 @@ fn render_env_vars_block(
             .wrap(Wrap { trim: false }),
         hint_area,
     );
-    let items: Vec<ListItem> = if profile.env_vars.is_empty() {
+    let items: Vec<ListItem> = if profile.env_rows.is_empty() {
         vec![ListItem::new(Line::from(vec![Span::styled(
-            "No profile-owned environment variables. Press n to add one.".to_string(),
+            "No environment rows. Press n to add one.".to_string(),
             theme::style::muted_text(),
         )]))]
     } else {
         profile
-            .env_vars
+            .env_rows
             .iter()
             .enumerate()
             .map(|(idx, env)| {
-                let style = if state.focus == ProfilesFocus::EnvVars && idx == state.env_selected {
-                    theme::style::selected_item()
-                } else {
-                    theme::style::text()
-                };
+                let is_selected =
+                    state.focus == ProfilesFocus::Environment && idx == state.env_selected;
                 ListItem::new(Line::from(vec![Span::styled(
-                    format!("{}={}", env.key, env.value),
-                    style,
+                    format!(
+                        "{}={}",
+                        env.key,
+                        env.value.as_deref().unwrap_or("<missing>")
+                    ),
+                    env_row_style(env, is_selected),
                 )]))
             })
             .collect()
@@ -691,106 +650,24 @@ fn render_env_vars_block(
 
     let list = List::new(items);
     let mut list_state = ListState::default();
-    if !profile.env_vars.is_empty() {
+    if !profile.env_rows.is_empty() {
         list_state.select(Some(state.env_selected));
     }
     frame.render_stateful_widget(list, content_area, &mut list_state);
 }
 
-fn render_disabled_env_block(
-    state: &ProfilesState,
-    profile: &ProfileItem,
-    frame: &mut Frame,
-    area: Rect,
-    hint_area: Rect,
-    content_area: Rect,
-) {
-    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::DisabledEnv);
-    frame.render_widget(
-        Block::default()
-            .title("Disabled OS Environment")
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type),
-        area,
-    );
-    frame.render_widget(
-        Paragraph::new(disabled_env_hint_text(area.width))
-            .style(theme::style::muted_text())
-            .wrap(Wrap { trim: false }),
-        hint_area,
-    );
-    let items: Vec<ListItem> = if profile.disabled_env.is_empty() {
-        vec![ListItem::new(Line::from(vec![Span::styled(
-            "No blocked OS environment variables. Press n to add one.".to_string(),
-            theme::style::muted_text(),
-        )]))]
-    } else {
-        profile
-            .disabled_env
-            .iter()
-            .enumerate()
-            .map(|(idx, key)| {
-                let style = if state.focus == ProfilesFocus::DisabledEnv
-                    && idx == state.disabled_selected
-                {
-                    theme::style::selected_item()
-                } else {
-                    theme::style::text()
-                };
-                ListItem::new(Line::from(vec![Span::styled(key.clone(), style)]))
-            })
-            .collect()
+fn env_row_style(row: &ProfileEnvRow, is_selected: bool) -> Style {
+    let mut style = match row.kind {
+        ProfileEnvRowKind::Base => theme::style::text(),
+        ProfileEnvRowKind::Override => theme::style::warning_text(),
+        ProfileEnvRowKind::Disabled => {
+            theme::style::muted_text().add_modifier(Modifier::CROSSED_OUT)
+        }
     };
-
-    let list = List::new(items);
-    let mut list_state = ListState::default();
-    if !profile.disabled_env.is_empty() {
-        list_state.select(Some(state.disabled_selected));
+    if is_selected {
+        style = style.bg(theme::color::SURFACE).add_modifier(Modifier::BOLD);
     }
-    frame.render_stateful_widget(list, content_area, &mut list_state);
-}
-
-fn render_preview_block(
-    state: &ProfilesState,
-    profile: &ProfileItem,
-    frame: &mut Frame,
-    area: Rect,
-    hint_area: Rect,
-    content_area: Rect,
-) {
-    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::Preview);
-    let lines: Vec<Line> = if profile.merged_preview.is_empty() {
-        vec![Line::from(vec![Span::styled(
-            "No effective environment variables.".to_string(),
-            theme::style::muted_text(),
-        )])]
-    } else {
-        profile
-            .merged_preview
-            .iter()
-            .map(|env| Line::from(format!("{}={}", env.key, env.value)))
-            .collect()
-    };
-
-    frame.render_widget(
-        Block::default()
-            .title("Effective Environment")
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type),
-        area,
-    );
-    frame.render_widget(
-        Paragraph::new(preview_hint_text(area.width))
-            .style(theme::style::muted_text())
-            .wrap(Wrap { trim: false }),
-        hint_area,
-    );
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        content_area,
-    );
+    style
 }
 
 fn list_hint_text(width: u16) -> &'static str {
@@ -803,25 +680,9 @@ fn list_hint_text(width: u16) -> &'static str {
 
 fn env_hint_text(width: u16) -> &'static str {
     if width >= 28 {
-        "Enter/e edit | n add | d delete"
+        "Enter/e edit | n add | d delete/restore"
     } else {
         "↵/e | n | d"
-    }
-}
-
-fn disabled_env_hint_text(width: u16) -> &'static str {
-    if width >= 28 {
-        "Enter/e edit | n add | d delete"
-    } else {
-        "↵/e | n | d"
-    }
-}
-
-fn preview_hint_text(width: u16) -> &'static str {
-    if width >= 28 {
-        "Read-only OS env with profile overrides"
-    } else {
-        "Read-only OS env"
     }
 }
 
@@ -995,6 +856,8 @@ fn render_confirm_delete(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
 
     fn sample_profiles() -> Vec<ProfileItem> {
@@ -1009,6 +872,23 @@ mod tests {
                     value: "xterm-256color".to_string(),
                 }],
                 disabled_env: vec!["SECRET".to_string()],
+                env_rows: vec![
+                    ProfileEnvRow {
+                        key: "PATH".to_string(),
+                        value: Some("/bin".to_string()),
+                        kind: ProfileEnvRowKind::Base,
+                    },
+                    ProfileEnvRow {
+                        key: "SECRET".to_string(),
+                        value: Some("hidden".to_string()),
+                        kind: ProfileEnvRowKind::Disabled,
+                    },
+                    ProfileEnvRow {
+                        key: "TERM".to_string(),
+                        value: Some("xterm-256color".to_string()),
+                        kind: ProfileEnvRowKind::Override,
+                    },
+                ],
                 merged_preview: vec![
                     EnvVarItem {
                         key: "PATH".to_string(),
@@ -1037,6 +917,23 @@ mod tests {
                     },
                 ],
                 disabled_env: vec![],
+                env_rows: vec![
+                    ProfileEnvRow {
+                        key: "API_URL".to_string(),
+                        value: Some("https://staging".to_string()),
+                        kind: ProfileEnvRowKind::Override,
+                    },
+                    ProfileEnvRow {
+                        key: "FEATURE_FLAG".to_string(),
+                        value: Some("1".to_string()),
+                        kind: ProfileEnvRowKind::Override,
+                    },
+                    ProfileEnvRow {
+                        key: "PATH".to_string(),
+                        value: Some("/usr/bin".to_string()),
+                        kind: ProfileEnvRowKind::Base,
+                    },
+                ],
                 merged_preview: vec![EnvVarItem {
                     key: "API_URL".to_string(),
                     value: "https://staging".to_string(),
@@ -1063,17 +960,17 @@ mod tests {
         state.profiles = sample_profiles();
 
         update(&mut state, ProfilesMessage::FocusRight);
-        assert_eq!(state.focus, ProfilesFocus::EnvVars);
+        assert_eq!(state.focus, ProfilesFocus::Environment);
         update(&mut state, ProfilesMessage::MoveDown);
-        assert_eq!(state.env_selected, 0);
+        assert_eq!(state.env_selected, 1);
 
         state.selected = 1;
         state.clamp_selection();
         update(&mut state, ProfilesMessage::MoveDown);
-        assert_eq!(state.env_selected, 1);
+        assert_eq!(state.env_selected, 2);
 
         update(&mut state, ProfilesMessage::FocusRight);
-        assert_eq!(state.focus, ProfilesFocus::DisabledEnv);
+        assert_eq!(state.focus, ProfilesFocus::ProfileList);
     }
 
     #[test]
@@ -1085,14 +982,9 @@ mod tests {
         assert_eq!(state.mode, ProfileMode::CreateProfile);
 
         state.exit_mode();
-        state.focus = ProfilesFocus::EnvVars;
+        state.focus = ProfilesFocus::Environment;
         update(&mut state, ProfilesMessage::StartCreate);
         assert_eq!(state.mode, ProfileMode::CreateEnvVar);
-
-        state.exit_mode();
-        state.focus = ProfilesFocus::DisabledEnv;
-        update(&mut state, ProfilesMessage::StartCreate);
-        assert_eq!(state.mode, ProfileMode::CreateDisabledEnv);
     }
 
     #[test]
@@ -1100,7 +992,7 @@ mod tests {
         let mut state = ProfilesState::default();
         state.profiles = sample_profiles();
         state.selected = 1;
-        state.focus = ProfilesFocus::EnvVars;
+        state.focus = ProfilesFocus::Environment;
 
         update(&mut state, ProfilesMessage::StartEdit);
         assert_eq!(state.mode, ProfileMode::EditEnvVar);
@@ -1141,8 +1033,8 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Profiles"), "{text}");
         assert!(text.contains("Environment"), "{text}");
-        assert!(text.contains("Disabled OS Environment"), "{text}");
-        assert!(text.contains("Effective Environment"), "{text}");
+        assert!(!text.contains("Disabled OS Environment"), "{text}");
+        assert!(!text.contains("Effective Environment"), "{text}");
         assert!(text.contains("locked (default)"), "{text}");
     }
 
@@ -1153,6 +1045,7 @@ mod tests {
         state.selected = 1;
         state.profiles[1].env_vars.clear();
         state.profiles[1].disabled_env.clear();
+        state.profiles[1].env_rows.clear();
         state.profiles[1].merged_preview.clear();
 
         let backend = TestBackend::new(140, 30);
@@ -1171,6 +1064,44 @@ mod tests {
             .map(|cell| cell.symbol().to_string())
             .collect::<String>();
         assert!(text.contains("Press n to add"), "{text}");
-        assert!(text.contains("Read-only OS env"), "{text}");
+        assert!(!text.contains("Read-only OS env"), "{text}");
+    }
+
+    #[test]
+    fn render_unified_environment_list_marks_override_and_disabled_rows() {
+        let mut state = ProfilesState::default();
+        state.profiles = sample_profiles();
+        state.focus = ProfilesFocus::ProfileList;
+
+        let backend = TestBackend::new(140, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let (override_x, override_y) =
+            find_text(&buf, "TERM=xterm-256color").expect("override row");
+        let override_cell = &buf[(override_x, override_y)];
+        assert_eq!(override_cell.fg, Color::Yellow);
+
+        let (disabled_x, disabled_y) = find_text(&buf, "SECRET=hidden").expect("disabled row");
+        let disabled_cell = &buf[(disabled_x, disabled_y)];
+        assert!(disabled_cell.modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    fn find_text(buf: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in buf.area.y..buf.area.bottom() {
+            let line = (buf.area.x..buf.area.right())
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>();
+            if let Some(start) = line.find(needle) {
+                return Some((buf.area.x + start as u16, y));
+            }
+        }
+        None
     }
 }
