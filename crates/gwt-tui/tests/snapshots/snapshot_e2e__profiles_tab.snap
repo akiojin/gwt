@@ -1,28 +1,29 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 366
 expression: output
 ---
 ┌...│ Specs │ Profiles │ Git View │...─┐┌ › Shell ─────────────────────────────┐
-│┏Profiles━━━┓╭Profile Detail─────────╮││Session: Shell (80x24)                │
-│┃No profiles┃│No profile selected.   │││                                      │
+│┏Profiles━━━┓┏Profile Detail━━━━━━━━━┓││Session: Shell (80x24)                │
+│┃Tab | ↵ |  ┃┃Name: default          ┃││                                      │
+│┃[*] default┃┃Desc: Default profile  ┃││                                      │
+│┃           ┃┃Active: yes            ┃││                                      │
+│┃           ┃┃Delete: locked         ┃││                                      │
+│┃           ┃┗━━━━━━━━━━━━━━━━━━━━━━━┛││                                      │
+│┃           ┃╭Environment────────────╮││                                      │
+│┃           ┃│↵/e | n | d            │││                                      │
+│┃           ┃│No profile-owned enviro│││                                      │
 │┃           ┃│                       │││                                      │
+│┃           ┃╰───────────────────────╯││                                      │
+│┃           ┃╭Disabled OS Environment╮││                                      │
+│┃           ┃│↵/e | n | d            │││                                      │
+│┃           ┃│No blocked OS environme│││                                      │
 │┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
-│┃           ┃│                       │││                                      │
+│┃           ┃╰───────────────────────╯││                                      │
+│┃           ┃╭Effective Environment──╮││                                      │
+│┃           ┃│Read-only OS env       │││                                      │
+│┃           ┃│BUN_INSTALL=/Users/akio│││                                      │
+│┃           ┃│jin/.bun               │││                                      │
 │┗━━━━━━━━━━━┛╰───────────────────────╯││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ⎇n/a  │  P:default  │  C-←→ pane  ↑↓ sel  ↵ act  n new  e edit  d del  Esc term
+ ⎇n/a  │  P:default  │  Tab pane  S-Tab back  ↑↓ sel  ↵ act  n/e/d  Esc term

@@ -2904,6 +2904,11 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             match model.profiles.mode {
                 ProfileMode::List => {
                     let msg = match key.code {
+                        KeyCode::BackTab => Some(ProfilesMessage::FocusLeft),
+                        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            Some(ProfilesMessage::FocusLeft)
+                        }
+                        KeyCode::Tab => Some(ProfilesMessage::FocusRight),
                         KeyCode::Down => Some(ProfilesMessage::MoveDown),
                         KeyCode::Up => Some(ProfilesMessage::MoveUp),
                         KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -6248,6 +6253,68 @@ fn handle_management_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
             model,
             Message::SwitchManagementTab(ManagementTab::ALL[tab_idx]),
         );
+        model.active_focus = FocusPane::TabContent;
+        return true;
+    }
+
+    if model.management_tab == ManagementTab::Profiles
+        && model.profiles.mode == screens::profiles::ProfileMode::List
+    {
+        let inner = pane_block(title, false).inner(management_area);
+        let layout = screens::profiles::layout_areas(inner);
+
+        if mouse_hits_rect(mouse, layout.list) {
+            model.profiles.focus = screens::profiles::ProfilesFocus::ProfileList;
+            if mouse_hits_rect(mouse, layout.list_content) {
+                let row = mouse.row.saturating_sub(layout.list_content.y) as usize;
+                if row < model.profiles.profiles.len() {
+                    model.profiles.selected = row;
+                    model.profiles.clamp_selection();
+                }
+            }
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
+
+        if mouse_hits_rect(mouse, layout.summary) {
+            model.profiles.focus = screens::profiles::ProfilesFocus::ProfileList;
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
+
+        if mouse_hits_rect(mouse, layout.env) {
+            model.profiles.focus = screens::profiles::ProfilesFocus::EnvVars;
+            if mouse_hits_rect(mouse, layout.env_content) {
+                if let Some(profile) = model.profiles.selected_profile() {
+                    let row = mouse.row.saturating_sub(layout.env_content.y) as usize;
+                    if row < profile.env_vars.len() {
+                        model.profiles.env_selected = row;
+                    }
+                }
+            }
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
+
+        if mouse_hits_rect(mouse, layout.disabled) {
+            model.profiles.focus = screens::profiles::ProfilesFocus::DisabledEnv;
+            if mouse_hits_rect(mouse, layout.disabled_content) {
+                if let Some(profile) = model.profiles.selected_profile() {
+                    let row = mouse.row.saturating_sub(layout.disabled_content.y) as usize;
+                    if row < profile.disabled_env.len() {
+                        model.profiles.disabled_selected = row;
+                    }
+                }
+            }
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
+
+        if mouse_hits_rect(mouse, layout.preview) {
+            model.profiles.focus = screens::profiles::ProfilesFocus::Preview;
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
     }
     model.active_focus = FocusPane::TabContent;
     true
@@ -7431,29 +7498,33 @@ fn profiles_hint_text(model: &Model, compact: bool) -> String {
     } else if compact {
         match model.profiles.focus {
             ProfilesFocus::ProfileList => {
-                "C-←→ pane  ↑↓ sel  ↵ act  n new  e edit  d del  Esc term".to_string()
+                "Tab pane  S-Tab back  ↑↓ sel  ↵ act  n/e/d  Esc term".to_string()
             }
             ProfilesFocus::EnvVars => {
-                "C-←→ pane  ↑↓ env  ↵ edit  n new  d del  Esc term".to_string()
+                "Tab pane  S-Tab back  ↑↓ env  ↵/e edit  n add  d del  Esc term".to_string()
             }
             ProfilesFocus::DisabledEnv => {
-                "C-←→ pane  ↑↓ blk  ↵ edit  n new  d del  Esc term".to_string()
+                "Tab pane  S-Tab back  ↑↓ blk  ↵/e edit  n add  d del  Esc term".to_string()
             }
-            ProfilesFocus::Preview => "C-←→ pane  preview  Esc term".to_string(),
+            ProfilesFocus::Preview => {
+                "Tab pane  S-Tab back  preview read-only  Esc term".to_string()
+            }
         }
     } else {
         match model.profiles.focus {
             ProfilesFocus::ProfileList => {
-                "Ctrl+←→:focus  ↑↓:select  Enter:activate  n:new  e:edit  d:delete  Esc:term"
-                    .to_string()
+                "Tab:next pane  Shift+Tab:prev pane  ↑↓:select  Enter:activate  n:new  e:edit  d:delete  Esc:term".to_string()
             }
             ProfilesFocus::EnvVars => {
-                "Ctrl+←→:focus  ↑↓:env  Enter/edit  n:new  d:delete  Esc:term".to_string()
+                "Tab:next pane  Shift+Tab:prev pane  ↑↓:env  Enter/e:edit  n:add  d:delete  Esc:term".to_string()
             }
             ProfilesFocus::DisabledEnv => {
-                "Ctrl+←→:focus  ↑↓:blocked  Enter/edit  n:new  d:delete  Esc:term".to_string()
+                "Tab:next pane  Shift+Tab:prev pane  ↑↓:blocked  Enter/e:edit  n:add  d:delete  Esc:term".to_string()
             }
-            ProfilesFocus::Preview => "Ctrl+←→:focus  Preview is read-only  Esc:term".to_string(),
+            ProfilesFocus::Preview => {
+                "Tab:next pane  Shift+Tab:prev pane  Preview is read-only  Esc:term"
+                    .to_string()
+            }
         }
     }
 }
@@ -10003,6 +10074,20 @@ mod tests {
 
         assert!(rendered.contains("Esc:cancel"));
         assert!(!rendered.contains("Esc:term"));
+    }
+
+    #[test]
+    fn render_model_text_profiles_list_hints_prefer_tab_for_pane_navigation() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Tab:next pane"));
+        assert!(rendered.contains("Shift+Tab:prev pane"));
+        assert!(!rendered.contains("Ctrl+←→:focus"));
     }
 
     #[test]
@@ -15864,6 +15949,31 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn route_key_to_management_profiles_tab_cycles_internal_focus() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+
+        route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            model.profiles.focus,
+            screens::profiles::ProfilesFocus::EnvVars
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            model.profiles.focus,
+            screens::profiles::ProfilesFocus::DisabledEnv
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(
+            model.profiles.focus,
+            screens::profiles::ProfilesFocus::EnvVars
+        );
+    }
+
+    #[test]
     fn route_key_to_management_profiles_add_env_var_persists_and_renders_preview() {
         with_temp_home(|home| {
             let config_dir = home.join(".gwt");
@@ -15882,7 +15992,7 @@ CUSTOM_ENV = "enabled"
             switch_management_tab(&mut model, ManagementTab::Profiles);
             model.profiles.selected = 1;
 
-            route_key_to_management(&mut model, key(KeyCode::Right, KeyModifiers::CONTROL));
+            route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
             route_key_to_management(&mut model, key(KeyCode::Char('n'), KeyModifiers::NONE));
             for ch in "API_URL".chars() {
                 route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
@@ -15903,6 +16013,81 @@ CUSTOM_ENV = "enabled"
             let rendered = render_model_text(&model, 220, 24);
             assert!(rendered.contains("API_URL"), "{rendered}");
             assert!(rendered.contains("https://example.test"), "{rendered}");
+        });
+    }
+
+    #[test]
+    fn profiles_mouse_click_selects_profile_row_and_focuses_env_pane() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev").with_env("API_URL", "https://example.test"))
+                .expect("add profile");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            update(&mut model, Message::Resize(80, 24));
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            model.active_focus = FocusPane::TabContent;
+
+            let management = visible_management_area(&model).expect("management area");
+            let outer = pane_block(management_tab_title(&model, management.width), false);
+            let inner = outer.inner(management);
+            let layout = screens::profiles::layout_areas(inner);
+
+            let handled = handle_mouse_input_with(
+                &mut model,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: layout.list_content.x,
+                    row: layout.list_content.y.saturating_add(1),
+                    modifiers: KeyModifiers::NONE,
+                },
+                |_| Ok(()),
+            )
+            .expect("profile click succeeds");
+            assert!(handled);
+            assert_eq!(
+                model.profiles.focus,
+                screens::profiles::ProfilesFocus::ProfileList
+            );
+            assert_eq!(
+                model
+                    .profiles
+                    .selected_profile()
+                    .map(|profile| profile.name.as_str()),
+                Some("dev")
+            );
+
+            let handled = handle_mouse_input_with(
+                &mut model,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: layout.env_content.x,
+                    row: layout.env_content.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                |_| Ok(()),
+            )
+            .expect("env click succeeds");
+            assert!(handled);
+            assert_eq!(
+                model.profiles.focus,
+                screens::profiles::ProfilesFocus::EnvVars
+            );
+            assert_eq!(
+                model
+                    .profiles
+                    .selected_env_var()
+                    .map(|env| env.key.as_str()),
+                Some("API_URL")
+            );
         });
     }
 

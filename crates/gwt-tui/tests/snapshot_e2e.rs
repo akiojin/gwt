@@ -17,10 +17,38 @@ use gwt_tui::screens::branches::{BranchCategory, BranchItem, BranchesMessage};
 use gwt_tui::screens::logs::{LogEntry, LogsMessage};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use tempfile::TempDir;
 
 fn test_model() -> Model {
     std::env::set_var("GWT_TUI_DISABLE_GLOBAL_CUSTOM_AGENTS", "1");
     Model::new(PathBuf::from("/tmp/test-repo"))
+}
+
+struct HomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _home: TempDir,
+}
+
+impl HomeEnvGuard {
+    fn new() -> Self {
+        let previous = std::env::var_os("HOME");
+        let home = tempfile::tempdir().expect("temp home dir");
+        std::env::set_var("HOME", home.path());
+        Self {
+            previous,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
 }
 
 /// Create a KeyEvent (Press only, matching the event.rs filter).
@@ -330,9 +358,13 @@ fn snapshot_pr_dashboard_tab() {
 
 #[test]
 fn snapshot_profiles_tab() {
+    let _home = HomeEnvGuard::new();
     let mut model = test_model();
-    model.active_layer = ActiveLayer::Management;
-    model.management_tab = ManagementTab::Profiles;
+    app::update(
+        &mut model,
+        Message::SwitchManagementTab(ManagementTab::Profiles),
+    );
+    model.active_focus = FocusPane::TabContent;
     let output = render_to_string(&model, 80, 24);
     insta::assert_snapshot!("profiles_tab", output);
 }

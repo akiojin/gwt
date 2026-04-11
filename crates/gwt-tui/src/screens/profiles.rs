@@ -10,6 +10,74 @@ use ratatui::{
 
 use crate::theme;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LayoutAreas {
+    pub list: Rect,
+    pub detail: Rect,
+    pub summary: Rect,
+    pub env: Rect,
+    pub disabled: Rect,
+    pub preview: Rect,
+    pub list_hint: Rect,
+    pub list_content: Rect,
+    pub env_hint: Rect,
+    pub env_content: Rect,
+    pub disabled_hint: Rect,
+    pub disabled_content: Rect,
+    pub preview_hint: Rect,
+    pub preview_content: Rect,
+}
+
+fn bordered_inner(area: Rect) -> Rect {
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
+fn split_with_hint(area: Rect) -> (Rect, Rect) {
+    let inner = bordered_inner(area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    (sections[0], sections[1])
+}
+
+pub(crate) fn layout_areas(area: Rect) -> LayoutAreas {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Min(5),
+            Constraint::Length(5),
+            Constraint::Min(5),
+        ])
+        .split(chunks[1]);
+    let (list_hint, list_content) = split_with_hint(chunks[0]);
+    let (env_hint, env_content) = split_with_hint(sections[1]);
+    let (disabled_hint, disabled_content) = split_with_hint(sections[2]);
+    let (preview_hint, preview_content) = split_with_hint(sections[3]);
+
+    LayoutAreas {
+        list: chunks[0],
+        detail: chunks[1],
+        summary: sections[0],
+        env: sections[1],
+        disabled: sections[2],
+        preview: sections[3],
+        list_hint,
+        list_content,
+        env_hint,
+        env_content,
+        disabled_hint,
+        disabled_content,
+        preview_hint,
+        preview_content,
+    }
+}
+
 /// A single environment variable row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvVarItem {
@@ -373,40 +441,48 @@ pub fn update(state: &mut ProfilesState, msg: ProfilesMessage) {
 
 /// Render the profiles screen.
 pub fn render(state: &ProfilesState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(area);
+    let areas = layout_areas(area);
 
-    render_list(state, frame, chunks[0]);
+    render_list(state, frame, areas);
     match state.mode {
-        ProfileMode::List => render_detail(state, frame, chunks[1]),
+        ProfileMode::List => render_detail(state, frame, areas),
         ProfileMode::CreateProfile
         | ProfileMode::EditProfile
         | ProfileMode::CreateEnvVar
         | ProfileMode::EditEnvVar
         | ProfileMode::CreateDisabledEnv
-        | ProfileMode::EditDisabledEnv => render_form(state, frame, chunks[1]),
+        | ProfileMode::EditDisabledEnv => render_form(state, frame, areas.detail),
         ProfileMode::ConfirmDeleteProfile
         | ProfileMode::ConfirmDeleteEnvVar
-        | ProfileMode::ConfirmDeleteDisabledEnv => render_confirm_delete(state, frame, chunks[1]),
+        | ProfileMode::ConfirmDeleteDisabledEnv => {
+            render_confirm_delete(state, frame, areas.detail)
+        }
     }
 }
 
 /// Render the profile list view.
-fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
+fn render_list(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
+    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::ProfileList);
+    let block = Block::default()
+        .title("Profiles")
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .border_type(border_type);
+    frame.render_widget(block, areas.list);
+    frame.render_widget(
+        Paragraph::new(list_hint_text(areas.list_hint.width))
+            .style(theme::style::muted_text())
+            .wrap(Wrap { trim: false }),
+        areas.list_hint,
+    );
+
     if state.profiles.is_empty() {
-        let (border_style, border_type) =
-            theme::pane_border(state.focus == ProfilesFocus::ProfileList);
-        let block = Block::default()
-            .title("Profiles")
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type);
-        let paragraph = Paragraph::new("No profiles loaded.")
-            .block(block)
-            .style(theme::style::muted_text());
-        frame.render_widget(paragraph, area);
+        frame.render_widget(
+            Paragraph::new("No profiles loaded. Press n to create one.")
+                .style(theme::style::muted_text())
+                .wrap(Wrap { trim: false }),
+            areas.list_content,
+        );
         return;
     }
 
@@ -452,48 +528,52 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::ProfileList);
-    let list = List::new(items).block(
-        Block::default()
-            .title("Profiles")
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type),
-    );
+    let list = List::new(items);
     let mut list_state = ListState::default();
     list_state.select(Some(state.selected));
-    frame.render_stateful_widget(list, area, &mut list_state);
+    frame.render_stateful_widget(list, areas.list_content, &mut list_state);
 }
 
-fn render_detail(state: &ProfilesState, frame: &mut Frame, area: Rect) {
+fn render_detail(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
     let Some(profile) = state.selected_profile() else {
         let block = Block::default()
             .title("Profile Detail")
             .borders(Borders::ALL)
             .border_type(theme::border::default());
         frame.render_widget(
-            Paragraph::new("No profile selected.")
+            Paragraph::new("No profile selected. Press n to create a profile.")
                 .block(block)
                 .style(theme::style::muted_text()),
-            area,
+            areas.detail,
         );
         return;
     };
 
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Min(6),
-            Constraint::Length(6),
-            Constraint::Min(6),
-        ])
-        .split(area);
-
-    render_summary_block(state, profile, frame, sections[0]);
-    render_env_vars_block(state, profile, frame, sections[1]);
-    render_disabled_env_block(state, profile, frame, sections[2]);
-    render_preview_block(state, profile, frame, sections[3]);
+    render_summary_block(state, profile, frame, areas.summary);
+    render_env_vars_block(
+        state,
+        profile,
+        frame,
+        areas.env,
+        areas.env_hint,
+        areas.env_content,
+    );
+    render_disabled_env_block(
+        state,
+        profile,
+        frame,
+        areas.disabled,
+        areas.disabled_hint,
+        areas.disabled_content,
+    );
+    render_preview_block(
+        state,
+        profile,
+        frame,
+        areas.preview,
+        areas.preview_hint,
+        areas.preview_content,
+    );
 }
 
 fn render_summary_block(
@@ -508,7 +588,7 @@ fn render_summary_block(
             Span::raw(profile.name.clone()),
         ]),
         Line::from(vec![
-            Span::styled("Description: ", theme::style::header()),
+            Span::styled("Desc: ", theme::style::header()),
             Span::raw(if profile.description.is_empty() {
                 "(none)".to_string()
             } else {
@@ -525,7 +605,8 @@ fn render_summary_block(
                     theme::style::muted_text()
                 },
             ),
-            Span::raw("  "),
+        ]),
+        Line::from(vec![
             Span::styled("Delete: ", theme::style::header()),
             Span::styled(
                 if profile.deletable {
@@ -539,6 +620,10 @@ fn render_summary_block(
                     theme::style::warning_text()
                 },
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("Guide: ", theme::style::header()),
+            Span::raw("Enter activates | Tab moves to Environment."),
         ]),
     ];
 
@@ -562,11 +647,27 @@ fn render_env_vars_block(
     profile: &ProfileItem,
     frame: &mut Frame,
     area: Rect,
+    hint_area: Rect,
+    content_area: Rect,
 ) {
     let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::EnvVars);
+    frame.render_widget(
+        Block::default()
+            .title("Environment")
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .border_type(border_type),
+        area,
+    );
+    frame.render_widget(
+        Paragraph::new(env_hint_text(area.width))
+            .style(theme::style::muted_text())
+            .wrap(Wrap { trim: false }),
+        hint_area,
+    );
     let items: Vec<ListItem> = if profile.env_vars.is_empty() {
         vec![ListItem::new(Line::from(vec![Span::styled(
-            "No profile-owned environment variables.".to_string(),
+            "No profile-owned environment variables. Press n to add one.".to_string(),
             theme::style::muted_text(),
         )]))]
     } else {
@@ -588,18 +689,12 @@ fn render_env_vars_block(
             .collect()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .title("Environment")
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type),
-    );
+    let list = List::new(items);
     let mut list_state = ListState::default();
     if !profile.env_vars.is_empty() {
         list_state.select(Some(state.env_selected));
     }
-    frame.render_stateful_widget(list, area, &mut list_state);
+    frame.render_stateful_widget(list, content_area, &mut list_state);
 }
 
 fn render_disabled_env_block(
@@ -607,11 +702,27 @@ fn render_disabled_env_block(
     profile: &ProfileItem,
     frame: &mut Frame,
     area: Rect,
+    hint_area: Rect,
+    content_area: Rect,
 ) {
     let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::DisabledEnv);
+    frame.render_widget(
+        Block::default()
+            .title("Disabled OS Environment")
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .border_type(border_type),
+        area,
+    );
+    frame.render_widget(
+        Paragraph::new(disabled_env_hint_text(area.width))
+            .style(theme::style::muted_text())
+            .wrap(Wrap { trim: false }),
+        hint_area,
+    );
     let items: Vec<ListItem> = if profile.disabled_env.is_empty() {
         vec![ListItem::new(Line::from(vec![Span::styled(
-            "No blocked OS environment variables.".to_string(),
+            "No blocked OS environment variables. Press n to add one.".to_string(),
             theme::style::muted_text(),
         )]))]
     } else {
@@ -632,18 +743,12 @@ fn render_disabled_env_block(
             .collect()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .title("Disabled OS Environment")
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(border_type),
-    );
+    let list = List::new(items);
     let mut list_state = ListState::default();
     if !profile.disabled_env.is_empty() {
         list_state.select(Some(state.disabled_selected));
     }
-    frame.render_stateful_widget(list, area, &mut list_state);
+    frame.render_stateful_widget(list, content_area, &mut list_state);
 }
 
 fn render_preview_block(
@@ -651,6 +756,8 @@ fn render_preview_block(
     profile: &ProfileItem,
     frame: &mut Frame,
     area: Rect,
+    hint_area: Rect,
+    content_area: Rect,
 ) {
     let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::Preview);
     let lines: Vec<Line> = if profile.merged_preview.is_empty() {
@@ -667,17 +774,55 @@ fn render_preview_block(
     };
 
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title("Effective Environment")
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .border_type(border_type),
-            )
-            .wrap(Wrap { trim: false }),
+        Block::default()
+            .title("Effective Environment")
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .border_type(border_type),
         area,
     );
+    frame.render_widget(
+        Paragraph::new(preview_hint_text(area.width))
+            .style(theme::style::muted_text())
+            .wrap(Wrap { trim: false }),
+        hint_area,
+    );
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        content_area,
+    );
+}
+
+fn list_hint_text(width: u16) -> &'static str {
+    if width >= 24 {
+        "Tab panes | Enter activate | n/e/d"
+    } else {
+        "Tab | ↵ | n/e/d"
+    }
+}
+
+fn env_hint_text(width: u16) -> &'static str {
+    if width >= 28 {
+        "Enter/e edit | n add | d delete"
+    } else {
+        "↵/e | n | d"
+    }
+}
+
+fn disabled_env_hint_text(width: u16) -> &'static str {
+    if width >= 28 {
+        "Enter/e edit | n add | d delete"
+    } else {
+        "↵/e | n | d"
+    }
+}
+
+fn preview_hint_text(width: u16) -> &'static str {
+    if width >= 28 {
+        "Read-only OS env with profile overrides"
+    } else {
+        "Read-only OS env"
+    }
 }
 
 fn render_form(state: &ProfilesState, frame: &mut Frame, area: Rect) {
@@ -999,5 +1144,33 @@ mod tests {
         assert!(text.contains("Disabled OS Environment"), "{text}");
         assert!(text.contains("Effective Environment"), "{text}");
         assert!(text.contains("locked (default)"), "{text}");
+    }
+
+    #[test]
+    fn render_empty_panes_show_guided_help() {
+        let mut state = ProfilesState::default();
+        state.profiles = sample_profiles();
+        state.selected = 1;
+        state.profiles[1].env_vars.clear();
+        state.profiles[1].disabled_env.clear();
+        state.profiles[1].merged_preview.clear();
+
+        let backend = TestBackend::new(140, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&state, f, area);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text = buf
+            .content
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<String>();
+        assert!(text.contains("Press n to add"), "{text}");
+        assert!(text.contains("Read-only OS env"), "{text}");
     }
 }
