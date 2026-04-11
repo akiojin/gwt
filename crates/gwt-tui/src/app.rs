@@ -14950,11 +14950,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Start,
-            skip_permissions: false,
-            codex_fast_mode: false,
-            linked_issue_number: None,
-        });
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Start,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");
@@ -15015,11 +15015,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
-            skip_permissions: false,
-            codex_fast_mode: false,
-            linked_issue_number: None,
-        });
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");
@@ -15083,11 +15083,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Recreate,
-            skip_permissions: false,
-            codex_fast_mode: false,
-            linked_issue_number: None,
-        });
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Recreate,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");
@@ -15142,11 +15142,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
-            skip_permissions: false,
-            codex_fast_mode: false,
-            linked_issue_number: None,
-        });
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");

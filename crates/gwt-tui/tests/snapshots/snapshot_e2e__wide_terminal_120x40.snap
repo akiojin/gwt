@@ -1,6 +1,5 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 489
 expression: output
 ---
 ┌ Branches │ Issues │ PRs │...─────────────────┐┌ › Shell ─────────────────────────────────────────────────────────────┐
@@ -27,7 +26,7 @@ expression: output
 │ No branch selected                           ││                                                                      │
 │                                              ││                                                                      │
 │ Docker status                                ││                                                                      │
-│ No containers found                          ││                                                                      │
+│ No Docker services found                     ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
