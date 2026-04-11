@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
+use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -28,8 +29,7 @@ use gwt_config::{AISettings, Settings, VoiceConfig};
 use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
-    distribute_to_worktree, generate_codex_hooks, generate_settings_local, prune_stale_gwt_assets,
-    update_git_exclude,
+    distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -38,6 +38,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
@@ -47,7 +48,7 @@ use crate::{
     custom_agents::load_custom_agents,
     input::voice::VoiceInputMessage,
     input_trace,
-    message::Message,
+    message::{GridSessionDirection, Message},
     model::{
         ActiveLayer, BranchDetailQueue, DockerProgressEvent, DockerProgressQueue, FocusPane,
         ManagementTab, Model, PendingSessionConversion, ScrollbackStrategy, SessionLayout,
@@ -65,6 +66,15 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
+const MANAGED_ASSET_ROOTS: &[&str] = &[
+    ".claude/skills",
+    ".claude/commands",
+    ".claude/hooks/scripts",
+    ".claude/settings.local.json",
+    ".codex/skills",
+    ".codex/hooks/scripts",
+    ".codex/hooks.json",
+];
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -165,25 +175,36 @@ pub fn session_content_size(model: &Model) -> (u16, u16) {
 }
 
 fn sync_session_viewports(model: &mut Model) {
-    let Some(content) = active_session_content_area(model) else {
+    let Some(session_area) = visible_session_area(model) else {
         return;
     };
-    let render_width = model
-        .active_session_tab()
-        .map(|session| session_text_area(session, content).width)
-        .unwrap_or(content.width);
 
-    for pty in model.pty_handles.values() {
-        let _ = pty.resize(render_width, content.height);
-    }
-    for session in &mut model.sessions {
+    for session_idx in 0..model.sessions.len() {
+        let Some(content) = session_content_area_for_index(model, session_area, session_idx) else {
+            continue;
+        };
+        let render_width = model
+            .sessions
+            .get(session_idx)
+            .map(|session| session_text_area(session, content).width)
+            .unwrap_or(content.width);
+
+        let session_id = model.sessions[session_idx].id.clone();
+        if let Some(pty) = model.pty_handles.get(&session_id) {
+            let _ = pty.resize(render_width, content.height);
+        }
+
+        let session = &mut model.sessions[session_idx];
         let current_scrollback = session.vt.scrollback();
         session.vt.resize(content.height, render_width);
         session
             .vt
             .set_scrollback(current_scrollback.min(session.vt.max_scrollback()));
     }
+
     if let Some(session) = model.active_session_tab() {
+        let content = active_session_content_area(model).unwrap_or(session_area);
+        let render_width = session_text_area(session, content).width;
         crate::scroll_debug::log_lazy(|| {
             format!(
             "event=viewport_sync session={} content_width={} content_height={} render_width={} vt_rows={} vt_cols={} scrollback={} max_scrollback={} follow_live={}",
@@ -720,16 +741,16 @@ fn persist_agent_session_stopped(sessions_dir: &Path, session_id: &str) {
     }
 }
 
-fn bootstrap_agent_session_running(sessions_dir: &Path, session_id: &str) {
+fn bootstrap_agent_session_waiting_input(sessions_dir: &Path, session_id: &str) {
     let runtime_path = runtime_state_path(sessions_dir, session_id);
     if runtime_path.exists() {
         return;
     }
 
-    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::WaitingInput);
     runtime.source_event = Some("LaunchBootstrap".to_string());
     if let Err(err) = runtime.save(&runtime_path) {
-        tracing::warn!(session_id, error = %err, "failed to bootstrap running runtime state");
+        tracing::warn!(session_id, error = %err, "failed to bootstrap waiting runtime state");
     }
 }
 
@@ -787,6 +808,8 @@ fn refresh_branch_live_session_summaries_with(model: &mut Model, sessions_dir: &
 pub fn update(model: &mut Model, msg: Message) {
     let previous_active_session = model.active_session;
     let previous_active_focus = model.active_focus;
+    let previous_session_count = model.sessions.len();
+    let previous_session_layout = model.session_layout;
 
     match msg {
         Message::Quit => {
@@ -838,6 +861,9 @@ pub fn update(model: &mut Model, msg: Message) {
             if idx < model.sessions.len() {
                 model.active_session = idx;
             }
+        }
+        Message::MoveGridSession(direction) => {
+            move_grid_session(model, direction);
         }
         Message::ToggleSessionLayout => {
             model.session_layout = match model.session_layout {
@@ -1003,7 +1029,7 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::profiles::update(&mut model.profiles, msg);
         }
         Message::Issues(msg) => {
-            screens::issues::update(&mut model.issues, msg);
+            handle_issues_message(model, msg);
         }
         Message::GitView(msg) => {
             screens::git_view::update(&mut model.git_view, msg);
@@ -1172,6 +1198,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::OpenWizardWithSpec(spec_context) => {
             open_wizard(model, Some(spec_context));
         }
+        Message::OpenWizardWithIssue(issue_number) => {
+            open_wizard_with_issue(model, issue_number);
+        }
         Message::CloseWizard => {
             model.wizard = None;
         }
@@ -1182,6 +1211,15 @@ pub fn update(model: &mut Model, msg: Message) {
         previous_active_session,
         previous_active_focus,
     );
+
+    if previous_session_count != model.sessions.len()
+        || previous_session_layout != model.session_layout
+    {
+        sync_session_viewports(model);
+    }
+    if previous_active_session != model.active_session {
+        refresh_branch_live_session_summaries(model);
+    }
 
     // Flush buffered PTY input after every message so keystrokes reach the PTY
     // without waiting for the next Tick.
@@ -1203,6 +1241,7 @@ where
 {
     schedule_startup_version_cache_refresh();
     let has_git_remote = repo_has_git_remote(&model.repo_path);
+    reload_cached_issues(model);
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -1214,6 +1253,7 @@ where
                 is_local: b.is_local,
                 category: screens::branches::categorize_branch(&b.name),
                 worktree_path: None,
+                upstream: b.upstream.clone(),
             })
             .collect();
         screens::branches::update(
@@ -1274,7 +1314,7 @@ where
         }
         model.branches.checked_out_branches = checked_out;
     }
-    prune_stale_gwt_assets_for_repo_worktrees(model);
+    refresh_managed_gwt_assets_for_repo_worktrees(model);
 
     // Refresh the protection inputs the Cleanup gutter consults. The HEAD
     // branch tracks the gwt-tui process itself; active session branches are
@@ -1404,19 +1444,73 @@ fn load_git_view_with<S, C, B, P>(
     );
 }
 
-fn prune_stale_gwt_assets_for_repo_worktrees(model: &Model) {
+fn refresh_managed_gwt_assets_for_repo_worktrees(model: &Model) {
     let mut paths = std::collections::HashSet::new();
     paths.insert(model.repo_path().to_path_buf());
     paths.extend(model.active_worktree_paths());
 
     for worktree in paths {
-        if let Err(error) = prune_stale_gwt_assets(&worktree) {
-            tracing::warn!(
-                worktree = %worktree.display(),
-                error = %error,
-                "failed to prune stale gwt assets during initial data refresh"
-            );
+        if !worktree_has_managed_asset_state(&worktree) {
+            continue;
         }
+        refresh_managed_gwt_assets_for_worktree(&worktree, "startup refresh");
+    }
+}
+
+fn worktree_has_managed_asset_state(worktree: &Path) -> bool {
+    MANAGED_ASSET_ROOTS
+        .iter()
+        .any(|relative| worktree.join(relative).exists())
+        || git_tracks_managed_assets(worktree)
+}
+
+fn git_tracks_managed_assets(worktree: &Path) -> bool {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--")
+        .args(MANAGED_ASSET_ROOTS)
+        .output()
+    {
+        Ok(output) => output.status.success() && !output.stdout.is_empty(),
+        Err(_) => false,
+    }
+}
+
+fn refresh_managed_gwt_assets_for_worktree(worktree: &Path, context: &str) {
+    if let Err(error) = distribute_to_worktree(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to distribute gwt managed assets"
+        );
+    }
+    if let Err(error) = update_git_exclude(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to update gwt managed excludes"
+        );
+    }
+    if let Err(error) = generate_settings_local(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to regenerate Claude hook settings"
+        );
+    }
+    if let Err(error) = generate_codex_hooks(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to regenerate Codex hook settings"
+        );
     }
 }
 
@@ -1496,6 +1590,9 @@ fn switch_management_tab_with<F, D>(
     };
     if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
         model.settings.load_category_fields();
+    }
+    if tab == ManagementTab::Issues {
+        reload_cached_issues(model);
     }
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
@@ -1694,8 +1791,46 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
 ///
 /// This keeps non-terminal surfaces animated while allowing terminal-focused
 /// IME composition to proceed without idle repaints.
+fn visible_branch_live_indicator_rows(
+    model: &Model,
+) -> Vec<crate::screens::branches::VisibleBranchLiveIndicatorRow> {
+    visible_branches_list_area(model)
+        .map(|area| model.branches.visible_live_indicator_rows(area))
+        .unwrap_or_default()
+}
+
+pub fn visible_branch_live_indicator_signature(model: &Model) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in visible_branch_live_indicator_rows(model) {
+        row.branch_name.hash(&mut hasher);
+        for indicator in row.indicators {
+            branch_live_indicator_kind_tag(indicator.kind).hash(&mut hasher);
+            branch_live_indicator_status_tag(indicator.status).hash(&mut hasher);
+            branch_live_indicator_color_tag(indicator.color).hash(&mut hasher);
+            indicator.active.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+pub fn should_render_after_tick_with_visible_branch_signature(
+    visible_branch_signature_before: u64,
+    model: &Model,
+) -> bool {
+    visible_branch_signature_before != visible_branch_live_indicator_signature(model)
+        || tick_redraw_required(model)
+}
+
 pub fn tick_redraw_required(model: &Model) -> bool {
     if model.active_focus != FocusPane::Terminal {
+        return true;
+    }
+
+    if model.active_layer == ActiveLayer::Management
+        && model.management_tab == ManagementTab::Branches
+        && visible_branches_list_area(model)
+            .is_some_and(|area| model.branches.has_running_live_sessions(area))
+    {
         return true;
     }
 
@@ -1707,7 +1842,58 @@ pub fn tick_redraw_required(model: &Model) -> bool {
             .docker_progress
             .as_ref()
             .is_some_and(|progress| progress.visible)
+        || model.cleanup_progress.visible
         || model.voice.is_active()
+}
+
+fn visible_branches_list_area(model: &Model) -> Option<Rect> {
+    if model.active_layer != ActiveLayer::Management
+        || model.management_tab != ManagementTab::Branches
+    {
+        return None;
+    }
+
+    let management = visible_management_area(model)?;
+    let top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(management)[0];
+    let list_inner = pane_block(management_tab_title(model, top.width), false).inner(top);
+    Some(
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(list_inner)[1],
+    )
+}
+
+fn branch_live_indicator_status_tag(status: gwt_agent::AgentStatus) -> u8 {
+    match status {
+        gwt_agent::AgentStatus::Unknown => 0,
+        gwt_agent::AgentStatus::Running => 1,
+        gwt_agent::AgentStatus::WaitingInput => 2,
+        gwt_agent::AgentStatus::Stopped => 3,
+    }
+}
+
+fn branch_live_indicator_kind_tag(
+    kind: crate::screens::branches::BranchLiveSessionIndicatorKind,
+) -> u8 {
+    match kind {
+        crate::screens::branches::BranchLiveSessionIndicatorKind::Agent => 0,
+        crate::screens::branches::BranchLiveSessionIndicatorKind::Shell => 1,
+    }
+}
+
+fn branch_live_indicator_color_tag(color: crate::model::AgentColor) -> u8 {
+    match color {
+        crate::model::AgentColor::Green => 0,
+        crate::model::AgentColor::Blue => 1,
+        crate::model::AgentColor::Cyan => 2,
+        crate::model::AgentColor::Yellow => 3,
+        crate::model::AgentColor::Magenta => 4,
+        crate::model::AgentColor::Gray => 5,
+    }
 }
 
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
@@ -1811,6 +1997,12 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     // Branch Cleanup confirm modal — Enter confirms, Esc cancels (FR-018e).
     if model.cleanup_confirm.visible {
         let msg = match key.code {
+            KeyCode::Char('r')
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                Some(screens::cleanup_confirm::CleanupConfirmMessage::ToggleRemote)
+            }
             KeyCode::Enter => Some(screens::cleanup_confirm::CleanupConfirmMessage::Confirm),
             KeyCode::Esc => Some(screens::cleanup_confirm::CleanupConfirmMessage::Cancel),
             _ => None,
@@ -1833,6 +2025,10 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     let msg = match key.code {
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
+        KeyCode::Char(' ') => {
+            toggle_cleanup_selection_for_selected_branch(model);
+            return;
+        }
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 && model.branches.detail_section != 2
@@ -1920,6 +2116,26 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     }
 }
 
+fn toggle_cleanup_selection_for_selected_branch(model: &mut Model) {
+    let Some(name) = model
+        .branches
+        .selected_branch()
+        .map(|branch| branch.name.clone())
+    else {
+        return;
+    };
+    match model.branches.toggle_cleanup_selection(&name) {
+        screens::branches::CleanupSelectionToggle::Selected
+        | screens::branches::CleanupSelectionToggle::Deselected => {}
+        screens::branches::CleanupSelectionToggle::Blocked(reason) => {
+            apply_notification(
+                model,
+                Notification::new(Severity::Info, "cleanup", reason.toast_message()),
+            );
+        }
+    }
+}
+
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     use screens::branches::BranchesMessage;
@@ -1935,11 +2151,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     if !is_in_text_input_mode(model) && !key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Right => {
-                model.management_tab = model.management_tab.next();
+                let next = model.management_tab.next();
+                switch_management_tab(model, next);
                 return;
             }
             KeyCode::Left => {
-                model.management_tab = model.management_tab.prev();
+                let prev = model.management_tab.prev();
+                switch_management_tab(model, prev);
                 return;
             }
             _ => {}
@@ -1968,17 +2186,11 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
                 // Space: toggle Branch Cleanup selection on the focused row
-                // (FR-018c). Falls back to focusing the Branch Detail pane
-                // when there is no selectable branch in scope.
+                // (FR-018c). Blocked rows stay focused and surface a
+                // short-lived Info toast that explains why cleanup selection
+                // is not currently allowed.
                 KeyCode::Char(' ') => {
-                    if let Some(name) = model.branches.selected_branch().map(|b| b.name.clone()) {
-                        let toggled = model.branches.toggle_cleanup_selection(&name);
-                        if !toggled {
-                            model.active_focus = FocusPane::BranchDetail;
-                        }
-                    } else {
-                        model.active_focus = FocusPane::BranchDetail;
-                    }
+                    toggle_cleanup_selection_for_selected_branch(model);
                     return;
                 }
                 // Shift+C: open the Cleanup Confirm modal (FR-018e).
@@ -2043,6 +2255,16 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Issues => {
+            if key.code == KeyCode::Enter
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+                && model.issues.detail_view
+            {
+                if let Some(issue) = model.issues.selected_issue() {
+                    update(model, Message::OpenWizardWithIssue(issue.number.into()));
+                }
+                return;
+            }
+
             if model.issues.search_active {
                 let msg = match key.code {
                     KeyCode::Esc => Some(IssuesMessage::SearchClear),
@@ -2050,7 +2272,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     _ => search_input_char(&key).map(IssuesMessage::SearchInput),
                 };
                 if let Some(m) = msg {
-                    screens::issues::update(&mut model.issues, m);
+                    update(model, Message::Issues(m));
                     return;
                 }
             }
@@ -2064,9 +2286,9 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
-                screens::issues::update(&mut model.issues, m);
+                update(model, Message::Issues(m));
             } else if key.code == KeyCode::Esc && model.issues.detail_view {
-                screens::issues::update(&mut model.issues, IssuesMessage::ToggleDetail);
+                update(model, Message::Issues(IssuesMessage::ToggleDetail));
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -2364,40 +2586,72 @@ fn branch_live_session_summaries_with(
 ) -> HashMap<String, screens::branches::BranchLiveSessionSummary> {
     let mut summaries: HashMap<String, screens::branches::BranchLiveSessionSummary> =
         HashMap::new();
+    let active_session_id = model.active_session_tab().map(|session| session.id.clone());
 
     for session in &model.sessions {
-        let SessionTabType::Agent { agent_id, color } = &session.tab_type else {
-            continue;
-        };
+        match &session.tab_type {
+            SessionTabType::Agent { agent_id, color } => {
+                let path = sessions_dir.join(format!("{}.toml", session.id));
+                let Ok(persisted) = AgentSession::load(&path) else {
+                    continue;
+                };
+                let runtime_status =
+                    agent_session_runtime_status(sessions_dir, &session.id, &persisted);
+                let is_active = active_session_id.as_deref() == Some(session.id.as_str());
+                let status = if matches!(
+                    runtime_status,
+                    gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
+                ) {
+                    runtime_status
+                } else if is_active {
+                    gwt_agent::AgentStatus::WaitingInput
+                } else {
+                    continue;
+                };
 
-        let path = sessions_dir.join(format!("{}.toml", session.id));
-        let Ok(persisted) = AgentSession::load(&path) else {
-            continue;
-        };
-        let status = agent_session_runtime_status(sessions_dir, &session.id, &persisted);
-        if !matches!(
-            status,
-            gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
-        ) {
-            continue;
+                let candidate = screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status,
+                    color: branch_spinner_palette_color(agent_id, *color),
+                    active: is_active,
+                };
+                summaries
+                    .entry(persisted.branch.clone())
+                    .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
+                        indicators: Vec::new(),
+                    })
+                    .indicators
+                    .push(candidate);
+            }
+            SessionTabType::Shell => {}
         }
+    }
 
-        let candidate = screens::branches::BranchLiveSessionIndicator {
-            status,
-            color: branch_spinner_palette_color(agent_id, *color),
-        };
-        summaries
-            .entry(persisted.branch.clone())
-            .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
-                indicators: Vec::new(),
-            })
-            .indicators
-            .push(candidate);
+    if let Some(active_session) = model.active_session_tab() {
+        if matches!(&active_session.tab_type, SessionTabType::Shell) {
+            if let Some(branch) = active_session.name.strip_prefix("Shell: ") {
+                summaries
+                    .entry(branch.to_string())
+                    .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
+                        indicators: Vec::new(),
+                    })
+                    .indicators
+                    .push(screens::branches::BranchLiveSessionIndicator {
+                        kind: screens::branches::BranchLiveSessionIndicatorKind::Shell,
+                        status: gwt_agent::AgentStatus::WaitingInput,
+                        color: crate::model::AgentColor::Gray,
+                        active: true,
+                    });
+            }
+        }
     }
 
     for summary in summaries.values_mut() {
         summary.indicators.sort_by_key(|indicator| {
-            std::cmp::Reverse(branch_live_session_priority(indicator.status))
+            (
+                std::cmp::Reverse(u8::from(indicator.active)),
+                std::cmp::Reverse(branch_live_session_priority(indicator.status)),
+            )
         });
     }
 
@@ -2939,6 +3193,7 @@ fn refresh_branches(model: &mut Model) {
                 is_local: branch.is_local,
                 category: screens::branches::categorize_branch(&branch.name),
                 worktree_path: None,
+                upstream: branch.upstream.clone(),
             })
             .collect();
         screens::branches::update(
@@ -3120,7 +3375,12 @@ fn refresh_active_session_branches_with(model: &mut Model, sessions_dir: &Path) 
             SessionTabType::Agent { .. } => {
                 let path = sessions_dir.join(format!("{}.toml", session.id));
                 if let Ok(persisted) = AgentSession::load(&path) {
-                    active.insert(persisted.branch.clone());
+                    if !matches!(
+                        agent_session_runtime_status(sessions_dir, &session.id, &persisted),
+                        gwt_agent::AgentStatus::Stopped
+                    ) {
+                        active.insert(persisted.branch.clone());
+                    }
                 } else if let Some((_, branch)) = session.name.split_once(": ") {
                     // Fall back to the tab title only when no persisted
                     // metadata exists (e.g., freshly spawned session before
@@ -3846,6 +4106,7 @@ fn build_launch_config_from_wizard_with_custom_agents(
     } else if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
         config.reasoning_level = Some(wizard.reasoning.clone());
     }
+    config.linked_issue_number = wizard.issue_id.parse::<u64>().ok();
     config
 }
 
@@ -3913,6 +4174,7 @@ fn build_custom_launch_config_from_wizard(
         runtime_target: wizard.runtime_target,
         docker_service: wizard.docker_service.clone(),
         docker_lifecycle_intent: wizard.docker_lifecycle_intent,
+        linked_issue_number: wizard.issue_id.parse::<u64>().ok(),
     }
 }
 
@@ -3967,6 +4229,21 @@ fn materialize_pending_launch(model: &mut Model) {
             return;
         }
         if let Some(config) = model.pending_launch_config.take() {
+            if let Err(err) = link_selected_issue_to_branch(&model.repo_path, &config) {
+                update(
+                    model,
+                    Message::PushErrorNotification(
+                        Notification::new(Severity::Error, "session", "Agent launch failed")
+                            .with_detail(err),
+                    ),
+                );
+                return;
+            }
+            if let Err(err) = persist_issue_linkage(&model.repo_path, &config) {
+                tracing::warn!("issue linkage store update failed: {err}");
+            } else if config.linked_issue_number.is_some() {
+                reload_cached_issues(model);
+            }
             start_async_docker_launch(model, config);
         }
         return;
@@ -3992,11 +4269,35 @@ fn materialize_pending_launch_with(
     model: &mut Model,
     sessions_dir: &std::path::Path,
 ) -> Result<(), String> {
+    materialize_pending_launch_with_hooks(
+        model,
+        sessions_dir,
+        link_selected_issue_to_branch,
+        resolve_launch_worktree,
+    )
+}
+
+fn materialize_pending_launch_with_hooks<Link, Resolve>(
+    model: &mut Model,
+    sessions_dir: &std::path::Path,
+    link_issue: Link,
+    resolve_worktree: Resolve,
+) -> Result<(), String>
+where
+    Link: FnOnce(&std::path::Path, &LaunchConfig) -> Result<(), String>,
+    Resolve: FnOnce(&std::path::Path, &mut LaunchConfig) -> Result<(), String>,
+{
     let Some(mut config) = model.pending_launch_config.take() else {
         return Ok(());
     };
 
-    resolve_launch_worktree(&model.repo_path, &mut config)?;
+    link_issue(&model.repo_path, &config)?;
+    resolve_worktree(&model.repo_path, &mut config)?;
+    if let Err(err) = persist_issue_linkage(&model.repo_path, &config) {
+        tracing::warn!("issue linkage store update failed: {err}");
+    } else if config.linked_issue_number.is_some() {
+        reload_cached_issues(model);
+    }
     if let Err(err) = apply_docker_runtime_to_launch_config(&model.repo_path, &mut config) {
         update(
             model,
@@ -4122,18 +4423,7 @@ fn persist_and_spawn_launch(
         .working_dir
         .clone()
         .unwrap_or_else(|| model.repo_path.clone());
-    if let Err(e) = distribute_to_worktree(&worktree) {
-        tracing::warn!("skill distribution failed: {e}");
-    }
-    if let Err(e) = update_git_exclude(&worktree) {
-        tracing::warn!("git exclude update failed: {e}");
-    }
-    if let Err(e) = generate_settings_local(&worktree) {
-        tracing::warn!("settings.local.json generation failed: {e}");
-    }
-    if let Err(e) = generate_codex_hooks(&worktree) {
-        tracing::warn!("hooks.json generation failed: {e}");
-    }
+    refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch");
 
     let mut pty_env = config.env_vars.clone();
     inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
@@ -4157,7 +4447,9 @@ fn persist_and_spawn_launch(
             ),
         );
     } else {
-        bootstrap_agent_session_running(sessions_dir, &session.id);
+        bootstrap_agent_session_waiting_input(sessions_dir, &session.id);
+        // Phase 8: ensure a watcher is running for this Worktree so live
+        // SPEC/file edits feed the incremental indexer.
         crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
         crate::index_worker::kick_initial_build_for_worktree(&repo_path_for_watcher, &worktree);
     }
@@ -4174,6 +4466,57 @@ fn persist_and_spawn_launch(
     );
 
     Ok(())
+}
+
+fn link_selected_issue_to_branch(
+    repo_path: &std::path::Path,
+    config: &LaunchConfig,
+) -> Result<(), String> {
+    link_selected_issue_to_branch_with(repo_path, config, |cwd, args| {
+        let output = Command::new("gh")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .map_err(|err| format!("gh issue develop: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "gh issue develop: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    })
+}
+
+fn link_selected_issue_to_branch_with<Run>(
+    repo_path: &std::path::Path,
+    config: &LaunchConfig,
+    run: Run,
+) -> Result<(), String>
+where
+    Run: FnOnce(&std::path::Path, &[String]) -> Result<(), String>,
+{
+    let Some(issue_number) = config.linked_issue_number else {
+        return Ok(());
+    };
+    let branch_name = config
+        .branch
+        .as_deref()
+        .ok_or_else(|| "issue linkage requires a branch name".to_string())?;
+    let base_branch = config
+        .base_branch
+        .as_deref()
+        .unwrap_or(DEFAULT_NEW_BRANCH_BASE_BRANCH);
+    let args = vec![
+        "issue".to_string(),
+        "develop".to_string(),
+        issue_number.to_string(),
+        "--name".to_string(),
+        branch_name.to_string(),
+        "--base".to_string(),
+        base_branch.to_string(),
+    ];
+    run(repo_path, &args)
 }
 
 fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
@@ -4227,7 +4570,13 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
 
     let main_repo_path =
         gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = existing_worktree_for_branch(&main_repo_path, &branch_name)? {
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let worktrees = manager.list().map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
+        .map(|worktree| worktree.path.clone())
+    {
         config.working_dir = Some(existing_worktree.clone());
         config.env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
@@ -4242,7 +4591,6 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
 
     manager
         .fetch_origin()
@@ -4273,7 +4621,20 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
             .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
     }
 
-    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let preferred_worktree_path =
+        gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
+        .ok_or_else(|| {
+            format!("failed to resolve available worktree path for branch {branch_name}")
+        })?;
+    if worktree_path != preferred_worktree_path {
+        tracing::warn!(
+            branch = branch_name,
+            preferred = %preferred_worktree_path.display(),
+            selected = %worktree_path.display(),
+            "preferred worktree path is occupied; using suffixed fallback"
+        );
+    }
     if local_branch_exists(&main_repo_path, &branch_name)? {
         manager
             .create(&branch_name, &worktree_path)
@@ -4888,6 +5249,48 @@ fn compose_workspace_mount_target(service: &gwt_docker::ComposeService) -> Optio
         .map(|mount| mount.target.clone())
 }
 
+fn first_available_worktree_path(
+    preferred_path: &Path,
+    worktrees: &[gwt_git::WorktreeInfo],
+) -> Option<PathBuf> {
+    if !worktree_path_is_occupied(preferred_path, worktrees) && !preferred_path.exists() {
+        return Some(preferred_path.to_path_buf());
+    }
+
+    for suffix in 2usize.. {
+        let candidate = suffixed_worktree_path(preferred_path, suffix)?;
+        if !worktree_path_is_occupied(&candidate, worktrees) && !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(format!("{file_name}-{suffix}"));
+    Some(candidate)
+}
+
+fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
+    worktrees
+        .iter()
+        .any(|worktree| same_worktree_path(&worktree.path, path))
+}
+
+fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
@@ -4896,22 +5299,6 @@ fn origin_remote_ref(branch_name: &str) -> String {
     } else {
         format!("origin/{branch_name}")
     }
-}
-
-fn existing_worktree_for_branch(
-    repo_path: &Path,
-    branch_name: &str,
-) -> Result<Option<PathBuf>, String> {
-    let manager = gwt_git::WorktreeManager::new(repo_path);
-    manager
-        .list()
-        .map_err(|err| err.to_string())
-        .map(|worktrees| {
-            worktrees
-                .into_iter()
-                .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
-                .map(|worktree| worktree.path)
-        })
 }
 
 fn current_git_branch(repo_path: &Path) -> Result<String, String> {
@@ -5036,11 +5423,33 @@ fn load_quick_start_entries(
 }
 
 fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecContext>) {
+    open_wizard_with_prefill(model, spec_context, None);
+}
+
+fn open_wizard_with_issue(model: &mut Model, issue_number: u64) {
+    open_wizard_with_prefill(model, None, Some(issue_number));
+}
+
+fn open_wizard_with_prefill(
+    model: &mut Model,
+    spec_context: Option<screens::wizard::SpecContext>,
+    initial_issue_number: Option<u64>,
+) {
     let cache_path = wizard_version_cache_path();
     let cache = VersionCache::load(&cache_path);
     let detected_agents = AgentDetector::detect_all();
-    let (wizard, refresh_targets) =
-        prepare_wizard_startup(&model.repo_path, spec_context, detected_agents, &cache);
+    let (wizard, refresh_targets) = if let Some(issue_number) = initial_issue_number {
+        prepare_wizard_startup_with_issue_cache_root(
+            &model.repo_path,
+            spec_context,
+            Some(issue_number),
+            detected_agents,
+            &cache,
+            default_issue_cache_root(),
+        )
+    } else {
+        prepare_wizard_startup(&model.repo_path, spec_context, detected_agents, &cache)
+    };
 
     model.wizard = Some(wizard);
     schedule_wizard_version_cache_refresh(cache_path, refresh_targets);
@@ -5088,7 +5497,6 @@ fn handle_confirm_message(model: &mut Model, msg: screens::confirm::ConfirmMessa
 // ---------------- Branch Cleanup integration (FR-018) ----------------
 
 fn open_cleanup_confirm_for_selection(model: &mut Model) {
-    use screens::branches::MergeState;
     use screens::cleanup_confirm::CleanupConfirmRow;
 
     // FR-018c: the selection set persists across view-mode / sort / search
@@ -5103,13 +5511,18 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
             if !model.branches.is_cleanup_selected(&branch.name) {
                 return None;
             }
-            match model.branches.merge_state(&branch.name) {
-                MergeState::Cleanable(target) => Some(CleanupConfirmRow {
-                    branch: branch.name.clone(),
-                    target,
-                }),
-                _ => None,
-            }
+            let execution_branch = model.branches.cleanup_execution_branch(&branch.name)?;
+            Some(CleanupConfirmRow {
+                branch: branch.name.clone(),
+                target: model.branches.cleanup_target(&branch.name),
+                execution_branch,
+                upstream: if branch.is_local {
+                    branch.upstream.clone()
+                } else {
+                    Some(origin_remote_ref(&branch.name))
+                },
+                risks: model.branches.cleanup_selection_risks(&branch.name),
+            })
         })
         .collect();
     rows.sort_by(|a, b| a.branch.cmp(&b.branch));
@@ -5120,13 +5533,15 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
             Notification::new(
                 gwt_core::logging::LogLevel::Warn,
                 "cleanup",
-                "No cleanable branches selected",
+                "No cleanup branches selected",
             ),
         );
         return;
     }
 
-    model.cleanup_confirm.show(rows);
+    model
+        .cleanup_confirm
+        .show(rows, model.branches.cleanup_settings.delete_remote);
 }
 
 fn handle_cleanup_confirm_message(
@@ -5136,6 +5551,7 @@ fn handle_cleanup_confirm_message(
     use screens::cleanup_confirm::CleanupConfirmOutcome;
 
     let outcome = screens::cleanup_confirm::update(&mut model.cleanup_confirm, msg);
+    model.branches.cleanup_settings.delete_remote = model.cleanup_confirm.delete_remote;
     match outcome {
         CleanupConfirmOutcome::Pending => {}
         CleanupConfirmOutcome::Cancelled => {}
@@ -5210,7 +5626,9 @@ fn start_cleanup_run(model: &mut Model) {
         return;
     }
 
-    model.cleanup_progress.show(branches.len(), false);
+    let rows = model.cleanup_confirm.rows.clone();
+    let delete_remote = model.cleanup_confirm.delete_remote;
+    model.cleanup_progress.show(rows.len(), delete_remote);
 
     let queue: crate::model::CleanupEventQueue =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -5233,10 +5651,11 @@ fn start_cleanup_run(model: &mut Model) {
                 .map(|path| (item.name.clone(), path.clone()))
         })
         .collect();
-
     std::thread::spawn(move || {
         let manager = gwt_git::WorktreeManager::new(&repo_path);
-        for branch in branches {
+        for row in rows {
+            let branch = row.branch.clone();
+            let execution_branch = row.execution_branch.clone();
             queue
                 .lock()
                 .unwrap()
@@ -5248,11 +5667,11 @@ fn start_cleanup_run(model: &mut Model) {
             // Branches with their own worktree are still candidates — the
             // whole point of Branch Cleanup is to remove the worktree along
             // with the branch.
-            let blocked_reason = if gwt_git::is_protected_branch(&branch) {
+            let blocked_reason = if gwt_git::is_protected_branch(&execution_branch) {
                 Some("protected branch".to_string())
-            } else if current_head_branch.as_deref() == Some(branch.as_str()) {
+            } else if current_head_branch.as_deref() == Some(execution_branch.as_str()) {
                 Some("current HEAD".to_string())
-            } else if active_session_branches.contains(&branch) {
+            } else if active_session_branches.contains(&execution_branch) {
                 Some("active session".to_string())
             } else {
                 None
@@ -5261,7 +5680,7 @@ fn start_cleanup_run(model: &mut Model) {
             let (success, message) = if let Some(reason) = blocked_reason {
                 (false, Some(reason))
             } else {
-                match manager.cleanup_branch(&branch) {
+                match manager.cleanup_branch(&execution_branch) {
                     Ok(()) => {
                         // Phase 8: shut the per-worktree index watcher down
                         // and drop the on-disk index dir ONLY after git has
@@ -5270,10 +5689,20 @@ fn start_cleanup_run(model: &mut Model) {
                         // (dirty worktree, git error, ...), the surviving
                         // worktree would stop being indexed until something
                         // explicitly recreated the watcher.
-                        if let Some(path) = worktree_paths.get(&branch) {
+                        if let Some(path) = worktree_paths.get(&execution_branch) {
                             let _ = crate::index_worker::shutdown_and_remove(&repo_path, path);
                         }
-                        (true, None)
+                        if delete_remote {
+                            match manager
+                                .delete_remote_branch(&execution_branch, row.upstream.as_deref())
+                            {
+                                Ok(gwt_git::RemoteDeleteOutcome::Deleted)
+                                | Ok(gwt_git::RemoteDeleteOutcome::SkippedMissing) => (true, None),
+                                Err(err) => (false, Some(format!("remote delete failed: {err}"))),
+                            }
+                        } else {
+                            (true, None)
+                        }
                     }
                     Err(err) => (false, Some(err.to_string())),
                 }
@@ -5418,11 +5847,30 @@ fn prepare_wizard_startup(
     detected_agents: Vec<DetectedAgent>,
     cache: &VersionCache,
 ) -> (screens::wizard::WizardState, Vec<AgentId>) {
+    prepare_wizard_startup_with_issue_cache_root(
+        repo_path,
+        spec_context,
+        None,
+        detected_agents,
+        cache,
+        default_issue_cache_root(),
+    )
+}
+
+fn prepare_wizard_startup_with_issue_cache_root(
+    repo_path: &Path,
+    spec_context: Option<screens::wizard::SpecContext>,
+    initial_issue_number: Option<u64>,
+    detected_agents: Vec<DetectedAgent>,
+    cache: &VersionCache,
+    issue_cache_root: PathBuf,
+) -> (screens::wizard::WizardState, Vec<AgentId>) {
     let branch_name = spec_context
         .as_ref()
         .and_then(|ctx| ctx.branch_seed())
         .unwrap_or_default();
-    let starts_new_branch = spec_context.is_some();
+    let starts_new_branch = spec_context.is_some() || initial_issue_number.is_some();
+    let (cached_issues, issue_load_error) = load_cached_wizard_issues(&issue_cache_root);
 
     let mut wizard = screens::wizard::WizardState {
         step: if starts_new_branch {
@@ -5434,6 +5882,15 @@ fn prepare_wizard_startup(
         gh_cli_available: gwt_core::process::command_exists("gh"),
         ai_enabled: false,
         branch_name,
+        issue_id: initial_issue_number
+            .map(|number| number.to_string())
+            .unwrap_or_default(),
+        issue_picker: screens::wizard::IssuePickerState {
+            issues: cached_issues,
+            search_query: String::new(),
+            search_active: false,
+            load_error: issue_load_error,
+        },
         spec_context,
         ..Default::default()
     };
@@ -5562,6 +6019,231 @@ fn detect_wizard_docker_context(
         services: services.into_iter().map(|service| service.name).collect(),
         suggested_service,
     })
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct IssueBranchLinkStore {
+    branches: HashMap<String, u64>,
+}
+
+fn default_issue_cache_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gwt")
+        .join("cache")
+        .join("issues")
+}
+
+fn default_issue_linkage_store_path(repo_path: &std::path::Path) -> Option<PathBuf> {
+    let repo_hash = crate::index_worker::detect_repo_hash(repo_path)?;
+    Some(
+        gwt_cache_dir()
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str())),
+    )
+}
+
+fn handle_issues_message(model: &mut Model, msg: screens::issues::IssuesMessage) {
+    handle_issues_message_with_paths(
+        model,
+        msg,
+        default_issue_cache_root(),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+}
+
+fn handle_issues_message_with_paths(
+    model: &mut Model,
+    msg: screens::issues::IssuesMessage,
+    issue_cache_root: PathBuf,
+    linkage_store_path: Option<PathBuf>,
+) {
+    if matches!(msg, screens::issues::IssuesMessage::Refresh) {
+        reload_cached_issues_with_paths(model, issue_cache_root, linkage_store_path);
+        return;
+    }
+
+    screens::issues::update(&mut model.issues, msg);
+}
+
+fn reload_cached_issues(model: &mut Model) {
+    reload_cached_issues_with_paths(
+        model,
+        default_issue_cache_root(),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+}
+
+fn reload_cached_issues_with_paths(
+    model: &mut Model,
+    issue_cache_root: PathBuf,
+    linkage_store_path: Option<PathBuf>,
+) {
+    let (issues, issue_load_error) =
+        load_cached_issues_with_linkage(&issue_cache_root, linkage_store_path.as_deref());
+    screens::issues::update(
+        &mut model.issues,
+        screens::issues::IssuesMessage::SetIssues(issues),
+    );
+    model.issues.last_error = issue_load_error;
+    if model.issues.selected_issue().is_none() {
+        model.issues.detail_view = false;
+    }
+}
+
+fn load_cached_wizard_issues(
+    cache_root: &std::path::Path,
+) -> (Vec<screens::issues::IssueItem>, Option<String>) {
+    load_cached_issues_with_linkage(cache_root, None)
+}
+
+fn load_cached_issues_with_linkage(
+    cache_root: &std::path::Path,
+    linkage_store_path: Option<&std::path::Path>,
+) -> (Vec<screens::issues::IssueItem>, Option<String>) {
+    let linked_branches_by_issue = load_issue_linkage_map(linkage_store_path);
+    let dir = match std::fs::read_dir(cache_root) {
+        Ok(dir) => dir,
+        Err(err) => return (Vec::new(), Some(err.to_string())),
+    };
+
+    let mut issues = Vec::new();
+    for entry in dir.flatten() {
+        if !entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(number) = name.parse::<u32>() else {
+            continue;
+        };
+        let meta_path = entry.path().join("meta.json");
+        let Ok(meta_bytes) = std::fs::read(&meta_path) else {
+            continue;
+        };
+        let Ok(meta): Result<serde_json::Value, _> = serde_json::from_slice(&meta_bytes) else {
+            continue;
+        };
+        let title = meta
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let state = meta
+            .get("state")
+            .and_then(|value| value.as_str())
+            .unwrap_or("open")
+            .to_string();
+        let labels = meta
+            .get("labels")
+            .and_then(|value| value.as_array())
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|label| label.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let body = std::fs::read_to_string(entry.path().join("body.md")).unwrap_or_default();
+        let linked_branches = linked_branches_by_issue
+            .get(&number)
+            .cloned()
+            .unwrap_or_default();
+
+        issues.push(screens::issues::IssueItem {
+            number,
+            title,
+            state,
+            labels,
+            body,
+            linked_branches,
+        });
+    }
+
+    issues.sort_by(|left, right| right.number.cmp(&left.number));
+    (issues, None)
+}
+
+fn load_issue_linkage_map(
+    linkage_store_path: Option<&std::path::Path>,
+) -> HashMap<u32, Vec<String>> {
+    let mut by_issue: HashMap<u32, Vec<String>> = HashMap::new();
+    let Some(store_path) = linkage_store_path else {
+        return by_issue;
+    };
+    let store = match read_issue_linkage_store(store_path) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!("issue linkage store read failed: {err}");
+            return by_issue;
+        }
+    };
+
+    for (branch_name, issue_number) in store.branches {
+        let Ok(issue_number) = u32::try_from(issue_number) else {
+            continue;
+        };
+        by_issue.entry(issue_number).or_default().push(branch_name);
+    }
+
+    for branches in by_issue.values_mut() {
+        branches.sort();
+    }
+
+    by_issue
+}
+
+fn persist_issue_linkage(repo_path: &std::path::Path, config: &LaunchConfig) -> Result<(), String> {
+    let Some(issue_number) = config.linked_issue_number else {
+        return Ok(());
+    };
+    let Some(branch_name) = config.branch.as_deref() else {
+        return Ok(());
+    };
+    let Some(store_path) = default_issue_linkage_store_path(repo_path) else {
+        return Ok(());
+    };
+    persist_issue_linkage_at_path(&store_path, issue_number, branch_name)
+}
+
+fn persist_issue_linkage_at_path(
+    store_path: &std::path::Path,
+    issue_number: u64,
+    branch_name: &str,
+) -> Result<(), String> {
+    if branch_name.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut store = read_issue_linkage_store(store_path)?;
+    store.branches.insert(branch_name.to_string(), issue_number);
+
+    if let Some(parent) = store_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create issue linkage store dir: {err}"))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&store)
+        .map_err(|err| format!("serialize issue linkage store: {err}"))?;
+    std::fs::write(store_path, bytes).map_err(|err| format!("write issue linkage store: {err}"))
+}
+
+fn read_issue_linkage_store(store_path: &std::path::Path) -> Result<IssueBranchLinkStore, String> {
+    match std::fs::read(store_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|err| format!("parse issue linkage store {}: {err}", store_path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(IssueBranchLinkStore::default())
+        }
+        Err(err) => Err(format!(
+            "read issue linkage store {}: {err}",
+            store_path.display()
+        )),
+    }
 }
 /// All builtin agent IDs in display order.
 const BUILTIN_AGENTS: [AgentId; 4] = [
@@ -5950,32 +6632,187 @@ fn title_hit_label_index(
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridAxis {
+    RowsFirst,
+    ColumnsFirst,
+}
+
+fn responsive_grid_axis(area: Rect) -> GridAxis {
+    if area.height > area.width {
+        GridAxis::ColumnsFirst
+    } else {
+        GridAxis::RowsFirst
+    }
+}
+
+fn grid_primary_count(count: usize) -> usize {
+    (count as f64).sqrt().ceil() as usize
+}
+
 fn grid_session_pane_area(area: Rect, count: usize, target_index: usize) -> Option<Rect> {
     if count == 0 || target_index >= count {
         return None;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
+    let primary = grid_primary_count(count);
+    match responsive_grid_axis(area) {
+        GridAxis::RowsFirst => {
+            let rows = count.div_ceil(primary);
+            let row_constraints: Vec<Constraint> = (0..rows)
+                .map(|_| Constraint::Ratio(1, rows as u32))
+                .collect();
+            let row_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(row_constraints)
+                .split(area);
 
-    let target_row = target_index / cols;
-    let start = target_row * cols;
-    let end = (start + cols).min(count);
-    let n = end - start;
-    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-    let col_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_constraints)
-        .split(row_chunks[target_row]);
+            let target_row = target_index / primary;
+            let start = target_row * primary;
+            let end = (start + primary).min(count);
+            let n = end - start;
+            let col_constraints: Vec<Constraint> =
+                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+            let col_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(col_constraints)
+                .split(row_chunks[target_row]);
 
-    col_chunks.get(target_index - start).copied()
+            col_chunks.get(target_index - start).copied()
+        }
+        GridAxis::ColumnsFirst => {
+            let cols = count.div_ceil(primary);
+            let col_constraints: Vec<Constraint> = (0..cols)
+                .map(|_| Constraint::Ratio(1, cols as u32))
+                .collect();
+            let col_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(col_constraints)
+                .split(area);
+
+            let target_col = target_index / primary;
+            let start = target_col * primary;
+            let end = (start + primary).min(count);
+            let n = end - start;
+            let row_constraints: Vec<Constraint> =
+                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+            let row_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(row_constraints)
+                .split(col_chunks[target_col]);
+
+            row_chunks.get(target_index - start).copied()
+        }
+    }
+}
+
+fn move_grid_session(model: &mut Model, direction: GridSessionDirection) {
+    if model.session_layout != SessionLayout::Grid {
+        return;
+    }
+
+    let Some(session_area) = visible_session_area(model) else {
+        return;
+    };
+    let Some(next_session) = adjacent_grid_session_index(
+        session_area,
+        model.sessions.len(),
+        model.active_session,
+        direction,
+    ) else {
+        return;
+    };
+
+    model.active_session = next_session;
+}
+
+fn adjacent_grid_session_index(
+    area: Rect,
+    count: usize,
+    active_index: usize,
+    direction: GridSessionDirection,
+) -> Option<usize> {
+    let current_area = grid_session_pane_area(area, count, active_index)?;
+    let current_center = rect_center_doubled(current_area);
+    let mut aligned_best: Option<(i32, i32, usize)> = None;
+    let mut fallback_best: Option<(i32, i32, usize)> = None;
+
+    for candidate_index in 0..count {
+        if candidate_index == active_index {
+            continue;
+        }
+        let Some(candidate_area) = grid_session_pane_area(area, count, candidate_index) else {
+            continue;
+        };
+        let candidate_center = rect_center_doubled(candidate_area);
+        let Some((primary_distance, secondary_distance)) =
+            directional_center_distances(current_center, candidate_center, direction)
+        else {
+            continue;
+        };
+        let key = (primary_distance, secondary_distance, candidate_index);
+        let overlaps = match direction {
+            GridSessionDirection::Left | GridSessionDirection::Right => {
+                rects_overlap_vertically(current_area, candidate_area)
+            }
+            GridSessionDirection::Up | GridSessionDirection::Down => {
+                rects_overlap_horizontally(current_area, candidate_area)
+            }
+        };
+        let slot = if overlaps {
+            &mut aligned_best
+        } else {
+            &mut fallback_best
+        };
+        if slot.as_ref().is_none_or(|best| key < *best) {
+            *slot = Some(key);
+        }
+    }
+
+    aligned_best
+        .or(fallback_best)
+        .map(|(_, _, candidate_index)| candidate_index)
+}
+
+fn rect_center_doubled(area: Rect) -> (i32, i32) {
+    (
+        i32::from(area.x) * 2 + i32::from(area.width),
+        i32::from(area.y) * 2 + i32::from(area.height),
+    )
+}
+
+fn directional_center_distances(
+    current_center: (i32, i32),
+    candidate_center: (i32, i32),
+    direction: GridSessionDirection,
+) -> Option<(i32, i32)> {
+    match direction {
+        GridSessionDirection::Left if candidate_center.0 < current_center.0 => Some((
+            current_center.0 - candidate_center.0,
+            (candidate_center.1 - current_center.1).abs(),
+        )),
+        GridSessionDirection::Right if candidate_center.0 > current_center.0 => Some((
+            candidate_center.0 - current_center.0,
+            (candidate_center.1 - current_center.1).abs(),
+        )),
+        GridSessionDirection::Up if candidate_center.1 < current_center.1 => Some((
+            current_center.1 - candidate_center.1,
+            (candidate_center.0 - current_center.0).abs(),
+        )),
+        GridSessionDirection::Down if candidate_center.1 > current_center.1 => Some((
+            candidate_center.1 - current_center.1,
+            (candidate_center.0 - current_center.0).abs(),
+        )),
+        _ => None,
+    }
+}
+
+fn rects_overlap_vertically(left: Rect, right: Rect) -> bool {
+    left.y < right.bottom() && right.y < left.bottom()
+}
+
+fn rects_overlap_horizontally(top: Rect, bottom: Rect) -> bool {
+    top.x < bottom.right() && bottom.x < top.right()
 }
 
 fn handle_management_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
@@ -6163,10 +7000,17 @@ where
     }
 
     if !hits_active_session {
-        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && scroll_target_session_index(model, mouse).is_some()
+        {
+            model.active_focus = FocusPane::Terminal;
+        } else if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
             model.terminal_trackpad_scroll_row = None;
+        } else {
+            return Ok(false);
         }
-        return Ok(false);
     }
 
     if matches!(
@@ -6185,22 +7029,32 @@ where
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, 1, "wheel");
+            let Some(target_session) = scroll_target_session_index(model, mouse) else {
+                return Ok(false);
+            };
+            let routing = session_scroll_routing_for_index(model, target_session);
+            log_session_scroll_routing(model, target_session, routing, 1, "wheel");
             match routing {
-                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, 1)),
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_session_by_rows(model, target_session, 1))
+                }
                 ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, 1))
+                    Ok(queue_session_mouse_scroll(model, target_session, mouse, 1))
                 }
             }
         }
         MouseEventKind::ScrollDown => {
-            let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, -1, "wheel");
+            let Some(target_session) = scroll_target_session_index(model, mouse) else {
+                return Ok(false);
+            };
+            let routing = session_scroll_routing_for_index(model, target_session);
+            log_session_scroll_routing(model, target_session, routing, -1, "wheel");
             match routing {
-                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, -1)),
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_session_by_rows(model, target_session, -1))
+                }
                 ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, -1))
+                    Ok(queue_session_mouse_scroll(model, target_session, mouse, -1))
                 }
             }
         }
@@ -6218,14 +7072,25 @@ where
             }
             let delta_rows = delta_rows.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
             let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, delta_rows, "trackpad_drag");
+            log_session_scroll_routing(
+                model,
+                model.active_session,
+                routing,
+                delta_rows,
+                "trackpad_drag",
+            );
             match routing {
-                ScrollInputRouting::LocalViewport => {
-                    Ok(scroll_active_session_by_rows(model, delta_rows))
-                }
-                ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, delta_rows))
-                }
+                ScrollInputRouting::LocalViewport => Ok(scroll_session_by_rows(
+                    model,
+                    model.active_session,
+                    delta_rows,
+                )),
+                ScrollInputRouting::PtyMouse => Ok(queue_session_mouse_scroll(
+                    model,
+                    model.active_session,
+                    mouse,
+                    delta_rows,
+                )),
             }
         }
         MouseEventKind::Up(MouseButton::Right) => {
@@ -6296,6 +7161,21 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
         .map(|region| region.url)
 }
 
+fn scroll_target_session_index(model: &Model, mouse: MouseEvent) -> Option<usize> {
+    match model.session_layout {
+        SessionLayout::Tab => {
+            mouse_hits_active_session(model, mouse).then_some(model.active_session)
+        }
+        SessionLayout::Grid => {
+            let session_area = visible_session_area(model)?;
+            (0..model.sessions.len()).find(|&session_idx| {
+                grid_session_pane_area(session_area, model.sessions.len(), session_idx)
+                    .is_some_and(|pane_area| mouse_hits_rect(mouse, pane_area))
+            })
+        }
+    }
+}
+
 fn mouse_hits_active_session(model: &Model, mouse: MouseEvent) -> bool {
     let Some(area) = active_session_content_area(model) else {
         return false;
@@ -6321,8 +7201,19 @@ fn mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell>
     })
 }
 
-fn clamped_mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell> {
-    let area = active_session_text_area(model)?;
+fn session_text_area_for_index(model: &Model, session_idx: usize) -> Option<Rect> {
+    let session_area = visible_session_area(model)?;
+    let area = session_content_area_for_index(model, session_area, session_idx)?;
+    let session = model.sessions.get(session_idx)?;
+    Some(session_text_area(session, area))
+}
+
+fn clamped_mouse_terminal_cell_for_index(
+    model: &Model,
+    mouse: MouseEvent,
+    session_idx: usize,
+) -> Option<TerminalCell> {
+    let area = session_text_area_for_index(model, session_idx)?;
     if area.width == 0 || area.height == 0 || mouse.row < area.y || mouse.row >= area.bottom() {
         return None;
     }
@@ -6348,6 +7239,13 @@ fn active_session_scroll_routing(model: &Model) -> ScrollInputRouting {
     session_scroll_routing(session)
 }
 
+fn session_scroll_routing_for_index(model: &Model, session_idx: usize) -> ScrollInputRouting {
+    let Some(session) = model.sessions.get(session_idx) else {
+        return ScrollInputRouting::LocalViewport;
+    };
+    session_scroll_routing(session)
+}
+
 fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRouting {
     if !matches!(session.tab_type, SessionTabType::Agent { .. }) {
         return ScrollInputRouting::LocalViewport;
@@ -6360,13 +7258,14 @@ fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRout
     ScrollInputRouting::LocalViewport
 }
 
-fn log_active_session_scroll_routing(
+fn log_session_scroll_routing(
     model: &Model,
+    session_idx: usize,
     routing: ScrollInputRouting,
     delta_rows: i16,
     source: &str,
 ) {
-    let Some(session) = model.active_session_tab() else {
+    let Some(session) = model.sessions.get(session_idx) else {
         return;
     };
     crate::scroll_debug::log_lazy(|| {
@@ -6386,8 +7285,25 @@ fn log_active_session_scroll_routing(
     });
 }
 
-fn queue_active_session_mouse_scroll(
+fn push_input_to_session(model: &mut Model, session_id: String, bytes: Vec<u8>) {
+    model
+        .pending_pty_inputs
+        .push_back(crate::model::PendingPtyInput { session_id, bytes });
+}
+
+fn reset_session_scrollback_for_input(model: &mut Model, session_idx: usize) {
+    let Some(session) = model.sessions.get_mut(session_idx) else {
+        return;
+    };
+    if session.vt.viewing_history() {
+        session.vt.clear_selection();
+        session.vt.set_follow_live(true);
+    }
+}
+
+fn queue_session_mouse_scroll(
     model: &mut Model,
+    session_idx: usize,
     mouse: MouseEvent,
     delta_rows: i16,
 ) -> bool {
@@ -6395,11 +7311,11 @@ fn queue_active_session_mouse_scroll(
         return false;
     }
 
-    let Some(cell) = clamped_mouse_terminal_cell(model, mouse) else {
+    let Some(cell) = clamped_mouse_terminal_cell_for_index(model, mouse, session_idx) else {
         return false;
     };
 
-    reset_active_session_scrollback_for_input(model);
+    reset_session_scrollback_for_input(model, session_idx);
     let steps = usize::from(delta_rows.unsigned_abs());
     let code = if delta_rows > 0 { 64 } else { 65 };
     let mut bytes = Vec::with_capacity(steps.saturating_mul(12));
@@ -6413,7 +7329,14 @@ fn queue_active_session_mouse_scroll(
             .as_bytes(),
         );
     }
-    push_input_to_active_session(model, bytes);
+    let Some(session_id) = model
+        .sessions
+        .get(session_idx)
+        .map(|session| session.id.clone())
+    else {
+        return false;
+    };
+    push_input_to_session(model, session_id, bytes);
     true
 }
 
@@ -6426,8 +7349,8 @@ fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     })
 }
 
-fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
-    let Some(session) = model.active_session_tab_mut() else {
+fn scroll_session_by_rows(model: &mut Model, session_idx: usize, delta_rows: i16) -> bool {
+    let Some(session) = model.sessions.get_mut(session_idx) else {
         return false;
     };
 
@@ -6507,7 +7430,7 @@ fn active_session_content_area(model: &Model) -> Option<Rect> {
         main_area
     };
 
-    session_content_area(model, session_area)
+    session_content_area_for_index(model, session_area, model.active_session)
 }
 
 fn active_session_text_area(model: &Model) -> Option<Rect> {
@@ -6539,55 +7462,38 @@ fn management_split(area: Rect) -> [Rect; 2] {
     [lr[0], lr[1]]
 }
 
-fn session_content_area(model: &Model, session_area: Rect) -> Option<Rect> {
+fn session_content_area_for_index(
+    model: &Model,
+    session_area: Rect,
+    session_idx: usize,
+) -> Option<Rect> {
     match model.session_layout {
         SessionLayout::Tab => {
-            model.active_session_tab()?;
+            model.sessions.get(session_idx)?;
             Some(
                 pane_block(
                     build_session_title(model, session_area.width),
-                    model.active_focus == FocusPane::Terminal,
+                    model.active_focus == FocusPane::Terminal
+                        && session_idx == model.active_session,
                 )
                 .inner(session_area),
             )
         }
-        SessionLayout::Grid => active_grid_session_content_area(model, session_area),
+        SessionLayout::Grid => active_grid_session_content_area(model, session_area, session_idx),
     }
 }
 
-fn active_grid_session_content_area(model: &Model, area: Rect) -> Option<Rect> {
+fn active_grid_session_content_area(model: &Model, area: Rect, session_idx: usize) -> Option<Rect> {
     let count = model.sessions.len();
-    if count == 0 || model.active_session >= count {
+    if count == 0 || session_idx >= count {
         return None;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
-
-    let target_row = model.active_session / cols;
-    let start = target_row * cols;
-    let end = (start + cols).min(count);
-    let n = end - start;
-    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-    let col_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_constraints)
-        .split(row_chunks[target_row]);
-
-    let target_col = model.active_session - start;
-    let session = model.sessions.get(model.active_session)?;
+    let pane_area = grid_session_pane_area(area, count, session_idx)?;
+    let session = model.sessions.get(session_idx)?;
     Some(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(session.name.as_str())
-            .inner(col_chunks[target_col]),
+        grid_session_block(session_idx, session, session_idx == model.active_session)
+            .inner(pane_area),
     )
 }
 
@@ -7273,9 +8179,11 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
             })
             .unwrap_or("");
         return match model.branches.detail_section {
-            0 => format!("←→ sec  ↵ act{direct_action_hints}{docker_hints}  mvf?  C-g↔P  Esc←"),
-            2 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  C-g↔P  Esc←".to_string(),
-            _ => format!("←→ sec  ↵ act{direct_action_hints}  mvf?  C-g↔P  Esc←"),
+            0 => format!(
+                "←→ sec  ↵ act{direct_action_hints}{docker_hints}  Sp sel  mvf?  C-g↔P  Esc←"
+            ),
+            2 => "↑↓ ses  ←→ sec  ↵ focus  Sp sel  mvf?  C-g↔P  Esc←".to_string(),
+            _ => format!("←→ sec  ↵ act{direct_action_hints}  Sp sel  mvf?  C-g↔P  Esc←"),
         };
     }
     match model.branches.detail_section {
@@ -7294,14 +8202,14 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
                 })
                 .unwrap_or("");
             format!(
-                "←→:section  Enter:launch{direct_action_hints}{docker_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+                "←→:section  Enter:launch{direct_action_hints}{docker_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
             )
         }
         2 => format!(
-            "↑↓:session  ←→:section  Enter:focus{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+            "↑↓:session  ←→:section  Enter:focus  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
         _ => format!(
-            "←→:section  Enter:launch{direct_action_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+            "←→:section  Enter:launch{direct_action_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
     }
 }
@@ -7355,56 +8263,47 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
-
-    for (row_idx, row_area) in row_chunks.iter().enumerate() {
-        let start = row_idx * cols;
-        let end = (start + cols).min(count);
-        let n = end - start;
-
-        let col_constraints: Vec<Constraint> =
-            (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-
-        let col_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints)
-            .split(*row_area);
-
-        for (col_idx, col_area) in col_chunks.iter().enumerate() {
-            let session_idx = start + col_idx;
-            if let Some(session) = model.sessions.get(session_idx) {
-                let is_active = session_idx == model.active_session;
-                let border_style = if is_active {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(grid_session_title(session_idx, session));
-                frame.render_widget(block, *col_area);
-            }
-        }
+    let terminal_focused = model.active_focus == FocusPane::Terminal;
+    for session_idx in 0..count {
+        let Some(session) = model.sessions.get(session_idx) else {
+            continue;
+        };
+        let Some(pane_area) = grid_session_pane_area(area, count, session_idx) else {
+            continue;
+        };
+        let is_active = session_idx == model.active_session;
+        let block = grid_session_block(session_idx, session, is_active);
+        let inner = block.inner(pane_area);
+        frame.render_widget(block, pane_area);
+        render_session_surface(session, frame, inner, is_active && terminal_focused);
     }
 }
 
+fn grid_session_block(
+    session_idx: usize,
+    session: &crate::model::SessionTab,
+    is_active: bool,
+) -> Block<'static> {
+    pane_block(
+        Line::from(grid_session_title(session_idx, session)),
+        is_active,
+    )
+}
+
 fn grid_session_title(session_idx: usize, session: &crate::model::SessionTab) -> String {
+    grid_session_title_with(session_idx, session, &gwt_sessions_dir())
+}
+
+fn grid_session_title_with(
+    session_idx: usize,
+    session: &crate::model::SessionTab,
+    sessions_dir: &Path,
+) -> String {
     format!(
         " {}: {} {} ",
         session_idx.saturating_add(1),
         session.tab_type.icon(),
-        session.name
+        session_title_label(session, sessions_dir)
     )
 }
 
@@ -7437,6 +8336,7 @@ mod tests {
 
     static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static INPUT_TRACE_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
@@ -7448,6 +8348,50 @@ mod tests {
     fn test_model() -> Model {
         disable_global_custom_agents_for_tests();
         Model::new(PathBuf::from("/tmp/test"))
+    }
+
+    struct HomeEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("HOME", previous);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn with_temp_home<T>(run: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = HOME_ENV_TEST_LOCK.lock().expect("lock HOME env");
+        let home = tempfile::tempdir().expect("temp home dir");
+        let _env = HomeEnvGuard::set(home.path());
+        run(home.path())
+    }
+
+    #[test]
+    fn tick_redraw_required_stays_true_while_cleanup_progress_is_visible() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.cleanup_progress.show(1, false);
+
+        update(&mut model, Message::Tick);
+
+        assert!(
+            tick_redraw_required(&model),
+            "cleanup progress should keep tick-driven redraws alive until the modal reflects updates"
+        );
     }
 
     #[derive(Debug)]
@@ -8191,6 +9135,7 @@ services:
                     is_local: true,
                     category: screens::branches::BranchCategory::Feature,
                     worktree_path: None,
+                    upstream: None,
                 },
                 screens::branches::BranchItem {
                     name: "feature/two".to_string(),
@@ -8198,6 +9143,7 @@ services:
                     is_local: true,
                     category: screens::branches::BranchCategory::Feature,
                     worktree_path: None,
+                    upstream: None,
                 },
             ]),
         );
@@ -8239,6 +9185,7 @@ services:
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             }]),
         );
 
@@ -8288,6 +9235,133 @@ services:
 
         assert_eq!(model.active_session, 1);
         assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn render_model_text_grid_sessions_render_live_terminal_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+            shell_tab("shell-2", "Shell: feature/three"),
+        ];
+
+        update(&mut model, Message::Resize(120, 30));
+        append_session_line(&mut model, "shell-0", "grid-line-one");
+        append_session_line(&mut model, "shell-1", "grid-line-two");
+        append_session_line(&mut model, "shell-2", "grid-line-three");
+
+        let rendered = render_model_text(&model, 120, 30);
+
+        assert!(
+            rendered.contains("grid-line-one"),
+            "grid mode should render the first session's live surface, not just its pane title"
+        );
+        assert!(
+            rendered.contains("grid-line-two"),
+            "grid mode should render the second session's live surface, not just its pane title"
+        );
+        assert!(
+            rendered.contains("grid-line-three"),
+            "grid mode should render the third session's live surface, not just its pane title"
+        );
+    }
+
+    #[test]
+    fn grid_session_area_stacks_two_sessions_vertically_in_tall_layout() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+        ];
+
+        update(&mut model, Message::Resize(40, 80));
+
+        let session_area = test_main_area(&model);
+        let first = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("first grid session");
+        let second = grid_session_pane_area(session_area, model.sessions.len(), 1)
+            .expect("second grid session");
+
+        assert_eq!(
+            first.x, second.x,
+            "tall layouts should transpose the two-session grid into a vertical stack"
+        );
+        assert!(
+            second.y > first.y,
+            "the second session should appear below the first in a tall layout"
+        );
+        assert_eq!(
+            first.width, second.width,
+            "transposed two-session layouts should preserve equal widths"
+        );
+    }
+
+    #[test]
+    fn resize_grid_syncs_each_session_to_its_own_cell_size() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+            shell_tab("shell-2", "Shell: feature/three"),
+        ];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(120, 30));
+
+        let top_cols = model.sessions[0].vt.cols();
+        let bottom_cols = model.sessions[2].vt.cols();
+
+        assert!(
+            bottom_cols > top_cols,
+            "three-session grid layouts should resize the bottom full-width session wider than the top-row sessions"
+        );
+    }
+
+    #[test]
+    fn wheel_over_inactive_grid_session_scrolls_it_without_changing_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+        ];
+        model.active_session = 0;
+        update(&mut model, Message::Resize(120, 30));
+
+        for i in 0..40 {
+            append_session_line(&mut model, "shell-1", &format!("two-line-{i}"));
+        }
+
+        let second_area = grid_session_pane_area(test_main_area(&model), model.sessions.len(), 1)
+            .expect("second grid session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: second_area.x + 2,
+                row: second_area.y + 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_session, 0,
+            "wheel scrolling another grid session should not steal active input ownership"
+        );
+        assert!(
+            model.sessions[1].vt.viewing_history(),
+            "wheel scrolling over an inactive grid session should scroll that session's local viewport"
+        );
     }
 
     #[test]
@@ -9859,6 +10933,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-banner")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 120, 16);
@@ -9881,6 +10956,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-top-row")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 120, 16);
@@ -10295,6 +11371,103 @@ services:
     }
 
     #[test]
+    fn branch_live_session_rendering_highlights_the_active_agent_indicator() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
+        }];
+
+        let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
+        running.save(dir.path()).expect("persist running session");
+        SessionRuntimeState::from_hook_event("PostToolUse")
+            .expect("running runtime")
+            .save(&runtime_state_path(dir.path(), &running.id))
+            .expect("persist running runtime");
+
+        model.sessions = vec![crate::model::SessionTab {
+            id: running.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+
+        let rendered = render_model_buffer(&model, 80, 8);
+        let active_indicator = rendered
+            .content
+            .iter()
+            .find(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .expect("active agent indicator");
+
+        assert!(
+            active_indicator.modifier.contains(Modifier::REVERSED),
+            "the active agent's branch-row indicator should be visually highlighted"
+        );
+    }
+
+    #[test]
+    fn branch_live_session_rendering_adds_a_shell_indicator_for_the_active_branch_shell() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
+        }];
+        model.sessions = vec![crate::model::SessionTab {
+            id: "shell-0".to_string(),
+            name: "Shell: feature/test".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+
+        let rendered = render_model_buffer(&model, 80, 8);
+        let shell_indicator = rendered
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "▸")
+            .expect("active shell indicator");
+
+        assert!(
+            shell_indicator.modifier.contains(Modifier::REVERSED),
+            "the active shell branch indicator should use the same highlighted treatment as the active agent indicator"
+        );
+    }
+
+    #[test]
     fn render_model_text_terminal_hints_include_grouped_global_shortcuts() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -10365,6 +11538,7 @@ services:
             worktree_path: Some(PathBuf::from(
                 "/tmp/demo/project-repo-feature-compact-detail",
             )),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 80, 24);
@@ -10400,6 +11574,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-title-context")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 160, 24);
@@ -10756,6 +11931,49 @@ services:
     }
 
     #[test]
+    fn update_move_grid_session_switches_to_adjacent_wide_layout_cells() {
+        let mut model = test_model();
+        update(&mut model, Message::NewShell);
+        update(&mut model, Message::NewShell);
+        model.active_session = 0;
+        model.session_layout = SessionLayout::Grid;
+        update(&mut model, Message::Resize(120, 30));
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Right),
+        );
+        assert_eq!(model.active_session, 1);
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Down),
+        );
+        assert_eq!(model.active_session, 2);
+    }
+
+    #[test]
+    fn update_move_grid_session_switches_to_adjacent_tall_layout_cells() {
+        let mut model = test_model();
+        update(&mut model, Message::NewShell);
+        model.active_session = 0;
+        model.session_layout = SessionLayout::Grid;
+        update(&mut model, Message::Resize(40, 80));
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Down),
+        );
+        assert_eq!(model.active_session, 1);
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Up),
+        );
+        assert_eq!(model.active_session, 0);
+    }
+
+    #[test]
     fn update_new_shell_adds_session() {
         let mut model = test_model();
         assert_eq!(model.session_count(), 1);
@@ -11038,6 +12256,167 @@ services:
         assert!(
             unrelated_stale.exists(),
             "startup sweep should not touch non-worktree directories"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_refreshes_managed_assets_for_repo_and_active_worktrees() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        fs::create_dir_all(tracked_command.parent().expect("tracked command parent"))
+            .expect("create tracked command dir");
+        fs::write(&tracked_command, "tracked brainstorm command")
+            .expect("write tracked brainstorm command");
+        let add_tracked_command = std::process::Command::new("git")
+            .args(["add", ".claude/commands/gwt-spec-brainstorm.md"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add tracked brainstorm command");
+        assert!(
+            add_tracked_command.status.success(),
+            "git add tracked brainstorm command failed: {}",
+            String::from_utf8_lossy(&add_tracked_command.stderr)
+        );
+        fs::remove_file(&tracked_command).expect("delete tracked brainstorm command");
+
+        let worktree = dir.path().join("wt-feature-sync");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/sync",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+
+        let legacy_hooks = serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state SessionStart",
+                        "type": "command"
+                    }]
+                }],
+                "UserPromptSubmit": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state UserPromptSubmit",
+                        "type": "command"
+                    }]
+                }],
+                "PreToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [{
+                            "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state PreToolUse",
+                            "type": "command"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-git-branch-ops",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-cd-command",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-file-ops",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-git-dir-override",
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ],
+                "PostToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state PostToolUse",
+                        "type": "command"
+                    }]
+                }],
+                "Stop": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state Stop",
+                        "type": "command"
+                    }]
+                }]
+            }
+        }))
+        .expect("serialize legacy hooks");
+
+        let codex_hooks = worktree.join(".codex/hooks.json");
+        let claude_settings = worktree.join(".claude/settings.local.json");
+        fs::create_dir_all(codex_hooks.parent().expect("codex hooks parent"))
+            .expect("create codex dir");
+        fs::create_dir_all(claude_settings.parent().expect("claude settings parent"))
+            .expect("create claude dir");
+        fs::write(&codex_hooks, &legacy_hooks).expect("write legacy codex hooks");
+        fs::write(&claude_settings, &legacy_hooks).expect("write legacy claude settings");
+
+        let add_codex_hooks = std::process::Command::new("git")
+            .args(["add", ".codex/hooks.json"])
+            .current_dir(&worktree)
+            .output()
+            .expect("git add codex hooks");
+        assert!(
+            add_codex_hooks.status.success(),
+            "git add codex hooks failed: {}",
+            String::from_utf8_lossy(&add_codex_hooks.stderr)
+        );
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        let tracked_command_content =
+            fs::read_to_string(&tracked_command).expect("tracked brainstorm command restored");
+        assert!(
+            tracked_command_content.contains("SPEC Brainstorm Command"),
+            "startup refresh should restore missing tracked bundled commands"
+        );
+
+        let codex_content = fs::read_to_string(&codex_hooks).expect("read migrated codex hooks");
+        assert!(
+            codex_content.contains("block-bash-policy"),
+            "startup refresh should consolidate Bash policy hooks"
+        );
+        assert!(
+            !codex_content.contains("GWT_MANAGED_HOOK=runtime-state"),
+            "startup refresh should remove the legacy runtime marker"
+        );
+        assert!(
+            !codex_content.contains("block-git-branch-ops"),
+            "startup refresh should replace split bash blockers"
+        );
+
+        let claude_content =
+            fs::read_to_string(&claude_settings).expect("read migrated claude settings");
+        assert!(
+            claude_content.contains("block-bash-policy"),
+            "startup refresh should regenerate Claude settings too"
+        );
+        assert!(
+            !claude_content.contains("GWT_MANAGED_HOOK=runtime-state"),
+            "startup refresh should remove the legacy runtime marker from Claude settings"
         );
     }
 
@@ -11617,6 +12996,119 @@ services:
         assert_eq!(refresh_targets, vec![AgentId::Codex, AgentId::Gemini]);
     }
 
+    fn write_issue_cache_meta(
+        root: &std::path::Path,
+        number: u64,
+        title: &str,
+        state: &str,
+        labels: &[&str],
+    ) {
+        let dir = root.join(number.to_string());
+        fs::create_dir_all(&dir).expect("create issue cache dir");
+        fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({
+                "number": number,
+                "title": title,
+                "labels": labels,
+                "state": state,
+                "updated_at": "2026-04-09T00:00:00Z",
+                "comment_ids": []
+            })
+            .to_string(),
+        )
+        .expect("write issue cache meta");
+    }
+
+    fn write_issue_cache_body(root: &std::path::Path, number: u64, body: &str) {
+        let dir = root.join(number.to_string());
+        fs::create_dir_all(&dir).expect("create issue cache dir for body");
+        fs::write(dir.join("body.md"), body).expect("write issue cache body");
+    }
+
+    #[test]
+    fn prepare_wizard_startup_loads_cached_issues_and_prefills_selected_issue() {
+        let cache = VersionCache::new();
+        let issue_cache = tempfile::tempdir().expect("issue cache tempdir");
+        write_issue_cache_meta(
+            issue_cache.path(),
+            42,
+            "Fix login bug",
+            "open",
+            &["bug", "auth"],
+        );
+        write_issue_cache_meta(
+            issue_cache.path(),
+            1776,
+            "Launch Agent issue linkage",
+            "closed",
+            &["ux"],
+        );
+
+        let (wizard, _) = prepare_wizard_startup_with_issue_cache_root(
+            issue_cache.path(),
+            None,
+            Some(1776),
+            vec![],
+            &cache,
+            issue_cache.path().to_path_buf(),
+        );
+
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.issue_id, "1776");
+        assert_eq!(
+            wizard.current_options_for_step(screens::wizard::WizardStep::IssueSelect),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+                "#42 Fix login bug (open) [bug, auth]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_cached_issues_with_linkage_merges_issue_cache_and_local_branch_store() {
+        let issue_cache = tempfile::tempdir().expect("issue cache tempdir");
+        write_issue_cache_meta(issue_cache.path(), 42, "Fix login bug", "open", &["bug"]);
+        write_issue_cache_body(issue_cache.path(), 42, "Login fails on Safari.");
+        write_issue_cache_meta(
+            issue_cache.path(),
+            1776,
+            "Launch Agent issue linkage",
+            "closed",
+            &["ux"],
+        );
+
+        let linkage_path = issue_cache.path().join("issue-links.json");
+        persist_issue_linkage_at_path(&linkage_path, 42, "feature/login-api")
+            .expect("persist linkage");
+        persist_issue_linkage_at_path(&linkage_path, 42, "feature/login-ui")
+            .expect("persist linkage");
+        persist_issue_linkage_at_path(&linkage_path, 1776, "feature/issue-link")
+            .expect("persist linkage");
+
+        let (issues, load_error) =
+            load_cached_issues_with_linkage(issue_cache.path(), Some(linkage_path.as_path()));
+
+        assert!(load_error.is_none());
+        assert_eq!(
+            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
+            vec![1776, 42]
+        );
+        assert_eq!(
+            issues[0].linked_branches,
+            vec!["feature/issue-link".to_string()]
+        );
+        assert_eq!(
+            issues[1].linked_branches,
+            vec![
+                "feature/login-api".to_string(),
+                "feature/login-ui".to_string()
+            ]
+        );
+        assert_eq!(issues[1].body, "Login fails on Safari.");
+    }
+
     #[test]
     fn prepare_wizard_startup_starts_spec_prefill_at_branch_type_select() {
         let project_root = tempfile::tempdir().expect("temp project root");
@@ -11852,6 +13344,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let mut matching = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -11948,6 +13441,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -11986,6 +13480,7 @@ services:
                 created_at: std::time::Instant::now(),
             },
         ];
+        model.active_session = 1;
 
         let summaries = branch_live_session_summaries_with(&model, dir.path());
         let summary = summaries.get("feature/test").expect("branch live summary");
@@ -12019,10 +13514,15 @@ services:
             .chars()
             .filter(|ch| matches!(ch, '◐' | '◓' | '◑' | '◒'))
             .count();
+        let waiting_count = rendered.chars().filter(|ch| *ch == '●').count();
 
         assert_eq!(
-            spinner_count, 2,
-            "one live branch row should keep one spinner per live agent session"
+            spinner_count, 1,
+            "one live branch row should animate only the running agent session"
+        );
+        assert_eq!(
+            waiting_count, 1,
+            "one live branch row should keep the waiting agent visible with a static dot"
         );
         assert!(
             !rendered.contains("run ") && !rendered.contains("wait "),
@@ -12031,7 +13531,7 @@ services:
     }
 
     #[test]
-    fn branch_live_session_rendering_uses_agent_colors_for_each_spinner() {
+    fn branch_live_session_rendering_uses_agent_colors_for_running_and_waiting_indicators() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let repo_path = dir.path().join("repo");
         let selected_worktree = repo_path.join("wt-feature-test");
@@ -12044,6 +13544,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -12082,6 +13583,7 @@ services:
                 created_at: std::time::Instant::now(),
             },
         ];
+        model.active_session = 1;
 
         model.branches.live_session_summaries =
             branch_live_session_summaries_with(&model, dir.path());
@@ -12095,19 +13597,204 @@ services:
             })
             .expect("draw branches");
 
-        let spinner_colors: Vec<Color> = terminal
+        let indicator_colors: Vec<Color> = terminal
             .backend()
             .buffer()
             .content
             .iter()
-            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒" | "●"))
             .map(|cell| cell.fg)
             .collect();
 
         assert_eq!(
-            spinner_colors,
+            indicator_colors,
             vec![Color::Cyan, Color::Yellow],
-            "spinner indicators should keep per-agent colors so multiple agents remain distinguishable"
+            "running and waiting indicators should keep per-agent colors so multiple agents remain distinguishable"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_terminal_focus_animating_for_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            tick_redraw_required(&model),
+            "Branches should keep redrawing while a running live-session indicator is visible, even when terminal focus owns input"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_waiting_branch_indicators_static_under_terminal_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Yellow,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "waiting-only live-session indicators should stay static and must not re-enable idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_filtered_out_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.view_mode = screens::branches::ViewMode::All;
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/visible".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-visible")),
+                upstream: None,
+            },
+            screens::branches::BranchItem {
+                name: "feature/hidden".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-hidden")),
+                upstream: None,
+            },
+        ];
+        model.branches.search_query = "visible".to_string();
+        model.branches.live_session_summaries.insert(
+            "feature/hidden".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators on filtered-out rows must not force idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_running_branch_indicators_without_visible_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.terminal_size = (24, 8);
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/this-branch-name-is-too-wide".to_string(),
+            is_head: true,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-wide")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/this-branch-name-is-too-wide".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators with no visible summary strip must not re-enable idle redraws"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_repaints_visible_branch_indicator_state_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+        let before = visible_branch_live_indicator_signature(&model);
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            should_render_after_tick_with_visible_branch_signature(before, &model),
+            "a visible running spinner must repaint once when it transitions to a static waiting dot"
         );
     }
 
@@ -12125,6 +13812,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Gemini);
@@ -12388,6 +14076,21 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_carries_selected_issue_number() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            branch_name: "feature/issue-link".to_string(),
+            issue_id: "1776".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.linked_issue_number, Some(1776));
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_uses_resume_session_id_for_quick_start_resume() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -12532,6 +14235,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         with_fake_docker(
@@ -12606,6 +14310,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         with_fake_docker(
@@ -12673,6 +14378,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: true,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         with_fake_docker(
@@ -12724,6 +14430,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: true,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         with_fake_docker(
@@ -12777,6 +14484,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         with_fake_docker(
@@ -12847,6 +14555,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         let script = format!(
@@ -12909,6 +14618,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         with_docker_bin_override(&worktree.path().join("missing-docker"), || {
@@ -12963,6 +14673,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         with_fake_docker(
@@ -13023,6 +14734,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: true,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         with_fake_docker(
@@ -13080,6 +14792,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         let script = format!(
@@ -13164,6 +14877,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         let script = format!(
@@ -13236,10 +14950,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Start,
-                skip_permissions: false,
-                codex_fast_mode: false,
-            });
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Start,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");
@@ -13300,10 +15015,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
-                skip_permissions: false,
-                codex_fast_mode: false,
-            });
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");
@@ -13367,10 +15083,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Recreate,
-                skip_permissions: false,
-                codex_fast_mode: false,
-            });
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Recreate,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");
@@ -13425,10 +15142,11 @@ services:
                 resume_session_id: None,
                 runtime_target: LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
-                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
-                skip_permissions: false,
-                codex_fast_mode: false,
-            });
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
 
             materialize_pending_launch_with(&mut model, sessions_dir.path())
                 .expect("materialize launch");
@@ -13504,6 +15222,56 @@ services:
     }
 
     #[test]
+    fn link_selected_issue_to_branch_with_builds_gh_issue_develop_command() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/issue-link".to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            linked_issue_number: Some(1776),
+        };
+
+        let mut observed_cwd = None;
+        let mut observed_args = Vec::new();
+        link_selected_issue_to_branch_with(repo.path(), &config, |cwd, args| {
+            observed_cwd = Some(cwd.to_path_buf());
+            observed_args.extend(args.iter().cloned());
+            Ok(())
+        })
+        .expect("link issue");
+
+        assert_eq!(observed_cwd.as_deref(), Some(repo.path()));
+        assert_eq!(
+            observed_args,
+            [
+                "issue",
+                "develop",
+                "1776",
+                "--name",
+                "feature/issue-link",
+                "--base",
+                "develop",
+            ]
+        );
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_claude_effort_auto_persists_without_env() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -13533,6 +15301,24 @@ services:
         assert_eq!(
             config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
             Some(&"medium".to_string())
+        );
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_high_exports_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "high".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"high".to_string())
         );
     }
 
@@ -13601,6 +15387,111 @@ services:
     }
 
     #[test]
+    fn materialize_pending_launch_with_issue_link_failure_stops_before_session_creation() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/issue-link".to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: Some(1776),
+        });
+
+        let result = materialize_pending_launch_with_hooks(
+            &mut model,
+            dir.path(),
+            |_repo_path, _config| Err("gh issue develop failed".to_string()),
+            |_repo_path, _config| {
+                panic!("resolve_launch_worktree should not run after link failure")
+            },
+        );
+
+        assert_eq!(result, Err("gh issue develop failed".to_string()));
+        assert_eq!(
+            model.sessions.len(),
+            1,
+            "launch should stop before creating a new tab"
+        );
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "failed link should not persist a session"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_issue_link_persists_local_linkage_store() {
+        with_temp_home(|_home| {
+            let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+            let repo_path = workspace_dir.path().join("repo");
+            fs::create_dir_all(&repo_path).expect("create repo path");
+            init_git_repo(&repo_path);
+            let remote_path = workspace_dir.path().join("origin.git");
+            init_bare_git_repo(&remote_path);
+            git_add_remote(&repo_path, "origin", &remote_path);
+
+            let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+            let mut model = Model::new(repo_path.clone());
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::Custom("my-agent".to_string()),
+                command: "gwt-missing-custom-agent-command".to_string(),
+                args: Vec::new(),
+                env_vars: HashMap::new(),
+                working_dir: Some(repo_path.clone()),
+                branch: Some("feature/issue-link".to_string()),
+                base_branch: Some("develop".to_string()),
+                display_name: "My Agent".to_string(),
+                color: AgentId::Custom("my-agent".to_string()).default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: Some(1776),
+            });
+
+            materialize_pending_launch_with_hooks(
+                &mut model,
+                sessions_dir.path(),
+                |_repo_path, _config| Ok(()),
+                |_repo_path, _config| Ok(()),
+            )
+            .expect("materialize launch");
+
+            let linkage_store_path =
+                default_issue_linkage_store_path(&repo_path).expect("repo hash-backed store path");
+            let issue_branches = load_issue_linkage_map(Some(linkage_store_path.as_path()));
+            assert_eq!(
+                issue_branches.get(&1776),
+                Some(&vec!["feature/issue-link".to_string()])
+            );
+        });
+    }
+
+    #[test]
     fn materialize_pending_launch_with_generates_claude_settings_local_hooks() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-feature-spec-42");
@@ -13627,6 +15518,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -13638,7 +15530,8 @@ services:
         let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
             .as_str()
             .expect("hook command");
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state UserPromptSubmit"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
@@ -13673,6 +15566,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -13684,7 +15578,8 @@ services:
             .as_str()
             .expect("hook command");
 
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state SessionStart"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
     }
 
@@ -13749,6 +15644,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -13761,7 +15657,8 @@ services:
             .as_str()
             .expect("hook command");
 
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state SessionStart"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!content.contains("gwt-forward-hook.mjs"));
         assert!(!command.contains("node"));
     }
@@ -13799,6 +15696,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -13850,6 +15748,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -13920,6 +15819,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -13955,7 +15855,7 @@ services:
     }
 
     #[test]
-    fn materialize_pending_launch_with_bootstraps_running_runtime_sidecar_after_spawn() {
+    fn materialize_pending_launch_with_bootstraps_waiting_runtime_sidecar_after_spawn() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-develop");
         fs::create_dir_all(&worktree).expect("create worktree");
@@ -13981,6 +15881,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -13993,7 +15894,7 @@ services:
             .clone();
         let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session_id))
             .expect("bootstrap runtime state");
-        assert_eq!(runtime.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::WaitingInput);
         assert_eq!(runtime.source_event.as_deref(), Some("LaunchBootstrap"));
     }
 
@@ -14024,6 +15925,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -14086,6 +15988,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         augment_agent_hook_runtime_launch_config(&mut config, dir.path(), "session-123");
@@ -14195,6 +16098,107 @@ services:
     }
 
     #[test]
+    fn refresh_active_session_branches_with_ignores_stopped_agent_sessions() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.update_status(gwt_agent::AgentStatus::Stopped);
+        persisted
+            .save(dir.path())
+            .expect("persist stopped agent session");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(worktree.clone()),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/test",
+            screens::branches::MergeState::Cleanable(gwt_git::MergeTarget::Develop),
+        );
+
+        refresh_active_session_branches_with(&mut model, dir.path());
+
+        assert!(
+            !model
+                .branches
+                .active_session_branches
+                .contains("feature/test"),
+            "stopped agent sessions must not block cleanup selection"
+        );
+        assert_eq!(
+            model.branches.toggle_cleanup_selection("feature/test"),
+            screens::branches::CleanupSelectionToggle::Selected
+        );
+    }
+
+    #[test]
+    fn refresh_active_session_branches_with_keeps_running_agent_sessions_blocked() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.update_status(gwt_agent::AgentStatus::Running);
+        persisted
+            .save(dir.path())
+            .expect("persist running agent session");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(worktree),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/test",
+            screens::branches::MergeState::Cleanable(gwt_git::MergeTarget::Develop),
+        );
+
+        refresh_active_session_branches_with(&mut model, dir.path());
+
+        assert!(model
+            .branches
+            .active_session_branches
+            .contains("feature/test"));
+        assert_eq!(
+            model.branches.toggle_cleanup_selection("feature/test"),
+            screens::branches::CleanupSelectionToggle::Blocked(
+                screens::branches::CleanupSelectionBlockedReason::ActiveSession
+            )
+        );
+    }
+
+    #[test]
     fn materialize_pending_launch_with_persists_quick_start_restore_fields() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let mut model = test_model();
@@ -14261,6 +16265,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, sessions_dir.path())
@@ -14637,6 +16642,76 @@ services:
     }
 
     #[test]
+    fn materialize_pending_launch_with_occupied_preferred_worktree_path_uses_suffixed_fallback() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        git_checkout_branch_or_create(&repo_path, "main");
+        git_push_branch(&repo_path, "main");
+        git_checkout_branch_or_create(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
+        git_checkout_branch_or_create(&repo_path, "main");
+
+        let occupied_path = workspace_dir.path().join("develop");
+        let occupied_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "dependabot/npm_and_yarn/test",
+                occupied_path.to_str().expect("occupied worktree path"),
+                "develop",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add occupied path");
+        assert!(
+            occupied_output.status.success(),
+            "git worktree add occupied path failed: {}",
+            String::from_utf8_lossy(&occupied_output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "develop".to_string(),
+            worktree_path: Some(repo_path.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(repo_path);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch with occupied preferred path");
+
+        let expected_worktree = workspace_dir.path().join("develop-2");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize fallback worktree");
+        assert!(
+            expected_worktree.exists(),
+            "launch should create a suffixed fallback path when the canonical branch path is occupied by another worktree"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "develop");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
     fn materialize_pending_launch_with_missing_remote_base_branch_returns_error() {
         let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
         let repo_path = workspace_dir.path().join("gwt");
@@ -14699,6 +16774,7 @@ services:
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -15831,6 +17907,7 @@ services:
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             })
             .collect();
 
@@ -15891,6 +17968,7 @@ services:
                 state: "open".into(),
                 labels: vec!["ux".into()],
                 body: "First body".into(),
+                linked_branches: vec![],
             },
             screens::issues::IssueItem {
                 number: 2,
@@ -15898,6 +17976,7 @@ services:
                 state: "open".into(),
                 labels: vec!["bug".into()],
                 body: "Second body".into(),
+                linked_branches: vec![],
             },
         ];
         model.issues.selected = 1;
@@ -15911,6 +17990,47 @@ services:
             model.issues.selected_issue().map(|issue| issue.number),
             Some(2)
         );
+    }
+
+    #[test]
+    fn route_key_to_management_issues_shift_enter_opens_wizard_with_prefilled_issue() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Issues;
+        model.issues.issues = vec![screens::issues::IssueItem {
+            number: 1776,
+            title: "Launch Agent issue linkage".into(),
+            state: "open".into(),
+            labels: vec!["ux".into()],
+            body: "Wizard should link a selected issue".into(),
+            linked_branches: vec![],
+        }];
+        model.issues.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        let wizard = model.wizard.expect("wizard should open from issue detail");
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.issue_id, "1776");
+    }
+
+    #[test]
+    fn route_key_to_management_issues_refresh_reloads_issue_cache() {
+        with_temp_home(|home| {
+            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            write_issue_cache_meta(&issue_cache_root, 42, "Fix login bug", "open", &["bug"]);
+
+            let mut model = test_model();
+            model.management_tab = ManagementTab::Issues;
+            model.issues.last_error = Some("stale".to_string());
+
+            route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+
+            assert_eq!(model.issues.issues.len(), 1);
+            assert_eq!(model.issues.issues[0].number, 42);
+            assert!(model.issues.last_error.is_none());
+        });
     }
 
     #[test]
@@ -15938,6 +18058,30 @@ services:
 
         assert_eq!(model.git_view.files.len(), 1);
         assert_eq!(model.git_view.files[0].path, "tracked.txt");
+    }
+
+    #[test]
+    fn load_initial_data_populates_issues_from_issue_cache() {
+        with_temp_home(|home| {
+            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            write_issue_cache_meta(
+                &issue_cache_root,
+                1776,
+                "Launch Agent issue linkage",
+                "open",
+                &["ux"],
+            );
+
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+
+            let mut model = Model::new(dir.path().to_path_buf());
+            load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
+
+            assert_eq!(model.issues.issues.len(), 1);
+            assert_eq!(model.issues.issues[0].number, 1776);
+            assert!(model.issues.last_error.is_none());
+        });
     }
 
     #[test]
@@ -16157,6 +18301,7 @@ services:
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(wt_a.path().to_path_buf()),
+                upstream: None,
             },
             screens::branches::BranchItem {
                 name: "feature/b".to_string(),
@@ -16164,6 +18309,7 @@ services:
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(wt_b.path().to_path_buf()),
+                upstream: None,
             },
         ];
 
@@ -16191,6 +18337,7 @@ services:
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             screens::branches::BranchItem {
                 name: "feature/b".to_string(),
@@ -16198,6 +18345,7 @@ services:
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
         ];
 
@@ -16244,6 +18392,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
         model.branches.detail_section = 2;
 
@@ -16280,6 +18429,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
         model.branches.detail_section = 2;
         model.active_focus = FocusPane::BranchDetail;
@@ -16317,6 +18467,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
         model.branches.detail_section = 2;
         model.active_focus = FocusPane::BranchDetail;
@@ -16355,6 +18506,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -16387,6 +18539,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -16405,6 +18558,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -16427,6 +18581,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -16445,6 +18600,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
         model.branches.detail_section = 2;
@@ -16464,6 +18620,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
         model.branches.detail_section = 2;
@@ -16493,6 +18650,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
         model.branches.detail_section = 2;
@@ -16522,6 +18680,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.active_focus = FocusPane::BranchDetail;
         update(
@@ -16545,6 +18704,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-view-mode")),
+            upstream: None,
         }];
         model.active_focus = FocusPane::BranchDetail;
         model.branches.detail_section = 0;
@@ -16607,6 +18767,7 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.branches.docker_services = vec![docker_service(
@@ -16647,9 +18808,11 @@ services:
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-mnemonics")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 220, 24);
+        assert!(rendered.contains("Space:select"));
         assert!(rendered.contains("m:view"));
         assert!(rendered.contains("v:git"));
         assert!(rendered.contains("f:search"));
@@ -16664,6 +18827,294 @@ services:
 
         route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
         assert!(model.help_visible);
+    }
+
+    #[test]
+    fn route_key_to_management_branches_space_on_unmerged_branch_selects_without_toast() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(model.branches.is_cleanup_selected("feature/not-merged"));
+        assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_space_on_unmerged_branch_selects_without_toast() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-not-merged")),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
+        assert!(model.branches.is_cleanup_selected("feature/not-merged"));
+        assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn render_model_text_branches_blocked_cleanup_toast_is_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/computing".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        let rendered = render_model_text(&model, 80, 24);
+        assert!(
+            rendered.contains("Cannot select: merge check running"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn route_key_input_shift_c_on_unmerged_selection_opens_confirm_with_warning() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char('C'), KeyModifiers::SHIFT)),
+        );
+
+        assert!(model.cleanup_confirm.visible);
+        assert_eq!(model.cleanup_confirm.rows.len(), 1);
+        assert_eq!(
+            model.cleanup_confirm.rows[0].risks,
+            vec![screens::branches::CleanupSelectionRisk::Unmerged]
+        );
+    }
+
+    #[test]
+    fn update_key_input_cleanup_confirm_r_then_enter_deletes_remote_branch() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_create_branch(&repo_path, "feature/cleanup-remote");
+        git_push_branch(&repo_path, "feature/cleanup-remote");
+
+        let mut model = Model::new(repo_path.clone());
+        model.cleanup_confirm.show(
+            vec![screens::cleanup_confirm::CleanupConfirmRow {
+                branch: "feature/cleanup-remote".to_string(),
+                target: Some(gwt_git::MergeTarget::Main),
+                execution_branch: "feature/cleanup-remote".to_string(),
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+                risks: Vec::new(),
+            }],
+            false,
+        );
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/cleanup-remote".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: Some("origin/feature/cleanup-remote".to_string()),
+        }];
+        model.branches.current_head_branch = Some("master".to_string());
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char('r'), KeyModifiers::NONE)),
+        );
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| {
+                model
+                    .cleanup_progress
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.phase == screens::branches::CleanupRunPhase::Done)
+            },
+            "cleanup progress completion",
+        );
+
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            !remote_output.status.success(),
+            "remote branch should be deleted: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
+    }
+
+    #[test]
+    fn update_key_input_cleanup_confirm_enter_on_remote_tracking_row_deletes_local_only() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_create_branch(&repo_path, "feature/cleanup-remote");
+        git_push_branch(&repo_path, "feature/cleanup-remote");
+
+        let mut model = Model::new(repo_path.clone());
+        model.cleanup_confirm.show(
+            vec![screens::cleanup_confirm::CleanupConfirmRow {
+                branch: "origin/feature/cleanup-remote".to_string(),
+                target: Some(gwt_git::MergeTarget::Main),
+                execution_branch: "feature/cleanup-remote".to_string(),
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+                risks: vec![screens::branches::CleanupSelectionRisk::RemoteTracking],
+            }],
+            false,
+        );
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/cleanup-remote".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+            },
+            screens::branches::BranchItem {
+                name: "origin/feature/cleanup-remote".to_string(),
+                is_head: false,
+                is_local: false,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+                upstream: None,
+            },
+        ];
+        model.branches.current_head_branch = Some("master".to_string());
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| {
+                model
+                    .cleanup_progress
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.phase == screens::branches::CleanupRunPhase::Done)
+            },
+            "cleanup progress completion",
+        );
+
+        let local_output = std::process::Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read local branch");
+        assert!(
+            !local_output.status.success(),
+            "local branch should be deleted"
+        );
+
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            remote_output.status.success(),
+            "remote branch should remain when delete_remote is off: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
     }
 
     #[test]
@@ -16685,6 +19136,7 @@ services:
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(tmp.path().to_path_buf()),
+                upstream: None,
             }];
             model.branches.docker_services = vec![docker_service(
                 tmp.path(),

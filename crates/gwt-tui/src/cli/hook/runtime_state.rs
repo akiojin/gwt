@@ -2,9 +2,8 @@
 //! tells the Branches tab whether the agent session is currently running
 //! or waiting for user input.
 //!
-//! Translated from `.claude/hooks/scripts/gwt-runtime-state.mjs`. The Node
-//! implementation is still the one wired up in settings; this Rust module
-//! is the replacement slated to go live in Phase US-4.
+//! Translated from `.claude/hooks/scripts/gwt-runtime-state.mjs` and now
+//! used as the managed runtime hook implementation wired from settings.
 
 use std::path::{Path, PathBuf};
 
@@ -29,8 +28,8 @@ pub struct RuntimeState {
 /// [`HookError::InvalidEvent`].
 pub fn status_for_event(event: &str) -> Option<&'static str> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some("Running"),
-        "Stop" => Some("WaitingInput"),
+        "SessionStart" | "Stop" => Some("WaitingInput"),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some("Running"),
         _ => None,
     }
 }

@@ -136,9 +136,14 @@ fn dispatch_post_normalized_message(
     };
 
     let was_tick = matches!(msg, Message::Tick);
+    let visible_branch_signature_before =
+        was_tick.then(|| app::visible_branch_live_indicator_signature(model));
     app::update(model, msg);
     if was_tick {
-        *needs_render |= should_render_after_tick(model);
+        *needs_render |= app::should_render_after_tick_with_visible_branch_signature(
+            visible_branch_signature_before.unwrap_or_default(),
+            model,
+        );
     } else {
         *needs_render = true;
     }
@@ -219,6 +224,7 @@ fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
     PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
 }
 
+#[cfg(test)]
 fn should_render_after_tick(model: &Model) -> bool {
     app::tick_redraw_required(model)
 }
@@ -401,7 +407,8 @@ fn main() -> io::Result<()> {
 
 /// SPEC-12 Phase 6 (CORE-CLI / #1942): CLI entry point.
 ///
-/// This is reached when argv[1] is a known CLI verb (`issue` or `hook`).
+/// This is reached when argv[1] is a known CLI verb (`issue`, `pr`,
+/// `actions`, or `hook`).
 /// We resolve the repository coordinates from the current git remote,
 /// build the production [`DefaultCliEnv`], and dispatch the subcommand
 /// without initializing the TUI tracing subscriber (CLI invocations are
@@ -411,23 +418,32 @@ fn main() -> io::Result<()> {
 fn run_cli(argv: &[String]) -> io::Result<()> {
     // For `gwt hook ...` we can run even outside a GitHub-linked repo,
     // because hooks don't need owner/repo for local atomic writes and
-    // stdin judgement. For `gwt issue ...` we need the remote coordinates.
-    let needs_repo = argv.get(1).map(String::as_str) == Some("issue");
+    // stdin judgement. For `gwt issue|pr|actions ...` we need the remote
+    // coordinates and repo cwd.
+    let needs_repo = matches!(
+        argv.get(1).map(String::as_str),
+        Some("issue" | "pr" | "actions")
+    );
 
     if needs_repo {
+        let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let (owner, repo) = match resolve_repo_coordinates() {
             Some(coords) => coords,
             None => {
                 eprintln!(
-                    "gwt issue: could not resolve GitHub owner/repo from the current git remote"
+                    "gwt {}: could not resolve GitHub owner/repo from the current git remote",
+                    argv.get(1).map(String::as_str).unwrap_or("issue")
                 );
                 std::process::exit(2);
             }
         };
-        let mut env = match gwt_tui::cli::DefaultCliEnv::new(&owner, &repo) {
+        let mut env = match gwt_tui::cli::DefaultCliEnv::new(&owner, &repo, repo_path) {
             Ok(env) => env,
             Err(e) => {
-                eprintln!("gwt issue: {e}");
+                eprintln!(
+                    "gwt {}: {e}",
+                    argv.get(1).map(String::as_str).unwrap_or("issue")
+                );
                 std::process::exit(1);
             }
         };

@@ -130,15 +130,18 @@ pub fn clone_repo(url: &str, target_dir: &Path) -> Result<PathBuf> {
 }
 
 /// Marker comment for the gwt-managed pre-commit hook section.
+///
+/// The marker text intentionally retains the legacy wording so existing
+/// repositories can rewrite an older "develop + main" block in place.
 const GWT_HOOK_START: &str = "# >>> gwt-managed: protect develop and main branches";
 const GWT_HOOK_END: &str = "# <<< gwt-managed";
 
-/// The hook script content that blocks direct commits on develop/main.
+/// The hook script content that blocks direct commits on main.
 fn hook_script_block() -> String {
     format!(
         r#"{GWT_HOOK_START}
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-if [ "$branch" = "develop" ] || [ "$branch" = "main" ]; then
+if [ "$branch" = "main" ]; then
   echo "ERROR: Direct commits to $branch are blocked by gwt."
   echo "Create a feature branch: git checkout -b feature/<name>"
   exit 1
@@ -147,10 +150,40 @@ fi
     )
 }
 
-/// Install a pre-commit hook that blocks direct commits on develop and main.
+fn upsert_managed_hook_block(existing: &str) -> String {
+    if let Some(start) = existing.find(GWT_HOOK_START) {
+        if let Some(end_rel) = existing[start..].find(GWT_HOOK_END) {
+            let end = start + end_rel + GWT_HOOK_END.len();
+            let mut rewritten = String::with_capacity(existing.len() + hook_script_block().len());
+            rewritten.push_str(existing[..start].trim_end());
+            if !rewritten.is_empty() {
+                rewritten.push('\n');
+            }
+            rewritten.push_str(&hook_script_block());
+            let suffix = existing[end..].trim_start_matches('\n');
+            if !suffix.is_empty() {
+                rewritten.push('\n');
+                rewritten.push_str(suffix);
+            }
+            if !rewritten.ends_with('\n') {
+                rewritten.push('\n');
+            }
+            return rewritten;
+        }
+    }
+
+    if existing.is_empty() {
+        format!("#!/bin/sh\n{}\n", hook_script_block())
+    } else {
+        format!("{}\n{}\n", existing.trim_end(), hook_script_block())
+    }
+}
+
+/// Install a pre-commit hook that blocks direct commits on main.
 ///
 /// If a pre-commit hook already exists, the gwt block is appended (preserving
-/// existing content). If the gwt block is already present, no changes are made.
+/// existing content). If the gwt block is already present, it is rewritten in
+/// place so legacy develop protection is removed.
 pub fn install_develop_protection(repo_path: &Path) -> Result<()> {
     let hooks_dir = repo_path.join(".git").join("hooks");
     fs::create_dir_all(&hooks_dir).map_err(GwtError::Io)?;
@@ -162,16 +195,7 @@ pub fn install_develop_protection(repo_path: &Path) -> Result<()> {
         String::new()
     };
 
-    // Skip if already installed
-    if existing.contains(GWT_HOOK_START) {
-        return Ok(());
-    }
-
-    let new_content = if existing.is_empty() {
-        format!("#!/bin/sh\n{}\n", hook_script_block())
-    } else {
-        format!("{}\n{}\n", existing.trim_end(), hook_script_block())
-    };
+    let new_content = upsert_managed_hook_block(&existing);
 
     fs::write(&hook_path, new_content).map_err(GwtError::Io)?;
 
@@ -434,9 +458,9 @@ mod tests {
         assert!(hook_path.exists());
         let content = std::fs::read_to_string(&hook_path).unwrap();
         assert!(content.contains("gwt-managed"));
-        assert!(content.contains("develop"));
         assert!(content.contains("main"));
         assert!(content.starts_with("#!/bin/sh"));
+        assert!(!content.contains("\"$branch\" = \"develop\""));
 
         // Check executable permission
         let perms = std::fs::metadata(&hook_path).unwrap().permissions();
@@ -477,6 +501,48 @@ mod tests {
         let second = std::fs::read_to_string(tmp.path().join(".git/hooks/pre-commit")).unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn install_develop_protection_blocks_main_but_not_develop() {
+        let tmp = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init", tmp.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        install_develop_protection(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path().join(".git/hooks/pre-commit")).unwrap();
+        assert!(content.contains("\"$branch\" = \"main\""));
+        assert!(
+            !content.contains("\"$branch\" = \"develop\""),
+            "develop should no longer be protected by the managed pre-commit hook"
+        );
+    }
+
+    #[test]
+    fn install_develop_protection_rewrites_legacy_managed_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init", tmp.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        let hook_path = tmp.path().join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook_path,
+            format!(
+                "#!/bin/sh\n{GWT_HOOK_START}\nbranch=$(git symbolic-ref --short HEAD 2>/dev/null)\nif [ \"$branch\" = \"develop\" ] || [ \"$branch\" = \"main\" ]; then\n  exit 1\nfi\n{GWT_HOOK_END}\n"
+            ),
+        )
+        .unwrap();
+
+        install_develop_protection(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&hook_path).unwrap();
+        assert!(content.contains("\"$branch\" = \"main\""));
+        assert!(!content.contains("\"$branch\" = \"develop\""));
     }
 
     // ---- initialize_workspace tests ----

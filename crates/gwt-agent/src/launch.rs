@@ -135,6 +135,7 @@ pub struct LaunchConfig {
     pub runtime_target: LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: DockerLifecycleIntent,
+    pub linked_issue_number: Option<u64>,
 }
 
 /// Permission mode for agent launch.
@@ -368,6 +369,7 @@ impl AgentLaunchBuilder {
             runtime_target: self.runtime_target,
             docker_service: self.docker_service,
             docker_lifecycle_intent: self.docker_lifecycle_intent,
+            linked_issue_number: None,
         }
     }
 
@@ -630,18 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn build_claude_skip_permissions_adds_dangerous_flag() {
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .skip_permissions(true)
-            .build();
-
-        assert!(config
-            .args
-            .contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(config.skip_permissions);
-    }
-
-    #[test]
     fn build_claude_with_auto_reasoning_does_not_export_effort_env() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .reasoning_level("auto")
@@ -649,6 +639,7 @@ mod tests {
 
         assert_eq!(config.reasoning_level.as_deref(), Some("auto"));
         assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+        assert!(!config.args.contains(&"--effort".to_string()));
     }
 
     #[test]
@@ -662,6 +653,19 @@ mod tests {
             config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
             Some(&"high".to_string())
         );
+        assert!(!config.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn build_claude_skip_permissions_adds_dangerous_flag() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .skip_permissions(true)
+            .build();
+
+        assert!(config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(config.skip_permissions);
     }
 
     #[test]

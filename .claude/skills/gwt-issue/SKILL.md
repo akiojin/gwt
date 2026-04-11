@@ -25,6 +25,8 @@ If the target SPEC is already known, use `gwt-spec-ops` instead.
 - Do not create both a plain Issue and a SPEC for the same request.
 - A local SPEC directory is not a GitHub Issue. When a SPEC is needed, create or reuse
   the local SPEC as the source of truth; treat any Issue as an optional related record.
+- Agent-facing Issue workflow must use `gwt issue ...` as the canonical CLI surface.
+  Direct `gh issue ...` commands are not part of the normal path.
 
 ## Mandatory Preflight: Search Existing Issues First
 
@@ -127,9 +129,10 @@ python3 ".claude/skills/gwt-issue/scripts/inspect_issue.py" --repo "." --issue "
 
 ## Register Mode Workflow
 
-### 1. Verify gh authentication
+### 1. Verify GitHub access
 
-Run `gh auth status` in the repo. If unauthenticated, stop and ask the user to log in.
+Issue writes go through `gwt issue ...`, which resolves GitHub auth internally. If that
+surface fails with an auth error, stop and ask the user to refresh GitHub authentication.
 
 ### 2. Normalize the request
 
@@ -153,14 +156,14 @@ Run `gh auth status` in the repo. If unauthenticated, stop and ask the user to l
 
 Use the decision rules above.
 
-- Plain Issue: create directly with `gh issue create`.
+- Plain Issue: create directly with `gwt issue create --title ... -f ...`.
 - New SPEC: create through `gwt-spec-register` (local directory), then continue through
   `gwt-spec-ops`.
 
 ### 6. Create the plain Issue when needed
 
-Use the required title rule and issue body structure. Fill the sections with concrete
-request context, not `_TODO_`.
+Use `gwt issue create --title ... -f <body-file>` with the required title rule and issue
+body structure. Fill the sections with concrete request context, not `_TODO_`.
 
 ### 7. Return the created Issue or active owner
 
@@ -191,9 +194,11 @@ Use `CLEAN` only when the duplicate search found no credible owner.
 
 ## Resolve Mode Workflow
 
-### 1. Verify gh authentication
+### 1. Verify GitHub access
 
-Run `gh auth status` in the repo. If unauthenticated, stop and ask the user to log in.
+Resolve mode should prefer `gwt issue view <number>` and `gwt issue comments <number>` as the
+canonical read path. If those commands fail with an auth error, stop and ask the user to
+refresh GitHub authentication.
 
 ### 2. Resolve the Issue input
 
@@ -294,41 +299,35 @@ See `references/analysis-report.md` for the full report template and structural 
 
 - Final comment text must not contain escaped newline literals such as `\n`.
 - Use real line breaks in comment bodies.
-- Before posting with `gh issue comment`, verify the final body does not contain
+- Before posting with `gwt issue comment`, verify the final body does not contain
   accidental escaped control sequences.
 
-## Operations (gh CLI fallback)
+## Canonical Issue Commands
+
+### Read
+
+```bash
+gwt issue view 123
+gwt issue comments 123
+gwt issue linked-prs 123
+```
 
 ### Create plain Issue
 
 ```bash
-gh issue create --title "fix: ..." --body "$(cat <<'EOF'
-## Summary
-
-Concrete summary
-
-## Background
-
-Why this request exists
-
-## Expected Outcome
-
-What done looks like
-
-## Notes
-
-Links, examples, or constraints
-EOF
-)"
+gwt issue create --title "fix: ..." -f /tmp/issue-body.md
 ```
 
-If `gh issue create` is rate-limited (`was submitted too quickly` / secondary rate
-limit), resolve the repo slug with `gh repo view --json nameWithOwner -q .nameWithOwner`
-and fall back to:
+### Comment on existing Issue
 
 ```bash
-gh api "repos/<owner>/<repo>/issues" --method POST --input /tmp/issue-create.json
+gwt issue comment 123 -f /tmp/comment.md
 ```
+
+## Transport Notes
+
+The normal agent path should use `gwt issue ...`. Internal helpers may still use `gh`
+or direct HTTP as transport, but that is an implementation detail, not the public workflow.
 
 ## Bundled Resources
 

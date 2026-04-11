@@ -10,11 +10,6 @@ use std::process::Command;
 const GWT_FORWARD_SCRIPT: &str = "gwt-forward-hook.mjs";
 const GWT_BLOCK_SCRIPT_PREFIX: &str = "gwt-block-";
 const GWT_MANAGED_RUNTIME_MARKER: &str = "GWT_MANAGED_HOOK";
-/// SPEC #1942 (CORE-CLI): every managed hook dispatched through the
-/// new `gwt hook ...` CLI surface carries this substring. Used by
-/// [`is_gwt_managed_command`] to recognise new-form entries as
-/// managed so that regeneration replaces them in place instead of
-/// preserving them as "user hooks" and appending fresh duplicates.
 const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
 /// SPEC #1942 amendment: distinctive subcommand suffixes that mark a
 /// generated managed hook command regardless of which binary path is
@@ -24,6 +19,7 @@ const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
 /// like `gwt_skills-abc123def` during unit tests.
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook runtime-state ",
+    " hook block-bash-policy",
     " hook block-git-branch-ops",
     " hook block-cd-command",
     " hook block-file-ops",
@@ -266,7 +262,9 @@ fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
     Ok(contains_legacy_runtime_forwarder(hooks)
         || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell())
         || contains_legacy_node_bash_blockers(hooks)
+        || contains_legacy_split_bash_blockers(hooks)
         || contains_inline_shell_runtime_hook(hooks)
+        || contains_legacy_runtime_marker(hooks)
         || contains_pathless_gwt_hook_command(hooks)
         || contains_stale_binary_path(hooks))
 }
@@ -323,6 +321,15 @@ fn contains_legacy_node_bash_blockers(existing: Option<&Value>) -> bool {
     })
 }
 
+fn contains_legacy_split_bash_blockers(existing: Option<&Value>) -> bool {
+    any_managed_command(existing, |command| {
+        command.contains(" hook block-git-branch-ops")
+            || command.contains(" hook block-cd-command")
+            || command.contains(" hook block-file-ops")
+            || command.contains(" hook block-git-dir-override")
+    })
+}
+
 /// SPEC #1942: detect tracked hook files that still carry the old
 /// `GWT_MANAGED_HOOK=runtime-state sh -lc '...'` inline-shell runtime
 /// hook form. The new form is
@@ -334,6 +341,12 @@ fn contains_inline_shell_runtime_hook(existing: Option<&Value>) -> bool {
     any_managed_command(existing, |command| {
         command.contains(GWT_MANAGED_RUNTIME_MARKER)
             && (command.contains("sh -lc") || command.contains("ConvertTo-Json"))
+    })
+}
+
+fn contains_legacy_runtime_marker(existing: Option<&Value>) -> bool {
+    any_managed_command(existing, |command| {
+        command.contains(GWT_MANAGED_RUNTIME_MARKER) && command.contains(" hook runtime-state ")
     })
 }
 
@@ -413,7 +426,8 @@ fn contains_managed_runtime_shell_mismatch(existing: Option<&Value>, shell: Hook
                                     .and_then(|obj| obj.get("command"))
                                     .and_then(Value::as_str)
                                     .is_some_and(|command| {
-                                        command.contains(GWT_MANAGED_RUNTIME_MARKER)
+                                        (command.contains(GWT_MANAGED_RUNTIME_MARKER)
+                                            || command.contains(" hook runtime-state "))
                                             && command_shell_mismatch(command, shell)
                                     })
                             })
@@ -537,19 +551,7 @@ fn bash_blockers_hook(_target: ManagedHookTarget) -> Value {
         "matcher": "Bash",
         "hooks": [
             {
-                "command": format!("{bin} hook block-git-branch-ops"),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            },
-            {
-                "command": format!("{bin} hook block-cd-command"),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            },
-            {
-                "command": format!("{bin} hook block-file-ops"),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            },
-            {
-                "command": format!("{bin} hook block-git-dir-override"),
+                "command": format!("{bin} hook block-bash-policy"),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -575,26 +577,19 @@ fn runtime_hook_command(event: &str, shell: HookShell) -> String {
 /// inline `sh -lc '...'` one-liner that wrote JSON directly is replaced
 /// by a single `gwt hook runtime-state <event>` dispatch, using the
 /// absolute path of *this* gwt binary so that `$PATH` is not
-/// consulted. The `GWT_MANAGED_HOOK=runtime-state` env-var prefix is
-/// retained so that [`is_gwt_managed_command`] continues to identify
-/// managed entries for idempotent replace on regeneration.
+/// consulted.
 fn posix_runtime_hook_command(event: &str) -> String {
     let bin = posix_shell_quote(&gwt_hook_bin_path());
-    format!(
-        "{GWT_MANAGED_RUNTIME_MARKER}={GWT_MANAGED_RUNTIME_KIND} {bin} hook runtime-state {event}"
-    )
+    format!("{bin} hook runtime-state {event}")
 }
 
 /// Emit the PowerShell form of the runtime-state hook. Windows Claude
 /// Code runs the hook through `powershell -NoProfile -Command`, so we
-/// keep that wrapper to be able to set the detection env-var, then
-/// invoke the gwt binary via `& '...'` call operator with the
-/// absolute path. PATH is not consulted.
+/// keep that wrapper, then invoke the gwt binary via `& '...'` call
+/// operator with the absolute path. PATH is not consulted.
 fn powershell_runtime_hook_command(event: &str) -> String {
     let bin = powershell_quote(&gwt_hook_bin_path());
-    format!(
-        "powershell -NoProfile -Command \"& {{ $env:{GWT_MANAGED_RUNTIME_MARKER} = '{GWT_MANAGED_RUNTIME_KIND}'; & {bin} hook runtime-state {event} }}\""
-    )
+    format!("powershell -NoProfile -Command \"& {{ & {bin} hook runtime-state {event} }}\"")
 }
 
 fn path_is_git_tracked(worktree: &Path, relative_path: &Path) -> io::Result<bool> {
@@ -631,7 +626,7 @@ mod tests {
         let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
             .as_str()
             .expect("command string");
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state UserPromptSubmit"));
         assert!(!command.contains("node"));
         assert!(value["hooks"]["SessionStart"].is_array());
         assert!(value["hooks"].get("Notification").is_none());
@@ -643,9 +638,7 @@ mod tests {
 
     // T-080 / T-082 (SPEC #1942): the Claude settings.local.json must
     // dispatch every managed hook through the `gwt hook ...` CLI surface,
-    // not through `node .../gwt-*.mjs`. The runtime hook keeps the
-    // `GWT_MANAGED_HOOK=runtime-state` env-var prefix so the detection
-    // logic in `is_gwt_managed_command` still recognises it as managed.
+    // not through `node .../gwt-*.mjs`.
     #[test]
     fn managed_hooks_dispatch_through_gwt_hook_cli_not_node_scripts() {
         let dir = tempfile::tempdir().unwrap();
@@ -667,9 +660,7 @@ mod tests {
 
         let value: Value = serde_json::from_str(&content).unwrap();
 
-        // T-082: runtime hooks now invoke `gwt hook runtime-state <event>`
-        // and still carry the GWT_MANAGED_HOOK marker for replace
-        // detection. The inline POSIX shell one-liner is gone.
+        // T-082: runtime hooks now invoke `gwt hook runtime-state <event>`.
         for event in [
             "SessionStart",
             "UserPromptSubmit",
@@ -681,16 +672,14 @@ mod tests {
                 .as_str()
                 .unwrap_or_else(|| panic!("runtime command missing for event {event}"));
             // SPEC #1942 amendment: runtime hook command embeds an
-            // absolute path to gwt rather than the literal `gwt`, so
-            // the shape is `GWT_MANAGED_HOOK=runtime-state '<path>'
-            // hook runtime-state <event>`.
+            // absolute path to gwt rather than the literal `gwt`.
             assert!(
                 cmd.contains(&format!(" hook runtime-state {event}")),
                 "runtime hook for {event} must end with `hook runtime-state {event}`, got: {cmd}"
             );
             assert!(
-                cmd.contains("GWT_MANAGED_HOOK"),
-                "runtime hook must carry the GWT_MANAGED_HOOK marker, got: {cmd}"
+                !cmd.contains("GWT_MANAGED_HOOK"),
+                "runtime hook must not carry the managed marker anymore, got: {cmd}"
             );
             assert!(
                 !cmd.contains("mkdir"),
@@ -712,27 +701,23 @@ mod tests {
         let pre_tool_block_hooks = value["hooks"]["PreToolUse"][1]["hooks"]
             .as_array()
             .expect("bash blockers array");
-        let expected_suffixes = [
-            " hook block-git-branch-ops",
-            " hook block-cd-command",
-            " hook block-file-ops",
-            " hook block-git-dir-override",
-        ];
         let actual: Vec<&str> = pre_tool_block_hooks
             .iter()
             .map(|h| h["command"].as_str().unwrap_or(""))
             .collect();
-        for suffix in expected_suffixes {
-            assert!(
-                actual.iter().any(|cmd| cmd.ends_with(suffix)),
-                "bash blocker hooks must include a command ending with {suffix:?}, got: {actual:?}"
-            );
-            // Must NOT be the PATH-dependent literal form.
-            assert!(
-                actual.iter().all(|cmd| !cmd.starts_with("gwt hook ")),
-                "bash blocker hooks must not use literal `gwt hook ...`, got: {actual:?}"
-            );
-        }
+        assert_eq!(
+            actual.len(),
+            1,
+            "bash blocker hooks must collapse to a single policy hook, got: {actual:?}"
+        );
+        assert!(
+            actual[0].ends_with(" hook block-bash-policy"),
+            "bash blocker hooks must dispatch to block-bash-policy, got: {actual:?}"
+        );
+        assert!(
+            !actual[0].starts_with("gwt hook "),
+            "bash blocker hooks must not use literal `gwt hook ...`, got: {actual:?}"
+        );
     }
 
     // Regression for PR #1943 review feedback ("settings.local.json
@@ -828,8 +813,8 @@ mod tests {
             "tracked legacy node bash blocker must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook block-git-branch-ops"),
-            "tracked file must be migrated to the new CLI form, got: {content}"
+            content.contains("hook block-bash-policy"),
+            "tracked file must be migrated to the consolidated CLI form, got: {content}"
         );
     }
 
@@ -885,6 +870,10 @@ mod tests {
         assert!(
             content.contains("hook runtime-state"),
             "tracked file must carry the new CLI form, got: {content}"
+        );
+        assert!(
+            !content.contains("GWT_MANAGED_HOOK"),
+            "tracked file must drop the managed marker, got: {content}"
         );
     }
 
@@ -943,13 +932,12 @@ mod tests {
             .filter_map(|hook| hook["command"].as_str())
             .collect();
 
-        assert_eq!(
-            commands
-                .iter()
-                .filter(|command| command.contains("GWT_MANAGED_HOOK"))
-                .count(),
-            1
-        );
+        assert!(commands
+            .iter()
+            .any(|command| command.contains(" hook runtime-state PreToolUse")));
+        assert!(commands
+            .iter()
+            .any(|command| command.contains(" hook block-bash-policy")));
         assert!(commands.contains(&"my-custom-hook"));
         assert_eq!(
             value["hooks"]["CustomEvent"][0]["hooks"][0]["command"],
@@ -1009,7 +997,8 @@ mod tests {
             .as_str()
             .expect("command string");
 
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state SessionStart"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
@@ -1059,13 +1048,9 @@ mod tests {
             .filter_map(|hook| hook["command"].as_str())
             .collect();
 
-        assert_eq!(
-            commands
-                .iter()
-                .filter(|command| command.contains("GWT_MANAGED_HOOK"))
-                .count(),
-            1
-        );
+        assert!(commands
+            .iter()
+            .any(|command| command.contains(" hook runtime-state SessionStart")));
         assert!(commands.contains(&"my-custom-hook"));
     }
 
@@ -1114,7 +1099,8 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("tracked-command"));
-        assert!(!content.contains("GWT_MANAGED_HOOK"));
+        assert!(!content.contains("hook runtime-state"));
+        assert!(!content.contains("block-bash-policy"));
     }
 
     #[test]
@@ -1188,10 +1174,14 @@ mod tests {
             .filter_map(|hook| hook["command"].as_str())
             .collect();
 
-        assert!(session_start_command.contains("GWT_MANAGED_HOOK"));
+        assert!(session_start_command.contains(" hook runtime-state SessionStart"));
+        assert!(!session_start_command.contains("GWT_MANAGED_HOOK"));
         assert!(!content.contains("gwt-forward-hook.mjs"));
         assert!(!session_start_command.contains("node"));
         assert!(pre_tool_commands.contains(&"my-custom-hook"));
+        assert!(pre_tool_commands
+            .iter()
+            .any(|command| command.contains(" hook block-bash-policy")));
     }
 
     #[test]
@@ -1260,8 +1250,8 @@ mod tests {
     fn posix_runtime_hook_command_dispatches_through_gwt_hook_cli() {
         let command = posix_runtime_hook_command("SessionStart");
         assert!(
-            command.starts_with("GWT_MANAGED_HOOK=runtime-state"),
-            "posix runtime hook must keep the managed marker prefix, got: {command}"
+            !command.contains("GWT_MANAGED_HOOK"),
+            "posix runtime hook must not keep the managed marker, got: {command}"
         );
         // SPEC #1942 amendment: the gwt binary is dispatched via its
         // absolute path (quoted) so `$PATH` is not consulted. The exact
@@ -1294,8 +1284,8 @@ mod tests {
     fn powershell_runtime_hook_command_dispatches_through_gwt_hook_cli() {
         let command = powershell_runtime_hook_command("Stop");
         assert!(
-            command.contains("$env:GWT_MANAGED_HOOK = 'runtime-state'"),
-            "powershell runtime hook must set the managed env var, got: {command}"
+            !command.contains("GWT_MANAGED_HOOK"),
+            "powershell runtime hook must not set the managed env var, got: {command}"
         );
         assert!(
             command.contains(" hook runtime-state Stop"),
@@ -1345,10 +1335,10 @@ mod tests {
     #[test]
     fn is_gwt_managed_command_recognizes_absolute_path_form() {
         assert!(is_gwt_managed_command(
-            "'/Users/x/.bun/bin/gwt' hook block-git-branch-ops"
+            "'/Users/x/.bun/bin/gwt' hook block-bash-policy"
         ));
         assert!(is_gwt_managed_command(
-            "GWT_MANAGED_HOOK=runtime-state '/Users/x/.bun/bin/gwt' hook runtime-state PreToolUse"
+            "'/Users/x/.bun/bin/gwt' hook runtime-state PreToolUse"
         ));
         // Negative: unrelated `hook` substring must not match.
         assert!(!is_gwt_managed_command("echo 'fish hook ornament'"));
@@ -1405,8 +1395,8 @@ mod tests {
             "tracked PATH-less literal must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook block-git-branch-ops"),
-            "migrated file must still dispatch to block-git-branch-ops (via absolute path), got: {content}"
+            content.contains("hook block-bash-policy"),
+            "migrated file must dispatch to block-bash-policy (via absolute path), got: {content}"
         );
     }
 }

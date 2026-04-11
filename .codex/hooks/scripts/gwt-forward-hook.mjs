@@ -16,12 +16,12 @@ const payload = Buffer.concat(chunks).toString();
 function hookStatus(eventName) {
   switch (eventName) {
     case "SessionStart":
+    case "Stop":
+      return "WaitingInput";
     case "UserPromptSubmit":
     case "PreToolUse":
     case "PostToolUse":
       return "Running";
-    case "Stop":
-      return "WaitingInput";
     default:
       return null;
   }

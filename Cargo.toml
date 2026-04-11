@@ -145,3 +145,6 @@ debug = true
 [profile.bench]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+ratatui-core = { path = "vendor/ratatui-core" }

@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::theme;
+use crate::{screens::issues::IssueItem, theme};
 
 /// Which step of the wizard is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -294,6 +294,7 @@ pub struct BranchSuggestionOption {
 
 const AI_SUGGEST_TIMEOUT_TICKS: usize = 12;
 const MANUAL_INPUT_LABEL: &str = "Manual input";
+const RELATED_TO_NONE_LABEL: &str = "Related to none";
 
 #[derive(Debug, Clone, Default)]
 pub struct AISuggestState {
@@ -307,6 +308,36 @@ pub struct AISuggestState {
     pub error: Option<String>,
     /// Tick counter for spinner animation (incremented on WizardMessage::Tick).
     pub tick_counter: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssuePickerState {
+    pub issues: Vec<IssueItem>,
+    pub search_query: String,
+    pub search_active: bool,
+    pub load_error: Option<String>,
+}
+
+impl IssuePickerState {
+    pub fn filtered_issues(&self) -> Vec<&IssueItem> {
+        let query = self.search_query.trim().to_lowercase();
+        let mut issues = self
+            .issues
+            .iter()
+            .filter(|issue| {
+                query.is_empty()
+                    || issue.number.to_string().contains(&query)
+                    || issue.title.to_lowercase().contains(&query)
+                    || issue.state.to_lowercase().contains(&query)
+                    || issue
+                        .labels
+                        .iter()
+                        .any(|label| label.to_lowercase().contains(&query))
+            })
+            .collect::<Vec<_>>();
+        issues.sort_by(|left, right| right.number.cmp(&left.number));
+        issues
+    }
 }
 
 /// An agent option discovered on the system.
@@ -422,6 +453,7 @@ pub struct WizardState {
     pub docker_context: Option<DockerWizardContext>,
     pub docker_service_status: gwt_docker::ComposeServiceStatus,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    pub issue_picker: IssuePickerState,
     pub skip_perms: bool,
     pub codex_fast_mode: bool,
     pub convert_source_agents: Vec<String>,
@@ -452,7 +484,7 @@ impl Default for WizardState {
             ai_enabled: false,
             agent_id: String::new(),
             model: String::new(),
-            reasoning: "medium".to_string(),
+            reasoning: String::new(),
             version: String::new(),
             version_options: Vec::new(),
             mode: "normal".to_string(),
@@ -464,6 +496,7 @@ impl Default for WizardState {
             docker_context: None,
             docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            issue_picker: IssuePickerState::default(),
             skip_perms: false,
             codex_fast_mode: false,
             convert_source_agents: Vec::new(),
@@ -494,6 +527,54 @@ impl WizardState {
         } else {
             self.quick_start_entries.len() * 2 + 1
         }
+    }
+
+    fn issue_picker_option_count(&self) -> usize {
+        self.issue_picker.filtered_issues().len() + 1
+    }
+
+    fn issue_picker_selected_issue(&self) -> Option<&IssueItem> {
+        if self.selected == 0 {
+            return None;
+        }
+        self.issue_picker
+            .filtered_issues()
+            .get(self.selected.saturating_sub(1))
+            .copied()
+    }
+
+    fn issue_picker_default_selection(&self) -> usize {
+        let Ok(selected_issue) = self.issue_id.parse::<u32>() else {
+            return 0;
+        };
+        self.issue_picker
+            .filtered_issues()
+            .iter()
+            .position(|issue| issue.number == selected_issue)
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    fn issue_picker_labels(&self) -> Vec<String> {
+        let mut labels = Vec::with_capacity(self.issue_picker_option_count());
+        labels.push(RELATED_TO_NONE_LABEL.to_string());
+        labels.extend(
+            self.issue_picker
+                .filtered_issues()
+                .into_iter()
+                .map(|issue| {
+                    let labels = if issue.labels.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", issue.labels.join(", "))
+                    };
+                    format!(
+                        "#{} {} ({}){}",
+                        issue.number, issue.title, issue.state, labels
+                    )
+                }),
+        );
+        labels
     }
 
     fn selected_quick_start_action(&self) -> QuickStartAction {
@@ -553,6 +634,7 @@ impl WizardState {
         if !self.agent_is_codex() {
             self.codex_fast_mode = false;
         }
+        self.sync_reasoning_state();
 
         match action {
             QuickStartAction::ResumeWithPrevious => {
@@ -857,10 +939,16 @@ impl WizardState {
                     self.ai_suggest.suggestions.len().max(1)
                 }
             }
-            WizardStep::IssueSelect => 0,     // text input
+            WizardStep::IssueSelect => self.issue_picker_option_count(),
             WizardStep::SkipPermissions => 2, // yes / no
             WizardStep::CodexFastMode => 2,   // on / off
         }
+    }
+
+    pub fn current_options_for_step(&self, step: WizardStep) -> Vec<String> {
+        let mut state = self.clone();
+        state.step = step;
+        state.current_options()
     }
 
     /// Static option labels for the current step.
@@ -971,7 +1059,8 @@ impl WizardState {
                     labels
                 }
             }
-            WizardStep::BranchNameInput | WizardStep::IssueSelect => vec![],
+            WizardStep::IssueSelect => self.issue_picker_labels(),
+            WizardStep::BranchNameInput => vec![],
             _ => self
                 .current_static_options()
                 .into_iter()
@@ -1081,6 +1170,12 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
             }
         }
         WizardMessage::Back => {
+            if state.step == WizardStep::IssueSelect && state.issue_picker.search_active {
+                state.issue_picker.search_active = false;
+                state.issue_picker.search_query.clear();
+                state.selected = state.issue_picker_default_selection();
+                return;
+            }
             if let Some(prev) = prev_step(state.step, state) {
                 state.step = prev;
                 state.selected = step_default_selection(prev, state);
@@ -1097,7 +1192,15 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 state.branch_name.push(ch);
             }
             WizardStep::IssueSelect => {
-                state.issue_id.push(ch);
+                if state.issue_picker.search_active {
+                    state.issue_picker.search_query.push(ch);
+                    let option_count = state.option_count();
+                    super::clamp_index(&mut state.selected, option_count);
+                } else if ch == '/' {
+                    state.issue_picker.search_active = true;
+                    state.issue_picker.search_query.clear();
+                    state.selected = state.issue_picker_default_selection();
+                }
             }
             _ => {}
         },
@@ -1106,7 +1209,11 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 state.branch_name.pop();
             }
             WizardStep::IssueSelect => {
-                state.issue_id.pop();
+                if state.issue_picker.search_active {
+                    state.issue_picker.search_query.pop();
+                    let option_count = state.option_count();
+                    super::clamp_index(&mut state.selected, option_count);
+                }
             }
             _ => {}
         },
@@ -1170,6 +1277,7 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
 
 fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
     match step {
+        WizardStep::IssueSelect => state.issue_picker_default_selection(),
         WizardStep::ReasoningLevel => reasoning_default_selection(state),
         WizardStep::VersionSelect => state
             .version_options
@@ -1287,6 +1395,13 @@ fn apply_selection(state: &mut WizardState) {
         WizardStep::DockerLifecycle => {
             if let Some(opt) = options.get(state.selected) {
                 state.docker_lifecycle_intent = docker_lifecycle_intent_for_label(opt);
+            }
+        }
+        WizardStep::IssueSelect => {
+            if let Some(issue) = state.issue_picker_selected_issue() {
+                state.issue_id = issue.number.to_string();
+            } else {
+                state.issue_id.clear();
             }
         }
         WizardStep::ConvertAgentSelect => {}
@@ -1434,7 +1549,7 @@ const CLAUDE_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 4] = [
         description: "Most capable for complex work",
     },
     ModelDisplayOption {
-        label: "Sonnet 4.5",
+        label: "Sonnet 4.6",
         description: "Best for everyday tasks",
     },
     ModelDisplayOption {
@@ -1514,6 +1629,7 @@ struct ReasoningDisplayOption {
     label: &'static str,
     stored_value: &'static str,
     description: &'static str,
+    is_default: bool,
 }
 
 const CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS: [ReasoningDisplayOption; 5] = [
@@ -1521,26 +1637,31 @@ const CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS: [ReasoningDisplayOption; 5] = [
         label: "Auto",
         stored_value: "auto",
         description: "Let the model decide how deeply to think",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "Low",
         stored_value: "low",
-        description: "Fast, cheap responses for simple work",
+        description: "Fast, cheap responses for simple renames, greps, and quick questions",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "Medium",
         stored_value: "medium",
-        description: "Balanced reasoning for everyday tasks",
+        description: "Balanced reasoning for everyday agentic coding and tool-heavy work",
+        is_default: true,
     },
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
         description: "Deeper reasoning for complex problems",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "Max",
         stored_value: "max",
-        description: "Deepest reasoning with no token limit bias",
+        description: "Deepest reasoning with no token-spending constraint",
+        is_default: false,
     },
 ];
 
@@ -1556,21 +1677,25 @@ const CODEX_REASONING_DISPLAY_OPTIONS: [ReasoningDisplayOption; 4] = [
         label: "Low",
         stored_value: "low",
         description: "Fast responses with lighter reasoning",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "Medium",
         stored_value: "medium",
-        description: "Balances speed and reasoning depth",
+        description: "Balances speed and reasoning depth for everyday tasks",
+        is_default: true,
     },
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
         description: "Greater reasoning depth for complex problems",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "Extra high",
         stored_value: "xhigh",
         description: "Extra high reasoning depth for complex problems",
+        is_default: false,
     },
 ];
 
@@ -1624,6 +1749,16 @@ fn reasoning_title_model(state: &WizardState) -> &str {
     }
 }
 
+fn reasoning_label(option: &ReasoningDisplayOption, is_current: bool) -> String {
+    let mut label = option.label.to_string();
+    if option.is_default {
+        label.push_str(" (default)");
+    }
+    if is_current {
+        label.push_str(" (current)");
+    }
+    label
+}
 fn reasoning_default_selection(state: &WizardState) -> usize {
     if let Some(value) = state.current_reasoning_value() {
         return state
@@ -1633,14 +1768,15 @@ fn reasoning_default_selection(state: &WizardState) -> usize {
             .unwrap_or(0);
     }
 
-    match state.reasoning_step_kind() {
-        ReasoningStepKind::Codex => state
-            .current_reasoning_options()
-            .iter()
-            .position(|option| option.stored_value == "medium")
-            .unwrap_or(0),
-        ReasoningStepKind::ClaudeEffort { .. } | ReasoningStepKind::None => 0,
-    }
+    state
+        .current_reasoning_options()
+        .iter()
+        .position(|option| match state.reasoning_step_kind() {
+            ReasoningStepKind::Codex => option.stored_value == "medium",
+            ReasoningStepKind::ClaudeEffort { .. } => option.stored_value == "low",
+            ReasoningStepKind::None => false,
+        })
+        .unwrap_or(0)
 }
 
 fn docker_lifecycle_label(intent: gwt_agent::DockerLifecycleIntent) -> &'static str {
@@ -1794,23 +1930,26 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
 fn render_reasoning_level_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let available_width = area.width as usize;
+    let label_width = state
+        .current_reasoning_options()
+        .iter()
+        .enumerate()
+        .map(|(idx, option)| {
+            reasoning_label(option, idx == state.selected)
+                .chars()
+                .count()
+        })
+        .max()
+        .unwrap_or(10);
     let items = state
         .current_reasoning_options()
         .iter()
         .enumerate()
         .map(|(idx, option)| {
             let marker = if idx == state.selected { "> " } else { "  " };
-            let label_width = if matches!(
-                state.reasoning_step_kind(),
-                ReasoningStepKind::ClaudeEffort { .. }
-            ) {
-                6
-            } else {
-                10
-            };
             let text = format_fixed_width_line(
                 marker,
-                option.label,
+                &reasoning_label(option, idx == state.selected),
                 option.description,
                 label_width,
                 available_width,
@@ -2048,17 +2187,17 @@ fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
             }
         }
         WizardStep::ReasoningLevel => {
-            let label_width = if matches!(
-                state.reasoning_step_kind(),
-                ReasoningStepKind::ClaudeEffort { .. }
-            ) {
-                6
-            } else {
-                10
-            };
-            for option in state.current_reasoning_options() {
-                max_line = max_line
-                    .max(2 + label_width.max(option.label.len()) + 1 + option.description.len());
+            let label_width = state
+                .current_reasoning_options()
+                .iter()
+                .enumerate()
+                .map(|(idx, option)| reasoning_label(option, idx == state.selected).len())
+                .max()
+                .unwrap_or(10);
+            for (idx, option) in state.current_reasoning_options().iter().enumerate() {
+                let label = reasoning_label(option, idx == state.selected);
+                max_line =
+                    max_line.max(2 + label_width.max(label.len()) + 1 + option.description.len());
             }
         }
         WizardStep::SkipPermissions => {
@@ -2300,7 +2439,11 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         1,
     );
     let hint = match state.step {
-        WizardStep::BranchNameInput | WizardStep::IssueSelect => "[Enter] Confirm  [Esc] Back",
+        WizardStep::BranchNameInput => "[Enter] Confirm  [Esc] Back",
+        WizardStep::IssueSelect if state.issue_picker.search_active => {
+            "[Enter] Select  [Esc] Clear search  [/]:search  [Up/Down] Navigate"
+        }
+        WizardStep::IssueSelect => "[Enter] Select  [Esc] Back  [/]:search  [Up/Down] Navigate",
         WizardStep::AIBranchSuggest if state.ai_suggest.loading => "[Esc] Cancel",
         WizardStep::AIBranchSuggest if state.ai_suggest.error.is_some() => {
             "[Enter] Manual input  [Esc] Retry"
@@ -2328,7 +2471,7 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
             render_input_step(state, frame, area, "Branch Name:", &state.branch_name);
         }
         WizardStep::IssueSelect => {
-            render_input_step(state, frame, area, "Issue ID (optional):", &state.issue_id);
+            render_issue_picker(state, frame, area);
         }
         WizardStep::AIBranchSuggest => {
             render_ai_suggest(state, frame, area);
@@ -2370,6 +2513,48 @@ fn render_input_step(
     frame.render_widget(
         Paragraph::new(format!("{value}_")).style(Style::default().fg(theme::color::ACTIVE)),
         Rect::new(area.x, area.y + 1, area.width, 1),
+    );
+}
+
+fn render_issue_picker(state: &WizardState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let search_text = if state.issue_picker.search_active {
+        format!("Search: {}_", state.issue_picker.search_query)
+    } else if state.issue_picker.search_query.is_empty() {
+        "Search: press / to filter cached issues".to_string()
+    } else {
+        format!("Search: {}", state.issue_picker.search_query)
+    };
+    frame.render_widget(
+        Paragraph::new(search_text).style(theme::style::header()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    let mut list_y = area.y + 1;
+    let mut list_height = area.height.saturating_sub(1);
+    if let Some(error) = state.issue_picker.load_error.as_ref() {
+        if list_height > 0 {
+            frame.render_widget(
+                Paragraph::new(format!("Cache unavailable: {error}"))
+                    .style(Style::default().fg(theme::color::ERROR)),
+                Rect::new(area.x, list_y, area.width, 1),
+            );
+            list_y = list_y.saturating_add(1);
+            list_height = list_height.saturating_sub(1);
+        }
+    }
+
+    if list_height == 0 {
+        return;
+    }
+
+    render_option_list(
+        state,
+        frame,
+        Rect::new(area.x, list_y, area.width, list_height),
     );
 }
 
@@ -2577,6 +2762,27 @@ mod tests {
         None
     }
 
+    fn sample_issue_picker_issues() -> Vec<crate::screens::issues::IssueItem> {
+        vec![
+            crate::screens::issues::IssueItem {
+                number: 42,
+                title: "Fix login bug".to_string(),
+                state: "open".to_string(),
+                labels: vec!["bug".to_string(), "auth".to_string()],
+                body: "Login fails on Safari".to_string(),
+                linked_branches: vec![],
+            },
+            crate::screens::issues::IssueItem {
+                number: 1776,
+                title: "Launch Agent issue linkage".to_string(),
+                state: "closed".to_string(),
+                labels: vec!["ux".to_string()],
+                body: "Wizard should link branches to issues".to_string(),
+                linked_branches: vec![],
+            },
+        ]
+    }
+
     #[test]
     fn default_state() {
         let state = WizardState::default();
@@ -2696,7 +2902,6 @@ mod tests {
         let mut state = WizardState::default();
         state.agent_id = "claude".to_string();
         state.model = "opus".to_string();
-
         assert_eq!(
             next_step(WizardStep::AgentSelect, &state),
             Some(WizardStep::ModelSelect)
@@ -2976,21 +3181,68 @@ mod tests {
     }
 
     #[test]
-    fn input_char_issue_id() {
+    fn issue_select_current_options_include_none_and_cached_issues() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        update(&mut state, WizardMessage::InputChar('1'));
-        update(&mut state, WizardMessage::InputChar('2'));
-        assert_eq!(state.issue_id, "12");
+        state.issue_picker.issues = sample_issue_picker_issues();
+
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+                "#42 Fix login bug (open) [bug, auth]".to_string(),
+            ]
+        );
+        assert_eq!(state.option_count(), 3);
     }
 
     #[test]
-    fn backspace_issue_id() {
+    fn issue_select_search_filters_by_number_title_label_and_state() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        state.issue_id = "42".to_string();
-        update(&mut state, WizardMessage::Backspace);
-        assert_eq!(state.issue_id, "4");
+        state.issue_picker.issues = sample_issue_picker_issues();
+
+        update(&mut state, WizardMessage::InputChar('/'));
+        update(&mut state, WizardMessage::InputChar('c'));
+        update(&mut state, WizardMessage::InputChar('l'));
+
+        assert!(state.issue_picker.search_active);
+        assert_eq!(state.issue_picker.search_query, "cl");
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_on_issue_step_stores_selected_issue_number() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::IssueSelect;
+        state.issue_picker.issues = sample_issue_picker_issues();
+        state.selected = 2;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.issue_id, "42");
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+    }
+
+    #[test]
+    fn select_on_issue_step_can_choose_related_to_none() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::IssueSelect;
+        state.issue_picker.issues = sample_issue_picker_issues();
+        state.issue_id = "1776".to_string();
+        state.selected = 0;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert!(state.issue_id.is_empty());
+        assert_eq!(state.step, WizardStep::BranchNameInput);
     }
 
     #[test]
@@ -3123,6 +3375,22 @@ mod tests {
     }
 
     #[test]
+    fn selecting_claude_haiku_clears_staged_effort() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.step = WizardStep::ModelSelect;
+        state.reasoning = "high".to_string();
+        state.selected = 3;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.model, "haiku");
+        assert!(state.reasoning.is_empty());
+        assert_eq!(state.step, WizardStep::VersionSelect);
+    }
+
+    #[test]
     fn select_on_skip_permissions_completes_without_confirm() {
         let mut state = WizardState::default();
         state.step = WizardStep::SkipPermissions;
@@ -3193,7 +3461,8 @@ mod tests {
         assert_eq!(state.option_count(), 0); // text input
 
         state.step = WizardStep::IssueSelect;
-        assert_eq!(state.option_count(), 0); // text input
+        state.issue_picker.issues = sample_issue_picker_issues();
+        assert_eq!(state.option_count(), 3);
     }
 
     #[test]
@@ -3415,26 +3684,16 @@ mod tests {
     }
 
     #[test]
-    fn render_issue_input_uses_old_tui_two_row_layout() {
+    fn render_issue_picker_shows_related_none_and_cached_issues() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        state.issue_id = "1234".to_string();
+        state.issue_picker.issues = sample_issue_picker_issues();
 
         let buf = render_buffer(&state, 90, 24);
         let text = buffer_text(&buf);
-        let (_, prompt_y) = find_text_position(&buf, "Issue ID (optional):").expect("prompt line");
-        let (_, value_y) = find_text_position(&buf, "1234_").expect("value line");
-
-        assert!(text.contains("Issue ID (optional):"));
-        assert!(text.contains("1234_"));
-        assert!(
-            value_y > prompt_y,
-            "input value should render on a row below the prompt"
-        );
-        assert!(
-            text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1,
-            "issue input should use the same inline prompt style instead of adding another boxed title"
-        );
+        assert!(text.contains("Related to none"));
+        assert!(text.contains("Fix login bug"));
+        assert!(text.contains("Launch Agent issue linkage"));
     }
 
     #[test]
@@ -3938,7 +4197,7 @@ mod tests {
         assert!(text.contains("Select Model"));
         assert!(text.contains("Default (recommended) - Opus 4.6 - Most capable for complex work"));
         assert!(text.contains("> Opus 4.6 - Most capable for complex work"));
-        assert!(text.contains("  Sonnet 4.5 - Best for everyday tasks"));
+        assert!(text.contains("  Sonnet 4.6 - Best for everyday tasks"));
         assert!(text.contains("  Haiku 4.5 - Fastest for quick answers"));
         assert!(text.contains("[Enter] Select  [Esc] Back  [Up/Down] Navigate"));
     }
@@ -4051,7 +4310,7 @@ mod tests {
     }
 
     #[test]
-    fn render_reasoning_step_shows_fixed_width_old_tui_layout() {
+    fn render_codex_reasoning_step_shows_model_title_and_refreshed_labels() {
         let mut state = WizardState::default();
         state.step = WizardStep::ReasoningLevel;
         state.agent_id = "codex".to_string();
@@ -4061,10 +4320,11 @@ mod tests {
         let text = render_text(&state, 90, 24);
 
         assert!(text.contains("Select Reasoning Level for gpt-5.4"));
-        assert!(text.contains("  Low        Fast responses with lighter reasoning"));
-        assert!(text.contains("  Medium     Balances speed and reasoning depth"));
-        assert!(text.contains("> High       Greater reasoning depth for complex problems"));
-        assert!(text.contains("  Extra high Extra high reasoning depth for complex problems"));
+        assert!(text.contains("Low"));
+        assert!(text.contains("Fast responses with lighter reasoning"));
+        assert!(text.contains("Medium (default)"));
+        assert!(text.contains("> High"));
+        assert!(text.contains("Extra high"));
     }
 
     #[test]
@@ -4073,14 +4333,16 @@ mod tests {
         state.step = WizardStep::ReasoningLevel;
         state.agent_id = "claude".to_string();
         state.model = "opus".to_string();
+        state.selected = 1;
 
-        let text = render_text(&state, 110, 24);
+        let text = render_text(&state, 120, 24);
 
         assert!(text.contains("Select Effort Level for opus"));
         assert!(text.contains("Auto"));
-        assert!(text.contains("Let the model decide how deeply to think"));
+        assert!(text.contains("> Low"));
+        assert!(text.contains("Medium (default)"));
+        assert!(text.contains("High"));
         assert!(text.contains("Max"));
-        assert!(text.contains("Deepest reasoning with no token limit bias"));
     }
 
     #[test]
@@ -4089,11 +4351,12 @@ mod tests {
         state.step = WizardStep::ReasoningLevel;
         state.agent_id = "claude".to_string();
         state.model = "sonnet".to_string();
+        state.selected = 1;
 
-        let text = render_text(&state, 110, 24);
+        let text = render_text(&state, 120, 24);
 
         assert!(text.contains("Select Effort Level for sonnet"));
-        assert!(!text.contains("  Max    "));
+        assert!(!text.contains("Max"));
     }
 
     #[test]
