@@ -151,10 +151,14 @@ fn extract_volumes(service: &Value) -> Vec<ComposeVolumeMount> {
 }
 
 fn parse_volume_mount(raw: &str) -> Option<ComposeVolumeMount> {
-    let mut parts = raw.split(':');
-    let source = parts.next()?.trim();
-    let target = parts.next()?.trim();
-    let mode = parts.next().map(|part| part.trim().to_string());
+    let raw = raw.trim();
+    let (mount_spec, mode) = match raw.rsplit_once(':') {
+        Some((spec, suffix)) if looks_like_volume_mode(suffix) => {
+            (spec, Some(suffix.trim().to_string()))
+        }
+        _ => (raw, None),
+    };
+    let (source, target) = split_volume_source_and_target(mount_spec)?;
     if source.is_empty() || target.is_empty() {
         return None;
     }
@@ -163,6 +167,36 @@ fn parse_volume_mount(raw: &str) -> Option<ComposeVolumeMount> {
         target: target.to_string(),
         mode,
     })
+}
+
+fn looks_like_volume_mode(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains(['/', '\\'])
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ',' | '=' | '-' | '_'))
+}
+
+fn split_volume_source_and_target(raw: &str) -> Option<(&str, &str)> {
+    for (idx, ch) in raw.char_indices().rev() {
+        if ch != ':' {
+            continue;
+        }
+
+        let source = raw[..idx].trim();
+        let target = raw[idx + 1..].trim();
+        if source.is_empty() || target.is_empty() {
+            continue;
+        }
+        if idx == 1 && source.chars().all(|part| part.is_ascii_alphabetic()) {
+            continue;
+        }
+
+        return Some((source, target));
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -262,6 +296,19 @@ services:
         assert_eq!(services[0].volumes[0].source, ".");
         assert_eq!(services[0].volumes[0].target, "/workspace");
         assert_eq!(services[0].volumes[1].mode.as_deref(), Some("ro"));
+    }
+
+    #[test]
+    fn parse_windows_drive_letter_volume_source() {
+        let mount = parse_volume_mount(r"C:\repo:/workspace:ro").unwrap();
+        assert_eq!(mount.source, r"C:\repo");
+        assert_eq!(mount.target, "/workspace");
+        assert_eq!(mount.mode.as_deref(), Some("ro"));
+
+        let mount = parse_volume_mount(r"C:\repo:/workspace").unwrap();
+        assert_eq!(mount.source, r"C:\repo");
+        assert_eq!(mount.target, "/workspace");
+        assert_eq!(mount.mode, None);
     }
 
     #[test]

@@ -5173,7 +5173,7 @@ fn resolve_docker_launch_plan(
         .as_ref()
         .and_then(|defaults| defaults.workspace_folder.clone())
         .or_else(|| service.working_dir.clone())
-        .or_else(|| compose_workspace_mount_target(service))
+        .or_else(|| compose_workspace_mount_target(worktree, service))
         .ok_or_else(|| {
             format!(
                 "Docker service {} is missing working_dir/workspaceFolder and no project-root volume mount was detected",
@@ -5196,14 +5196,9 @@ fn docker_compose_file_for_launch(
     project_root: &Path,
     files: &gwt_docker::DockerFiles,
 ) -> Result<Option<PathBuf>, String> {
-    if let Some(path) = files.compose_file.clone() {
-        return Ok(Some(path));
-    }
-
-    Ok(
-        docker_devcontainer_defaults(project_root, files)
-            .and_then(|defaults| defaults.compose_file),
-    )
+    Ok(docker_devcontainer_defaults(project_root, files)
+        .and_then(|defaults| defaults.compose_file)
+        .or_else(|| files.compose_file.clone()))
 }
 
 fn docker_devcontainer_defaults(
@@ -5240,12 +5235,29 @@ fn docker_devcontainer_defaults(
     })
 }
 
-fn compose_workspace_mount_target(service: &gwt_docker::ComposeService) -> Option<String> {
+fn compose_workspace_mount_target(
+    project_root: &Path,
+    service: &gwt_docker::ComposeService,
+) -> Option<String> {
     service
         .volumes
         .iter()
-        .find(|mount| mount.source == "." || mount.source == "./")
+        .find(|mount| mount_source_matches_project_root(&mount.source, project_root))
         .map(|mount| mount.target.clone())
+}
+
+fn mount_source_matches_project_root(source: &str, project_root: &Path) -> bool {
+    let normalized = source
+        .trim()
+        .trim_end_matches(['/', '\\'])
+        .trim_end_matches("/.");
+
+    if matches!(normalized, "." | "$PWD" | "${PWD}") {
+        return true;
+    }
+
+    let source_path = Path::new(normalized);
+    source_path.is_absolute() && same_worktree_path(source_path, project_root)
 }
 
 fn first_available_worktree_path(
@@ -13270,6 +13282,51 @@ services:
     }
 
     #[test]
+    fn resolve_docker_launch_plan_prefers_devcontainer_compose_target() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            r#"
+services:
+  root:
+    image: node:22
+    working_dir: /root-workspace
+"#,
+        )
+        .expect("write root compose");
+        fs::create_dir_all(project_root.path().join(".devcontainer"))
+            .expect("create .devcontainer");
+        let dev_compose = project_root
+            .path()
+            .join(".devcontainer/docker-compose.dev.yml");
+        fs::write(
+            &dev_compose,
+            r#"
+services:
+  app:
+    image: node:22
+    working_dir: /workspace
+"#,
+        )
+        .expect("write devcontainer compose");
+        fs::write(
+            project_root.path().join(".devcontainer/devcontainer.json"),
+            r#"{
+  "dockerComposeFile": "docker-compose.dev.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace"
+}"#,
+        )
+        .expect("write devcontainer");
+
+        let plan = resolve_docker_launch_plan(project_root.path(), None).expect("launch plan");
+
+        assert_eq!(plan.compose_file, dev_compose);
+        assert_eq!(plan.service, "app");
+        assert_eq!(plan.container_cwd, "/workspace");
+    }
+
+    #[test]
     fn configure_existing_branch_wizard_with_sessions_loads_newest_entry_per_agent() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let cache = VersionCache::new();
@@ -14235,6 +14292,53 @@ CUSTOM_ENV = "enabled"
             config.docker_lifecycle_intent,
             gwt_agent::DockerLifecycleIntent::Restart
         );
+    }
+
+    #[test]
+    fn resolve_docker_launch_plan_accepts_pwd_workspace_mount() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            r#"
+services:
+  web:
+    image: node:22
+    volumes:
+      - ${PWD}:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let plan =
+            resolve_docker_launch_plan(project_root.path(), Some("web")).expect("launch plan");
+
+        assert_eq!(plan.service, "web");
+        assert_eq!(plan.container_cwd, "/workspace");
+    }
+
+    #[test]
+    fn resolve_docker_launch_plan_accepts_absolute_project_root_workspace_mount() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let mount = format!("{}:/workspace", project_root.path().display());
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            format!(
+                r#"
+services:
+  web:
+    image: node:22
+    volumes:
+      - {mount}
+"#
+            ),
+        )
+        .expect("write compose");
+
+        let plan =
+            resolve_docker_launch_plan(project_root.path(), Some("web")).expect("launch plan");
+
+        assert_eq!(plan.service, "web");
+        assert_eq!(plan.container_cwd, "/workspace");
     }
 
     #[test]
