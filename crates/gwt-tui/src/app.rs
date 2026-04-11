@@ -6411,12 +6411,6 @@ fn handle_management_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
             return true;
         }
 
-        if mouse_hits_rect(mouse, layout.summary) {
-            model.profiles.focus = screens::profiles::ProfilesFocus::ProfileList;
-            model.active_focus = FocusPane::TabContent;
-            return true;
-        }
-
         if mouse_hits_rect(mouse, layout.env) {
             model.profiles.focus = screens::profiles::ProfilesFocus::Environment;
             if mouse_hits_rect(mouse, layout.env_content) {

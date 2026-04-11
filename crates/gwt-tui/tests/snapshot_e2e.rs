@@ -405,12 +405,20 @@ fn snapshot_profiles_tab() {
         ("A11_OVERRIDE".to_string(), "override-b".to_string()),
         ("A12_OVERRIDE".to_string(), "override-c".to_string()),
         ("A13_OVERRIDE".to_string(), "override-d".to_string()),
+        ("A14_OVERRIDE".to_string(), "override-e".to_string()),
+        ("A15_OVERRIDE".to_string(), "override-f".to_string()),
+        ("A16_OVERRIDE".to_string(), "override-g".to_string()),
+        ("A17_OVERRIDE".to_string(), "override-h".to_string()),
     ]);
     default.disabled_env = vec![
         "A20_DISABLED".to_string(),
         "A21_DISABLED".to_string(),
         "A22_DISABLED".to_string(),
         "A23_DISABLED".to_string(),
+        "A24_DISABLED".to_string(),
+        "A25_DISABLED".to_string(),
+        "A26_DISABLED".to_string(),
+        "A27_DISABLED".to_string(),
     ];
     settings
         .save(&config_dir.join("config.toml"))
@@ -421,10 +429,20 @@ fn snapshot_profiles_tab() {
         ("A01_BASE", "/bin"),
         ("A02_BASE", "/opt/bin"),
         ("A03_BASE", "/usr/local/bin"),
+        ("A04_BASE", "/sbin"),
+        ("A05_BASE", "/usr/sbin"),
+        ("A06_BASE", "/opt/homebrew/bin"),
+        ("A07_BASE", "/tmp/bin"),
+        ("A08_BASE", "/var/tmp/bin"),
+        ("A09_BASE", "/custom/bin"),
         ("A20_DISABLED", "hidden-a"),
         ("A21_DISABLED", "hidden-b"),
         ("A22_DISABLED", "hidden-c"),
         ("A23_DISABLED", "hidden-d"),
+        ("A24_DISABLED", "hidden-e"),
+        ("A25_DISABLED", "hidden-f"),
+        ("A26_DISABLED", "hidden-g"),
+        ("A27_DISABLED", "hidden-h"),
     ]);
 
     let mut model = test_model();

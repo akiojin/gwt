@@ -14,7 +14,6 @@ use crate::theme;
 pub(crate) struct LayoutAreas {
     pub list: Rect,
     pub detail: Rect,
-    pub summary: Rect,
     pub env: Rect,
     pub list_hint: Rect,
     pub list_content: Rect,
@@ -40,18 +39,13 @@ pub(crate) fn layout_areas(area: Rect) -> LayoutAreas {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(8)])
-        .split(chunks[1]);
     let (list_hint, list_content) = split_with_hint(chunks[0]);
-    let (env_hint, env_content) = split_with_hint(sections[1]);
+    let (env_hint, env_content) = split_with_hint(chunks[1]);
 
     LayoutAreas {
         list: chunks[0],
         detail: chunks[1],
-        summary: sections[0],
-        env: sections[1],
+        env: chunks[1],
         list_hint,
         list_content,
         env_hint,
@@ -511,7 +505,7 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
 fn render_detail(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
     let Some(profile) = state.selected_profile() else {
         let block = Block::default()
-            .title("Profile Detail")
+            .title("Environment")
             .borders(Borders::ALL)
             .border_type(theme::border::default());
         frame.render_widget(
@@ -523,7 +517,6 @@ fn render_detail(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
         return;
     };
 
-    render_summary_block(state, profile, frame, areas.summary);
     render_environment_block(
         state,
         profile,
@@ -531,72 +524,6 @@ fn render_detail(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
         areas.env,
         areas.env_hint,
         areas.env_content,
-    );
-}
-
-fn render_summary_block(
-    state: &ProfilesState,
-    profile: &ProfileItem,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Name: ", theme::style::header()),
-            Span::raw(profile.name.clone()),
-        ]),
-        Line::from(vec![
-            Span::styled("Desc: ", theme::style::header()),
-            Span::raw(if profile.description.is_empty() {
-                "(none)".to_string()
-            } else {
-                profile.description.clone()
-            }),
-        ]),
-        Line::from(vec![
-            Span::styled("Active: ", theme::style::header()),
-            Span::styled(
-                if profile.active { "yes" } else { "no" },
-                if profile.active {
-                    theme::style::success_text()
-                } else {
-                    theme::style::muted_text()
-                },
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Delete: ", theme::style::header()),
-            Span::styled(
-                if profile.deletable {
-                    "allowed"
-                } else {
-                    "locked (default)"
-                },
-                if profile.deletable {
-                    theme::style::text()
-                } else {
-                    theme::style::warning_text()
-                },
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Guide: ", theme::style::header()),
-            Span::raw("Enter activates | Tab moves to Environment."),
-        ]),
-    ];
-
-    let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::ProfileList);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title("Profile Detail")
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .border_type(border_type),
-            )
-            .wrap(Wrap { trim: false }),
-        area,
     );
 }
 
@@ -1033,9 +960,12 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Profiles"), "{text}");
         assert!(text.contains("Environment"), "{text}");
+        assert!(!text.contains("Profile Detail"), "{text}");
+        assert!(!text.contains("Name:"), "{text}");
+        assert!(!text.contains("Desc:"), "{text}");
         assert!(!text.contains("Disabled OS Environment"), "{text}");
         assert!(!text.contains("Effective Environment"), "{text}");
-        assert!(text.contains("locked (default)"), "{text}");
+        assert!(text.contains("[default]"), "{text}");
     }
 
     #[test]
@@ -1091,6 +1021,13 @@ mod tests {
         let (disabled_x, disabled_y) = find_text(&buf, "SECRET=hidden").expect("disabled row");
         let disabled_cell = &buf[(disabled_x, disabled_y)];
         assert!(disabled_cell.modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    #[test]
+    fn layout_uses_entire_right_pane_for_environment_block() {
+        let areas = layout_areas(Rect::new(0, 0, 120, 30));
+
+        assert_eq!(areas.env, areas.detail);
     }
 
     fn find_text(buf: &Buffer, needle: &str) -> Option<(u16, u16)> {
