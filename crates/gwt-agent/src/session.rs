@@ -331,6 +331,32 @@ mod tests {
     }
 
     #[test]
+    fn load_legacy_toml_without_runtime_fields_uses_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.toml");
+
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
+        session.runtime_target = LaunchRuntimeTarget::Docker;
+        session.docker_service = Some("web".into());
+
+        let serialized = toml::to_string_pretty(&session).unwrap();
+        let legacy = serialized
+            .lines()
+            .filter(|line| {
+                !line.trim_start().starts_with("runtime_target")
+                    && !line.trim_start().starts_with("docker_service")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        std::fs::write(&path, legacy).unwrap();
+
+        let loaded = Session::load(&path).unwrap();
+        assert_eq!(loaded.runtime_target, LaunchRuntimeTarget::Host);
+        assert!(loaded.docker_service.is_none());
+    }
+
+    #[test]
     fn load_nonexistent_returns_error() {
         let result = Session::load(Path::new("/nonexistent/session.toml"));
         assert!(result.is_err());

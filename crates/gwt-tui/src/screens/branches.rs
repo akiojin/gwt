@@ -1047,7 +1047,7 @@ pub fn load_branch_detail(
                     .cloned()
                     .collect()
             })
-            .unwrap_or_else(|| docker_services.to_vec()),
+            .unwrap_or_default(),
         ..BranchDetailData::default()
     };
 
@@ -2302,6 +2302,28 @@ mod tests {
         assert_eq!(service.name, "web");
         assert_eq!(service.status, gwt_docker::ComposeServiceStatus::Running);
         assert_eq!(service.ports, "8080:80");
+    }
+
+    #[test]
+    fn load_branch_detail_without_worktree_does_not_associate_docker_services() {
+        let branch = BranchItem {
+            name: "origin/feature/docker".to_string(),
+            is_head: false,
+            is_local: false,
+            category: BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        };
+        let detail =
+            load_branch_detail(&branch, &sample_services(std::path::Path::new("/tmp/test")));
+
+        assert!(detail.docker_services.is_empty());
+
+        let mut state = BranchesState::default();
+        state.apply_detail_data(&detail, true);
+        update(&mut state, BranchesMessage::DockerContainerRestart);
+
+        assert!(state.pending_docker_action.is_none());
     }
 
     #[test]

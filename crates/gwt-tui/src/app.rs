@@ -12183,16 +12183,11 @@ services:
         });
         load_initial_data(&mut model);
 
+        let docker_calls_for_assert = docker_calls.clone();
         drive_ticks_until(
             &mut model,
-            |model| {
-                model
-                    .branches
-                    .detail_cache
-                    .values()
-                    .any(|detail| !detail.docker_services.is_empty())
-            },
-            "branch detail preload docker snapshot",
+            |_| docker_calls_for_assert.load(Ordering::SeqCst) == 1,
+            "branch detail preload docker snapshotter call",
         );
 
         let docker_calls = docker_calls.load(Ordering::SeqCst);
