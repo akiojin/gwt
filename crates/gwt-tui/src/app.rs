@@ -15861,8 +15861,13 @@ CUSTOM_ENV = "enabled"
         route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
         let elapsed = start.elapsed();
 
+        // Tight enough to still prove non-blocking behavior (the mock
+        // snapshotter sleeps 250ms, so anything under that disproves "waited
+        // for it"), loose enough to survive CPU contention when the full test
+        // suite runs in parallel — the previous 150ms bound flaked whenever
+        // nearby tests were added.
         assert!(
-            elapsed < std::time::Duration::from_millis(150),
+            elapsed < std::time::Duration::from_millis(230),
             "Branches refresh should not block on branch detail reload: {elapsed:?}"
         );
         assert!(
