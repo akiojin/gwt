@@ -113,44 +113,13 @@ fn run_docker_with_timeout_in_dir_and_timeout(
     current_dir: Option<&std::path::Path>,
     timeout: Duration,
 ) -> Result<Output> {
-    let mut command = Command::new(docker_binary());
-    command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(dir) = current_dir {
-        command.current_dir(dir);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|e| GwtError::Docker(format!("failed to run {action}: {e}")))?;
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(GwtError::Docker(format!(
-                        "{action} timed out after {}ms",
-                        timeout.as_millis()
-                    )));
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => {
-                return Err(GwtError::Docker(format!(
-                    "failed while waiting for {action}: {e}"
-                )));
-            }
-        }
-    }
-
-    child
-        .wait_with_output()
-        .map_err(|e| GwtError::Docker(format!("failed to collect {action} output: {e}")))
+    run_docker_with_output_streaming_in_dir_and_timeout(
+        args,
+        action,
+        current_dir,
+        timeout,
+        |_, _| {},
+    )
 }
 
 #[derive(Debug)]

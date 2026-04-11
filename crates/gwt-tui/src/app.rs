@@ -2036,11 +2036,9 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         {
             Some(BranchesMessage::OpenShell)
         }
-        KeyCode::Up if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerUp)
-        }
+        KeyCode::Up if model.branches.detail_section == 0 => Some(BranchesMessage::DockerServiceUp),
         KeyCode::Down if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerDown)
+            Some(BranchesMessage::DockerServiceDown)
         }
         KeyCode::Up if model.branches.detail_section == 2 => {
             let len = branch_session_matches(model).len();
@@ -2075,16 +2073,16 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Enter => Some(BranchesMessage::LaunchAgent),
         KeyCode::Char('s') if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerStart)
+            Some(BranchesMessage::DockerServiceStart)
         }
         KeyCode::Char('t') if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerStop)
+            Some(BranchesMessage::DockerServiceStop)
         }
         KeyCode::Char('r') if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerRestart)
+            Some(BranchesMessage::DockerServiceRestart)
         }
         KeyCode::Char('c') if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerRecreate)
+            Some(BranchesMessage::DockerServiceRecreate)
         }
         KeyCode::Char('m') => {
             screens::branches::update(&mut model.branches, BranchesMessage::ToggleView);
@@ -4393,6 +4391,7 @@ fn persist_and_spawn_launch(
     session.codex_fast_mode = config.codex_fast_mode;
     session.runtime_target = config.runtime_target;
     session.docker_service = config.docker_service.clone();
+    session.docker_lifecycle_intent = config.docker_lifecycle_intent;
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
     augment_agent_hook_runtime_launch_config(&mut config, sessions_dir, &session.id);
@@ -5418,6 +5417,7 @@ fn load_quick_start_entries(
             codex_fast_mode: session.codex_fast_mode,
             runtime_target: session.runtime_target,
             docker_service: session.docker_service.clone(),
+            docker_lifecycle_intent: session.docker_lifecycle_intent,
         })
         .collect()
 }
@@ -8377,6 +8377,50 @@ mod tests {
         let home = tempfile::tempdir().expect("temp home dir");
         let _env = HomeEnvGuard::set(home.path());
         run(home.path())
+    }
+
+    fn wait_for_startup_version_cache_refresh_slot() {
+        for _ in 0..100 {
+            if !STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    type StartupVersionRefreshTask = Box<dyn FnOnce() + Send>;
+    type ScheduledStartupVersionRefresh =
+        std::sync::Arc<std::sync::Mutex<Option<(PathBuf, Vec<AgentId>)>>>;
+
+    fn capture_startup_version_cache_refresh_task(
+        cache_path: PathBuf,
+        detect_agents: std::sync::Arc<dyn Fn() -> Vec<DetectedAgent> + Send + Sync>,
+    ) -> (StartupVersionRefreshTask, ScheduledStartupVersionRefresh) {
+        for _ in 0..5 {
+            let spawned = std::cell::RefCell::new(None::<StartupVersionRefreshTask>);
+            let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let scheduled_capture = scheduled.clone();
+            let detect_agents = detect_agents.clone();
+
+            schedule_startup_version_cache_refresh_with(
+                cache_path.clone(),
+                move || detect_agents.as_ref()(),
+                |task| {
+                    *spawned.borrow_mut() = Some(task);
+                },
+                move |path, targets| {
+                    *scheduled_capture.lock().unwrap() = Some((path, targets));
+                },
+            );
+
+            if let Some(task) = spawned.borrow_mut().take() {
+                return (task, scheduled);
+            }
+
+            wait_for_startup_version_cache_refresh_slot();
+        }
+
+        panic!("failed to capture startup version cache refresh task");
     }
 
     #[test]
@@ -16798,27 +16842,16 @@ services:
             .insert("codex".into(), version_entry(&["0.5.0"], 60));
         cache.save(&cache_path).unwrap();
 
-        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
-        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let scheduled_capture = scheduled.clone();
-        schedule_startup_version_cache_refresh_with(
+        let (task, scheduled) = capture_startup_version_cache_refresh_task(
             cache_path.clone(),
-            || {
+            std::sync::Arc::new(|| {
                 vec![
                     detected_agent(AgentId::ClaudeCode, Some("1.0.55")),
                     detected_agent(AgentId::Codex, Some("0.5.1")),
                     detected_agent(AgentId::OpenCode, Some("0.2.0")),
                 ]
-            },
-            |task| {
-                *spawned.borrow_mut() = Some(task);
-            },
-            move |path, targets| {
-                *scheduled_capture.lock().unwrap() = Some((path, targets));
-            },
+            }),
         );
-
-        let task = spawned.borrow_mut().take().unwrap();
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
@@ -16836,27 +16869,15 @@ services:
 
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
-        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
-        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let scheduled_capture = scheduled.clone();
-
-        schedule_startup_version_cache_refresh_with(
+        let (task, scheduled) = capture_startup_version_cache_refresh_task(
             cache_path.clone(),
-            || {
+            std::sync::Arc::new(|| {
                 vec![
                     detected_agent(AgentId::Gemini, Some("0.2.0")),
                     detected_agent(AgentId::OpenCode, Some("0.4.0")),
                 ]
-            },
-            |task| {
-                *spawned.borrow_mut() = Some(task);
-            },
-            move |path, targets| {
-                *scheduled_capture.lock().unwrap() = Some((path, targets));
-            },
+            }),
         );
-
-        let task = spawned.borrow_mut().take().unwrap();
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
@@ -16873,32 +16894,19 @@ services:
         STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
 
         let cache_path = PathBuf::from("/tmp/agent-versions.json");
-        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
         let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let detected_flag = detected.clone();
-        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None::<(PathBuf, Vec<AgentId>)>));
-        let scheduled_capture = scheduled.clone();
-
-        schedule_startup_version_cache_refresh_with(
+        let (task, scheduled) = capture_startup_version_cache_refresh_task(
             cache_path.clone(),
-            move || {
+            std::sync::Arc::new(move || {
                 detected_flag.store(true, Ordering::Release);
                 vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
-            },
-            |task| {
-                *spawned.borrow_mut() = Some(task);
-            },
-            move |path, targets| {
-                *scheduled_capture.lock().unwrap() = Some((path, targets));
-            },
+            }),
         );
 
         assert!(!detected.load(Ordering::Acquire));
         assert!(scheduled.lock().unwrap().is_none());
-        assert!(spawned.borrow().is_some());
         assert!(STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
-
-        let task = spawned.borrow_mut().take().unwrap();
         task();
 
         assert!(detected.load(Ordering::Acquire));
@@ -19141,7 +19149,7 @@ services:
 
             update(
                 &mut model,
-                Message::Branches(screens::branches::BranchesMessage::DockerContainerStop),
+                Message::Branches(screens::branches::BranchesMessage::DockerServiceStop),
             );
 
             assert!(model.branches.pending_docker_action.is_none());
@@ -19216,7 +19224,7 @@ services:
 
             update(
                 &mut model,
-                Message::Branches(screens::branches::BranchesMessage::DockerContainerRestart),
+                Message::Branches(screens::branches::BranchesMessage::DockerServiceRestart),
             );
 
             assert!(model.docker_progress_events.is_some());

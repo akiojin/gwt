@@ -208,6 +208,8 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::VersionSelect => {
             if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
                 Some(WizardStep::DockerLifecycle)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
@@ -221,6 +223,8 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::DockerLifecycle)
             } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
@@ -381,6 +385,7 @@ pub struct QuickStartEntry {
     pub codex_fast_mode: bool,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
+    pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -631,6 +636,7 @@ impl WizardState {
         self.codex_fast_mode = entry.codex_fast_mode;
         self.runtime_target = entry.runtime_target;
         self.docker_service = entry.docker_service.clone();
+        self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
         if !self.agent_is_codex() {
             self.codex_fast_mode = false;
         }
@@ -2706,6 +2712,7 @@ mod tests {
                 codex_fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -2718,6 +2725,7 @@ mod tests {
                 codex_fast_mode: false,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             },
         ]
     }
@@ -2811,6 +2819,33 @@ mod tests {
         assert_eq!(
             prev_step(WizardStep::AgentSelect, &state),
             Some(WizardStep::BranchAction)
+        );
+    }
+
+    #[test]
+    fn step_navigation_prev_keeps_runtime_target_for_host_docker_flow() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+        state.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+
+        assert_eq!(
+            prev_step(WizardStep::VersionSelect, &state),
+            Some(WizardStep::RuntimeTarget)
+        );
+        assert_eq!(
+            prev_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::VersionSelect)
+        );
+
+        state.agent_id = "opencode".to_string();
+        assert_eq!(
+            prev_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::RuntimeTarget)
         );
     }
 
@@ -3498,6 +3533,41 @@ mod tests {
     }
 
     #[test]
+    fn select_on_quick_start_restores_docker_lifecycle_intent() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.detected_agents = sample_agents();
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        state.quick_start_entries = vec![QuickStartEntry {
+            agent_id: "claude".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("think".to_string()),
+            version: Some("latest".to_string()),
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+        }];
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+        assert_eq!(state.docker_service.as_deref(), Some("web"));
+        assert_eq!(
+            state.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+    }
+
+    #[test]
     fn select_on_quick_start_without_reasoning_treats_legacy_claude_entry_as_auto() {
         let mut state = WizardState::default();
         state.step = WizardStep::QuickStart;
@@ -3549,6 +3619,7 @@ mod tests {
             codex_fast_mode: false,
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         }];
 
         update(&mut state, WizardMessage::Select);
@@ -3578,6 +3649,7 @@ mod tests {
             codex_fast_mode: false,
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         }];
 
         update(&mut state, WizardMessage::Select);
@@ -3768,6 +3840,7 @@ mod tests {
             codex_fast_mode: true,
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         }];
 
         let text = render_text(&state, 100, 24);
@@ -3845,6 +3918,7 @@ mod tests {
                 codex_fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -3857,6 +3931,7 @@ mod tests {
                 codex_fast_mode: false,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             },
         ];
         state.selected = 0;

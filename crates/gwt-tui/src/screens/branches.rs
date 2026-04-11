@@ -875,17 +875,17 @@ pub enum BranchesMessage {
     /// Open shell action.
     OpenShell,
     /// Move to the next Docker service in the overview area.
-    DockerContainerDown,
+    DockerServiceDown,
     /// Move to the previous Docker service in the overview area.
-    DockerContainerUp,
+    DockerServiceUp,
     /// Request a start lifecycle action for the selected Docker service.
-    DockerContainerStart,
+    DockerServiceStart,
     /// Request a stop lifecycle action for the selected Docker service.
-    DockerContainerStop,
+    DockerServiceStop,
     /// Request a restart lifecycle action for the selected Docker service.
-    DockerContainerRestart,
+    DockerServiceRestart,
     /// Request a recreate lifecycle action for the selected Docker service.
-    DockerContainerRecreate,
+    DockerServiceRecreate,
 }
 
 /// Update branches state in response to a message.
@@ -977,17 +977,17 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::OpenShell => {
             state.pending_open_shell = true;
         }
-        BranchesMessage::DockerContainerDown => {
+        BranchesMessage::DockerServiceDown => {
             if !state.docker_services.is_empty() {
                 super::move_down(&mut state.docker_selected, state.docker_services.len());
             }
         }
-        BranchesMessage::DockerContainerUp => {
+        BranchesMessage::DockerServiceUp => {
             if !state.docker_services.is_empty() {
                 super::move_up(&mut state.docker_selected, state.docker_services.len());
             }
         }
-        BranchesMessage::DockerContainerStart => {
+        BranchesMessage::DockerServiceStart => {
             if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
                     compose_file: service.compose_file.clone(),
@@ -996,7 +996,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 });
             }
         }
-        BranchesMessage::DockerContainerStop => {
+        BranchesMessage::DockerServiceStop => {
             if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
                     compose_file: service.compose_file.clone(),
@@ -1005,7 +1005,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 });
             }
         }
-        BranchesMessage::DockerContainerRestart => {
+        BranchesMessage::DockerServiceRestart => {
             if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
                     compose_file: service.compose_file.clone(),
@@ -1014,7 +1014,7 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
                 });
             }
         }
-        BranchesMessage::DockerContainerRecreate => {
+        BranchesMessage::DockerServiceRecreate => {
             if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
                     compose_file: service.compose_file.clone(),
@@ -2321,7 +2321,7 @@ mod tests {
 
         let mut state = BranchesState::default();
         state.apply_detail_data(&detail, true);
-        update(&mut state, BranchesMessage::DockerContainerRestart);
+        update(&mut state, BranchesMessage::DockerServiceRestart);
 
         assert!(state.pending_docker_action.is_none());
     }
@@ -2331,13 +2331,13 @@ mod tests {
         let mut state = BranchesState::default();
         state.docker_services = sample_services(std::path::Path::new("/tmp/test"));
 
-        update(&mut state, BranchesMessage::DockerContainerDown);
+        update(&mut state, BranchesMessage::DockerServiceDown);
         assert_eq!(state.docker_selected, 1);
 
-        update(&mut state, BranchesMessage::DockerContainerUp);
+        update(&mut state, BranchesMessage::DockerServiceUp);
         assert_eq!(state.docker_selected, 0);
 
-        update(&mut state, BranchesMessage::DockerContainerRestart);
+        update(&mut state, BranchesMessage::DockerServiceRestart);
         assert_eq!(
             state.pending_docker_action,
             Some(PendingDockerAction {
@@ -2347,7 +2347,7 @@ mod tests {
             })
         );
 
-        update(&mut state, BranchesMessage::DockerContainerRecreate);
+        update(&mut state, BranchesMessage::DockerServiceRecreate);
         assert_eq!(
             state.pending_docker_action,
             Some(PendingDockerAction {
