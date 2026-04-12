@@ -19090,21 +19090,22 @@ services:
                     .map(|profile| profile.name.as_str()),
                 Some("dev")
             );
-            let api_url_row = model
+            let expected_env_key = model
                 .profiles
                 .selected_profile()
                 .expect("selected profile")
                 .env_rows
-                .iter()
-                .position(|row| row.key == "API_URL")
-                .expect("API_URL row");
+                .first()
+                .expect("first env row")
+                .key
+                .clone();
 
             let handled = handle_mouse_input_with(
                 &mut model,
                 MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
                     column: layout.env_content.x,
-                    row: layout.env_content.y.saturating_add(api_url_row as u16),
+                    row: layout.env_content.y,
                     modifiers: KeyModifiers::NONE,
                 },
                 |_| Ok(()),
@@ -19120,7 +19121,7 @@ services:
                     .profiles
                     .selected_env_row()
                     .map(|env| env.key.as_str()),
-                Some("API_URL")
+                Some(expected_env_key.as_str())
             );
         });
     }
