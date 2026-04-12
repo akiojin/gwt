@@ -43,6 +43,7 @@ impl Pane {
             cols,
             rows,
             env,
+            remove_env: Vec::new(),
             cwd,
         };
         let pty = PtyHandle::spawn(config)?;

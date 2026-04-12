@@ -41,4 +41,4 @@ expression: output
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
- ▣ Shell  │  ⎇ n/a  │  type: Shell  │  [Mgmt]  │  /tmp/test-repo  │  ↑↓:move  ←→:tab  Enter:wizard  Space:select  Shift+
+ ▣ Shell  │  ⎇ n/a  │  profile: default  │  type: Shell  │  [Mgmt]  │  ↑↓:move  ←→:tab  Enter:wizard  Space:select  Shif
