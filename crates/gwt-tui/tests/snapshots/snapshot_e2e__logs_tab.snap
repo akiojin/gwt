@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc t
+ ⎇n/a  │  P:default  │  ↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc term

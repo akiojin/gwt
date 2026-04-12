@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-12 — test: Profiles の環境一覧クリックは固定キー順を前提にしない
+
+### 事象
+
+PR #1966 の CI で
+`profiles_mouse_click_selects_profile_row_and_focuses_env_pane` が
+`left: Some("ACCEPT_EULA") / right: Some("API_URL")` で失敗し、後続の
+`with_temp_home` 系テストが `HOME_ENV_TEST_LOCK` の poison で連鎖失敗した。
+
+### 原因
+
+- Profiles の環境一覧は `std::env::vars()` と profile override をまとめて
+  キー昇順で描画するが、テストは「先頭の可視行をクリックする」実装のまま
+  `API_URL` が選ばれる前提を置いていた。
+- GitHub Actions runner では `ACCEPT_EULA` など `API_URL` より前に並ぶ
+  OS 環境変数が存在し、ローカルより先頭行が変わっていた。
+
+### 再発防止策
+
+1. `std::env::vars()` を含む UI テストでは固定キー名の表示順を仮定せず、
+   クリックする可視行から期待値を計算する。
+2. process-global env lock を使うテスト群で 1 件の panic が連鎖失敗を生む場合、
+   先頭の順序依存 assertion を優先して安定化する。
+
 ## 2026-04-10 — fix: wide glyph の trailing clear は「出すか」だけでなく「順序」まで固定する
 
 ### 事象

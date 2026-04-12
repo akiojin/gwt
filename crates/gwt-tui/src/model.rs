@@ -181,6 +181,24 @@ impl FocusPane {
     }
 }
 
+/// Active profile summary shown in the footer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveProfileSummary {
+    /// Resolved active profile name.
+    pub name: String,
+    /// Whether resolution fell back to `default`.
+    pub fallback: bool,
+}
+
+impl Default for ActiveProfileSummary {
+    fn default() -> Self {
+        Self {
+            name: "default".to_string(),
+            fallback: false,
+        }
+    }
+}
+
 /// Session layout mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLayout {
@@ -1825,6 +1843,8 @@ pub struct Model {
     pub quit: bool,
     /// Repository path.
     pub(crate) repo_path: PathBuf,
+    /// Resolved active profile summary for UI/runtime helpers.
+    pub(crate) active_profile: ActiveProfileSummary,
     /// Terminal size.
     pub(crate) terminal_size: (u16, u16),
     /// Branches screen state.
@@ -1921,6 +1941,7 @@ impl std::fmt::Debug for Model {
                 "terminal_trackpad_scroll_row",
                 &self.terminal_trackpad_scroll_row,
             )
+            .field("active_profile", &self.active_profile)
             .field("repo_path", &self.repo_path)
             .finish()
     }
@@ -1954,6 +1975,7 @@ impl Model {
             error_queue: VecDeque::new(),
             quit: false,
             repo_path,
+            active_profile: ActiveProfileSummary::default(),
             terminal_size: (80, 24),
             branches: BranchesState::default(),
             profiles: ProfilesState::default(),
