@@ -3,6 +3,7 @@
 //! Checks for Docker CLI availability, daemon status, and discovers
 //! Docker-related files (Dockerfile, docker-compose.yml, .devcontainer/).
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use tracing::debug;
@@ -27,7 +28,9 @@ impl DockerFiles {
 
 /// Run a docker sub-command and return whether it succeeded.
 fn docker_probe(args: &[&str], label: &str) -> bool {
-    let result = std::process::Command::new("docker").args(args).output();
+    let result = std::process::Command::new(docker_binary())
+        .args(args)
+        .output();
     match result {
         Ok(output) => {
             let ok = output.status.success();
@@ -39,6 +42,10 @@ fn docker_probe(args: &[&str], label: &str) -> bool {
             false
         }
     }
+}
+
+fn docker_binary() -> OsString {
+    std::env::var_os("GWT_DOCKER_BIN").unwrap_or_else(|| OsString::from("docker"))
 }
 
 /// Check if the `docker` command is available in PATH.
