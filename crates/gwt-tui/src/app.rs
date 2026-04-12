@@ -19090,13 +19090,21 @@ services:
                     .map(|profile| profile.name.as_str()),
                 Some("dev")
             );
+            let api_url_row = model
+                .profiles
+                .selected_profile()
+                .expect("selected profile")
+                .env_rows
+                .iter()
+                .position(|row| row.key == "API_URL")
+                .expect("API_URL row");
 
             let handled = handle_mouse_input_with(
                 &mut model,
                 MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
                     column: layout.env_content.x,
-                    row: layout.env_content.y,
+                    row: layout.env_content.y.saturating_add(api_url_row as u16),
                     modifiers: KeyModifiers::NONE,
                 },
                 |_| Ok(()),
