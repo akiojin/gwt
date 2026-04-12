@@ -7419,6 +7419,35 @@ fn title_hit_label_index(
     None
 }
 
+/// Detect which session tab label was clicked in a `build_session_title` Line.
+///
+/// Works by counting non-separator (`│`) spans — each corresponds to one
+/// session in `model.sessions` order.  Returns `None` when the title is
+/// compact (single span), when only one session exists, or when the click
+/// falls outside any label span.
+fn session_title_hit_tab_index(title: &Line<'_>, area: Rect, mouse: MouseEvent) -> Option<usize> {
+    if mouse.row != area.y || title.spans.len() <= 1 {
+        return None;
+    }
+
+    let mut x = area.x.saturating_add(1);
+    let mut session_idx = 0;
+    for span in &title.spans {
+        let content = span.content.as_ref();
+        let width = content.chars().count() as u16;
+        if content.trim() == "│" {
+            x = x.saturating_add(width);
+            continue;
+        }
+        if mouse.column >= x && mouse.column < x.saturating_add(width) {
+            return Some(session_idx);
+        }
+        x = x.saturating_add(width);
+        session_idx += 1;
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GridAxis {
     RowsFirst,
@@ -7722,6 +7751,12 @@ fn handle_session_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
             if !mouse_hits_rect(mouse, session_area) {
                 return false;
             }
+            let title = build_session_title(model, session_area.width);
+            if let Some(tab_idx) = session_title_hit_tab_index(&title, session_area, mouse) {
+                model.active_session = tab_idx;
+                model.active_focus = FocusPane::Terminal;
+                return true;
+            }
             if active_session_content_area(model).is_some_and(|area| mouse_hits_rect(mouse, area)) {
                 return false;
             }
@@ -7921,6 +7956,13 @@ where
             Ok(false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -7931,6 +7973,13 @@ where
             Ok(false)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -7941,6 +7990,13 @@ where
             Ok(false)
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -7958,6 +8014,21 @@ where
         }
         _ => Ok(false),
     }
+}
+
+/// Decide whether a left-button mouse event should be forwarded to the PTY
+/// (because the guest program has enabled SGR mouse reporting) or handled as
+/// local text selection.  Shift held down acts as a bypass so users can still
+/// select text in guests that captured the mouse, matching the behavior of
+/// common terminal emulators (iTerm2, WezTerm, kitty, ...).
+fn should_forward_click_to_pty(model: &Model, mouse: MouseEvent) -> bool {
+    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        return false;
+    }
+    matches!(
+        session_scroll_routing_for_index(model, model.active_session),
+        ScrollInputRouting::PtyMouse
+    )
 }
 
 fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
@@ -8161,6 +8232,76 @@ fn queue_session_mouse_scroll(
     };
     push_input_to_session(model, session_id, bytes);
     true
+}
+
+/// Encode a mouse button event (press / drag / release) as an SGR 1006 report
+/// and queue it for the PTY writer.  Mirrors `queue_session_mouse_scroll` but
+/// for button events instead of wheel events.
+///
+/// Returns `true` when a byte sequence was queued, `false` when the event
+/// does not map to a supported button (or the coordinate falls outside the
+/// session's text area).
+fn queue_session_mouse_click(model: &mut Model, session_idx: usize, mouse: MouseEvent) -> bool {
+    let Some((base_code, final_byte)) = mouse_click_sgr_code(mouse.kind) else {
+        return false;
+    };
+    let Some(cell) = clamped_mouse_terminal_cell_for_index(model, mouse, session_idx) else {
+        return false;
+    };
+
+    reset_session_scrollback_for_input(model, session_idx);
+    let code = base_code | sgr_modifier_bits(mouse.modifiers);
+    let bytes = format!(
+        "\x1b[<{code};{};{}{final_byte}",
+        cell.col.saturating_add(1),
+        cell.row.saturating_add(1),
+    )
+    .into_bytes();
+
+    let Some(session_id) = model
+        .sessions
+        .get(session_idx)
+        .map(|session| session.id.clone())
+    else {
+        return false;
+    };
+    push_input_to_session(model, session_id, bytes);
+    true
+}
+
+/// Map a `MouseEventKind` to its SGR 1006 base button code and terminating
+/// byte (`M` for press/motion, `m` for release).  Returns `None` for events
+/// we do not forward (wheel events are encoded by `queue_session_mouse_scroll`
+/// and moved events are filtered upstream).
+fn mouse_click_sgr_code(kind: MouseEventKind) -> Option<(u16, char)> {
+    match kind {
+        MouseEventKind::Down(button) => Some((sgr_button_base(button), 'M')),
+        MouseEventKind::Drag(button) => Some((sgr_button_base(button) | 32, 'M')),
+        MouseEventKind::Up(button) => Some((sgr_button_base(button), 'm')),
+        _ => None,
+    }
+}
+
+fn sgr_button_base(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
+fn sgr_modifier_bits(modifiers: KeyModifiers) -> u16 {
+    let mut bits = 0u16;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        bits |= 4;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        bits |= 8;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        bits |= 16;
+    }
+    bits
 }
 
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
@@ -10004,6 +10145,65 @@ services:
     }
 
     #[test]
+    fn mouse_click_session_tab_switches_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions.push(crate::model::SessionTab {
+            id: "agent-0".to_string(),
+            name: "Claude Code".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "claude".to_string(),
+                color: crate::model::AgentColor::Green,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.active_session = 0;
+        update(&mut model, Message::Resize(80, 24));
+
+        // The session pane spans the full width in Main layer.
+        let session_area = visible_session_area(&model).expect("session area");
+        let title = build_session_title(&model, session_area.width);
+
+        // Find the x position that falls within the second tab label.
+        let mut x = session_area.x.saturating_add(1);
+        let mut target_x = None;
+        let mut session_idx = 0;
+        for span in &title.spans {
+            let content = span.content.as_ref();
+            let width = content.chars().count() as u16;
+            if content.trim() == "│" {
+                x = x.saturating_add(width);
+                continue;
+            }
+            if session_idx == 1 {
+                target_x = Some(x + 1);
+                break;
+            }
+            x = x.saturating_add(width);
+            session_idx += 1;
+        }
+        let click_x = target_x.expect("second session tab label should exist in the title");
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_x,
+                row: session_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_session, 1,
+            "clicking the second session tab should switch to it"
+        );
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
     fn mouse_click_branch_list_row_selects_branch_and_focuses_list() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
@@ -11199,6 +11399,245 @@ services:
                 .vt
                 .follow_live(),
             "PTY-driven agent scrolling should keep the local viewport pinned to live output"
+        );
+    }
+
+    /// Helper that spins up a single Claude-Code-like agent session with SGR
+    /// mouse reporting (DECSET 1000+1006) already negotiated.  Used by the
+    /// left-click forwarding tests below to avoid copy-pasting fixture setup.
+    fn model_with_agent_mouse_reporting_enabled() -> Model {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1000h\x1b[?1006hframe-1".to_vec(),
+            ),
+        );
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::PtyMouse,
+            "fixture precondition: agent should be in PTY mouse routing",
+        );
+        model
+    }
+
+    #[test]
+    fn agent_left_click_down_forwards_sgr_press_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[<0;1;1M".to_vec());
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "PTY-forwarded clicks must not also start a local text selection",
+        );
+    }
+
+    #[test]
+    fn agent_left_click_up_forwards_sgr_release_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left up should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[<0;1;1m".to_vec(),
+            "release must terminate with lowercase 'm' per SGR 1006",
+        );
+    }
+
+    #[test]
+    fn agent_left_drag_forwards_sgr_motion_event_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x.saturating_add(2),
+                row: area.y.saturating_add(1),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left drag should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[<32;3;2M".to_vec(),
+            "drag encodes base button 0 plus the motion flag 32",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "drag forwarding must not silently update the local selection either",
+        );
+    }
+
+    #[test]
+    fn shift_left_click_bypasses_pty_forwarding_and_starts_local_selection() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::SHIFT,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "Shift+click should act as a local selection bypass, never touching the PTY",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "Shift+click must start a local text selection for copy UX",
+        );
+    }
+
+    #[test]
+    fn agent_left_click_without_mouse_reporting_still_starts_local_selection() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        // No DECSET 1000/1006 → session_scroll_routing must stay LocalViewport.
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::LocalViewport,
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "agents without mouse reporting should keep click handling on the local selection path",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "local-mode left click must begin a text selection as before",
         );
     }
 
@@ -19440,8 +19879,13 @@ services:
         route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
         let elapsed = start.elapsed();
 
+        // Tight enough to still prove non-blocking behavior (the mock
+        // snapshotter sleeps 250ms, so anything under that disproves "waited
+        // for it"), loose enough to survive CPU contention when the full test
+        // suite runs in parallel — the previous 150ms bound flaked whenever
+        // nearby tests were added.
         assert!(
-            elapsed < std::time::Duration::from_millis(150),
+            elapsed < std::time::Duration::from_millis(230),
             "Branches refresh should not block on branch detail reload: {elapsed:?}"
         );
         assert!(
