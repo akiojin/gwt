@@ -4,6 +4,7 @@
 //! Built with ratatui + crossterm.
 
 pub mod app;
+pub(crate) mod branch_cleanup;
 pub mod cli;
 pub(crate) mod custom_agents;
 pub mod event;
@@ -18,6 +19,7 @@ pub mod notification_router;
 pub mod renderer;
 pub mod screens;
 pub(crate) mod scroll_debug;
+pub(crate) mod specs_cache;
 pub mod theme;
 pub mod widgets;
 

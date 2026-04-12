@@ -8,7 +8,8 @@
 //!
 //! Current scope (MVP): list SPECs from the local cache with number, title,
 //! state, and phase label. Detail view, section switching, search, and
-//! filter controls are follow-up work.
+//! filter controls are follow-up work. Cache schema access flows through the
+//! typed `crate::specs_cache` read model rather than screen-local fs parsing.
 
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -17,11 +18,6 @@ use std::path::PathBuf;
 use crate::theme;
 
 /// In-memory state for the Specs tab.
-///
-/// SPECs are refreshed from `~/.gwt/cache/issues/` by scanning every
-/// sub-directory containing a `meta.json` file. This is intentionally a
-/// simple filesystem walk rather than an index: the cache is the source of
-/// truth and walking 10–100 directories is negligible.
 #[derive(Debug, Default, Clone)]
 pub struct SpecsState {
     pub cache_root: PathBuf,
@@ -56,59 +52,22 @@ impl SpecsState {
     /// unchanged.
     pub fn reload_from_cache(&mut self) {
         self.last_error = None;
-        let dir = match std::fs::read_dir(&self.cache_root) {
-            Ok(d) => d,
-            Err(e) => {
-                self.last_error = Some(format!("cache unavailable: {e}"));
+        let items = match crate::specs_cache::load_specs(&self.cache_root) {
+            Ok(items) => items,
+            Err(err) => {
+                self.last_error = Some(format!("cache unavailable: {err}"));
                 return;
             }
         };
-        let mut items: Vec<SpecListItem> = Vec::new();
-        for entry in dir.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let Some(name) = entry.file_name().to_str().map(String::from) else {
-                continue;
-            };
-            let Ok(number) = name.parse::<u64>() else {
-                continue;
-            };
-            let meta_path = entry.path().join("meta.json");
-            let Ok(meta_bytes) = std::fs::read(&meta_path) else {
-                continue;
-            };
-            let Ok(meta): Result<serde_json::Value, _> = serde_json::from_slice(&meta_bytes) else {
-                continue;
-            };
-            let title = meta
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let state = meta
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("open")
-                .to_string();
-            let labels: Vec<String> = meta
-                .get("labels")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            items.push(SpecListItem {
-                number,
-                title,
-                state,
-                labels,
-            });
-        }
-        items.sort_by(|a, b| b.number.cmp(&a.number));
-        self.items = items;
+        self.items = items
+            .into_iter()
+            .map(|item| SpecListItem {
+                number: item.number,
+                title: item.title,
+                state: item.state,
+                labels: item.labels,
+            })
+            .collect();
         if self.selected >= self.items.len() {
             self.selected = self.items.len().saturating_sub(1);
         }
@@ -180,29 +139,68 @@ pub fn render(state: &SpecsState, frame: &mut Frame<'_>, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
-    fn write_meta(dir: &std::path::Path, number: u64, title: &str, state: &str, phase: &str) {
-        let issue_dir = dir.join(number.to_string());
-        fs::create_dir_all(&issue_dir).unwrap();
-        let meta = serde_json::json!({
-            "number": number,
-            "title": title,
-            "labels": ["gwt-spec", phase],
-            "state": state,
-            "updated_at": "t1",
-            "comment_ids": []
-        });
-        fs::write(issue_dir.join("meta.json"), meta.to_string()).unwrap();
+    fn write_spec(
+        dir: &std::path::Path,
+        number: u64,
+        title: &str,
+        state: gwt_github::IssueState,
+        phase: &str,
+    ) {
+        gwt_github::Cache::new(dir.to_path_buf())
+            .write_snapshot(&gwt_github::client::IssueSnapshot {
+                number: gwt_github::IssueNumber(number),
+                title: title.to_string(),
+                body: format!(
+                    "<!-- gwt-spec id={number} version=1 -->\n<!-- sections:\nspec=body\n-->\n<!-- artifact:spec BEGIN -->\nbody\n<!-- artifact:spec END -->\n"
+                ),
+                labels: vec!["gwt-spec".to_string(), phase.to_string()],
+                state,
+                updated_at: gwt_github::UpdatedAt::new("2026-04-12T00:00:00Z"),
+                comments: vec![],
+            })
+            .unwrap();
+    }
+
+    fn write_plain_issue(dir: &std::path::Path, number: u64, title: &str) {
+        gwt_github::Cache::new(dir.to_path_buf())
+            .write_snapshot(&gwt_github::client::IssueSnapshot {
+                number: gwt_github::IssueNumber(number),
+                title: title.to_string(),
+                body: "plain body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-04-12T00:00:00Z"),
+                comments: vec![],
+            })
+            .unwrap();
     }
 
     #[test]
-    fn reload_reads_meta_json_entries() {
+    fn reload_reads_cached_spec_entries() {
         let tmp = TempDir::new().unwrap();
-        write_meta(tmp.path(), 1, "Alpha", "open", "phase/draft");
-        write_meta(tmp.path(), 2, "Beta", "closed", "phase/done");
-        write_meta(tmp.path(), 3, "Gamma", "open", "phase/implementation");
+        write_spec(
+            tmp.path(),
+            1,
+            "Alpha",
+            gwt_github::IssueState::Open,
+            "phase/draft",
+        );
+        write_spec(
+            tmp.path(),
+            2,
+            "Beta",
+            gwt_github::IssueState::Closed,
+            "phase/done",
+        );
+        write_spec(
+            tmp.path(),
+            3,
+            "Gamma",
+            gwt_github::IssueState::Open,
+            "phase/implementation",
+        );
 
         let mut state = SpecsState::new(tmp.path().to_path_buf());
         state.reload_from_cache();
@@ -215,10 +213,17 @@ mod tests {
     }
 
     #[test]
-    fn reload_skips_non_numeric_dirs() {
+    fn reload_skips_plain_issues_and_non_numeric_dirs() {
         let tmp = TempDir::new().unwrap();
-        fs::create_dir_all(tmp.path().join("not-an-issue")).unwrap();
-        write_meta(tmp.path(), 42, "Only", "open", "phase/draft");
+        std::fs::create_dir_all(tmp.path().join("not-an-issue")).unwrap();
+        write_plain_issue(tmp.path(), 7, "Plain issue");
+        write_spec(
+            tmp.path(),
+            42,
+            "Only",
+            gwt_github::IssueState::Open,
+            "phase/draft",
+        );
         let mut state = SpecsState::new(tmp.path().to_path_buf());
         state.reload_from_cache();
         assert_eq!(state.items.len(), 1);

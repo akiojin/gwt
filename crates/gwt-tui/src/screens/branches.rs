@@ -407,6 +407,15 @@ pub struct BranchesState {
 }
 
 impl BranchesState {
+    fn cleanup_policy(&self) -> crate::branch_cleanup::CleanupPolicy<'_> {
+        crate::branch_cleanup::CleanupPolicy::new(
+            &self.branches,
+            self.current_head_branch.as_deref(),
+            &self.active_session_branches,
+            &self.merged_state,
+        )
+    }
+
     /// Return branches filtered by current view mode and search query,
     /// then sorted according to the active `sort_mode`.
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
@@ -621,26 +630,13 @@ impl BranchesState {
         self.branches.iter().find(|item| item.name == branch)
     }
 
-    fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
-        name.strip_prefix("refs/remotes/origin/")
-            .or_else(|| name.strip_prefix("origin/"))
-    }
-
     /// Resolve the local branch that a cleanup action should operate on.
     ///
     /// Local rows resolve to themselves. Remote-tracking rows resolve only
     /// when a matching local branch exists; otherwise they are not cleanup
     /// candidates.
     pub fn cleanup_execution_branch(&self, branch: &str) -> Option<String> {
-        let item = self.branch_item(branch)?;
-        if item.is_local {
-            return Some(item.name.clone());
-        }
-        let local_name = Self::local_branch_for_remote_ref(&item.name)?;
-        self.branches
-            .iter()
-            .find(|candidate| candidate.is_local && candidate.name == local_name)
-            .map(|candidate| candidate.name.clone())
+        self.cleanup_policy().execution_branch(branch)
     }
 
     /// Returns true when `branch` is allowed to participate in Branch Cleanup
@@ -662,55 +658,13 @@ impl BranchesState {
         &self,
         branch: &str,
     ) -> Option<CleanupSelectionBlockedReason> {
-        let item = self.branch_item(branch)?;
-        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
-            return if item.is_local {
-                Some(CleanupSelectionBlockedReason::Unknown)
-            } else {
-                Some(CleanupSelectionBlockedReason::RemoteTrackingWithoutLocal)
-            };
-        };
-        if gwt_git::is_protected_branch(&execution_branch) {
-            return Some(CleanupSelectionBlockedReason::ProtectedBranch);
-        }
-        if self
-            .current_head_branch
-            .as_deref()
-            .is_some_and(|head| head == execution_branch)
-        {
-            return Some(CleanupSelectionBlockedReason::CurrentHead);
-        }
-        if self.active_session_branches.contains(&execution_branch) {
-            return Some(CleanupSelectionBlockedReason::ActiveSession);
-        }
-        if matches!(self.merge_state(&execution_branch), MergeState::Computing) {
-            return Some(CleanupSelectionBlockedReason::MergeCheckRunning);
-        }
-        None
+        self.cleanup_policy().blocked_reason(branch)
     }
 
     /// Return the warning risks that should be surfaced in confirm modal for a
     /// selectable branch.
     pub fn cleanup_selection_risks(&self, branch: &str) -> Vec<CleanupSelectionRisk> {
-        if self.cleanup_selection_blocked_reason(branch).is_some() {
-            return Vec::new();
-        }
-
-        let Some(item) = self.branch_item(branch) else {
-            return Vec::new();
-        };
-        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
-            return Vec::new();
-        };
-
-        let mut risks = Vec::new();
-        if !item.is_local {
-            risks.push(CleanupSelectionRisk::RemoteTracking);
-        }
-        if matches!(self.merge_state(&execution_branch), MergeState::NotMerged) {
-            risks.push(CleanupSelectionRisk::Unmerged);
-        }
-        risks
+        self.cleanup_policy().risks(branch)
     }
 
     /// Returns true when the branch is both a protection-allowed candidate
@@ -763,11 +717,7 @@ impl BranchesState {
 
     /// Returns the merge target for a branch when it is cleanable.
     pub fn cleanup_target(&self, branch: &str) -> Option<gwt_git::MergeTarget> {
-        let execution_branch = self.cleanup_execution_branch(branch)?;
-        match self.merge_state(&execution_branch) {
-            MergeState::Cleanable(target) => Some(target),
-            _ => None,
-        }
+        self.cleanup_policy().target(branch)
     }
 
     /// Returns true when at least one branch is still being computed by
