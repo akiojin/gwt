@@ -5584,6 +5584,35 @@ fn title_hit_label_index(
     None
 }
 
+/// Detect which session tab label was clicked in a `build_session_title` Line.
+///
+/// Works by counting non-separator (`│`) spans — each corresponds to one
+/// session in `model.sessions` order.  Returns `None` when the title is
+/// compact (single span), when only one session exists, or when the click
+/// falls outside any label span.
+fn session_title_hit_tab_index(title: &Line<'_>, area: Rect, mouse: MouseEvent) -> Option<usize> {
+    if mouse.row != area.y || title.spans.len() <= 1 {
+        return None;
+    }
+
+    let mut x = area.x.saturating_add(1);
+    let mut session_idx = 0;
+    for span in &title.spans {
+        let content = span.content.as_ref();
+        let width = content.chars().count() as u16;
+        if content.trim() == "│" {
+            x = x.saturating_add(width);
+            continue;
+        }
+        if mouse.column >= x && mouse.column < x.saturating_add(width) {
+            return Some(session_idx);
+        }
+        x = x.saturating_add(width);
+        session_idx += 1;
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GridAxis {
     RowsFirst,
@@ -5850,6 +5879,12 @@ fn handle_session_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
         SessionLayout::Tab => {
             if !mouse_hits_rect(mouse, session_area) {
                 return false;
+            }
+            let title = build_session_title(model, session_area.width);
+            if let Some(tab_idx) = session_title_hit_tab_index(&title, session_area, mouse) {
+                model.active_session = tab_idx;
+                model.active_focus = FocusPane::Terminal;
+                return true;
             }
             if active_session_content_area(model).is_some_and(|area| mouse_hits_rect(mouse, area)) {
                 return false;
@@ -8137,6 +8172,65 @@ mod tests {
 
         assert_eq!(model.management_tab, ManagementTab::Issues);
         assert_eq!(model.active_focus, FocusPane::TabContent);
+    }
+
+    #[test]
+    fn mouse_click_session_tab_switches_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions.push(crate::model::SessionTab {
+            id: "agent-0".to_string(),
+            name: "Claude Code".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "claude".to_string(),
+                color: crate::model::AgentColor::Green,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.active_session = 0;
+        update(&mut model, Message::Resize(80, 24));
+
+        // The session pane spans the full width in Main layer.
+        let session_area = visible_session_area(&model).expect("session area");
+        let title = build_session_title(&model, session_area.width);
+
+        // Find the x position that falls within the second tab label.
+        let mut x = session_area.x.saturating_add(1);
+        let mut target_x = None;
+        let mut session_idx = 0;
+        for span in &title.spans {
+            let content = span.content.as_ref();
+            let width = content.chars().count() as u16;
+            if content.trim() == "│" {
+                x = x.saturating_add(width);
+                continue;
+            }
+            if session_idx == 1 {
+                target_x = Some(x + 1);
+                break;
+            }
+            x = x.saturating_add(width);
+            session_idx += 1;
+        }
+        let click_x = target_x.expect("second session tab label should exist in the title");
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_x,
+                row: session_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_session, 1,
+            "clicking the second session tab should switch to it"
+        );
+        assert_eq!(model.active_focus, FocusPane::Terminal);
     }
 
     #[test]
