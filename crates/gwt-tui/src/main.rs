@@ -6,6 +6,10 @@ use std::{
     collections::VecDeque,
     io,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -658,6 +662,12 @@ fn run_app(
         }
     }
 
+    // Register SIGHUP handler to detect terminal closure.
+    // Defence-in-depth: even if tcgetattr pre-check misses the condition,
+    // the signal flag will catch it on the next outer-loop iteration.
+    let sighup_flag = Arc::new(AtomicBool::new(false));
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&sighup_flag));
+
     let mut keybinds = KeybindRegistry::new();
     let mut input_normalizer = event::InputNormalizer::default();
     let mut pending_messages = VecDeque::new();
@@ -665,6 +675,12 @@ fn run_app(
     let mut last_draw_at = None;
 
     loop {
+        if sighup_flag.load(Ordering::Relaxed) {
+            tracing::warn!("SIGHUP received — shutting down gracefully");
+            model.quit = true;
+            break;
+        }
+
         drain_pty_output_and_request_render(&mut model, &mut needs_render);
 
         if needs_render {

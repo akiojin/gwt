@@ -815,6 +815,10 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Quit => {
             model.quit = true;
         }
+        Message::TerminalLost => {
+            tracing::warn!("Controlling terminal lost — shutting down gracefully");
+            model.quit = true;
+        }
         Message::ToggleLayer => {
             match model.active_layer {
                 ActiveLayer::Initialization => {} // blocked

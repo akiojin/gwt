@@ -1,5 +1,40 @@
 # Lessons Learned
 
+## 2026-04-12 — fix: 端末喪失時の crossterm 内部スピンによる CPU 100%
+
+### 事象
+
+ターミナルタブを閉じた後、gwt-tui プロセスが CPU 100% で数百分回り続けていた。
+`ps aux` で 5 プロセスが 100% 消費（うち 3 つは fd revoked、2 つは TTY hung-up）。
+
+### 原因
+
+crossterm 0.29.0 の `try_read()` 内部リードループ（`mio.rs:95-120`）に 3 つの欠陥:
+
+1. `read()` が `Ok(0)` (EOF) を返しても `break` しない
+2. `read()` が `Err(EIO/EBADF)` を返しても error ハンドリングが空でループ継続
+3. 外側のタイムアウトチェック（line 149）に内部ループから到達不能
+
+結果として `crossterm::event::poll()` 自体がリターンせず、gwt-tui 側のエラー
+ハンドリング (`unwrap_or(false)`) は無関係だった。
+
+### 再発防止策
+
+1. `libc::tcgetattr` で `poll()` 呼び出し前に端末の健全性を検査（revoked fd と
+   hung-up terminal の両方を検知）
+2. `signal-hook` で SIGHUP を捕捉し、メインループでグレースフルに終了
+3. `crossterm::event::poll()` の `Err` を `unwrap_or` で握りつぶさず `match` で
+   明示的にハンドリング
+4. テスト環境（stdin が非端末）では `OnceLock` で初期状態を記録し、検査をスキップ
+
+### 教訓
+
+- `sample <pid> 1` でスレッド別のホットスポットを特定すること。コード分析だけでは
+  スピンが crossterm 内部かアプリ側かの切り分けができない
+- サードパーティの `poll()`/`read()` がリターンしない可能性を想定し、呼び出し前に
+  前提条件を検証する防御的プログラミングを行う
+- `unwrap_or(false)` はエラーを握りつぶすアンチパターン。`match` でエラーパスを明示する
+
 ## 2026-04-12 — test: Profiles の環境一覧クリックは固定キー順を前提にしない
 
 ### 事象
