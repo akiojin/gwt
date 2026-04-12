@@ -1,29 +1,29 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 329
+assertion_line: 455
 expression: output
 ---
 ┌...│ Specs │ Profiles │ Git View │...─┐┌ › Shell ─────────────────────────────┐
-│Profiles                              ││Session: Shell (80x24)                │
-│No profiles. Press 'c' to create one. ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+│┏Profiles━━━┓╭Environment────────────╮││Session: Shell (80x24)                │
+│┃Tab | ↵ |  ┃│↵/e | n | d            │││                                      │
+│┃[*] default┃│A00_BASE=/usr/bin      │││                                      │
+│┃           ┃│A01_BASE=/bin          │││                                      │
+│┃           ┃│A02_BASE=/opt/bin      │││                                      │
+│┃           ┃│A03_BASE=/usr/local/bin│││                                      │
+│┃           ┃│A04_BASE=/sbin         │││                                      │
+│┃           ┃│A05_BASE=/usr/sbin     │││                                      │
+│┃           ┃│A06_BASE=/opt/homebrew/│││                                      │
+│┃           ┃│A07_BASE=/tmp/bin      │││                                      │
+│┃           ┃│A08_BASE=/var/tmp/bin  │││                                      │
+│┃           ┃│A09_BASE=/custom/bin   │││                                      │
+│┃           ┃│A10_OVERRIDE=override-a│││                                      │
+│┃           ┃│A11_OVERRIDE=override-b│││                                      │
+│┃           ┃│A12_OVERRIDE=override-c│││                                      │
+│┃           ┃│A13_OVERRIDE=override-d│││                                      │
+│┃           ┃│A14_OVERRIDE=override-e│││                                      │
+│┃           ┃│A15_OVERRIDE=override-f│││                                      │
+│┃           ┃│A16_OVERRIDE=override-g│││                                      │
+│┃           ┃│A17_OVERRIDE=override-h│││                                      │
+│┗━━━━━━━━━━━┛╰───────────────────────╯││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ tog  n new  e edit  d del  C-g Tab  Esc ter
+ ⎇n/a  │  P:default  │  Tab pane  S-Tab back  ↑↓ sel  ↵ act  n/e/d  Esc term

@@ -18,7 +18,7 @@ const TTL_SECS: i64 = 86400;
 /// A single version option presented to the user in the wizard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionOption {
-    /// Display label (e.g., "Installed (v1.2.3)", "1.2.3", "latest").
+    /// Display label (e.g., "Installed", "1.2.3", "latest").
     pub label: String,
     /// Value used for launch resolution ("installed", "latest", "1.2.3").
     pub value: String,
@@ -26,29 +26,19 @@ pub struct VersionOption {
 
 /// Build the list of version options for the wizard VersionSelect step.
 ///
-/// - If `is_installed` is true and `installed_version` is provided, prepends "Installed (vX.Y.Z)".
-/// - If `is_installed` is true but version is unknown, prepends "Installed".
+/// - Always prepends "Installed" as direct-command mode.
 /// - Appends "latest" if the agent has an npm package.
 /// - Appends each cached version from `cached_versions`.
 pub fn build_version_options(
-    is_installed: bool,
-    installed_version: Option<&str>,
+    _is_installed: bool,
+    _installed_version: Option<&str>,
     has_npm_package: bool,
     cached_versions: &[String],
 ) -> Vec<VersionOption> {
-    let mut options = Vec::new();
-    let installed_version = installed_version.map(str::trim);
-
-    if is_installed {
-        let label = match installed_version {
-            Some(v) => format!("Installed (v{})", v),
-            None => "Installed".to_string(),
-        };
-        options.push(VersionOption {
-            label,
-            value: "installed".to_string(),
-        });
-    }
+    let mut options = vec![VersionOption {
+        label: "Installed".to_string(),
+        value: "installed".to_string(),
+    }];
 
     if has_npm_package {
         options.push(VersionOption {
@@ -57,7 +47,7 @@ pub fn build_version_options(
         });
 
         for version in cached_versions {
-            if installed_version == Some(version.as_str()) {
+            if version == "installed" || version == "latest" {
                 continue;
             }
             options.push(VersionOption {
@@ -439,7 +429,7 @@ mod tests {
             &["2.0.0".to_string(), "1.9.0".to_string()],
         );
         assert_eq!(opts.len(), 4); // Installed + latest + 2 cached
-        assert_eq!(opts[0].label, "Installed (v1.2.3)");
+        assert_eq!(opts[0].label, "Installed");
         assert_eq!(opts[0].value, "installed");
         assert_eq!(opts[1].label, "latest");
         assert_eq!(opts[1].value, "latest");
@@ -452,11 +442,13 @@ mod tests {
     #[test]
     fn build_version_options_not_installed_with_npm() {
         let opts = build_version_options(false, None, true, &["3.0.0".to_string()]);
-        assert_eq!(opts.len(), 2); // latest + 1 cached
-        assert_eq!(opts[0].label, "latest");
-        assert_eq!(opts[0].value, "latest");
-        assert_eq!(opts[1].label, "3.0.0");
-        assert_eq!(opts[1].value, "3.0.0");
+        assert_eq!(opts.len(), 3); // Installed + latest + 1 cached
+        assert_eq!(opts[0].label, "Installed");
+        assert_eq!(opts[0].value, "installed");
+        assert_eq!(opts[1].label, "latest");
+        assert_eq!(opts[1].value, "latest");
+        assert_eq!(opts[2].label, "3.0.0");
+        assert_eq!(opts[2].value, "3.0.0");
     }
 
     #[test]
@@ -464,7 +456,7 @@ mod tests {
         // OpenCode/Copilot: installed but no npm package
         let opts = build_version_options(true, Some("0.1.0"), false, &[]);
         assert_eq!(opts.len(), 1);
-        assert_eq!(opts[0].label, "Installed (v0.1.0)");
+        assert_eq!(opts[0].label, "Installed");
         assert_eq!(opts[0].value, "installed");
     }
 
@@ -479,7 +471,9 @@ mod tests {
     #[test]
     fn build_version_options_nothing_available() {
         let opts = build_version_options(false, None, false, &[]);
-        assert!(opts.is_empty());
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].label, "Installed");
+        assert_eq!(opts[0].value, "installed");
     }
 
     #[test]
@@ -490,10 +484,11 @@ mod tests {
             true,
             &["1.2.3".to_string(), "1.2.2".to_string()],
         );
-        assert_eq!(opts.len(), 3);
-        assert_eq!(opts[0].label, "Installed (v1.2.3)");
+        assert_eq!(opts.len(), 4);
+        assert_eq!(opts[0].label, "Installed");
         assert_eq!(opts[1].label, "latest");
-        assert_eq!(opts[2].label, "1.2.2");
+        assert_eq!(opts[2].label, "1.2.3");
+        assert_eq!(opts[3].label, "1.2.2");
     }
 
     #[test]

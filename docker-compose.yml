@@ -8,7 +8,8 @@ services:
       - bash-history:/root/.bash_history_dir
       - claude-config:/root/.claude
       - codex-config:/root/.codex
-      - ${HOME:-~}/.codex:/root/.codex-host:ro
+      - ${HOME:?HOME must be set}/.claude:/root/.claude-host:ro
+      - ${HOME:?HOME must be set}/.codex:/root/.codex-host:ro
     ports:
       - ${PORT:-3000}:3000
     extra_hosts:
