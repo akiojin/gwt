@@ -18,7 +18,7 @@ expression: output
 │ No branch sele║                                              ║               │
 │               ╚══════════════════════════════════════════════╝               │
 │ Docker status                        ││                                      │
-│ No containers found                  ││                                      │
+│ No Docker services found             ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │

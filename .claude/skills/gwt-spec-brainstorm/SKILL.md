@@ -60,6 +60,9 @@ single API in the skill contract.
 
 If no selection UI exists in the current runtime, ask in plain text as
 the exception path. Keep the same one-question-at-a-time discipline.
+For Codex, use `request_user_input` for each high-impact question that
+can be expressed honestly as 2-3 options. Do not switch back to plain
+chat after the first answer while selection UI remains available.
 
 ## Flow
 
@@ -133,6 +136,9 @@ After each answer:
 - Remove or refine the resolved unknown
 - Re-rank the remaining unresolved questions
 - Ask the next highest-impact question if any remain
+- If a high-impact unknown remains and the platform question tool is
+  still available, ask that next question via the same selection UI
+  path before summarizing, handing off, or exiting
 
 Prioritize questions by impact:
 
@@ -152,6 +158,9 @@ on cycles. The discussion continues until:
 
 Do not end the brainstorm after a single answer when unresolved
 high-impact items still exist.
+Do not emit the decision summary or hand off to another skill until all
+high-impact unknowns are resolved or intentionally deferred in the
+Intake Memo.
 
 ### Phase 6: Exit
 

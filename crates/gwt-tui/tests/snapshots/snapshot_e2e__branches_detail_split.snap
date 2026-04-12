@@ -20,7 +20,7 @@ expression: output
 │ Type: Local                          ││                                      │
 │                                      ││                                      │
 │ Docker status                        ││                                      │
-│ No containers found                  ││                                      │
+│ No Docker services found             ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │

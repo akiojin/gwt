@@ -325,8 +325,8 @@ pub struct PendingSessionConversion {
     pub target_display_name: String,
 }
 
-/// Shared queue of terminal Docker lifecycle results produced in the background.
-pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
+/// Shared queue of terminal Docker progress events produced in the background.
+pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressEvent>>>;
 
 /// Per-branch event emitted by the Branch Cleanup runner background job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,7 +373,7 @@ pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
 #[cfg(test)]
 pub(crate) type BranchDetailDockerSnapshotter =
-    Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>;
+    Arc<dyn Fn() -> Vec<crate::screens::branches::DockerServiceInfo> + Send + Sync>;
 
 /// Tracked branch-detail preload worker state.
 pub(crate) struct BranchDetailWorker {
@@ -464,11 +464,30 @@ impl std::fmt::Debug for BranchDetailWorker {
     }
 }
 
-/// Result sent from the background Docker lifecycle worker back into the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DockerProgressResult {
-    Completed { message: String },
-    Failed { message: String, detail: String },
+/// Event sent from a background Docker worker back into the TUI.
+#[derive(Debug, Clone)]
+pub enum DockerProgressEvent {
+    Stage {
+        stage: crate::screens::docker_progress::DockerStage,
+        message: String,
+    },
+    Log {
+        entry: Notification,
+    },
+    BranchCompleted {
+        message: String,
+    },
+    BranchFailed {
+        message: String,
+        detail: String,
+    },
+    LaunchReady {
+        config: Box<gwt_agent::LaunchConfig>,
+    },
+    LaunchFailed {
+        message: String,
+        detail: String,
+    },
 }
 
 /// A terminal cell position within the currently visible viewport.
@@ -2108,7 +2127,7 @@ impl Model {
     #[cfg(test)]
     pub(crate) fn set_branch_detail_docker_snapshotter<F>(&mut self, snapshotter: F)
     where
-        F: Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync + 'static,
+        F: Fn() -> Vec<crate::screens::branches::DockerServiceInfo> + Send + Sync + 'static,
     {
         self.branch_detail_docker_snapshotter = Some(Arc::new(snapshotter));
     }
