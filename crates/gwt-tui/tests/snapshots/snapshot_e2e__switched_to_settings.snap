@@ -25,4 +25,4 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
- ▣ Sh  │  ⎇n/a  │  [G]  │  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  C-g Tab  Es
+ ⎇n/a  │  P:default  │  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  C-g Tab  Esc t

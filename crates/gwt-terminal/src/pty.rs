@@ -24,6 +24,8 @@ pub struct SpawnConfig {
     pub rows: u16,
     /// Environment variables to set.
     pub env: HashMap<String, String>,
+    /// Inherited environment variable names to remove before applying `env`.
+    pub remove_env: Vec<String>,
     /// Working directory.
     pub cwd: Option<PathBuf>,
 }
@@ -57,6 +59,9 @@ impl PtyHandle {
         cmd.args(&config.args);
         if let Some(ref cwd) = config.cwd {
             cmd.cwd(cwd);
+        }
+        for key in &config.remove_env {
+            cmd.env_remove(key);
         }
         for (key, value) in &config.env {
             cmd.env(key, value);
@@ -166,6 +171,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         }
     }
@@ -177,6 +183,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         }
     }
@@ -198,6 +205,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
@@ -266,6 +274,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env,
+            remove_env: Vec::new(),
             cwd: None,
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
@@ -287,6 +296,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: Some(temp.clone()),
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
@@ -313,9 +323,37 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         };
         let result = PtyHandle::spawn(config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spawn_with_removed_inherited_env() {
+        let mut env = HashMap::new();
+        env.insert("GWT_REMOVE_CHECK".to_string(), "expected".to_string());
+        let config = SpawnConfig {
+            command: "/usr/bin/env".to_string(),
+            args: vec![],
+            cols: 80,
+            rows: 24,
+            env,
+            remove_env: vec!["HOME".to_string()],
+            cwd: None,
+        };
+        let handle = PtyHandle::spawn(config).expect("spawn failed");
+        let reader = handle.reader().expect("reader failed");
+        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains("GWT_REMOVE_CHECK=expected"),
+            "Expected env var in: {text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("HOME=")),
+            "Expected inherited HOME to be removed from: {text}"
+        );
     }
 }
