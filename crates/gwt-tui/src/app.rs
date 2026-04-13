@@ -33,6 +33,9 @@ use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
 };
+use gwt_terminal::protocol::{
+    build_paste_input_bytes, key_event_to_bytes, screen_requests_bracketed_paste,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -69,18 +72,16 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
-const MANAGED_ASSET_ROOTS: &[&str] = &[
+const MANAGED_BUNDLE_TRIGGER_ROOTS: &[&str] = &[
     ".claude/skills",
     ".claude/commands",
     // Retired root kept here so startup refresh can still detect and prune
     // stale Claude gwt hook scripts left by older worktrees.
     ".claude/hooks/scripts",
-    ".claude/settings.local.json",
     ".codex/skills",
     // Retired root kept here so startup refresh can still detect and prune
     // stale Codex gwt hook scripts left by older worktrees.
     ".codex/hooks/scripts",
-    ".codex/hooks.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -702,6 +703,21 @@ fn check_pty_exits(model: &mut Model) {
     check_pty_exits_with(model, &gwt_sessions_dir());
 }
 
+fn focus_session_by_id(model: &mut Model, session_id: &str) -> bool {
+    if let Some(index) = model
+        .sessions
+        .iter()
+        .position(|session| session.id == session_id)
+    {
+        model.active_layer = ActiveLayer::Main;
+        model.active_session = index;
+        model.active_focus = FocusPane::Terminal;
+        true
+    } else {
+        false
+    }
+}
+
 fn check_pty_exits_with(model: &mut Model, sessions_dir: &Path) {
     let exited: Vec<String> = model
         .pty_handles
@@ -1167,7 +1183,7 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::versions::update(&mut model.versions, msg);
         }
         Message::Wizard(msg) => {
-            let launch_config = if let Some(ref mut wizard) = model.wizard {
+            let (launch_config, focus_session_id) = if let Some(ref mut wizard) = model.wizard {
                 screens::wizard::update(wizard, msg);
                 let project_root = wizard
                     .worktree_path
@@ -1176,7 +1192,12 @@ pub fn update(model: &mut Model, msg: Message) {
                 sync_wizard_docker_status(wizard, &project_root);
                 maybe_start_wizard_branch_suggestions(wizard);
                 let completed = wizard.completed;
-                let launch_config = if completed {
+                let focus_session_id = if completed {
+                    wizard.focus_session_id.clone()
+                } else {
+                    None
+                };
+                let launch_config = if completed && focus_session_id.is_none() {
                     Some(build_launch_config_from_wizard(wizard))
                 } else {
                     None
@@ -1184,11 +1205,22 @@ pub fn update(model: &mut Model, msg: Message) {
                 if wizard.completed || wizard.cancelled {
                     model.wizard = None;
                 }
-                launch_config
+                (launch_config, focus_session_id)
             } else {
-                None
+                (None, None)
             };
-            if let Some(config) = launch_config {
+            if let Some(session_id) = focus_session_id {
+                if !focus_session_by_id(model, &session_id) {
+                    apply_notification(
+                        model,
+                        Notification::new(
+                            Severity::Warn,
+                            "session",
+                            format!("Session {session_id} is no longer available"),
+                        ),
+                    );
+                }
+            } else if let Some(config) = launch_config {
                 model.pending_launch_config = Some(config);
                 materialize_pending_launch(model);
                 model.active_focus = FocusPane::Terminal;
@@ -1589,15 +1621,33 @@ fn refresh_managed_gwt_assets_for_repo_worktrees(model: &Model) {
     paths.extend(model.active_worktree_paths());
 
     for worktree in paths {
-        if !worktree_has_managed_asset_state(&worktree) {
+        if !path_is_git_repo_or_worktree(&worktree) {
             continue;
         }
-        refresh_managed_gwt_assets_for_worktree(&worktree, "startup refresh");
+        refresh_managed_gwt_assets_for_worktree(
+            &worktree,
+            "startup refresh",
+            worktree_has_managed_asset_state(&worktree),
+        );
+    }
+}
+
+fn path_is_git_repo_or_worktree(worktree: &Path) -> bool {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+    {
+        Ok(output) => {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        }
+        Err(_) => false,
     }
 }
 
 fn worktree_has_managed_asset_state(worktree: &Path) -> bool {
-    MANAGED_ASSET_ROOTS
+    MANAGED_BUNDLE_TRIGGER_ROOTS
         .iter()
         .any(|relative| worktree.join(relative).exists())
         || git_tracks_managed_assets(worktree)
@@ -1610,7 +1660,7 @@ fn git_tracks_managed_assets(worktree: &Path) -> bool {
         .arg("ls-files")
         .arg("-z")
         .arg("--")
-        .args(MANAGED_ASSET_ROOTS)
+        .args(MANAGED_BUNDLE_TRIGGER_ROOTS)
         .output()
     {
         Ok(output) => output.status.success() && !output.stdout.is_empty(),
@@ -1618,14 +1668,20 @@ fn git_tracks_managed_assets(worktree: &Path) -> bool {
     }
 }
 
-fn refresh_managed_gwt_assets_for_worktree(worktree: &Path, context: &str) {
-    if let Err(error) = distribute_to_worktree(worktree) {
-        tracing::warn!(
-            worktree = %worktree.display(),
-            error = %error,
-            context,
-            "failed to distribute gwt managed assets"
-        );
+fn refresh_managed_gwt_assets_for_worktree(
+    worktree: &Path,
+    context: &str,
+    materialize_bundle: bool,
+) {
+    if materialize_bundle {
+        if let Err(error) = distribute_to_worktree(worktree) {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                error = %error,
+                context,
+                "failed to distribute gwt managed assets"
+            );
+        }
     }
     if let Err(error) = update_git_exclude(worktree) {
         tracing::warn!(
@@ -3449,14 +3505,16 @@ fn check_branch_pending_actions(model: &mut Model) {
                 .clone()
                 .unwrap_or_else(|| model.repo_path.clone());
             open_wizard(model, None);
-            if let Some(ref mut wizard) = model.wizard {
+            if let Some(mut wizard) = model.wizard.take() {
                 wizard.worktree_path = worktree_path;
                 configure_existing_branch_wizard_with_sessions(
-                    wizard,
+                    &mut wizard,
+                    model,
                     &quick_start_root,
                     &gwt_sessions_dir(),
                     &branch_name,
                 );
+                model.wizard = Some(wizard);
             }
         }
     }
@@ -3658,8 +3716,20 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
         return Vec::new();
     };
 
-    let branch_name = branch.name.as_str();
-    let branch_worktree = branch.worktree_path.as_deref().unwrap_or(model.repo_path());
+    branch_session_matches_for(
+        model,
+        sessions_dir,
+        branch.name.as_str(),
+        branch.worktree_path.as_deref().unwrap_or(model.repo_path()),
+    )
+}
+
+fn branch_session_matches_for(
+    model: &Model,
+    sessions_dir: &Path,
+    branch_name: &str,
+    branch_worktree: &Path,
+) -> Vec<BranchSessionMatch> {
     let branch_shell_name = format!("Shell: {branch_name}");
 
     model
@@ -3713,6 +3783,24 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                 })
             }
             _ => None,
+        })
+        .collect()
+}
+
+fn branch_live_session_entries_with(
+    model: &Model,
+    sessions_dir: &Path,
+    branch_name: &str,
+    branch_worktree: &Path,
+) -> Vec<screens::wizard::LiveSessionEntry> {
+    branch_session_matches_for(model, sessions_dir, branch_name, branch_worktree)
+        .into_iter()
+        .map(|entry| screens::wizard::LiveSessionEntry {
+            session_id: model.sessions[entry.session_index].id.clone(),
+            kind: entry.summary.kind.to_string(),
+            name: entry.summary.name,
+            detail: entry.summary.detail,
+            active: entry.summary.active,
         })
         .collect()
 }
@@ -5523,7 +5611,7 @@ fn persist_and_spawn_launch(
         .working_dir
         .clone()
         .unwrap_or_else(|| model.repo_path.clone());
-    refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch");
+    refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch", true);
 
     let (mut pty_env, mut remove_env) = spawn_env_with_active_profile(config.env_vars.clone());
     inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
@@ -6454,6 +6542,7 @@ fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, Stri
 
 fn configure_existing_branch_wizard_with_sessions(
     wizard: &mut screens::wizard::WizardState,
+    model: &Model,
     repo_path: &std::path::Path,
     sessions_dir: &std::path::Path,
     branch_name: &str,
@@ -6462,7 +6551,11 @@ fn configure_existing_branch_wizard_with_sessions(
     wizard.branch_name = branch_name.to_string();
     apply_wizard_docker_context(wizard, repo_path);
     wizard.quick_start_entries = load_quick_start_entries(repo_path, sessions_dir, branch_name);
-    wizard.has_quick_start = !wizard.quick_start_entries.is_empty();
+    wizard.live_session_entries =
+        branch_live_session_entries_with(model, sessions_dir, branch_name, repo_path);
+    wizard.has_quick_start =
+        !wizard.quick_start_entries.is_empty() || !wizard.live_session_entries.is_empty();
+    wizard.focus_session_id = None;
     wizard.step = if wizard.has_quick_start {
         screens::wizard::WizardStep::QuickStart
     } else {
@@ -7614,34 +7707,11 @@ fn run_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<Ag
 fn handle_paste_input(model: &mut Model, text: String) {
     let bracketed_paste_enabled = model
         .active_session_tab()
-        .map(|session| vt_requests_bracketed_paste(&session.vt))
+        .map(|session| screen_requests_bracketed_paste(session.vt.screen()))
         .unwrap_or(false);
 
     if let Some(bytes) = build_paste_input_bytes(&text, bracketed_paste_enabled) {
         push_input_to_active_session(model, bytes);
-    }
-}
-
-fn vt_requests_bracketed_paste(vt: &crate::model::VtState) -> bool {
-    vt.screen()
-        .input_mode_formatted()
-        .windows(b"\x1b[?2004h".len())
-        .any(|window| window == b"\x1b[?2004h")
-}
-
-fn build_paste_input_bytes(text: &str, bracketed_paste_enabled: bool) -> Option<Vec<u8>> {
-    if text.is_empty() {
-        return None;
-    }
-
-    if bracketed_paste_enabled {
-        let mut bytes = Vec::with_capacity(text.len() + 12);
-        bytes.extend_from_slice(b"\x1b[200~");
-        bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(b"\x1b[201~");
-        Some(bytes)
-    } else {
-        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -7706,66 +7776,6 @@ fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
         crate::model::AgentColor::Yellow => Color::Yellow,
         crate::model::AgentColor::Magenta => Color::Magenta,
         crate::model::AgentColor::Gray => Color::Gray,
-    }
-}
-
-fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
-    match key.code {
-        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            control_char_bytes(ch)
-        }
-        KeyCode::Char(ch) => Some(ch.to_string().into_bytes()),
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
-        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
-        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
-        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
-        KeyCode::F(n) => f_key_to_bytes(n),
-        _ => None,
-    }
-}
-
-fn f_key_to_bytes(n: u8) -> Option<Vec<u8>> {
-    match n {
-        // F1-F4: SS3 sequences (xterm PC-style default)
-        1 => Some(b"\x1bOP".to_vec()),
-        2 => Some(b"\x1bOQ".to_vec()),
-        3 => Some(b"\x1bOR".to_vec()),
-        4 => Some(b"\x1bOS".to_vec()),
-        // F5-F12: CSI sequences
-        5 => Some(b"\x1b[15~".to_vec()),
-        6 => Some(b"\x1b[17~".to_vec()),
-        7 => Some(b"\x1b[18~".to_vec()),
-        8 => Some(b"\x1b[19~".to_vec()),
-        9 => Some(b"\x1b[20~".to_vec()),
-        10 => Some(b"\x1b[21~".to_vec()),
-        11 => Some(b"\x1b[23~".to_vec()),
-        12 => Some(b"\x1b[24~".to_vec()),
-        _ => None,
-    }
-}
-
-fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
-    let ch = ch.to_ascii_lowercase();
-    match ch {
-        '@' | ' ' => Some(vec![0x00]),
-        'a'..='z' => Some(vec![(ch as u8) & 0x1f]),
-        '[' => Some(vec![0x1b]),
-        '\\' => Some(vec![0x1c]),
-        ']' => Some(vec![0x1d]),
-        '^' => Some(vec![0x1e]),
-        '_' => Some(vec![0x1f]),
-        _ => None,
     }
 }
 
@@ -8463,17 +8473,19 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
     }
 
     let session = model.active_session_tab()?;
-    session
-        .vt
-        .visible_url_regions(Rect::new(0, 0, area.width, area.height))
-        .into_iter()
-        .find(|region| {
-            let row = area.y + region.row;
-            let start_col = area.x + region.start_col;
-            let end_col = area.x + region.end_col;
-            mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
-        })
-        .map(|region| region.url)
+    session.vt.with_visible_screen(|screen| {
+        let render_surface = session_render_surface(session, screen, area);
+        render_surface
+            .url_regions
+            .into_iter()
+            .find(|region| {
+                let row = area.y + region.row;
+                let start_col = area.x + region.start_col;
+                let end_col = area.x + region.end_col;
+                mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
+            })
+            .map(|region| region.url)
+    })
 }
 
 fn scroll_target_session_index(model: &Model, mouse: MouseEvent) -> Option<usize> {
@@ -8924,7 +8936,10 @@ fn render_session_surface(
 ) {
     let text_area = session_text_area(session, area);
     session.vt.with_visible_screen(|screen| {
-        if screen.contents().trim().is_empty() {
+        let render_surface = session_render_surface(session, screen, text_area);
+        let render_screen = render_surface.screen(screen);
+
+        if render_screen.contents().trim().is_empty() {
             match &session.tab_type {
                 crate::model::SessionTabType::Agent { agent_id, color } => {
                     // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
@@ -8980,21 +8995,17 @@ fn render_session_surface(
                 }
             }
         } else {
-            let url_regions =
-                session
-                    .vt
-                    .visible_url_regions(Rect::new(0, 0, text_area.width, text_area.height));
             crate::renderer::render_vt_screen_with_selection_and_urls(
-                screen,
+                render_screen,
                 frame.buffer_mut(),
                 text_area,
                 session.vt.selection(),
-                &url_regions,
+                &render_surface.url_regions,
             );
         }
 
-        if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
-            let (cursor_row, cursor_col) = screen.cursor_position();
+        if show_cursor && !session.vt.viewing_history() && !render_screen.hide_cursor() {
+            let (cursor_row, cursor_col) = render_screen.cursor_position();
             let x = text_area.x + cursor_col;
             let y = text_area.y + cursor_row;
             if x < text_area.right() && y < text_area.bottom() {
@@ -9002,6 +9013,180 @@ fn render_session_surface(
             }
         }
     });
+}
+
+struct SessionRenderSurface {
+    normalized_parser: Option<vt100::Parser>,
+    url_regions: Vec<crate::renderer::UrlRegion>,
+}
+
+impl SessionRenderSurface {
+    fn screen<'a>(&'a self, fallback: &'a vt100::Screen) -> &'a vt100::Screen {
+        self.normalized_parser
+            .as_ref()
+            .map(vt100::Parser::screen)
+            .unwrap_or(fallback)
+    }
+}
+
+fn session_render_surface(
+    session: &crate::model::SessionTab,
+    screen: &vt100::Screen,
+    text_area: Rect,
+) -> SessionRenderSurface {
+    let area = Rect::new(0, 0, text_area.width, text_area.height);
+    let normalized_parser = match &session.tab_type {
+        crate::model::SessionTabType::Agent { agent_id, .. }
+            if agent_id == "codex" && session.vt.selection().is_none() =>
+        {
+            normalized_codex_progress_parser(screen)
+        }
+        _ => None,
+    };
+    let url_regions = if let Some(parser) = normalized_parser.as_ref() {
+        crate::renderer::collect_url_regions(parser.screen(), area)
+    } else {
+        session.vt.visible_url_regions(area)
+    };
+    SessionRenderSurface {
+        normalized_parser,
+        url_regions,
+    }
+}
+
+fn normalized_codex_progress_parser(screen: &vt100::Screen) -> Option<vt100::Parser> {
+    let (rows, cols) = screen.size();
+    let visible_lines: Vec<String> = screen
+        .rows(0, cols)
+        .map(|line| line.trim_end_matches(' ').to_string())
+        .collect();
+    let formatted_rows: Vec<Vec<u8>> = screen.rows_formatted(0, cols).collect();
+    if visible_lines.is_empty() || visible_lines.len() != formatted_rows.len() {
+        return None;
+    }
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let hide_cursor = screen.hide_cursor();
+
+    let mut keep = vec![true; visible_lines.len()];
+    let mut row = 0usize;
+    let mut changed = false;
+    while row < visible_lines.len() {
+        if !is_codex_progress_separator(&visible_lines[row]) {
+            row += 1;
+            continue;
+        }
+
+        let separator_start = row;
+        while row < visible_lines.len() && is_codex_progress_separator(&visible_lines[row]) {
+            row += 1;
+        }
+        let separator_end = row;
+
+        let previous_end = separator_start;
+        let mut previous_start = previous_end;
+        while previous_start > 0 && !is_codex_progress_separator(&visible_lines[previous_start - 1])
+        {
+            previous_start -= 1;
+        }
+
+        let next_start = separator_end;
+        let mut next_end = next_start;
+        while next_end < visible_lines.len()
+            && !is_codex_progress_separator(&visible_lines[next_end])
+        {
+            next_end += 1;
+        }
+
+        let previous_block =
+            codex_progress_block_lines(&visible_lines[previous_start..previous_end]);
+        let next_block = codex_progress_block_lines(&visible_lines[next_start..next_end]);
+        if previous_block
+            .as_ref()
+            .zip(next_block.as_ref())
+            .is_some_and(|(previous, next)| codex_progress_block_repeated(previous, next))
+        {
+            for keep_row in keep.iter_mut().take(next_start).skip(previous_start) {
+                *keep_row = false;
+            }
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let rows_to_keep: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(index, keep_row)| keep_row.then_some(index))
+        .collect();
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(b"\x1b[2J\x1b[H");
+    for (dest_row, src_row) in rows_to_keep.iter().take(rows as usize).enumerate() {
+        let mut positioned_row = format!("\x1b[{};1H\x1b[K", dest_row + 1).into_bytes();
+        positioned_row.extend_from_slice(&formatted_rows[*src_row]);
+        parser.process(&positioned_row);
+    }
+    if rows > 0 && cols > 0 {
+        let cursor_row = usize::from(cursor_row).min(keep.len().saturating_sub(1));
+        let adjusted_cursor_row = keep
+            .iter()
+            .take(cursor_row.saturating_add(1))
+            .filter(|keep_row| **keep_row)
+            .count()
+            .saturating_sub(1)
+            .min(rows_to_keep.len().saturating_sub(1));
+        let adjusted_cursor_col = usize::from(cursor_col)
+            .min(usize::from(cols).saturating_sub(1))
+            .saturating_add(1);
+        let cursor_sequence = format!(
+            "\x1b[{};{}H",
+            adjusted_cursor_row.saturating_add(1),
+            adjusted_cursor_col
+        );
+        parser.process(cursor_sequence.as_bytes());
+    }
+    parser.process(if hide_cursor {
+        b"\x1b[?25l"
+    } else {
+        b"\x1b[?25h"
+    });
+    Some(parser)
+}
+
+fn is_codex_progress_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '─')
+}
+
+fn codex_progress_block_lines(lines: &[String]) -> Option<Vec<String>> {
+    let first = lines.iter().position(|line| !line.trim().is_empty())?;
+    let last = lines.iter().rposition(|line| !line.trim().is_empty())?;
+    let mut normalized = Vec::new();
+    let mut has_bullet = false;
+    let mut has_child = false;
+
+    for line in &lines[first..=last] {
+        let trimmed = line.trim_end().to_string();
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+        has_bullet |= trimmed.starts_with("• ");
+        has_child |= trimmed.starts_with("  ");
+        normalized.push(trimmed);
+    }
+
+    (has_bullet && has_child && normalized.len() >= 2).then_some(normalized)
+}
+
+fn codex_progress_block_repeated(previous: &[String], next: &[String]) -> bool {
+    if previous.len() > next.len() || previous.len() < 2 {
+        return false;
+    }
+
+    next.windows(previous.len())
+        .any(|window| window == previous)
 }
 
 /// Render the full UI (Elm: view).
@@ -12304,6 +12489,189 @@ services:
     }
 
     #[test]
+    fn render_model_text_codex_collapses_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 1);
+        assert_eq!(text.matches("  └ Search alpha").count(), 1);
+    }
+
+    #[test]
+    fn render_model_text_codex_keeps_distinct_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• cache summary updated",
+                "",
+                "• Explored",
+                "  └ Read spec.mdsh",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert!(text.contains("  └ Search alpha"));
+        assert!(text.contains("  └ Read spec.mdsh"));
+    }
+
+    #[test]
+    fn render_model_text_non_codex_keeps_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert_eq!(text.matches("  └ Search alpha").count(), 2);
+    }
+
+    #[test]
+    fn render_model_text_codex_with_selection_keeps_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 5 });
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert_eq!(text.matches("  └ Search alpha").count(), 2);
+    }
+
+    #[test]
+    fn normalized_codex_progress_parser_preserves_cursor_state() {
+        let mut parser = vt100::Parser::new(14, 60, 0);
+        parser.process(
+            concat!(
+                "• contract swapped\r\n",
+                "\r\n",
+                "• Explored\r\n",
+                "  └ Search alpha\r\n",
+                "\r\n",
+                "────────────────────────────────────────\r\n",
+                "• contract swapped\r\n",
+                "\r\n",
+                "• Explored\r\n",
+                "  └ Search alpha\r\n",
+                "\r\n",
+                "• Working\r\n",
+            )
+            .as_bytes(),
+        );
+        parser.process(b"\x1b[12;5H\x1b[?25l");
+
+        let normalized = normalized_codex_progress_parser(parser.screen()).expect("normalized");
+        assert_eq!(normalized.screen().cursor_position(), (5, 4));
+        assert!(normalized.screen().hide_cursor());
+    }
+
+    #[test]
     fn agent_trackpad_drag_forwards_repeated_mouse_wheel_steps_to_pty() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -13431,6 +13799,75 @@ services:
     }
 
     #[test]
+    fn ctrl_click_on_codex_url_uses_normalized_hit_testing() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+        let expected_url = "https://example.com/docs";
+
+        update(&mut model, Message::Resize(80, 20));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                expected_url,
+            ],
+        );
+
+        let area = active_session_text_area(&model).expect("active session area");
+        let region = model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .with_visible_screen(|screen| {
+                let normalized = normalized_codex_progress_parser(screen).expect("normalized");
+                crate::renderer::collect_url_regions(
+                    normalized.screen(),
+                    Rect::new(0, 0, area.width, area.height),
+                )
+                .into_iter()
+                .find(|region| region.url == expected_url)
+                .expect("url region")
+            });
+
+        let mut opened = None;
+        let opened_result = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + region.start_col,
+                row: area.y + region.row,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            |url| {
+                opened = Some(url.to_string());
+                Ok(())
+            },
+        )
+        .expect("mouse handler succeeds");
+
+        assert!(opened_result);
+        assert_eq!(opened.as_deref(), Some(expected_url));
+    }
+
+    #[test]
     fn click_without_ctrl_does_not_invoke_opener_and_focuses_terminal() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -13572,6 +14009,29 @@ services:
             "git branch failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn git_resolved_exclude_path(path: &std::path::Path) -> PathBuf {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", "info/exclude"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse --git-path info/exclude");
+        assert!(
+            output.status.success(),
+            "git rev-parse --git-path info/exclude failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let resolved = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("utf8 git-path")
+                .trim(),
+        );
+        if resolved.is_absolute() {
+            resolved
+        } else {
+            path.join(resolved)
+        }
     }
 
     fn git_checkout_branch_or_create(path: &std::path::Path, name: &str) {
@@ -13812,6 +14272,7 @@ services:
         fs::write(dir.path().join("new.txt"), "new file\n").expect("write untracked file");
 
         let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
         load_initial_data(&mut model);
 
         assert!(
@@ -14191,6 +14652,82 @@ services:
         assert!(
             !claude_content.contains("GWT_MANAGED_HOOK=runtime-state"),
             "startup refresh should remove the legacy runtime marker from Claude settings"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_self_heals_pristine_git_repo_and_linked_worktree_without_materializing_bundles(
+    ) {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let worktree = dir.path().join("wt-feature-pristine");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/pristine",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "linked worktree should expose .git as a file"
+        );
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        for path in [dir.path(), worktree.as_path()] {
+            assert!(
+                path.join(".claude/settings.local.json").exists(),
+                "startup self-heal should generate Claude settings for {}",
+                path.display()
+            );
+            assert!(
+                path.join(".codex/hooks.json").exists(),
+                "startup self-heal should generate Codex hooks for {}",
+                path.display()
+            );
+            assert!(
+                !path.join(".claude/skills/gwt-pr/SKILL.md").exists(),
+                "pristine startup should not materialize bundled skills for {}",
+                path.display()
+            );
+            assert!(
+                !path
+                    .join(".claude/commands/gwt-spec-brainstorm.md")
+                    .exists(),
+                "pristine startup should not materialize bundled commands for {}",
+                path.display()
+            );
+
+            let exclude_path = git_resolved_exclude_path(path);
+            let exclude = fs::read_to_string(&exclude_path).expect("read git exclude");
+            assert!(
+                exclude.contains("# gwt-managed-begin"),
+                "startup self-heal should update git exclude for {}",
+                path.display()
+            );
+            assert!(
+                exclude.contains(".codex/hooks.json"),
+                "startup self-heal should exclude managed hooks for {}",
+                path.display()
+            );
+        }
+
+        assert!(
+            !worktree.join(".git/info/exclude").exists(),
+            "linked worktree startup self-heal should not treat .git as a directory"
         );
     }
 
@@ -15283,7 +15820,14 @@ services:
         );
 
         let (mut wizard, _) = prepare_wizard_startup(repo_path.as_path(), None, detected, &cache);
-        configure_existing_branch_wizard_with_sessions(&mut wizard, &repo_path, dir.path(), branch);
+        let model = test_model();
+        configure_existing_branch_wizard_with_sessions(
+            &mut wizard,
+            &model,
+            &repo_path,
+            dir.path(),
+            branch,
+        );
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::QuickStart);
         assert!(wizard.has_quick_start);
@@ -15310,6 +15854,106 @@ services:
         );
         assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
         assert!(!wizard.quick_start_entries[1].codex_fast_mode);
+    }
+
+    #[test]
+    fn configure_existing_branch_wizard_with_sessions_loads_branch_live_sessions() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let cache = VersionCache::new();
+        let repo_path = PathBuf::from("/tmp/repo");
+        let worktree_path = repo_path.join("wt-feature-test");
+        let branch = "feature/test";
+        let now = Utc::now();
+
+        let mut persisted =
+            AgentSession::new(worktree_path.to_str().unwrap(), branch, AgentId::Codex);
+        persisted.id = "agent-1".to_string();
+        persisted.model = Some("gpt-5.3-codex".to_string());
+        persisted.reasoning_level = Some("high".to_string());
+        persisted.tool_version = Some("latest".to_string());
+        persisted.agent_session_id = Some("sess-live".to_string());
+        persisted.skip_permissions = true;
+        persisted.codex_fast_mode = true;
+        persisted.updated_at = now;
+        persisted.created_at = now;
+        persisted.last_activity_at = now;
+        persisted.save(dir.path()).expect("persist live session");
+
+        let detected = vec![detected_agent(AgentId::Codex, Some("0.5.1"))];
+        let (mut wizard, _) = prepare_wizard_startup(repo_path.as_path(), None, detected, &cache);
+        let mut model = test_model();
+        model.sessions = vec![crate::model::SessionTab {
+            id: "agent-1".to_string(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Cyan,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        configure_existing_branch_wizard_with_sessions(
+            &mut wizard,
+            &model,
+            &worktree_path,
+            dir.path(),
+            branch,
+        );
+
+        assert_eq!(wizard.live_session_entries.len(), 1);
+        assert_eq!(wizard.live_session_entries[0].session_id, "agent-1");
+        assert_eq!(wizard.live_session_entries[0].name, "Codex");
+    }
+
+    #[test]
+    fn wizard_select_focus_existing_session_switches_active_session_without_launching() {
+        let mut model = test_model();
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: "shell-0".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+            crate::model::SessionTab {
+                id: "agent-1".to_string(),
+                name: "Codex".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "codex".to_string(),
+                    color: crate::model::AgentColor::Cyan,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+        ];
+        model.active_session = 0;
+        model.active_focus = FocusPane::BranchDetail;
+        model.active_layer = ActiveLayer::Management;
+        model.wizard = Some(screens::wizard::WizardState {
+            step: screens::wizard::WizardStep::FocusExistingSession,
+            live_session_entries: vec![screens::wizard::LiveSessionEntry {
+                session_id: "agent-1".to_string(),
+                kind: "Agent".to_string(),
+                name: "Codex".to_string(),
+                detail: Some("gpt-5.3-codex · high".to_string()),
+                active: false,
+            }],
+            ..screens::wizard::WizardState::default()
+        });
+
+        update(
+            &mut model,
+            Message::Wizard(screens::wizard::WizardMessage::Select),
+        );
+
+        assert!(model.wizard.is_none());
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_session, 1);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert!(model.pending_launch_config.is_none());
     }
 
     #[test]
@@ -17643,6 +18287,72 @@ services:
     }
 
     #[test]
+    fn materialize_pending_launch_with_updates_git_resolved_exclude_for_linked_worktree() {
+        let dir = tempfile::tempdir().expect("temp repo dir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        git_commit_allow_empty(&repo, "initial commit");
+
+        let worktree = dir.path().join("wt-feature-spec-42");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/spec-42",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "linked worktree should expose .git as a file"
+        );
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "gwt-missing-custom-agent-command".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let exclude_path = git_resolved_exclude_path(&worktree);
+        let exclude = fs::read_to_string(&exclude_path).expect("read git exclude");
+        assert!(exclude.contains("# gwt-managed-begin"));
+        assert!(exclude.contains(".codex/hooks.json"));
+        assert!(
+            !worktree.join(".git/info/exclude").exists(),
+            "agent launch should not treat linked worktree .git as a directory"
+        );
+    }
+
+    #[test]
     fn materialize_pending_launch_with_migrates_tracked_legacy_codex_runtime_hooks() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-develop");
@@ -19786,13 +20496,13 @@ services:
     #[test]
     fn vt_state_reports_bracketed_paste_when_requested_by_session() {
         let mut vt = crate::model::VtState::new(24, 80);
-        assert!(!vt_requests_bracketed_paste(&vt));
+        assert!(!screen_requests_bracketed_paste(vt.screen()));
 
         vt.process(b"\x1b[?2004h");
-        assert!(vt_requests_bracketed_paste(&vt));
+        assert!(screen_requests_bracketed_paste(vt.screen()));
 
         vt.process(b"\x1b[?2004l");
-        assert!(!vt_requests_bracketed_paste(&vt));
+        assert!(!screen_requests_bracketed_paste(vt.screen()));
     }
 
     #[test]

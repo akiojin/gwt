@@ -1,4 +1,0 @@
-- [x] Git 側の 1 つの検索欄から Issue/Spec を探せる
-- [x] `Project Index` は files 専用である
-- [x] spec semantic search を Git 側から更新・利用できる
-- [x] 対象の frontend tests と Rust compile/test が通る

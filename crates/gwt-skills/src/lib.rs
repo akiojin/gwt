@@ -1130,15 +1130,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wt = dir.path();
 
-        // Create .git/info for git_exclude
-        std::fs::create_dir_all(wt.join(".git/info")).unwrap();
+        init_git_repo(wt);
 
         // Run full pipeline
         let report = distribute_to_worktree(wt).unwrap();
         assert!(report.files_written > 0);
 
         update_git_exclude(wt).unwrap();
-        let exclude = std::fs::read_to_string(wt.join(".git/info/exclude")).unwrap();
+        let exclude = std::fs::read_to_string(git_resolved_exclude_path(wt)).unwrap();
         assert!(exclude.contains("gwt-managed-begin"));
 
         generate_settings_local(wt).unwrap();
@@ -1199,6 +1198,34 @@ mod tests {
             } else {
                 None
             },
+        }
+    }
+
+    fn init_git_repo(path: &std::path::Path) {
+        let output = std::process::Command::new("git")
+            .arg("init")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {:?}", output);
+    }
+
+    fn git_resolved_exclude_path(worktree: &std::path::Path) -> PathBuf {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", "info/exclude"])
+            .current_dir(worktree)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git rev-parse --git-path info/exclude failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let resolved = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        if resolved.is_absolute() {
+            resolved
+        } else {
+            worktree.join(resolved)
         }
     }
 }

@@ -13,16 +13,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::{
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    Command,
-};
-
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use gwt_agent::reset_runtime_state_dir;
@@ -33,6 +23,7 @@ use gwt_core::logging::{
 };
 use gwt_core::paths::gwt_logs_dir;
 use gwt_git::RepoType;
+use gwt_terminal::runtime;
 use gwt_tui::{
     app, event,
     input::keybind::KeybindRegistry,
@@ -44,22 +35,6 @@ use gwt_tui::{
 const PTY_OUTPUT_POLL_SLICE: Duration = Duration::from_millis(10);
 const PTY_REDRAW_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MAX_MOUSE_SCROLL_BURST_MESSAGES: usize = 128;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DisableAlternateScrollMode;
-
-impl Command for DisableAlternateScrollMode {
-    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
-        // Terminal.app can translate trackpad scrolling in the alternate screen
-        // into cursor keys unless alternate-scroll mode is explicitly disabled.
-        f.write_str("\u{1b}[?1007l")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 fn drain_pty_output_into_model(model: &mut Model) -> bool {
     let mut drained = false;
@@ -106,21 +81,13 @@ fn is_mouse_scroll_message(msg: &Message) -> bool {
 fn poll_immediate_message_for_scroll_burst(
     deadline: Instant,
     input_normalizer: &mut event::InputNormalizer,
-    terminal_focused: bool,
 ) -> Option<Message> {
-    loop {
-        let now = Instant::now();
-        if let Some(msg) = input_normalizer.pop_pending(now) {
-            return Some(msg);
-        }
-
-        let raw = event::poll_event_slice(deadline, Duration::ZERO)?;
-        let now = Instant::now();
-        let Some(msg) = input_normalizer.normalize(raw, now, terminal_focused) else {
-            continue;
-        };
+    let now = Instant::now();
+    if let Some(msg) = event::pop_pending_message(input_normalizer, now) {
         return Some(msg);
     }
+
+    event::poll_event_slice(deadline, Duration::ZERO, input_normalizer)
 }
 
 fn dispatch_post_normalized_message(
@@ -128,6 +95,7 @@ fn dispatch_post_normalized_message(
     keybinds: &mut KeybindRegistry,
     msg: Message,
     needs_render: &mut bool,
+    tick_deadline: &mut Instant,
 ) {
     let msg = match msg {
         Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
@@ -139,6 +107,8 @@ fn dispatch_post_normalized_message(
         other => other,
     };
 
+    let handled_at = Instant::now();
+    *tick_deadline = tick_deadline_after_message(*tick_deadline, handled_at, &msg);
     let was_tick = matches!(msg, Message::Tick);
     let visible_branch_signature_before =
         was_tick.then(|| app::visible_branch_live_indicator_signature(model));
@@ -158,6 +128,7 @@ fn handle_post_normalized_message<F>(
     keybinds: &mut KeybindRegistry,
     first: Message,
     needs_render: &mut bool,
+    tick_deadline: &mut Instant,
     pending_messages: &mut VecDeque<Message>,
     next_message: F,
 ) where
@@ -165,7 +136,7 @@ fn handle_post_normalized_message<F>(
 {
     let burst = drain_mouse_scroll_burst(first, pending_messages, next_message);
     for msg in burst {
-        dispatch_post_normalized_message(model, keybinds, msg, needs_render);
+        dispatch_post_normalized_message(model, keybinds, msg, needs_render, tick_deadline);
         if model.quit {
             break;
         }
@@ -228,88 +199,17 @@ fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
     PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
 }
 
+fn tick_deadline_after_message(current_deadline: Instant, now: Instant, msg: &Message) -> Instant {
+    if matches!(msg, Message::Tick) {
+        event::next_tick_deadline_from(now)
+    } else {
+        current_deadline
+    }
+}
+
 #[cfg(test)]
 fn should_render_after_tick(model: &Model) -> bool {
     app::tick_redraw_required(model)
-}
-
-fn enter_terminal(writer: &mut impl io::Write) -> io::Result<()> {
-    execute!(
-        writer,
-        EnterAlternateScreen,
-        DisableAlternateScrollMode,
-        EnableMouseCapture,
-        EnableBracketedPaste,
-    )?;
-    enable_keyboard_enhancements(writer);
-    Ok(())
-}
-
-fn leave_terminal(writer: &mut impl io::Write) -> io::Result<()> {
-    disable_keyboard_enhancements(writer);
-    execute!(
-        writer,
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-    )
-}
-
-fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
-    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-}
-
-fn enable_keyboard_enhancements(writer: &mut impl io::Write) {
-    // Fail-open: keep startup working even when the host terminal ignores or rejects kitty flags.
-    let _ = execute!(
-        writer,
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-    );
-}
-
-fn disable_keyboard_enhancements(writer: &mut impl io::Write) {
-    // Fail-open: shutdown should restore the terminal even if keyboard enhancement pop fails.
-    let _ = execute!(writer, PopKeyboardEnhancementFlags);
-}
-
-#[cfg(test)]
-fn terminal_enter_commands_ansi() -> String {
-    let mut ansi = String::new();
-    EnterAlternateScreen
-        .write_ansi(&mut ansi)
-        .expect("enter alternate screen ansi");
-    DisableAlternateScrollMode
-        .write_ansi(&mut ansi)
-        .expect("disable alternate scroll ansi");
-    EnableMouseCapture
-        .write_ansi(&mut ansi)
-        .expect("enable mouse capture ansi");
-    EnableBracketedPaste
-        .write_ansi(&mut ansi)
-        .expect("enable bracketed paste ansi");
-    PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-        .write_ansi(&mut ansi)
-        .expect("enable keyboard enhancement ansi");
-    ansi
-}
-
-#[cfg(test)]
-fn terminal_leave_commands_ansi() -> String {
-    let mut ansi = String::new();
-    PopKeyboardEnhancementFlags
-        .write_ansi(&mut ansi)
-        .expect("disable keyboard enhancement ansi");
-    LeaveAlternateScreen
-        .write_ansi(&mut ansi)
-        .expect("leave alternate screen ansi");
-    DisableMouseCapture
-        .write_ansi(&mut ansi)
-        .expect("disable mouse capture ansi");
-    DisableBracketedPaste
-        .write_ansi(&mut ansi)
-        .expect("disable bracketed paste ansi");
-    ansi
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -344,8 +244,8 @@ fn main() -> io::Result<()> {
     //      backtrace to stderr)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = leave_terminal(&mut io::stdout());
+        let _ = runtime::leave_raw_mode();
+        let _ = runtime::leave_terminal(&mut io::stdout());
         let backtrace = std::backtrace::Backtrace::force_capture();
         tracing::error!(
             target: "gwt_tui::panic",
@@ -377,9 +277,9 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     // Initialize terminal
-    enable_raw_mode()?;
+    runtime::enter_raw_mode()?;
     let mut stdout = io::stdout();
-    enter_terminal(&mut stdout)?;
+    runtime::enter_terminal(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -392,8 +292,8 @@ fn main() -> io::Result<()> {
     );
 
     // Restore terminal
-    disable_raw_mode()?;
-    leave_terminal(terminal.backend_mut())?;
+    runtime::leave_raw_mode()?;
+    runtime::leave_terminal(terminal.backend_mut())?;
     terminal.show_cursor()?;
 
     if let Err(e) = result {
@@ -681,6 +581,7 @@ fn run_app(
     let mut pending_messages = VecDeque::new();
     let mut needs_render = true;
     let mut last_draw_at = None;
+    let mut tick_deadline = event::next_tick_deadline();
 
     loop {
         if sighup_flag.load(Ordering::Relaxed) {
@@ -705,16 +606,16 @@ fn run_app(
         }
 
         // Event: poll
-        let deadline = event::next_tick_deadline();
         loop {
-            if let Some(msg) = input_normalizer.pop_pending(std::time::Instant::now()) {
+            if let Some(msg) = event::pop_pending_message(&mut input_normalizer, Instant::now()) {
                 handle_post_normalized_message(
                     &mut model,
                     &mut keybinds,
                     msg,
                     &mut needs_render,
+                    &mut tick_deadline,
                     &mut pending_messages,
-                    || input_normalizer.pop_pending(std::time::Instant::now()),
+                    || event::pop_pending_message(&mut input_normalizer, Instant::now()),
                 );
                 break;
             }
@@ -723,10 +624,12 @@ fn run_app(
 
             let Some(msg) = next_message_for_loop_iteration(
                 &mut pending_messages,
-                deadline,
+                tick_deadline,
                 had_pty_output,
                 last_draw_at,
-                event::poll_event_slice,
+                |deadline, max_wait| {
+                    event::poll_event_slice(deadline, max_wait, &mut input_normalizer)
+                },
             ) else {
                 if had_pty_output {
                     break;
@@ -734,27 +637,15 @@ fn run_app(
                 continue;
             };
 
-            let terminal_focused = model.active_layer != ActiveLayer::Initialization
-                && model.active_focus == gwt_tui::model::FocusPane::Terminal;
-            let Some(msg) =
-                input_normalizer.normalize(msg, std::time::Instant::now(), terminal_focused)
-            else {
-                continue;
-            };
-
+            let burst_deadline = tick_deadline;
             handle_post_normalized_message(
                 &mut model,
                 &mut keybinds,
                 msg,
                 &mut needs_render,
+                &mut tick_deadline,
                 &mut pending_messages,
-                || {
-                    poll_immediate_message_for_scroll_burst(
-                        deadline,
-                        &mut input_normalizer,
-                        terminal_focused,
-                    )
-                },
+                || poll_immediate_message_for_scroll_burst(burst_deadline, &mut input_normalizer),
             );
             break;
         }
@@ -820,7 +711,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::{
+        event::{
+            KeyCode, KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        },
+        Command,
+    };
     use gwt_tui::app;
     use gwt_tui::message::Message;
     use gwt_tui::model::{FocusPane, ManagementTab, SessionLayout};
@@ -1047,7 +944,7 @@ mod tests {
 
     #[test]
     fn terminal_enter_commands_enable_bracketed_paste() {
-        let ansi = terminal_enter_commands_ansi();
+        let ansi = runtime::terminal_enter_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004h"));
     }
 
@@ -1188,6 +1085,7 @@ mod tests {
         model.active_focus = FocusPane::TabContent;
         let mut keybinds = KeybindRegistry::new();
         let mut needs_render = false;
+        let mut tick_deadline = Instant::now();
 
         dispatch_post_normalized_message(
             &mut model,
@@ -1197,6 +1095,7 @@ mod tests {
                 KeyModifiers::CONTROL,
             )),
             &mut needs_render,
+            &mut tick_deadline,
         );
         dispatch_post_normalized_message(
             &mut model,
@@ -1206,6 +1105,7 @@ mod tests {
                 KeyModifiers::NONE,
             )),
             &mut needs_render,
+            &mut tick_deadline,
         );
 
         assert_eq!(
@@ -1218,7 +1118,7 @@ mod tests {
 
     #[test]
     fn terminal_enter_commands_disable_alternate_scroll_mode() {
-        let ansi = terminal_enter_commands_ansi();
+        let ansi = runtime::terminal_enter_commands_ansi();
         assert!(
             ansi.contains("\u{1b}[?1007l"),
             "terminal startup should disable alternate-scroll mode so Terminal.app delivers wheel events to gwt"
@@ -1227,23 +1127,26 @@ mod tests {
 
     #[test]
     fn terminal_leave_commands_disable_bracketed_paste() {
-        let ansi = terminal_leave_commands_ansi();
+        let ansi = runtime::terminal_leave_commands_ansi();
         assert!(ansi.contains("\u{1b}[?2004l"));
     }
 
     #[test]
     fn terminal_enter_commands_enable_keyboard_enhancement_flags() {
-        let ansi = terminal_enter_commands_ansi();
+        let ansi = runtime::terminal_enter_commands_ansi();
         let mut expected = String::new();
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-            .write_ansi(&mut expected)
-            .expect("keyboard enhancement push ansi");
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+        )
+        .write_ansi(&mut expected)
+        .expect("keyboard enhancement push ansi");
         assert!(ansi.contains(expected.as_str()));
     }
 
     #[test]
     fn terminal_leave_commands_pop_keyboard_enhancement_flags() {
-        let ansi = terminal_leave_commands_ansi();
+        let ansi = runtime::terminal_leave_commands_ansi();
         let mut expected = String::new();
         PopKeyboardEnhancementFlags
             .write_ansi(&mut expected)
@@ -1296,6 +1199,44 @@ mod tests {
         assert!(
             should_render_after_tick(&model),
             "visible overlays that depend on tick-driven updates should still redraw"
+        );
+    }
+
+    #[test]
+    fn non_tick_messages_do_not_delay_the_pending_tick_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+
+        let next = tick_deadline_after_message(
+            deadline,
+            now + Duration::from_millis(90),
+            &Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )),
+        );
+
+        assert_eq!(
+            next, deadline,
+            "non-tick events must preserve the original deadline so tick-driven cleanup updates do not starve behind unrelated input/output"
+        );
+    }
+
+    #[test]
+    fn tick_messages_schedule_the_next_deadline_from_now() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+        let tick_handled_at = now + Duration::from_millis(90);
+
+        let next = tick_deadline_after_message(deadline, tick_handled_at, &Message::Tick);
+
+        assert!(
+            next >= tick_handled_at + Duration::from_millis(95),
+            "tick handling should move the deadline forward from the time the tick was consumed"
+        );
+        assert!(
+            next <= tick_handled_at + Duration::from_millis(105),
+            "the next deadline should stay close to one tick interval after the consumed tick"
         );
     }
 }

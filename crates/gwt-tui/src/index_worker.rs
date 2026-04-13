@@ -181,7 +181,6 @@ const SCOPE_SKIP_PREFIXES: &[&str] = &[
     ".codex",
     ".gemini",
     ".gwt",
-    "specs-archive",
     "tasks",
     "target",
     "node_modules",
@@ -742,6 +741,14 @@ mod tests {
                 root.join("specs/SPEC-10/spec.md"),
             ],
         );
+
+        assert_eq!(scope_names_from_mask(mask), vec!["files-docs"]);
+    }
+
+    #[test]
+    fn changed_paths_do_not_skip_removed_specs_archive_prefix() {
+        let root = Path::new("/repo");
+        let mask = scopes_for_changed_paths(root, &[root.join("specs-archive/SPEC-10/spec.md")]);
 
         assert_eq!(scope_names_from_mask(mask), vec!["files-docs"]);
     }
