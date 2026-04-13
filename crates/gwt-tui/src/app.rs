@@ -13692,22 +13692,22 @@ services:
         init_git_repo(dir.path());
         git_commit_allow_empty(dir.path(), "initial commit");
 
-        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-discussion.md");
         fs::create_dir_all(tracked_command.parent().expect("tracked command parent"))
             .expect("create tracked command dir");
-        fs::write(&tracked_command, "tracked brainstorm command")
-            .expect("write tracked brainstorm command");
+        fs::write(&tracked_command, "tracked discussion command")
+            .expect("write tracked discussion command");
         let add_tracked_command = std::process::Command::new("git")
-            .args(["add", ".claude/commands/gwt-spec-brainstorm.md"])
+            .args(["add", ".claude/commands/gwt-discussion.md"])
             .current_dir(dir.path())
             .output()
-            .expect("git add tracked brainstorm command");
+            .expect("git add tracked discussion command");
         assert!(
             add_tracked_command.status.success(),
-            "git add tracked brainstorm command failed: {}",
+            "git add tracked discussion command failed: {}",
             String::from_utf8_lossy(&add_tracked_command.stderr)
         );
-        fs::remove_file(&tracked_command).expect("delete tracked brainstorm command");
+        fs::remove_file(&tracked_command).expect("delete tracked discussion command");
 
         let worktree = dir.path().join("wt-feature-sync");
         let add_worktree = std::process::Command::new("git")
@@ -13815,9 +13815,9 @@ services:
         load_initial_data(&mut model);
 
         let tracked_command_content =
-            fs::read_to_string(&tracked_command).expect("tracked brainstorm command restored");
+            fs::read_to_string(&tracked_command).expect("tracked discussion command restored");
         assert!(
-            tracked_command_content.contains("SPEC Brainstorm Command"),
+            tracked_command_content.contains("gwt Discussion Command"),
             "startup refresh should restore missing tracked bundled commands"
         );
 

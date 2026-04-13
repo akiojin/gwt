@@ -27,7 +27,7 @@ Do not use this for new work intake. Use `gwt-register-issue` instead.
 1. Load `.claude/skills/gwt-issue/SKILL.md` and follow **Resolve Mode** only.
 2. Use `gwt issue view`, `gwt issue comments`, and `inspect_issue.py` to inspect the issue.
 3. If the change is a clear direct fix, continue through `gwt-build-spec` in standalone mode and finish verification.
-4. If the issue needs behavior design or wider scope definition, hand off to `gwt-design-spec` with the issue context.
+4. If the issue needs behavior design or wider scope definition, hand off to `gwt-discussion` with the issue context.
 5. Post progress and closure comments through `gwt issue comment`.
 
 ## Compatibility

@@ -18,7 +18,7 @@
   - migration / 互換性パスの条件分岐が新形式を網羅していない
   - 変更の下流影響（何が壊れるか）、上流前提（何が先に必要か）、同時変更境界（何を一緒に変えないと中間状態で壊れるか）を分析していない
 
-  調査手順: コードを読む → 依存関係を洗い出す → 実行して試す → 結果をユーザーに提示 → 判断を仰ぐ。「進めて」と言われるまでは議論を続ける。明示的に壁打ちモードに入りたい場合は `gwt-spec-brainstorm` を使用する。
+  調査手順: コードを読む → 依存関係を洗い出す → 実行して試す → 結果をユーザーに提示 → 判断を仰ぐ。「進めて」と言われるまでは議論を続ける。明示的に議論モードに入りたい場合は `gwt-discussion` を使用する。
 
 ## 開発指針
 
@@ -87,7 +87,7 @@
 
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
-- `gwt-design-spec` を使って DDD ベースの SPEC 設計を行う（ドメイン分析 → SPEC 登録 → 仕様明確化）
+- `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
 - SPEC ディレクトリ内の `spec.md` に最低限以下を含める:
   - ユーザーシナリオとテスト（受け入れシナリオ）
   - 機能要件（FR-\*）
@@ -261,17 +261,17 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | gwt-register-issue | `/gwt:gwt-register-issue` | Register new work from a bug report, enhancement idea, docs task, or rough request. Decides plain Issue vs SPEC after duplicate search. |
 | gwt-fix-issue | `/gwt:gwt-fix-issue` | Resolve an existing GitHub Issue by number or URL. Carries clear direct-fix work through implementation and routes to SPEC design only when needed. |
-| gwt-design-spec | `/gwt:gwt-design-spec` | Create or deepen a SPEC until it is planning-ready. Visible owner for SPEC design and clarification work. |
+| gwt-discussion | `/gwt:gwt-discussion` | Investigate ideas, spec gaps, and implementation concerns. Updates `spec` / `plan` when discussion stabilizes and returns an action bundle for the next step. |
 | gwt-plan-spec | `/gwt:gwt-plan-spec` | Generate or refresh `plan.md`, `tasks.md`, and related planning artifacts for a SPEC. |
 | gwt-build-spec | `/gwt:gwt-build-spec` | Implement an approved SPEC or approved standalone task with TDD, verification, and PR handoff. |
 | gwt-manage-pr | `/gwt:gwt-manage-pr` | Create, inspect, update, or unblock a PR through one visible PR lifecycle entrypoint. |
-| gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, and agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-design-spec. |
+| gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, and agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-discussion. |
 
 ### Search & Agent Management
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-design-spec, gwt-register-issue, and gwt-fix-issue. |
+| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
 | gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; pane ID + message → send input; stop/close + pane ID → stop pane. |
 
 ### TUI Design
@@ -285,7 +285,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 | Skill | Command | Preferred Visible Entry Point |
 |-------|---------|-------------------------------|
 | gwt-issue | `/gwt:gwt-issue` | `gwt-register-issue` / `gwt-fix-issue` |
-| gwt-spec-design | `/gwt:gwt-spec-design` | `gwt-design-spec` |
+| gwt-spec-design | `/gwt:gwt-spec-design` | `gwt-discussion` |
 | gwt-spec-plan | `/gwt:gwt-spec-plan` | `gwt-plan-spec` |
 | gwt-spec-build | `/gwt:gwt-spec-build` | `gwt-build-spec` |
 | gwt-pr | `/gwt:gwt-pr` | `gwt-manage-pr` |
@@ -295,14 +295,14 @@ Commands can be invoked as `/gwt:<command-name>`.
 ```text
 gwt-register-issue / gwt-fix-issue
           ↓
-gwt-design-spec → gwt-plan-spec → gwt-build-spec → gwt-manage-pr
-        ↑                                            |
-        └──────────────── gwt-arch-review ───────────┘
+     gwt-discussion → gwt-plan-spec → gwt-build-spec → gwt-manage-pr
+          ↑                                                |
+          └────────────────── gwt-arch-review ─────────────┘
 ```
 
 1. **Register new work** → `gwt-register-issue` (plain Issue か SPEC かを決める)
 2. **Fix an existing Issue** → `gwt-fix-issue` (Issue 起点で直接修正か SPEC 化かを決める)
-3. **Design a SPEC** → `gwt-design-spec` (DDD intake → SPEC creation)
+3. **Discuss and shape the work** → `gwt-discussion` (investigation → design clarification → action bundle)
 4. **Plan implementation** → `gwt-plan-spec` (SDD architecture → tasks)
 5. **Build with TDD** → `gwt-build-spec` (Red-Green-Refactor → verification)
 6. **Manage PRs** → `gwt-manage-pr` (create, check, or fix)

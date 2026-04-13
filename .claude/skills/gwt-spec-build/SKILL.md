@@ -21,7 +21,7 @@ Once started, keep moving until one of these is true:
 - a merge conflict or reviewer request cannot be resolved with high confidence
 - required auth or tooling is unavailable
 - a spec-implementation mismatch is discovered that changes the design surface
-  (not just a typo fix) — use `gwt-spec-brainstorm` to investigate and discuss
+  (not just a typo fix) — use `gwt-discussion` to investigate and discuss
 
 Routine CI failures, update-branch merges, and test-first edits are handled autonomously.
 
@@ -109,7 +109,7 @@ In SPEC mode, also verify:
 
 - Implementation matches `spec.md` acceptance scenarios
 - No scope creep beyond `tasks.md`
-- If a failure indicates a spec gap (not a code bug), route back to `gwt-design-spec`
+- If a failure indicates a spec gap (not a code bug), route back to `gwt-discussion`
 
 ## Phase 4: PR Flow
 
@@ -133,7 +133,7 @@ Required checks:
 - `checklists/acceptance.md` reflects actual accepted behavior
 - `checklists/tdd.md` reflects actual verification evidence
 - `progress.md` entries do not claim completion unsupported by code
-- If artifacts disagree, return to `gwt-design-spec` — do not proceed to PR
+- If artifacts disagree, return to `gwt-discussion` — do not proceed to PR
 
 Update execution tracking:
 
@@ -163,7 +163,7 @@ Stop only when:
   (acceptance scenario inaccuracy, missing data-model section, undocumented
   registration table, dependency chain not captured in tasks.md, etc.) that
   changes the design surface — not just a typo fix. Route to
-  `gwt-spec-brainstorm` if the gap requires user discussion, or update the
+  `gwt-discussion` if the gap requires user discussion, or update the
   SPEC artifact directly if the fix is mechanical
 
 ## Exit report
@@ -180,6 +180,6 @@ Verification:
 Next:
 - `gwt-manage-pr` (create/update PR)
 - `gwt-arch-review` (code review)
-- return to `gwt-design-spec` (artifact repair)
+- return to `gwt-discussion` (artifact repair)
 - ask user for decision
 ```

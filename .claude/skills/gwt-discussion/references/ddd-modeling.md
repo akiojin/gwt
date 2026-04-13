@@ -1,6 +1,6 @@
 # DDD Domain Discovery Reference
 
-Detailed logic for Phase 2 of gwt-spec-design.
+Detailed logic for the domain discovery phase of gwt-discussion.
 
 ## Purpose
 

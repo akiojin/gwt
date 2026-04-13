@@ -13,7 +13,7 @@ This skill remains available as a compatibility alias. Prefer the visible task e
 
 - `gwt-register-issue` for new work intake
 - `gwt-fix-issue` for an existing Issue number or URL
-- `gwt-design-spec` / `gwt-plan-spec` / `gwt-build-spec` for visible SPEC work
+- `gwt-discussion` / `gwt-plan-spec` / `gwt-build-spec` for visible SPEC work
 
 ## Mode Detection
 
@@ -29,7 +29,7 @@ If the target SPEC is already known, use the visible SPEC flow instead.
 
 - Do not call `gh issue create` manually before this skill completes duplicate search
   and ISSUE vs SPEC selection.
-- Do not jump to `gwt-design-spec` before duplicate search completes.
+- Do not jump to `gwt-discussion` before duplicate search completes.
 - Do not create both a plain Issue and a SPEC for the same request.
 - A local SPEC directory is not a GitHub Issue. When a SPEC is needed, create or reuse
   the local SPEC as the source of truth; treat any Issue as an optional related record.
@@ -78,7 +78,7 @@ Create a **new local SPEC directory** when the request includes any of:
 - non-trivial technical or product tradeoffs
 
 When the need for a SPEC is clear, do not create a plain Issue first. Create or deepen
-the SPEC through `gwt-design-spec`, then continue through `gwt-plan-spec` and
+the SPEC through `gwt-discussion`, then continue through `gwt-plan-spec` and
 `gwt-build-spec` when the artifact state is ready.
 
 ## Title Rules for Plain Issues
@@ -166,7 +166,7 @@ surface fails with an auth error, stop and ask the user to refresh GitHub authen
 Use the decision rules above.
 
 - Plain Issue: create directly with `gwt issue create --title ... -f ...`.
-- New SPEC: create or deepen through `gwt-design-spec`, then continue through the visible
+- New SPEC: create or deepen through `gwt-discussion`, then continue through the visible
   SPEC flow.
 
 ### 6. Create the plain Issue when needed
@@ -250,7 +250,7 @@ Accept an issue number or full URL. Validate that the issue exists and is access
 - Search with at least 2 semantic queries derived from the Issue.
 - If a canonical existing SPEC is found, update that destination and continue with the
   visible SPEC flow.
-- If no suitable SPEC exists, create or deepen the owner SPEC through `gwt-design-spec`.
+- If no suitable SPEC exists, create or deepen the owner SPEC through `gwt-discussion`.
 - Do not "convert the Issue into the SPEC"; the Issue remains an Issue and the SPEC
   remains a local artifact set.
 - After the target SPEC exists, continue with the visible SPEC flow.

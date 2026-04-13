@@ -1,6 +1,6 @@
 # Registration Reference
 
-Detailed logic for Phase 3 of gwt-spec-design.
+Detailed logic for the SPEC creation/update phase of gwt-discussion.
 
 ## Prerequisites
 

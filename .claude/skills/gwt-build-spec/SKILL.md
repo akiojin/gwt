@@ -20,7 +20,7 @@ If the request starts from an existing GitHub Issue number or URL, prefer `gwt-f
 1. Load `.claude/skills/gwt-spec-build/SKILL.md` and follow it as the implementation engine.
 2. Prefer SPEC mode when a SPEC exists; use standalone mode only when the task was explicitly approved without a SPEC.
 3. Keep PR flow user-facing through `gwt-manage-pr`.
-4. Route back to `gwt-design-spec` if implementation reveals a real spec gap.
+4. Route back to `gwt-discussion` if implementation reveals a real spec gap.
 
 ## Compatibility
 

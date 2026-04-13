@@ -636,41 +636,41 @@ mod tests {
     }
 
     #[test]
-    fn distribute_preserves_tracked_bundled_spec_brainstorm_command() {
+    fn distribute_preserves_tracked_bundled_discussion_command() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
-        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-discussion.md");
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
-        fs::write(&tracked_command, "tracked brainstorm command").unwrap();
+        fs::write(&tracked_command, "tracked discussion command").unwrap();
 
-        track_path(dir.path(), ".claude/commands/gwt-spec-brainstorm.md");
+        track_path(dir.path(), ".claude/commands/gwt-discussion.md");
 
         distribute_to_worktree(dir.path()).unwrap();
 
         assert_eq!(
             fs::read_to_string(&tracked_command).unwrap(),
-            "tracked brainstorm command"
+            "tracked discussion command"
         );
     }
 
     #[test]
-    fn distribute_restores_missing_tracked_bundled_spec_brainstorm_command() {
+    fn distribute_restores_missing_tracked_bundled_discussion_command() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
-        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-discussion.md");
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
-        fs::write(&tracked_command, "tracked brainstorm command").unwrap();
+        fs::write(&tracked_command, "tracked discussion command").unwrap();
 
-        track_path(dir.path(), ".claude/commands/gwt-spec-brainstorm.md");
+        track_path(dir.path(), ".claude/commands/gwt-discussion.md");
         fs::remove_file(&tracked_command).unwrap();
 
         distribute_to_worktree(dir.path()).unwrap();
 
         let content = fs::read_to_string(&tracked_command).unwrap();
         assert!(
-            content.contains("SPEC Brainstorm Command"),
+            content.contains("gwt Discussion Command"),
             "missing tracked bundled command should be restored from the current bundle"
         );
     }

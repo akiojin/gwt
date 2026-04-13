@@ -1,4 +1,4 @@
-description: Compatibility alias for the visible SPEC design entrypoint
+description: Compatibility alias for the visible discussion and design entrypoint
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
@@ -6,7 +6,7 @@ allowed-tools: Read, Glob, Grep, Bash
 SPEC Design Command (Compatibility Alias)
 ========================================
 
-Legacy command alias. Prefer `/gwt:gwt-design-spec` for visible SPEC design work.
+Legacy command alias. Prefer `/gwt:gwt-discussion` for visible discussion and design work.
 
 Usage
 -----
@@ -18,9 +18,9 @@ Usage
 Steps
 -----
 
-1. Load `.claude/skills/gwt-design-spec/SKILL.md` and follow the visible workflow.
-2. Reuse the owner SPEC when one already exists.
-3. Produce a planning-ready SPEC for the next planning step.
+1. Load `.claude/skills/gwt-discussion/SKILL.md` and follow the visible workflow.
+2. Reuse the owner SPEC when one already exists, or keep the work in discussion mode when it is not planning-ready yet.
+3. Produce `Action Delta` / `Action Bundle` outputs consistent with `gwt-discussion`.
 
 Examples
 --------

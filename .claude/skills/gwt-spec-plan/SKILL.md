@@ -22,8 +22,8 @@ Absorbs the responsibilities of `gwt-spec-plan`, `gwt-spec-tasks`, and `gwt-spec
 
 ## Prerequisites
 
-- If `spec.md` has critical `[NEEDS CLARIFICATION]` markers, use `gwt-design-spec` first.
-- If the target SPEC does not exist, use `gwt-design-spec` to create it first.
+- If `spec.md` has critical `[NEEDS CLARIFICATION]` markers, use `gwt-discussion` first.
+- If the target SPEC does not exist, use `gwt-discussion` to create it first.
 - If planning artifacts already exist but are stale, update them — do not recreate blindly.
 
 ## Required inputs

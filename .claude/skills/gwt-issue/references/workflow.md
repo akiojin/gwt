@@ -49,7 +49,7 @@
 - non-trivial technical or product tradeoffs
 
 When the need for a SPEC is clear, do not create a plain Issue first. Create or deepen
-the SPEC through `gwt-design-spec`, then continue through the visible SPEC flow. Only create a plain
+the SPEC through `gwt-discussion`, then continue through the visible SPEC flow. Only create a plain
 Issue too when the user explicitly asks for separate GitHub tracking.
 
 ### Step 6: Create the plain Issue when needed
@@ -116,7 +116,7 @@ Issue too when the user explicitly asks for separate GitHub tracking.
 - Search with at least 2 semantic queries derived from the Issue.
 - If a canonical existing SPEC is found, update that destination and continue with the
   visible SPEC flow.
-- If no suitable SPEC exists, create or deepen the owner SPEC through `gwt-design-spec`.
+- If no suitable SPEC exists, create or deepen the owner SPEC through `gwt-discussion`.
 - Do not "convert the Issue into the SPEC"; the Issue remains an Issue and the SPEC
   remains a local artifact set.
 - After the target SPEC exists, continue with the visible SPEC flow, which owns

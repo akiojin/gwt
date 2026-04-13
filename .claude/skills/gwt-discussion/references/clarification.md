@@ -1,6 +1,6 @@
 # Clarification Reference
 
-Detailed logic for Phase 4 of gwt-spec-design.
+Detailed logic for the clarification phase of gwt-discussion.
 
 ## Purpose
 

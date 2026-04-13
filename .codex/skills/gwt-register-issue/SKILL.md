@@ -27,7 +27,7 @@ Do not use this for an existing Issue. Use `gwt-fix-issue` instead.
 1. Load `.claude/skills/gwt-issue/SKILL.md` and follow **Register Mode** only.
 2. Run duplicate search before creating anything.
 3. If the request is a narrow bug/docs/chore/investigation item, create the plain Issue through `gwt issue create`.
-4. If the request needs new behavior definition, create or deepen the owner SPEC through `gwt-design-spec`.
+4. If the request needs new behavior definition, create or deepen the owner SPEC through `gwt-discussion`.
 5. Return the chosen owner and next step without exposing internal routing names.
 
 ## Compatibility

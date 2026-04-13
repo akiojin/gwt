@@ -1,6 +1,6 @@
 # Deepening Reference
 
-Detailed logic for Phase 5 of gwt-spec-design.
+Detailed logic for the deepening phase of gwt-discussion.
 
 ## Purpose
 
@@ -9,7 +9,7 @@ break down coarse tasks through a two-phase interactive workshop.
 
 ## When to use
 
-- Invoke with `gwt-spec-design --deepen SPEC-N`.
+- Invoke with `gwt-discussion --deepen SPEC-N`.
 - Or when the user requests deeper exploration after clarification.
 - Goes beyond clarify: it questions premises, not just fills gaps.
 
