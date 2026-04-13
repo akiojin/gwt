@@ -12,6 +12,7 @@ pub mod ime_probe;
 pub mod index_worker;
 pub mod input;
 pub mod input_trace;
+pub(crate) mod issue_cache;
 pub mod logs_watcher;
 pub mod message;
 pub mod model;

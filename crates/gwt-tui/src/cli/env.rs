@@ -142,7 +142,8 @@ impl DefaultCliEnv {
         repo_path: PathBuf,
     ) -> Result<Self, gwt_github::client::ApiError> {
         let client = HttpIssueClient::from_gh_auth(owner, repo)?;
-        let cache_root = Self::default_cache_root();
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(&repo_path)
+            .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
         Ok(DefaultCliEnv {
             client,
             cache_root,
@@ -169,21 +170,13 @@ impl DefaultCliEnv {
         let client = HttpIssueClient::with_transport(transport, String::new(), "", "");
         Ok(DefaultCliEnv {
             client,
-            cache_root: Self::default_cache_root(),
+            cache_root: crate::issue_cache::detached_issue_cache_root(),
             repo_path: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             owner: String::new(),
             repo: String::new(),
             stdout: io::stdout(),
             stderr: io::stderr(),
         })
-    }
-
-    fn default_cache_root() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".gwt")
-            .join("cache")
-            .join("issues")
     }
 }
 

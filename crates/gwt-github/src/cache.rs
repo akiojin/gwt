@@ -6,7 +6,7 @@
 //! `pull`-like commands.
 //!
 //! Filesystem layout (rooted at a configurable directory, typically
-//! `~/.gwt/cache/issues/`):
+//! `~/.gwt/cache/issues/<repo-hash>/`):
 //!
 //! ```text
 //! <root>/
