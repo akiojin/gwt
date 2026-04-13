@@ -10,8 +10,9 @@ use gwt_github::client::IssueClient;
 use gwt_github::{IssueNumber, SpecListFilter};
 
 use super::{
-    parse_actions_args, parse_hook_args, parse_issue_args, parse_pr_args, run, CliParseError,
-    LinkedPrSummary, PrChecksSummary, PrCreateCall, PrEditCall, PrReview, PrReviewThread,
+    parse_actions_args, parse_board_args, parse_hook_args, parse_issue_args, parse_pr_args, run,
+    CliParseError, LinkedPrSummary, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
+    PrReviewThread,
 };
 
 /// High-level runtime environment for the CLI. Kept as a trait so tests can
@@ -20,6 +21,7 @@ pub trait CliEnv {
     type Client: IssueClient;
     fn client(&self) -> &Self::Client;
     fn cache_root(&self) -> PathBuf;
+    fn repo_path(&self) -> &std::path::Path;
     fn stdout(&mut self) -> &mut dyn io::Write;
     fn stderr(&mut self) -> &mut dyn io::Write;
     fn read_file(&self, path: &str) -> io::Result<String>;
@@ -189,6 +191,9 @@ impl CliEnv for DefaultCliEnv {
     fn cache_root(&self) -> PathBuf {
         self.cache_root.clone()
     }
+    fn repo_path(&self) -> &std::path::Path {
+        &self.repo_path
+    }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout
     }
@@ -292,6 +297,7 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "issue" => parse_issue_args(&rest),
         "pr" => parse_pr_args(&rest),
         "actions" => parse_actions_args(&rest),
+        "board" => parse_board_args(&rest),
         "hook" => parse_hook_args(&rest),
         _ => Err(CliParseError::UnknownSubcommand(top_verb.to_string())),
     };
@@ -320,6 +326,7 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
 pub struct TestEnv {
     pub client: FakeIssueClient,
     pub cache_root: PathBuf,
+    pub repo_path: PathBuf,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
@@ -348,9 +355,11 @@ pub struct TestEnv {
 
 impl TestEnv {
     pub fn new(cache_root: PathBuf) -> Self {
+        let repo_path = cache_root.clone();
         TestEnv {
             client: FakeIssueClient::new(),
             cache_root,
+            repo_path,
             stdout: Vec::new(),
             stderr: Vec::new(),
             files: HashMap::new(),
@@ -430,6 +439,9 @@ impl CliEnv for TestEnv {
     }
     fn cache_root(&self) -> PathBuf {
         self.cache_root.clone()
+    }
+    fn repo_path(&self) -> &std::path::Path {
+        &self.repo_path
     }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout

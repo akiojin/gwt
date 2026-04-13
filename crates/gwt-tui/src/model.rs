@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::discussion_resume::ResumePromptSessionState;
 use crate::input::voice::VoiceInputState;
+use crate::screens::board::BoardState;
 use crate::screens::branches::{BranchDetailLoadResult, BranchesState};
 use crate::screens::confirm::ConfirmState;
 use crate::screens::docker_progress::DockerProgressState;
@@ -215,6 +216,7 @@ pub enum ManagementTab {
     Branches,
     Issues,
     PrDashboard,
+    Board,
     /// SPEC-12 Phase 9: dedicated Specs tab backed by the repo-scoped issue
     /// cache under `~/.gwt/cache/issues/<repo-hash>/`.
     /// Displayed as a top-level peer of Branches/Issues/PRs now that SPECs
@@ -229,10 +231,11 @@ pub enum ManagementTab {
 
 impl ManagementTab {
     /// All tabs in display order.
-    pub const ALL: [ManagementTab; 9] = [
+    pub const ALL: [ManagementTab; 10] = [
         ManagementTab::Branches,
         ManagementTab::Issues,
         ManagementTab::PrDashboard,
+        ManagementTab::Board,
         ManagementTab::Specs,
         ManagementTab::Profiles,
         ManagementTab::GitView,
@@ -247,6 +250,7 @@ impl ManagementTab {
             Self::Branches => "Branches",
             Self::Issues => "Issues",
             Self::PrDashboard => "PRs",
+            Self::Board => "Board",
             Self::Specs => "Specs",
             Self::Profiles => "Profiles",
             Self::GitView => "Git View",
@@ -1851,6 +1855,8 @@ pub struct Model {
     pub(crate) terminal_size: (u16, u16),
     /// Branches screen state.
     pub(crate) branches: BranchesState,
+    /// Shared Board screen state.
+    pub(crate) board: BoardState,
     /// Profiles screen state.
     pub(crate) profiles: ProfilesState,
     /// Issues screen state.
@@ -1919,6 +1925,10 @@ pub struct Model {
     /// (most unit tests).
     pub(crate) logs_watcher_rx:
         Option<std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>>,
+    /// Receiver for Board tab coordination snapshots produced by the
+    /// background repo-local projection watcher.
+    pub(crate) board_watcher_rx:
+        Option<std::sync::mpsc::Receiver<crate::board_watcher::BoardWatcherPacket>>,
     /// Receiver for `tracing::warn!` / `tracing::error!` / `tracing::info!`
     /// events that should surface as toasts or error modal entries.
     /// Fed by a bridge thread that drains the tokio
@@ -1986,6 +1996,7 @@ impl Model {
             active_profile: ActiveProfileSummary::default(),
             terminal_size: (80, 24),
             branches: BranchesState::default(),
+            board: BoardState::default(),
             profiles: ProfilesState::default(),
             issues: IssuesState::default(),
             git_view: GitViewState::default(),
@@ -2029,6 +2040,7 @@ impl Model {
             pty_output_tx,
             pty_output_rx,
             logs_watcher_rx: None,
+            board_watcher_rx: None,
             ui_log_rx: None,
             log_reload_handle: None,
             initialization: None,
@@ -2042,6 +2054,15 @@ impl Model {
         rx: std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>,
     ) {
         self.logs_watcher_rx = Some(rx);
+    }
+
+    /// Attach a board-watcher receiver produced by
+    /// [`crate::board_watcher::spawn`].
+    pub fn set_board_watcher_rx(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<crate::board_watcher::BoardWatcherPacket>,
+    ) {
+        self.board_watcher_rx = Some(rx);
     }
 
     /// Attach a UI log event receiver (SPEC-6 FR-015).
@@ -2097,6 +2118,25 @@ impl Model {
                     // past the filtered view length when the active
                     // filter hides the new tail).
                     logs_update(&mut self.logs, LogsMessage::AppendEntries(entries));
+                }
+            }
+        }
+        total
+    }
+
+    /// Drain pending board-watcher packets into `BoardState`.
+    pub(crate) fn drain_board_watcher(&mut self) -> usize {
+        use crate::board_watcher::BoardWatcherPacket;
+        use crate::screens::board::{update as board_update, BoardMessage};
+        let Some(rx) = self.board_watcher_rx.as_ref() else {
+            return 0;
+        };
+        let mut total = 0usize;
+        while let Ok(packet) = rx.try_recv() {
+            match packet {
+                BoardWatcherPacket::SetSnapshot(snapshot) => {
+                    total += snapshot.board.entries.len() + snapshot.cards.cards.len();
+                    board_update(&mut self.board, BoardMessage::SetSnapshot(snapshot));
                 }
             }
         }
@@ -2428,7 +2468,7 @@ mod tests {
                 .map(|tab| tab.label())
                 .collect::<Vec<_>>(),
             vec![
-                "Branches", "Issues", "PRs", "Specs", "Profiles", "Git View", "Versions",
+                "Branches", "Issues", "PRs", "Board", "Specs", "Profiles", "Git View", "Versions",
                 "Settings", "Logs",
             ]
         );
@@ -2437,9 +2477,41 @@ mod tests {
     }
 
     #[test]
-    fn management_tab_all_has_nine_entries() {
-        // SPEC-12 Phase 9: Specs tab raises the count from 8 to 9.
-        assert_eq!(ManagementTab::ALL.len(), 9);
+    fn management_tab_all_has_ten_entries() {
+        assert_eq!(ManagementTab::ALL.len(), 10);
+    }
+
+    #[test]
+    fn drain_board_watcher_applies_snapshot_packets() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.set_board_watcher_rx(rx);
+
+        tx.send(crate::board_watcher::BoardWatcherPacket::SetSnapshot(
+            gwt_core::coordination::CoordinationSnapshot {
+                board: gwt_core::coordination::BoardProjection {
+                    entries: vec![gwt_core::coordination::BoardEntry::new(
+                        gwt_core::coordination::AuthorKind::User,
+                        "user",
+                        gwt_core::coordination::BoardEntryKind::Request,
+                        "Need a board",
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    updated_at: chrono::Utc::now(),
+                },
+                cards: gwt_core::coordination::AgentCardsProjection::default(),
+            },
+        ))
+        .unwrap();
+
+        let drained = model.drain_board_watcher();
+
+        assert_eq!(drained, 1);
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "Need a board");
     }
 
     #[test]

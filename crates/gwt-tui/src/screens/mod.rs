@@ -1,5 +1,6 @@
 //! Screen modules — one per management tab, plus overlays.
 
+pub mod board;
 pub mod branches;
 pub mod cleanup_confirm;
 pub mod cleanup_progress;

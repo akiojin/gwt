@@ -5,6 +5,7 @@ use gwt_core::logging::LogEvent;
 
 use crate::input::voice::VoiceInputMessage;
 use crate::model::ManagementTab;
+use crate::screens::board::BoardMessage;
 use crate::screens::branches::BranchesMessage;
 use crate::screens::cleanup_confirm::CleanupConfirmMessage;
 use crate::screens::cleanup_progress::CleanupProgressMessage;
@@ -86,6 +87,8 @@ pub enum Message {
     DismissError,
     /// Branches screen message.
     Branches(BranchesMessage),
+    /// Board screen message.
+    Board(BoardMessage),
     /// Profiles screen message.
     Profiles(ProfilesMessage),
     /// Issues screen message.
@@ -174,6 +177,7 @@ mod tests {
         let _ = Message::PtyOutput("id".into(), vec![0x41]);
         let _ = Message::PasteInput("git status".into());
         let _ = Message::Branches(BranchesMessage::MoveUp);
+        let _ = Message::Board(BoardMessage::MoveUp);
         let _ = Message::Profiles(ProfilesMessage::MoveUp);
         let _ = Message::Issues(IssuesMessage::MoveUp);
         let _ = Message::GitView(GitViewMessage::MoveUp);

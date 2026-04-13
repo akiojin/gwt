@@ -541,6 +541,14 @@ fn run_app(
     let _logs_watcher_handle =
         gwt_tui::logs_watcher::spawn(gwt_core::paths::gwt_logs_dir(), logs_tx);
     model.set_logs_watcher_rx(logs_rx);
+    let _board_watcher_handle = if model.active_layer == ActiveLayer::Initialization {
+        None
+    } else {
+        let (board_tx, board_rx) = std::sync::mpsc::channel();
+        let handle = gwt_tui::board_watcher::spawn(model.repo_path().to_path_buf(), board_tx);
+        model.set_board_watcher_rx(board_rx);
+        Some(handle)
+    };
 
     // Plumb the reload handle through so the Logs tab can cycle the
     // tracing level live (SPEC-6 FR-011).

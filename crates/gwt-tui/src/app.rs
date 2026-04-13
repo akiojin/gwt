@@ -1087,6 +1087,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Tick => {
             drain_notification_bus(model);
+            model.drain_board_watcher();
             model.drain_logs_watcher();
             drain_ui_log_events(model);
             drain_docker_progress_events(model);
@@ -1140,6 +1141,9 @@ pub fn update(model: &mut Model, msg: Message) {
             if let Some(action) = model.branches.pending_docker_action.take() {
                 handle_pending_branch_docker_action(model, action);
             }
+        }
+        Message::Board(msg) => {
+            handle_board_message(model, msg);
         }
         Message::Profiles(msg) => {
             screens::profiles::update(&mut model.profiles, msg);
@@ -2417,6 +2421,9 @@ fn switch_management_tab_with<F, D>(
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
     }
+    if tab == ManagementTab::Board {
+        reload_board(model);
+    }
 }
 
 fn refresh_pr_dashboard_with<F, D>(model: &mut Model, fetch_prs: F, fetch_detail: D)
@@ -2969,6 +2976,7 @@ fn toggle_cleanup_selection_for_selected_branch(model: &mut Model) {
 
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
+    use screens::board::BoardMessage;
     use screens::branches::BranchesMessage;
     use screens::git_view::GitViewMessage;
     use screens::issues::IssuesMessage;
@@ -3081,6 +3089,42 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 if should_prefetch_detail {
                     schedule_branch_detail_prefetch(model);
                 }
+            } else if key.code == KeyCode::Esc {
+                fallback_management_escape(model);
+            }
+        }
+        ManagementTab::Board => {
+            if model.board.composer_open {
+                match key.code {
+                    KeyCode::Esc => update(model, Message::Board(BoardMessage::CloseComposer)),
+                    KeyCode::Backspace => {
+                        update(model, Message::Board(BoardMessage::ComposerBackspace))
+                    }
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        update(model, Message::Board(BoardMessage::SubmitComposer))
+                    }
+                    KeyCode::Char('k') => {
+                        update(model, Message::Board(BoardMessage::CycleComposerKind))
+                    }
+                    _ => {
+                        if let Some(ch) = search_input_char(&key) {
+                            update(model, Message::Board(BoardMessage::ComposerInput(ch)));
+                        }
+                    }
+                }
+                return;
+            }
+
+            let msg = match key.code {
+                KeyCode::Down => Some(BoardMessage::MoveDown),
+                KeyCode::Up => Some(BoardMessage::MoveUp),
+                KeyCode::Char('i') => Some(BoardMessage::OpenComposer),
+                KeyCode::Char('k') => Some(BoardMessage::CycleComposerKind),
+                KeyCode::Char('r') => Some(BoardMessage::Refresh),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                update(model, Message::Board(m));
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -4630,6 +4674,74 @@ fn handle_logs_message(model: &mut Model, msg: screens::logs::LogsMessage) {
         return;
     }
     screens::logs::update(&mut model.logs, msg);
+}
+
+fn handle_board_message(model: &mut Model, msg: screens::board::BoardMessage) {
+    if matches!(msg, screens::board::BoardMessage::Refresh) {
+        reload_board(model);
+        return;
+    }
+
+    if matches!(msg, screens::board::BoardMessage::SubmitComposer) {
+        submit_board_composer(model);
+        return;
+    }
+
+    screens::board::update(&mut model.board, msg);
+}
+
+fn reload_board(model: &mut Model) {
+    match gwt_core::coordination::load_snapshot(model.repo_path()) {
+        Ok(snapshot) => {
+            screens::board::update(
+                &mut model.board,
+                screens::board::BoardMessage::SetSnapshot(snapshot),
+            );
+        }
+        Err(err) => {
+            model.error_queue.push_back(Notification::new(
+                Severity::Error,
+                "gwt_tui::ui::board",
+                format!("failed to load board snapshot: {err}"),
+            ));
+        }
+    }
+}
+
+fn submit_board_composer(model: &mut Model) {
+    let body = model.board.composer_text.trim().to_string();
+    if body.is_empty() {
+        return;
+    }
+
+    let entry = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::User,
+        "user",
+        model.board.composer_kind.clone(),
+        body,
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+
+    match gwt_core::coordination::post_entry(model.repo_path(), entry) {
+        Ok(snapshot) => {
+            model.board.composer_text.clear();
+            model.board.composer_open = false;
+            screens::board::update(
+                &mut model.board,
+                screens::board::BoardMessage::SetSnapshot(snapshot),
+            );
+        }
+        Err(err) => {
+            model.error_queue.push_back(Notification::new(
+                Severity::Error,
+                "gwt_tui::ui::board",
+                format!("failed to post board entry: {err}"),
+            ));
+        }
+    }
 }
 
 /// Drain the UI log bridge channel and dispatch user-facing events
@@ -7667,6 +7779,7 @@ fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
+        ManagementTab::Board => model.board.composer_open,
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -9112,6 +9225,7 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
         ManagementTab::Branches => {
             // Handled by render_management_panes directly
         }
+        ManagementTab::Board => screens::board::render(&model.board, frame, area),
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -9297,6 +9411,7 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
             compact,
             model.branches.cleanup_selection_count(),
         ),
+        ManagementTab::Board => board_hint_text(model, compact),
         ManagementTab::Issues => issues_hint_text(model, compact),
         ManagementTab::Settings => {
             if model.settings.editing {
@@ -9332,6 +9447,20 @@ fn issues_hint_text(model: &Model, compact: bool) -> String {
     } else {
         "↑↓:select  Enter:detail  /:search  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help"
             .to_string()
+    }
+}
+
+fn board_hint_text(model: &Model, compact: bool) -> String {
+    if model.board.composer_open {
+        if compact {
+            "type msg  k kind  C-↵ send  Esc close".to_string()
+        } else {
+            "type message  k:cycle kind  Ctrl+Enter:send  Esc:close composer".to_string()
+        }
+    } else if compact {
+        "↑↓ sel  i comp  k kind  r rfsh  Esc term".to_string()
+    } else {
+        "↑↓:select  i:compose  k:cycle kind  r:refresh  Esc:term".to_string()
     }
 }
 
@@ -12734,13 +12863,12 @@ services:
         model.management_tab = ManagementTab::Issues;
         model.active_focus = FocusPane::TabContent;
 
-        let rendered = render_model_text(&model, 220, 24);
+        let rendered = render_model_text(&model, 260, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
         assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
-        // SPEC-12 Phase 9: the Specs tab is now a top-level peer, so the
-        // extra-wide tab strip should include it.
+        assert!(first_line.contains("Board"));
         assert!(first_line.contains("Specs"));
     }
 
@@ -14176,6 +14304,95 @@ services:
         assert_eq!(model.pr_dashboard.prs[0].ci_status, "success");
         assert_eq!(model.pr_dashboard.prs[0].review_status, "approved");
         assert!(model.pr_dashboard.prs[0].mergeable);
+    }
+
+    #[test]
+    fn switch_management_tab_board_loads_coordination_snapshot() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Need coordination",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::Board,
+            |_repo_path| panic!("PR loader should not run for Board"),
+            |_repo_path, _number| panic!("detail loader should not run for Board"),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Board);
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(
+            model.board.snapshot.board.entries[0].body,
+            "Need coordination"
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_enter_posts_entry() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::CONTROL));
+
+        assert!(!model.board.composer_open);
+        assert_eq!(model.board.composer_text, "");
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "hi");
+        assert_eq!(
+            model.board.snapshot.board.entries[0].author_kind,
+            gwt_core::coordination::AuthorKind::User
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_r_reloads_snapshot() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Reloaded",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "Reloaded");
     }
 
     #[test]
