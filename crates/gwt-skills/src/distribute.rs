@@ -1,6 +1,6 @@
 //! Distribute bundled skill assets to a target worktree.
 
-use crate::assets::{CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_SKILLS, CODEX_HOOKS};
+use crate::assets::{CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_SKILLS};
 use include_dir::Dir;
 use std::collections::HashSet;
 use std::fs;
@@ -13,7 +13,6 @@ const TRACKED_ROOTS: &[&str] = &[
     ".claude/commands",
     ".claude/hooks/scripts",
     ".codex/skills",
-    ".codex/hooks/scripts",
 ];
 
 /// Result of a distribution operation.
@@ -40,7 +39,10 @@ enum RootEntryKind {
 /// - `.claude/commands/gwt-*.md`
 /// - `.claude/hooks/scripts/gwt-*.mjs`
 /// - `.codex/skills/gwt-*/`  (same skill content)
-/// - `.codex/hooks/scripts/gwt-*.mjs`
+///
+/// Codex hook execution is now driven only by `.codex/hooks.json`.
+/// Retired `.codex/hooks/scripts/gwt-*.mjs` files are pruned as stale
+/// managed assets instead of being redistributed.
 pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
@@ -75,13 +77,6 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
         &CLAUDE_SKILLS,
         worktree,
         &worktree.join(".codex/skills"),
-        &tracked_paths,
-        &mut report,
-    )?;
-    write_dir_assets(
-        &CODEX_HOOKS,
-        worktree,
-        &worktree.join(".codex/hooks/scripts"),
         &tracked_paths,
         &mut report,
     )?;
@@ -138,14 +133,30 @@ fn prune_managed_asset_roots(
         tracked_paths,
         report,
     )?;
-    prune_dir_against_source(
-        &CODEX_HOOKS,
-        worktree,
-        &worktree.join(".codex/hooks/scripts"),
-        Some(RootEntryKind::Files),
-        tracked_paths,
-        report,
-    )?;
+    prune_retired_codex_hook_scripts(&worktree.join(".codex/hooks/scripts"), report)?;
+
+    Ok(())
+}
+
+fn prune_retired_codex_hook_scripts(dest: &Path, report: &mut DistributeReport) -> io::Result<()> {
+    if !dest.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dest)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("gwt-") {
+            continue;
+        }
+        remove_path(&entry.path())?;
+        report.paths_removed += 1;
+    }
+
+    if fs::read_dir(dest)?.next().is_none() {
+        fs::remove_dir(dest)?;
+    }
 
     Ok(())
 }
@@ -359,11 +370,11 @@ mod tests {
     }
 
     #[test]
-    fn distribute_creates_codex_hooks() {
+    fn distribute_does_not_create_retired_codex_hook_scripts() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
         let hook = dir.path().join(".codex/hooks/scripts/gwt-forward-hook.mjs");
-        assert!(hook.exists(), "expected {}", hook.display());
+        assert!(!hook.exists(), "unexpected {}", hook.display());
     }
 
     #[test]
@@ -467,8 +478,8 @@ mod tests {
             tracked_command.display()
         );
         assert!(
-            tracked_hook.exists(),
-            "tracked gwt hook must be preserved: {}",
+            !tracked_hook.exists(),
+            "retired codex gwt hook must be removed even when tracked: {}",
             tracked_hook.display()
         );
     }

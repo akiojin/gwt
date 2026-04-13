@@ -1,4 +1,4 @@
-> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。
+> **Historical Status**: この closed SPEC の未完了 task は旧 backlog の保存であり、現行の完了条件ではない。旧 `.codex/hooks/scripts/gwt-*.mjs` task 群は歴史的記録であり、現行契約では再導入しない。
 
 # SPEC-1438 Codex Hooks 対応 — タスク一覧
 

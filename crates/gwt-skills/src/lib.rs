@@ -588,6 +588,24 @@ mod tests {
     }
 
     #[test]
+    fn repo_does_not_keep_codex_hook_scripts() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".codex/hooks/scripts/gwt-forward-hook.mjs",
+            ".codex/hooks/scripts/gwt-block-file-ops.mjs",
+            ".codex/hooks/scripts/gwt-block-cd-command.mjs",
+            ".codex/hooks/scripts/gwt-block-git-branch-ops.mjs",
+            ".codex/hooks/scripts/gwt-block-git-dir-override.mjs",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
+                "unexpected retired codex hook script {relative}"
+            );
+        }
+    }
+
+    #[test]
     fn search_commands_route_issue_queries_through_unified_gwt_search() {
         for command in [
             include_str!("../../../.claude/commands/gwt-project-index.md"),
@@ -919,6 +937,11 @@ mod tests {
         assert!(wt
             .join(".claude/hooks/scripts/gwt-forward-hook.mjs")
             .exists());
+        assert!(
+            !wt.join(".codex/hooks/scripts/gwt-forward-hook.mjs")
+                .exists(),
+            "unexpected retired codex hook script"
+        );
     }
 
     // ── helpers ──

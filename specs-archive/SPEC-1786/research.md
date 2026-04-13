@@ -28,13 +28,14 @@ Claude Code の `prune_managed_hook_entries()` と同じパターン。
 
 ## gwt managed hooks の識別方法
 
-managed hooks の command フィールドはすべて以下のパターン:
+managed hooks の command フィールドは現行では以下の no-Node パターン:
 
 ```
-node "$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-*.mjs" [args]
+'<absolute-path-to-gwt>' hook runtime-state <event>
+'<absolute-path-to-gwt>' hook block-bash-policy
 ```
 
-識別キー: command 文字列に `gwt-` を含むかどうか（`is_managed_hook_command()` で判定可能）。
+識別キー: `hook runtime-state` / `hook block-bash-policy` を含む gwt 管理 command 形状。旧 `gwt-*.mjs` 文字列は migration 用の legacy 判定としてのみ扱う。
 
 ## 確認ダイアログの UX
 

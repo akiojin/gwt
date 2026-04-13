@@ -72,6 +72,8 @@ const MANAGED_ASSET_ROOTS: &[&str] = &[
     ".claude/hooks/scripts",
     ".claude/settings.local.json",
     ".codex/skills",
+    // Retired root kept here so startup refresh can still detect and prune
+    // stale Codex gwt hook scripts left by older worktrees.
     ".codex/hooks/scripts",
     ".codex/hooks.json",
 ];

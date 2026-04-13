@@ -1,4 +1,4 @@
-> **Historical Status**: この closed SPEC は旧ローカル SPEC / hook 登録方針の履歴である。未完了 task は旧 backlog の保存であり、現行の完了条件ではない。現行の workflow / hook 管理は `SPEC-1579` と `SPEC-1786` を参照する。
+> **Historical Status**: この closed SPEC は旧ローカル SPEC / hook 登録方針の履歴である。未完了 task は旧 backlog の保存であり、現行の完了条件ではない。現行の workflow / hook 管理は `SPEC-1579` と `SPEC-1786` を参照する。Codex の旧 `.codex/hooks/scripts/gwt-*.mjs` runtime assets は廃止済みで、現行契約は `.codex/hooks.json` のみである。
 
 # スキル埋め込みと対象ワークツリーへの登録
 
