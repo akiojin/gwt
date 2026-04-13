@@ -99,7 +99,8 @@ direct `crossterm` で周期再描画し、`ratatui` は同じ surface を同じ
 `--tick-ms <N>` で変更できます。
 
 また gwt は起動時に minimal な kitty keyboard enhancement
-(`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) を要求し、終了時に pop します。
+(`DISAMBIGUATE_ESCAPE_CODES | REPORT_ALL_KEYS_AS_ESCAPE_CODES |
+REPORT_ALTERNATE_KEYS | REPORT_EVENT_TYPES`) を要求し、終了時に pop します。
 非対応端末では fail-open で従来挙動を維持します。互換端末で発生する
 繰り返しキーイベントも通常の key press と同じ入力経路に残るため、IME の
 候補ページ送り時にイベントが途中で消えにくくなります。さらに terminal pane
