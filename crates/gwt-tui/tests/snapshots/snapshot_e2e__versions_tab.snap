@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌...│ Git View │ Versions │...─────────┐┌ › Shell ─────────────────────────────┐
-│Versions                              ││Session: Shell (80x24)                │
-│No version tags found                 ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│Detail                                ││                                      │
-│No tag selected                       ││                                      │
-│                                      ││                                      │
-└──────────────────────────────────────┘└──────────────────────────────────────┘
+╔...│ Git View │ Versions │...═════════╗╭ › Shell ─────────────────────────────╮
+║Versions                              ║│Session: Shell (80x24)                │
+║No version tags found                 ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║Detail                                ║│                                      │
+║No tag selected                       ║│                                      │
+║                                      ║│                                      │
+╚══════════════════════════════════════╝╰──────────────────────────────────────╯
  ⎇n/a  │  P:default  │  ↑↓ mv  r rfsh  C-g Tab  Esc term  ?
