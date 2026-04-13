@@ -3094,37 +3094,28 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Board => {
-            if model.board.composer_open {
-                match key.code {
-                    KeyCode::Esc => update(model, Message::Board(BoardMessage::CloseComposer)),
-                    KeyCode::Backspace => {
-                        update(model, Message::Board(BoardMessage::ComposerBackspace))
-                    }
-                    KeyCode::Enter if key.modifiers.is_empty() => {
-                        update(model, Message::Board(BoardMessage::SubmitComposer))
-                    }
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        update(model, Message::Board(BoardMessage::ComposerInput('\n')))
-                    }
-                    KeyCode::Char('k') if key.modifiers.is_empty() => {
-                        update(model, Message::Board(BoardMessage::CycleComposerKind))
-                    }
-                    _ => {
-                        if let Some(ch) = search_input_char(&key) {
-                            update(model, Message::Board(BoardMessage::ComposerInput(ch)));
-                        }
-                    }
-                }
-                return;
-            }
-
             let msg = match key.code {
+                KeyCode::Esc if model.board.composer_open => Some(BoardMessage::CloseComposer),
+                KeyCode::Backspace
+                    if model.board.composer_open || !model.board.composer_text.is_empty() =>
+                {
+                    Some(BoardMessage::ComposerBackspace)
+                }
+                KeyCode::Enter if key.modifiers.is_empty() && model.board.composer_open => {
+                    Some(BoardMessage::SubmitComposer)
+                }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::ComposerInput('\n'))
+                }
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::CycleComposerKind)
+                }
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::Refresh)
+                }
                 KeyCode::Down => Some(BoardMessage::MoveDown),
                 KeyCode::Up => Some(BoardMessage::MoveUp),
-                KeyCode::Char('i') => Some(BoardMessage::OpenComposer),
-                KeyCode::Char('k') => Some(BoardMessage::CycleComposerKind),
-                KeyCode::Char('r') => Some(BoardMessage::Refresh),
-                _ => None,
+                _ => search_input_char(&key).map(BoardMessage::ComposerInput),
             };
             if let Some(m) = msg {
                 update(model, Message::Board(m));
@@ -4731,7 +4722,7 @@ fn submit_board_composer(model: &mut Model) {
     match gwt_core::coordination::post_entry(model.repo_path(), entry) {
         Ok(snapshot) => {
             model.board.composer_text.clear();
-            model.board.composer_open = false;
+            model.board.composer_open = true;
             screens::board::update(
                 &mut model.board,
                 screens::board::BoardMessage::SetSnapshot(snapshot),
@@ -7782,7 +7773,7 @@ fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
-        ManagementTab::Board => model.board.composer_open,
+        ManagementTab::Board => false,
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -9456,14 +9447,14 @@ fn issues_hint_text(model: &Model, compact: bool) -> String {
 fn board_hint_text(model: &Model, compact: bool) -> String {
     if model.board.composer_open {
         if compact {
-            "type msg  ↵ send  C-j nl  k kind  Esc done".to_string()
+            "type msg  ↵ send  C-j nl  C-k kind  C-r rfsh  Esc done".to_string()
         } else {
-            "type message  Enter:send  Ctrl+J:new line  k:cycle kind  Esc:stop editing".to_string()
+            "type message  Enter:send  Ctrl+J:new line  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:stop editing".to_string()
         }
     } else if compact {
-        "↑↓ sel  i focus  k kind  r rfsh  Esc term".to_string()
+        "↑↓ sel  type post  C-k kind  C-r rfsh  Esc term".to_string()
     } else {
-        "↑↓:select  i:focus input  k:cycle kind  r:refresh  Esc:term".to_string()
+        "↑↓:select  type to post  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:term".to_string()
     }
 }
 
@@ -14354,12 +14345,11 @@ services:
         model.active_focus = FocusPane::TabContent;
         model.management_tab = ManagementTab::Board;
 
-        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
         route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
         route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
         route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert!(!model.board.composer_open);
+        assert!(model.board.composer_open);
         assert_eq!(model.board.composer_text, "");
         assert_eq!(model.board.snapshot.board.entries.len(), 1);
         assert_eq!(model.board.snapshot.board.entries[0].body, "hi");
@@ -14377,7 +14367,6 @@ services:
         model.active_focus = FocusPane::TabContent;
         model.management_tab = ManagementTab::Board;
 
-        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
         route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
         route_key_to_management(&mut model, key(KeyCode::Char('j'), KeyModifiers::CONTROL));
         route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
@@ -14388,7 +14377,45 @@ services:
     }
 
     #[test]
-    fn route_key_to_management_board_r_reloads_snapshot() {
+    fn route_key_to_management_board_plain_k_starts_input_without_i() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('k'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "k");
+        assert_eq!(
+            model.board.snapshot.board.entries[0].kind,
+            gwt_core::coordination::BoardEntryKind::Request
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_k_cycles_kind_before_post() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(
+            model.board.snapshot.board.entries[0].kind,
+            gwt_core::coordination::BoardEntryKind::Status
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_r_reloads_snapshot() {
         let dir = tempfile::tempdir().expect("temp repo");
         let mut model = Model::new(dir.path().to_path_buf());
         model.active_layer = ActiveLayer::Management;
@@ -14410,7 +14437,7 @@ services:
         )
         .expect("seed board entry");
 
-        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::CONTROL));
 
         assert_eq!(model.board.snapshot.board.entries.len(), 1);
         assert_eq!(model.board.snapshot.board.entries[0].body, "Reloaded");

@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-13 — tui: 常設入力欄では plain 文字ショートカットを残さない
+
+### 事象
+
+Board tab に常設入力欄を出したあとも `k` / `r` を plain key shortcut のまま残していたため、
+`i` で入力モードに入らない限り本文入力と衝突した。結果として、入力欄が見えていても
+直打ちできず、最初の文字が `k` / `r` の投稿もできなかった。
+
+### 原因
+
+- hidden composer 前提の keybind を引きずり、常設入力欄では「plain printable key は本文入力」
+  が最優先になることを操作契約として固定していなかった。
+- Board を閲覧 UI と入力 UI の中間状態で扱い、shortcut と text entry の責務を分離していなかった。
+
+### 再発防止策
+
+1. 常設入力欄のある TUI では、plain printable key をショートカットに使わない。
+2. printable key と衝突する操作は `Ctrl+<key>` など modifier 付きに移す。
+3. key routing test には「plain key が本文入力になること」と「modifier shortcut が別操作になること」を両方固定する。
+
 ## 2026-04-13 — tui: 端末ホストが奪うショートカットを送信キー前提にしない
 
 ### 事象

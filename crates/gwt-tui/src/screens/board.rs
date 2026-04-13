@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
 
@@ -27,7 +28,7 @@ impl Default for BoardState {
             snapshot: CoordinationSnapshot::default(),
             selected_entry: 0,
             selected_card: 0,
-            composer_open: false,
+            composer_open: true,
             composer_kind: BoardEntryKind::Request,
             composer_text: String::new(),
         }
@@ -94,6 +95,7 @@ pub fn update(state: &mut BoardState, msg: BoardMessage) {
             state.composer_text.push(ch);
         }
         BoardMessage::ComposerBackspace => {
+            state.composer_open = true;
             state.composer_text.pop();
         }
         BoardMessage::CycleComposerKind => {
@@ -285,25 +287,49 @@ fn render_cards(state: &BoardState, frame: &mut Frame, area: Rect) {
 
 fn render_composer(state: &BoardState, frame: &mut Frame, area: Rect) {
     let title = format!("Input [{}]", state.composer_kind.as_str());
-    let text = if state.composer_text.is_empty() {
-        let placeholder = if state.composer_open {
-            "Write a board update"
-        } else {
-            "Press i to write a board update"
-        };
-        Text::from(vec![
-            Line::from(""),
-            Line::from(vec![Span::styled(placeholder, theme::style::muted_text())]),
-        ])
-    } else {
-        Text::from(state.composer_text.clone())
-    };
+    let block = Block::default().title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let paragraph = Paragraph::new(text)
-        .block(Block::default().title(title))
-        .wrap(Wrap { trim: false })
-        .style(theme::style::text());
-    frame.render_widget(paragraph, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let raw_lines: Vec<&str> = if state.composer_text.is_empty() {
+        vec![""]
+    } else {
+        state.composer_text.split('\n').collect()
+    };
+    let visible_start = raw_lines.len().saturating_sub(inner.height as usize);
+    let visible_lines = &raw_lines[visible_start..];
+    let mut lines = Vec::with_capacity(inner.height as usize);
+    let pad = inner.height as usize - visible_lines.len();
+    lines.extend(std::iter::repeat_with(Line::default).take(pad));
+
+    for (offset, line) in visible_lines.iter().enumerate() {
+        let overall_idx = visible_start + offset;
+        let prefix = if overall_idx == 0 { "> " } else { "  " };
+        let mut spans = vec![Span::styled(prefix, theme::style::active_item())];
+        if state.composer_text.is_empty() && overall_idx == 0 && !state.composer_open {
+            spans.push(Span::styled("Type to post", theme::style::muted_text()));
+        } else {
+            spans.push(Span::styled((*line).to_string(), theme::style::text()));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let paragraph = Paragraph::new(Text::from(lines)).style(theme::style::text());
+    frame.render_widget(paragraph, inner);
+
+    if state.composer_open {
+        let last_line = raw_lines.last().copied().unwrap_or("");
+        let last_prefix = if raw_lines.len() == 1 { "> " } else { "  " };
+        let cursor_x = inner.x
+            + (UnicodeWidthStr::width(last_prefix) + UnicodeWidthStr::width(last_line))
+                .min(inner.width.saturating_sub(1) as usize) as u16;
+        let cursor_y = inner.y + inner.height.saturating_sub(1);
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 fn next_kind(kind: &BoardEntryKind) -> BoardEntryKind {
@@ -339,12 +365,19 @@ mod tests {
     use super::*;
     use gwt_core::coordination::{AgentCard, AgentCardsProjection, AuthorKind, BoardProjection};
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
     use ratatui::Terminal;
 
     fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
         (0..buf.area.height)
             .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn buffer_line(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
             .collect()
     }
 
@@ -355,6 +388,15 @@ mod tests {
             .draw(|frame| render(state, frame, frame.area()))
             .unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn render_cursor_position(state: &BoardState, width: u16, height: u16) -> Position {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(state, frame, frame.area()))
+            .unwrap();
+        terminal.get_cursor_position().unwrap()
     }
 
     fn sample_snapshot() -> CoordinationSnapshot {
@@ -438,12 +480,23 @@ mod tests {
 
     #[test]
     fn render_shows_input_footer_even_when_not_editing() {
-        let state = BoardState::default();
+        let mut state = BoardState::default();
+        update(&mut state, BoardMessage::CloseComposer);
 
         let text = buffer_text(&render_buffer(&state, 100, 24));
 
         assert!(text.contains("Input [request]"));
-        assert!(text.contains("Press i to write a board update"));
+        assert!(text.contains("Type to post"));
+    }
+
+    #[test]
+    fn render_places_prompt_on_bottom_row() {
+        let state = BoardState::default();
+
+        let buf = render_buffer(&state, 100, 24);
+        let line = buffer_line(&buf, 23);
+
+        assert!(line.contains("> "));
     }
 
     #[test]
@@ -454,6 +507,17 @@ mod tests {
         let text = buffer_text(&render_buffer(&state, 100, 24));
 
         assert!(text.contains("Input [request]"));
-        assert!(text.contains("Write a board update"));
+        assert!(text.contains("> "));
+    }
+
+    #[test]
+    fn render_places_cursor_after_prompt_when_editing() {
+        let mut state = BoardState::default();
+        update(&mut state, BoardMessage::ComposerInput('h'));
+        update(&mut state, BoardMessage::ComposerInput('i'));
+
+        let position = render_cursor_position(&state, 100, 24);
+
+        assert_eq!(position, Position::new(4, 23));
     }
 }
