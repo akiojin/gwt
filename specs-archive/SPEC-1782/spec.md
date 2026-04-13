@@ -14,13 +14,17 @@ rebuilt TUI では `1ブランチ = Nセッション` を許可するため、Qu
 
 ### US-3: 必要ならフル Wizard へ落ちたい
 
+### US-4: 同一ブランチで既に開いている live session にすぐ戻りたい
+
 ## Acceptance Scenarios
 
 1. branch に active session がなく、resume 可能な履歴がある場合、Quick Start fast path を提示できる
 2. branch に active session が複数ある場合、selector から `追加起動` を選ぶと Quick Start fast path へ進める
 3. Resume は保存済み session_id を使って起動する
 4. Start New は保存済み設定を使って新規 session を追加する
-5. いつでも Full Wizard へフォールバックできる
+5. branch に紐づく live session がある場合、Quick Start から `Focus existing session` を選んで対象 session selector へ進める
+6. `Focus existing session` は現在の session workspace に存在する live session のみを候補にし、選択すると launch を発生させず active session と terminal focus を切り替える
+7. いつでも Full Wizard へフォールバックできる
 
 ## Functional Requirements
 
@@ -29,9 +33,11 @@ rebuilt TUI では `1ブランチ = Nセッション` を許可するため、Qu
 - FR-003: branch `Enter` の selector から `追加起動` fast path として呼び出せなければならない
 - FR-004: Resume は session_id を使って起動する
 - FR-005: Start New は保存済み設定を使って新規 session を追加する
-- FR-006: Full Wizard へのフォールバックを常に提供する
+- FR-006: Quick Start は live session へのフォーカス導線を Resume / Start New と別アクションとして提供しなければならない
+- FR-007: live session selector は branch/worktree に一致する current live session だけを表示しなければならない
+- FR-008: Full Wizard へのフォールバックを常に提供する
 
 ## Success Criteria
 
 - SC-001: Quick Start が branch-first parent UX と矛盾しない
-- SC-002: active session の有無にかかわらず、resume / add session / full wizard の関係が一貫する
+- SC-002: active session の有無にかかわらず、resume / focus existing session / add session / full wizard の関係が一貫する
