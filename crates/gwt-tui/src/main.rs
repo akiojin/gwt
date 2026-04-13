@@ -423,10 +423,10 @@ fn run_app(
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
-        RepoType::Normal(root) => Model::new(root),
+        RepoType::Normal(root) => Model::new_startup(root),
         RepoType::Bare {
             develop_worktree: Some(wt),
-        } => Model::new(wt),
+        } => Model::new_startup(wt),
         RepoType::Bare {
             develop_worktree: None,
         } => Model::new_initialization(repo_path, true),
@@ -540,7 +540,7 @@ fn run_app(
     }
 
     // Spawn PTY for the default shell-0 session.
-    if model.active_layer != ActiveLayer::Initialization {
+    if should_spawn_default_shell(&model) {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let (cols, rows) = app::session_content_size(&model);
         // Resize default VtState to match actual pane area.
@@ -669,7 +669,13 @@ fn run_app(
 }
 
 fn restore_startup_session_state_with(model: &mut Model, path: &Path) -> Option<String> {
-    model.restore_session_state_from_path(path)
+    let warning = model.restore_session_state_from_path(path);
+    model.apply_startup_welcome_state();
+    warning
+}
+
+fn should_spawn_default_shell(model: &Model) -> bool {
+    model.active_layer != ActiveLayer::Initialization && model.session_count() > 0
 }
 
 fn reset_startup_runtime_state_with(sessions_dir: &Path) -> Option<String> {
@@ -783,6 +789,69 @@ mod tests {
         let warning = restore_startup_session_state_with(&mut restored, &path);
 
         assert!(warning.is_some());
+    }
+
+    #[test]
+    fn restore_startup_session_state_with_zero_sessions_skips_default_shell_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            r#"
+display_mode = "tab"
+panel_visible = false
+active_management_tab = "Branches"
+session_count = 0
+"#,
+        )
+        .expect("write zero-session state");
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restore_startup_session_state_with(&mut restored, &path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.session_count(), 0);
+        assert!(restored.active_session_tab().is_none());
+        assert!(!should_spawn_default_shell(&restored));
+    }
+
+    #[test]
+    fn restore_startup_session_state_with_saved_sessions_still_starts_in_welcome() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            r#"
+display_mode = "grid"
+panel_visible = true
+active_management_tab = "Logs"
+session_count = 3
+"#,
+        )
+        .expect("write saved session state");
+
+        let mut restored = Model::new_startup(PathBuf::from("/tmp/repo"));
+        let warning = restore_startup_session_state_with(&mut restored, &path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.session_layout, SessionLayout::Grid);
+        assert_eq!(restored.management_tab, ManagementTab::Logs);
+        assert_eq!(restored.active_layer, ActiveLayer::Main);
+        assert_eq!(restored.active_focus, FocusPane::Terminal);
+        assert_eq!(restored.session_count(), 0);
+        assert!(restored.active_session_tab().is_none());
+        assert!(!should_spawn_default_shell(&restored));
+    }
+
+    #[test]
+    fn startup_welcome_skips_default_shell_spawn() {
+        let model = Model::new_startup(PathBuf::from("/tmp/repo"));
+
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.session_count(), 0);
+        assert!(model.active_session_tab().is_none());
+        assert!(!should_spawn_default_shell(&model));
     }
 
     #[test]

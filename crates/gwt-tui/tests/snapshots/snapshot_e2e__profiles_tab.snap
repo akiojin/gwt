@@ -1,9 +1,10 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 455
 expression: output
 ---
 ╔...│ Specs │ Profiles │ Git View │...═╗╭ › Shell ─────────────────────────────╮
-║╔Profiles═══╗╭Environment────────────╮║│Session: Shell (80x24)                │
+║╔Profiles═══╗╭Profile Variables──────╮║│Session: Shell (80x24)                │
 ║║Tab | ↵ |  ║│↵/e | n | d            │║│                                      │
 ║║[*] default║│A00_BASE=/usr/bin      │║│                                      │
 ║║           ║│A01_BASE=/bin          │║│                                      │

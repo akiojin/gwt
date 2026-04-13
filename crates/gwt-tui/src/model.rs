@@ -316,6 +316,20 @@ pub struct SessionTab {
     pub created_at: std::time::Instant,
 }
 
+pub(crate) fn shell_session(index: usize) -> SessionTab {
+    SessionTab {
+        id: format!("shell-{index}"),
+        name: if index == 0 {
+            "Shell".to_string()
+        } else {
+            format!("Shell {}", index + 1)
+        },
+        tab_type: SessionTabType::Shell,
+        vt: VtState::new(24, 80),
+        created_at: std::time::Instant::now(),
+    }
+}
+
 /// Buffered PTY input waiting to be written to the active session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPtyInput {
@@ -1975,13 +1989,7 @@ impl Model {
     pub fn new(repo_path: PathBuf) -> Self {
         let specs_cache_root =
             crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo_path);
-        let default_session = SessionTab {
-            id: "shell-0".to_string(),
-            name: "Shell".to_string(),
-            tab_type: SessionTabType::Shell,
-            vt: VtState::new(24, 80),
-            created_at: std::time::Instant::now(),
-        };
+        let default_session = shell_session(0);
         let (notification_bus, notification_receiver) = unbounded_channel::<Notification>();
         let (pty_output_tx, pty_output_rx) = std::sync::mpsc::channel();
         Self {
@@ -2053,6 +2061,21 @@ impl Model {
             log_reload_handle: None,
             initialization: None,
         }
+    }
+
+    /// Normalize the model into the startup Welcome state.
+    pub fn apply_startup_welcome_state(&mut self) {
+        self.sessions.clear();
+        self.active_session = 0;
+        self.active_layer = ActiveLayer::Main;
+        self.active_focus = FocusPane::Terminal;
+    }
+
+    /// Create the startup model shown before any terminal window exists.
+    pub fn new_startup(repo_path: PathBuf) -> Self {
+        let mut model = Self::new(repo_path);
+        model.apply_startup_welcome_state();
+        model
     }
 
     /// Attach a logs-watcher receiver produced by
@@ -2363,6 +2386,11 @@ impl Model {
         } else {
             ActiveLayer::Main
         };
+        self.active_focus = if state.panel_visible {
+            FocusPane::TabContent
+        } else {
+            FocusPane::Terminal
+        };
         self.management_tab = if state.active_management_tab == "Specs" {
             ManagementTab::Branches
         } else {
@@ -2381,6 +2409,17 @@ impl Model {
                 }
             }
         };
+        if state.session_count == 0 {
+            self.sessions.clear();
+            self.active_session = 0;
+        } else {
+            if self.sessions.is_empty() {
+                self.sessions.push(shell_session(0));
+            }
+            if self.active_session >= self.sessions.len() {
+                self.active_session = self.sessions.len().saturating_sub(1);
+            }
+        }
 
         if warnings.is_empty() {
             None
@@ -2457,6 +2496,17 @@ mod tests {
                 "queued",
             ))
             .is_ok());
+    }
+
+    #[test]
+    fn model_new_startup_defaults_to_welcome_without_sessions() {
+        let model = Model::new_startup(PathBuf::from("/tmp/repo"));
+
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.session_count(), 0);
+        assert_eq!(model.active_session, 0);
+        assert!(model.active_session_tab().is_none());
     }
 
     #[test]
@@ -3337,6 +3387,19 @@ mod tests {
     }
 
     #[test]
+    fn save_session_state_tracks_zero_session_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        model.sessions.clear();
+        model.save_session_state(&path).unwrap();
+
+        let loaded = Model::load_session_state(&path).expect("load state");
+        assert_eq!(loaded.session_count, 0);
+    }
+
+    #[test]
     fn save_session_state_creates_missing_parent_directory() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("state.toml");
@@ -3403,5 +3466,29 @@ session_count = 1
 
         assert!(warning.is_none());
         assert_eq!(restored.management_tab, ManagementTab::Branches);
+    }
+
+    #[test]
+    fn restore_session_state_from_path_zero_session_state_clears_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            r#"
+display_mode = "tab"
+panel_visible = false
+active_management_tab = "Branches"
+session_count = 0
+"#,
+        )
+        .unwrap();
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restored.restore_session_state_from_path(&path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.active_layer, ActiveLayer::Main);
+        assert_eq!(restored.session_count(), 0);
+        assert_eq!(restored.active_session, 0);
     }
 }
