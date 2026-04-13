@@ -1,10 +1,11 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 608
 expression: output
 ---
 ╔...│ Versions │ Settings │ Logs ══════╗╭ › Shell ─────────────────────────────╮
 ║ General │ Worktree │ Agent │ Custom A║│Session: Shell (80x24)                │
-║General Enter: edit | Space: toggle bo║│                                      │
+║General Enter: edit/apply | Space: tog║│                                      │
 ║[T] Theme: dark                       ║│                                      │
 ║[T] Language: en                      ║│                                      │
 ║[B] Auto-save: true                   ║│                                      │
@@ -25,4 +26,4 @@ expression: output
 ║                                      ║│                                      │
 ║                                      ║│                                      │
 ╚══════════════════════════════════════╝╰──────────────────────────────────────╯
- ⎇n/a  │  P:default  │  ↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  C-g Tab  Esc t
+ ⎇n/a  │  P:default  │  ↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  ?
