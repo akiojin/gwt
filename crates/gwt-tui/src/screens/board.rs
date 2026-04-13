@@ -103,17 +103,10 @@ pub fn update(state: &mut BoardState, msg: BoardMessage) {
 }
 
 pub fn render(state: &BoardState, frame: &mut Frame, area: Rect) {
-    let chunks = if state.composer_open {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(10), Constraint::Length(7)])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0)])
-            .split(area)
-    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(10), Constraint::Length(7)])
+        .split(area);
 
     let main = chunks[0];
     let columns = Layout::default()
@@ -129,9 +122,7 @@ pub fn render(state: &BoardState, frame: &mut Frame, area: Rect) {
     render_entry_detail(state, frame, right[0]);
     render_cards(state, frame, right[1]);
 
-    if state.composer_open {
-        render_composer(state, frame, chunks[1]);
-    }
+    render_composer(state, frame, chunks[1]);
 }
 
 fn render_timeline(state: &BoardState, frame: &mut Frame, area: Rect) {
@@ -293,14 +284,16 @@ fn render_cards(state: &BoardState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_composer(state: &BoardState, frame: &mut Frame, area: Rect) {
-    let title = format!("Compose [{}]", state.composer_kind.as_str());
+    let title = format!("Input [{}]", state.composer_kind.as_str());
     let text = if state.composer_text.is_empty() {
+        let placeholder = if state.composer_open {
+            "Write a board update"
+        } else {
+            "Press i to write a board update"
+        };
         Text::from(vec![
             Line::from(""),
-            Line::from(vec![Span::styled(
-                "Write a board update",
-                theme::style::muted_text(),
-            )]),
+            Line::from(vec![Span::styled(placeholder, theme::style::muted_text())]),
         ])
     } else {
         Text::from(state.composer_text.clone())
@@ -345,6 +338,24 @@ fn kind_color(kind: &BoardEntryKind) -> Color {
 mod tests {
     use super::*;
     use gwt_core::coordination::{AgentCard, AgentCardsProjection, AuthorKind, BoardProjection};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn render_buffer(state: &BoardState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(state, frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
 
     fn sample_snapshot() -> CoordinationSnapshot {
         CoordinationSnapshot {
@@ -423,5 +434,26 @@ mod tests {
         assert!(!state.composer_open);
         assert_eq!(state.composer_text, "h");
         assert_eq!(state.composer_kind, BoardEntryKind::Status);
+    }
+
+    #[test]
+    fn render_shows_input_footer_even_when_not_editing() {
+        let state = BoardState::default();
+
+        let text = buffer_text(&render_buffer(&state, 100, 24));
+
+        assert!(text.contains("Input [request]"));
+        assert!(text.contains("Press i to write a board update"));
+    }
+
+    #[test]
+    fn render_shows_active_input_placeholder_when_editing() {
+        let mut state = BoardState::default();
+        update(&mut state, BoardMessage::OpenComposer);
+
+        let text = buffer_text(&render_buffer(&state, 100, 24));
+
+        assert!(text.contains("Input [request]"));
+        assert!(text.contains("Write a board update"));
     }
 }
