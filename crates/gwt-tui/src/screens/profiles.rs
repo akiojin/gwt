@@ -505,7 +505,7 @@ fn render_list(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
 fn render_detail(state: &ProfilesState, frame: &mut Frame, areas: LayoutAreas) {
     let Some(profile) = state.selected_profile() else {
         let block = Block::default()
-            .title("Environment")
+            .title("Profile Variables")
             .borders(Borders::ALL)
             .border_type(theme::border::default());
         frame.render_widget(
@@ -538,7 +538,7 @@ fn render_environment_block(
     let (border_style, border_type) = theme::pane_border(state.focus == ProfilesFocus::Environment);
     frame.render_widget(
         Block::default()
-            .title("Environment")
+            .title("Profile Variables")
             .borders(Borders::ALL)
             .border_style(border_style)
             .border_type(border_type),
@@ -552,7 +552,7 @@ fn render_environment_block(
     );
     let items: Vec<ListItem> = if profile.env_rows.is_empty() {
         vec![ListItem::new(Line::from(vec![Span::styled(
-            "No environment rows. Press n to add one.".to_string(),
+            "No profile variables. Press n to add one.".to_string(),
             theme::style::muted_text(),
         )]))]
     } else {
@@ -617,10 +617,10 @@ fn render_form(state: &ProfilesState, frame: &mut Frame, area: Rect) {
     let title = match state.mode {
         ProfileMode::CreateProfile => "Create Profile",
         ProfileMode::EditProfile => "Edit Profile",
-        ProfileMode::CreateEnvVar => "Add Environment Variable",
-        ProfileMode::EditEnvVar => "Edit Environment Variable",
-        ProfileMode::CreateDisabledEnv => "Add Disabled OS Environment",
-        ProfileMode::EditDisabledEnv => "Edit Disabled OS Environment",
+        ProfileMode::CreateEnvVar => "Add Profile Variable",
+        ProfileMode::EditEnvVar => "Edit Profile Variable",
+        ProfileMode::CreateDisabledEnv => "Disable OS Variable",
+        ProfileMode::EditDisabledEnv => "Edit Disabled OS Variable",
         _ => "Profile Form",
     };
 
@@ -750,11 +750,11 @@ fn render_confirm_delete(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             state.selected_profile().map(|profile| profile.name.clone()),
         ),
         ProfileMode::ConfirmDeleteEnvVar => (
-            "Delete Environment Variable",
+            "Delete Profile Variable",
             state.selected_env_var().map(|env| env.key.clone()),
         ),
         ProfileMode::ConfirmDeleteDisabledEnv => (
-            "Delete Disabled OS Environment",
+            "Delete Disabled OS Variable",
             state.selected_disabled_env().map(str::to_string),
         ),
         _ => ("Delete", None),
@@ -959,7 +959,8 @@ mod tests {
             .map(|cell| cell.symbol().to_string())
             .collect::<String>();
         assert!(text.contains("Profiles"), "{text}");
-        assert!(text.contains("Environment"), "{text}");
+        assert!(text.contains("Profile Variables"), "{text}");
+        assert!(!text.contains("Environment"), "{text}");
         assert!(!text.contains("Profile Detail"), "{text}");
         assert!(!text.contains("Name:"), "{text}");
         assert!(!text.contains("Desc:"), "{text}");

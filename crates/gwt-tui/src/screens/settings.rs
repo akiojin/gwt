@@ -28,7 +28,6 @@ pub enum SettingsCategory {
     Worktree,
     Agent,
     CustomAgents,
-    Environment,
     Ai,
     Skills,
     Voice,
@@ -36,12 +35,11 @@ pub enum SettingsCategory {
 
 impl SettingsCategory {
     /// All categories in display order.
-    pub const ALL: [SettingsCategory; 8] = [
+    pub const ALL: [SettingsCategory; 7] = [
         SettingsCategory::General,
         SettingsCategory::Worktree,
         SettingsCategory::Agent,
         SettingsCategory::CustomAgents,
-        SettingsCategory::Environment,
         SettingsCategory::Ai,
         SettingsCategory::Skills,
         SettingsCategory::Voice,
@@ -54,7 +52,6 @@ impl SettingsCategory {
             Self::Worktree => "Worktree",
             Self::Agent => "Agent",
             Self::CustomAgents => "Custom Agents",
-            Self::Environment => "Environment",
             Self::Ai => "AI",
             Self::Skills => "Skills",
             Self::Voice => "Voice",
@@ -274,23 +271,6 @@ pub fn fields_for_category_with_settings(
                 label: CUSTOM_AGENT_ADD_LABEL.to_string(),
                 value: "Create new custom agent".to_string(),
                 field_type: FieldType::Action,
-            },
-        ],
-        SettingsCategory::Environment => vec![
-            SettingField {
-                label: "Shell".to_string(),
-                value: "/bin/zsh".to_string(),
-                field_type: FieldType::Path,
-            },
-            SettingField {
-                label: "PATH prefix".to_string(),
-                value: String::new(),
-                field_type: FieldType::Text,
-            },
-            SettingField {
-                label: "Inherit env".to_string(),
-                value: "true".to_string(),
-                field_type: FieldType::Bool,
             },
         ],
         SettingsCategory::Ai => vec![
@@ -768,6 +748,14 @@ fn finish_custom_agent_edit(state: &mut SettingsState) {
     });
 }
 
+fn persist_settings_change(state: &mut SettingsState) {
+    if let Err(e) = save_settings_to_config(state) {
+        state.save_error = Some(e);
+    } else {
+        state.save_error = None;
+    }
+}
+
 /// Update settings state in response to a message.
 pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
     match msg {
@@ -802,6 +790,7 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
                 if let Some(field) = state.fields.get(state.selected) {
                     if field.field_type == FieldType::Bool {
                         toggle_bool_field(&mut state.fields[state.selected]);
+                        persist_settings_change(state);
                     } else {
                         state.edit_buffer = field.value.clone();
                         state.editing = true;
@@ -820,6 +809,7 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
                 }
                 state.editing = false;
                 state.edit_buffer.clear();
+                persist_settings_change(state);
             }
         }
         SettingsMessage::CancelEdit => {
@@ -840,15 +830,12 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
             if !state.editing {
                 if let Some(field) = state.fields.get_mut(state.selected) {
                     toggle_bool_field(field);
+                    persist_settings_change(state);
                 }
             }
         }
         SettingsMessage::Save => {
-            if let Err(e) = save_settings_to_config(state) {
-                state.save_error = Some(e);
-            } else {
-                state.save_error = None;
-            }
+            persist_settings_change(state);
         }
     }
 }
@@ -962,11 +949,11 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let hints = if state.editing {
-        " Enter: save | Esc: cancel"
+        " Enter: apply | Esc: cancel"
     } else if state.category == SettingsCategory::CustomAgents {
-        " Enter: cycle/edit/action | Ctrl+Left/Right: category"
+        " Enter: cycle/edit/action | [/]: category"
     } else {
-        " Enter: edit | Space: toggle bool | Ctrl+Left/Right: category"
+        " Enter: edit/apply | Space: toggle bool | [/]: category"
     };
 
     let block = Block::default().title(format!("{}{}", state.category.label(), hints));
@@ -1007,6 +994,17 @@ mod tests {
     fn voice_state_with_fields() -> SettingsState {
         let mut state = SettingsState::default();
         state.category = SettingsCategory::Voice;
+        state.load_category_fields();
+        state
+    }
+
+    fn state_with_category_and_path(
+        category: SettingsCategory,
+        config_path: &Path,
+    ) -> SettingsState {
+        let mut state = SettingsState::default();
+        state.category = category;
+        state.config_path_override = Some(config_path.to_path_buf());
         state.load_category_fields();
         state
     }
@@ -1153,6 +1151,23 @@ mod tests {
     }
 
     #[test]
+    fn end_edit_persists_agent_field_without_explicit_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        Settings::default().save(&config_path).unwrap();
+
+        let mut state = state_with_category_and_path(SettingsCategory::Agent, &config_path);
+        update(&mut state, SettingsMessage::StartEdit);
+        state.edit_buffer = "codex".to_string();
+
+        update(&mut state, SettingsMessage::EndEdit);
+
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert_eq!(loaded.agent.default_agent.as_deref(), Some("codex"));
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
     fn cancel_edit_discards() {
         let mut state = state_with_fields();
         let original = state.fields[0].value.clone();
@@ -1217,6 +1232,45 @@ mod tests {
     }
 
     #[test]
+    fn toggle_bool_persists_voice_config_without_explicit_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let model_dir = dir.path().join("model");
+        std::fs::create_dir(&model_dir).unwrap();
+
+        let mut settings = Settings::default();
+        settings.voice.model_path = Some(model_dir.clone());
+        settings.save(&config_path).unwrap();
+
+        let mut state = state_with_category_and_path(SettingsCategory::Voice, &config_path);
+        state.selected = 4;
+
+        update(&mut state, SettingsMessage::ToggleBool);
+
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert!(loaded.voice.enabled);
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
+    fn end_edit_auto_save_surfaces_validation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        Settings::default().save(&config_path).unwrap();
+
+        let mut state = state_with_category_and_path(SettingsCategory::Voice, &config_path);
+        state.selected = 0;
+        update(&mut state, SettingsMessage::StartEdit);
+        state.edit_buffer = "/nonexistent/model".to_string();
+
+        update(&mut state, SettingsMessage::EndEdit);
+
+        assert!(state.save_error.is_some());
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert!(loaded.voice.model_path.is_none());
+    }
+
+    #[test]
     fn toggle_bool_noop_on_text_field() {
         let mut state = state_with_fields();
         state.selected = 0; // Theme (Text)
@@ -1243,6 +1297,16 @@ mod tests {
             let fields = fields_for_category(cat);
             assert!(!fields.is_empty(), "Category {:?} has no fields", cat);
         }
+    }
+
+    #[test]
+    fn settings_categories_exclude_environment() {
+        let labels: Vec<_> = SettingsCategory::ALL
+            .iter()
+            .map(|category| category.label())
+            .collect();
+
+        assert!(!labels.contains(&"Environment"));
     }
 
     #[test]
@@ -1309,7 +1373,7 @@ mod tests {
     #[test]
     fn category_cycle_full_round() {
         let mut cat = SettingsCategory::General;
-        for _ in 0..8 {
+        for _ in 0..SettingsCategory::ALL.len() {
             cat = cat.next();
         }
         assert_eq!(cat, SettingsCategory::General); // full cycle
@@ -1317,15 +1381,15 @@ mod tests {
 
     #[test]
     fn voice_and_skills_categories_are_last_in_sidebar_order() {
-        assert_eq!(SettingsCategory::ALL.len(), 8);
-        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Skills);
-        assert_eq!(SettingsCategory::ALL[7], SettingsCategory::Voice);
+        assert_eq!(SettingsCategory::ALL.len(), 7);
+        assert_eq!(SettingsCategory::ALL[5], SettingsCategory::Skills);
+        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Voice);
     }
 
     #[test]
     fn category_prev_full_round() {
         let mut cat = SettingsCategory::General;
-        for _ in 0..8 {
+        for _ in 0..SettingsCategory::ALL.len() {
             cat = cat.prev();
         }
         assert_eq!(cat, SettingsCategory::General); // full cycle

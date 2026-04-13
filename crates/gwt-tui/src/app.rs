@@ -3231,9 +3231,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     KeyCode::Up => Some(SettingsMessage::MoveUp),
                     KeyCode::Enter => Some(SettingsMessage::StartEdit),
                     KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
-                    KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        Some(SettingsMessage::Save)
-                    }
+                    KeyCode::Char('[') => Some(SettingsMessage::PrevCategory),
+                    KeyCode::Char(']') => Some(SettingsMessage::NextCategory),
                     KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         Some(SettingsMessage::PrevCategory)
                     }
@@ -9868,17 +9867,18 @@ fn generic_management_hint_text(
 
 fn settings_list_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  C-g Tab  Esc term  ?".to_string()
+        "↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  ?".to_string()
     } else {
-        "↑↓:select  Enter:edit  Space:toggle  Ctrl+←→:sub-tab  Shift+S:save  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:apply  Space:toggle  []:sub-tab  Ctrl+G, Tab:focus  Esc:term  ?:help"
+            .to_string()
     }
 }
 
 fn settings_edit_hint_text(compact: bool) -> String {
     if compact {
-        "↵ save  ⌫ del  Esc cancel  ?".to_string()
+        "↵ apply  ⌫ del  Esc cancel  ?".to_string()
     } else {
-        "Enter:save  Backspace:delete  Esc:cancel  ?:help".to_string()
+        "Enter:apply  Backspace:delete  Esc:cancel  ?:help".to_string()
     }
 }
 
@@ -13259,7 +13259,7 @@ services:
 
         let rendered = render_model_text(&model, 220, 24);
 
-        assert!(rendered.contains("Ctrl+←→:sub-tab"));
+        assert!(rendered.contains("[]:sub-tab"));
     }
 
     #[test]
@@ -21541,6 +21541,46 @@ services:
             model.profiles.focus,
             screens::profiles::ProfilesFocus::ProfileList
         );
+    }
+
+    #[test]
+    fn route_key_to_management_settings_brackets_cycle_categories() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::TabContent;
+
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::General
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::Worktree
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::General
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_settings_shift_s_is_noop() {
+        with_temp_home(|_home| {
+            let mut model = test_model();
+            model.management_tab = ManagementTab::Settings;
+            model.active_focus = FocusPane::TabContent;
+            model.settings.category = screens::settings::SettingsCategory::Voice;
+            model.settings.load_category_fields();
+            model.settings.fields[0].value = "/nonexistent/model".to_string();
+
+            route_key_to_management(&mut model, key(KeyCode::Char('S'), KeyModifiers::SHIFT));
+
+            assert!(model.settings.save_error.is_none());
+        });
     }
 
     #[test]
