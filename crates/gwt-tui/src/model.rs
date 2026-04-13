@@ -214,7 +214,8 @@ pub enum ManagementTab {
     Branches,
     Issues,
     PrDashboard,
-    /// SPEC-12 Phase 9: dedicated Specs tab backed by `~/.gwt/cache/issues/`.
+    /// SPEC-12 Phase 9: dedicated Specs tab backed by the repo-scoped issue
+    /// cache under `~/.gwt/cache/issues/<repo-hash>/`.
     /// Displayed as a top-level peer of Branches/Issues/PRs now that SPECs
     /// live as GitHub Issues rather than worktree-local files.
     Specs,
@@ -1950,6 +1951,8 @@ impl std::fmt::Debug for Model {
 impl Model {
     /// Create a new Model with sensible defaults.
     pub fn new(repo_path: PathBuf) -> Self {
+        let specs_cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo_path);
         let default_session = SessionTab {
             id: "shell-0".to_string(),
             name: "Shell".to_string(),
@@ -1986,12 +1989,7 @@ impl Model {
             logs: LogsState::default(),
             versions: VersionsState::default(),
             specs: {
-                let cache_root = dirs::home_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join(".gwt")
-                    .join("cache")
-                    .join("issues");
-                let mut specs = crate::screens::specs::SpecsState::new(cache_root);
+                let mut specs = crate::screens::specs::SpecsState::new(specs_cache_root);
                 // Silently attempt to load cached SPECs. If the cache
                 // directory doesn't exist yet (first startup before any
                 // `gwt issue spec pull`), we leave the list empty rather

@@ -1251,7 +1251,23 @@ where
 {
     schedule_startup_version_cache_refresh();
     let has_git_remote = repo_has_git_remote(&model.repo_path);
-    reload_cached_issues(model);
+    let issue_cache_root = default_issue_cache_root(&model.repo_path);
+    if let Err(err) = crate::issue_cache::sync_issue_cache_from_remote_if_missing(
+        &model.repo_path,
+        &issue_cache_root,
+    ) {
+        tracing::warn!("startup issue cache sync failed: {err}");
+    }
+    reload_cached_issues_with_paths(
+        model,
+        issue_cache_root.clone(),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+    model.specs.cache_root = issue_cache_root.clone();
+    model.specs.reload_from_cache();
+    if !issue_cache_root.exists() {
+        model.specs.last_error = None;
+    }
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -3199,7 +3215,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::Specs => {
             // SPEC-12 Phase 9: Specs tab is cache-only. `r` triggers a
-            // local cache reload from `~/.gwt/cache/issues/`.
+            // local cache reload from `~/.gwt/cache/issues/<repo-hash>/`.
             match key.code {
                 KeyCode::Char('r') => {
                     model.specs.reload_from_cache();
@@ -6314,7 +6330,7 @@ fn open_wizard_with_prefill(
             Some(issue_number),
             detected_agents,
             &cache,
-            default_issue_cache_root(),
+            default_issue_cache_root(&model.repo_path),
         )
     } else {
         prepare_wizard_startup(&model.repo_path, spec_context, detected_agents, &cache)
@@ -6722,7 +6738,7 @@ fn prepare_wizard_startup(
         None,
         detected_agents,
         cache,
-        default_issue_cache_root(),
+        default_issue_cache_root(repo_path),
     )
 }
 
@@ -6895,12 +6911,8 @@ struct IssueBranchLinkStore {
     branches: HashMap<String, u64>,
 }
 
-fn default_issue_cache_root() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".gwt")
-        .join("cache")
-        .join("issues")
+fn default_issue_cache_root(repo_path: &std::path::Path) -> PathBuf {
+    crate::issue_cache::issue_cache_root_for_repo_path_or_detached(repo_path)
 }
 
 fn default_issue_linkage_store_path(repo_path: &std::path::Path) -> Option<PathBuf> {
@@ -6916,7 +6928,7 @@ fn handle_issues_message(model: &mut Model, msg: screens::issues::IssuesMessage)
     handle_issues_message_with_paths(
         model,
         msg,
-        default_issue_cache_root(),
+        default_issue_cache_root(&model.repo_path),
         default_issue_linkage_store_path(&model.repo_path),
     );
 }
@@ -6938,7 +6950,7 @@ fn handle_issues_message_with_paths(
 fn reload_cached_issues(model: &mut Model) {
     reload_cached_issues_with_paths(
         model,
-        default_issue_cache_root(),
+        default_issue_cache_root(&model.repo_path),
         default_issue_linkage_store_path(&model.repo_path),
     );
 }
@@ -14441,6 +14453,28 @@ services:
         fs::write(dir.join("body.md"), body).expect("write issue cache body");
     }
 
+    fn write_cached_spec(
+        root: &std::path::Path,
+        number: u64,
+        title: &str,
+        state: gwt_github::IssueState,
+        labels: &[&str],
+    ) {
+        gwt_github::Cache::new(root.to_path_buf())
+            .write_snapshot(&gwt_github::client::IssueSnapshot {
+                number: gwt_github::IssueNumber(number),
+                title: title.to_string(),
+                body: format!(
+                    "<!-- gwt-spec id={number} version=1 -->\n<!-- sections:\nspec=body\n-->\n<!-- artifact:spec BEGIN -->\nbody\n<!-- artifact:spec END -->\n"
+                ),
+                labels: labels.iter().map(|label| label.to_string()).collect(),
+                state,
+                updated_at: gwt_github::UpdatedAt::new("2026-04-12T00:00:00Z"),
+                comments: vec![],
+            })
+            .expect("write cached spec");
+    }
+
     #[test]
     fn prepare_wizard_startup_loads_cached_issues_and_prefills_selected_issue() {
         let cache = VersionCache::new();
@@ -19945,10 +19979,24 @@ services:
     #[test]
     fn route_key_to_management_issues_refresh_reloads_issue_cache() {
         with_temp_home(|home| {
-            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            let repo_url = "https://github.com/example/repo.git";
+            let issue_cache_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(gwt_core::repo_hash::compute_repo_hash(repo_url).as_str());
             write_issue_cache_meta(&issue_cache_root, 42, "Fix login bug", "open", &["bug"]);
 
-            let mut model = test_model();
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let mut model = Model::new(dir.path().to_path_buf());
             model.management_tab = ManagementTab::Issues;
             model.issues.last_error = Some("stale".to_string());
 
@@ -19990,7 +20038,17 @@ services:
     #[test]
     fn load_initial_data_populates_issues_from_issue_cache() {
         with_temp_home(|home| {
-            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            let repo_url = "https://github.com/example/repo.git";
+            let repo_hash = gwt_core::repo_hash::compute_repo_hash(repo_url);
+            let issue_cache_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(repo_hash.as_str());
+            let other_cache_root = home.join(".gwt").join("cache").join("issues").join(
+                gwt_core::repo_hash::compute_repo_hash("https://github.com/example/other.git")
+                    .as_str(),
+            );
             write_issue_cache_meta(
                 &issue_cache_root,
                 1776,
@@ -19998,9 +20056,16 @@ services:
                 "open",
                 &["ux"],
             );
+            write_issue_cache_meta(&other_cache_root, 42, "Other repo issue", "open", &["bug"]);
 
             let dir = tempfile::tempdir().expect("temp repo");
             init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
 
             let mut model = Model::new(dir.path().to_path_buf());
             load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
@@ -20008,6 +20073,91 @@ services:
             assert_eq!(model.issues.issues.len(), 1);
             assert_eq!(model.issues.issues[0].number, 1776);
             assert!(model.issues.last_error.is_none());
+        });
+    }
+
+    #[test]
+    fn load_initial_data_syncs_repo_scoped_issue_cache_when_missing() {
+        with_temp_home(|_home| {
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/example/repo.git",
+                ])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let script = r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  printf '[{"number":1776,"title":"Launch Agent issue linkage","body":"Body from startup sync","labels":[{"name":"ux"}],"state":"OPEN","url":"https://github.com/example/repo/issues/1776","updatedAt":"2026-04-13T00:00:00Z"}]'
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#;
+
+            with_fake_gh(script, || {
+                let mut model = Model::new(dir.path().to_path_buf());
+                load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
+
+                assert_eq!(model.issues.issues.len(), 1);
+                assert_eq!(model.issues.issues[0].number, 1776);
+                assert_eq!(model.issues.issues[0].title, "Launch Agent issue linkage");
+                assert_eq!(model.issues.issues[0].body, "Body from startup sync");
+            });
+        });
+    }
+
+    #[test]
+    fn model_new_loads_specs_from_repo_scoped_cache_only() {
+        with_temp_home(|home| {
+            let repo_url = "https://github.com/example/specs.git";
+            let repo_hash = gwt_core::repo_hash::compute_repo_hash(repo_url);
+            let relevant_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(repo_hash.as_str());
+            let other_root = home.join(".gwt").join("cache").join("issues").join(
+                gwt_core::repo_hash::compute_repo_hash(
+                    "https://github.com/example/other-specs.git",
+                )
+                .as_str(),
+            );
+            write_cached_spec(
+                &relevant_root,
+                1776,
+                "Current repo spec",
+                gwt_github::IssueState::Open,
+                &["gwt-spec", "phase/draft"],
+            );
+            write_cached_spec(
+                &other_root,
+                42,
+                "Other repo spec",
+                gwt_github::IssueState::Open,
+                &["gwt-spec", "phase/draft"],
+            );
+
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let model = Model::new(dir.path().to_path_buf());
+            assert_eq!(model.specs.items.len(), 1);
+            assert_eq!(model.specs.items[0].number, 1776);
+            assert_eq!(model.specs.items[0].title, "Current repo spec");
         });
     }
 
