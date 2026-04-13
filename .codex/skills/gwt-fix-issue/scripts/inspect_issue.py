@@ -105,24 +105,30 @@ class GhResult:
 # =============================================================================
 
 def run_gh_command(args: Sequence[str], cwd: Path) -> GhResult:
-    process = subprocess.run(
-        ["gh", *args],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        encoding="utf-8",
-    )
+    try:
+        process = subprocess.run(
+            ["gh", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return GhResult(1, "", str(exc))
     return GhResult(process.returncode, process.stdout, process.stderr)
 
 
 def find_git_root(start: Path) -> Path | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=start,
-        text=True,
-        capture_output=True,
-        encoding="utf-8",
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=start,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
     if result.returncode != 0:
         return None
     return Path(result.stdout.strip())
@@ -229,27 +235,41 @@ def fetch_issue_comments(
     """Fetch all comments on an issue."""
     repo_slug = fetch_repo_slug(repo_root)
     if not repo_slug:
-        return []
+        raise RuntimeError("failed to resolve repository slug")
 
     result = run_gh_command(
-        ["api", f"repos/{repo_slug}/issues/{issue_number}/comments?per_page=100"],
+        [
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{repo_slug}/issues/{issue_number}/comments?per_page=100",
+        ],
         cwd=repo_root,
     )
     if result.returncode != 0:
-        return []
+        message = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(message or "failed to fetch issue comments")
 
     try:
-        comments = json.loads(result.stdout or "[]")
+        pages = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
-        return []
+        raise RuntimeError("failed to parse paginated issue comments")
 
-    if not isinstance(comments, list):
-        return []
+    if not isinstance(pages, list):
+        raise RuntimeError("unexpected paginated issue comment payload")
+
+    comments: list[dict[str, Any]] = []
+    for page in pages:
+        if page is None:
+            continue
+        if not isinstance(page, list):
+            raise RuntimeError("unexpected issue comment page payload")
+        for comment in page:
+            if isinstance(comment, dict):
+                comments.append(comment)
 
     formatted: list[dict[str, Any]] = []
     for comment in comments:
-        if not isinstance(comment, dict):
-            continue
         body = (comment.get("body") or "").strip()
         if max_comment_length > 0 and len(body) > max_comment_length:
             body = body[:max_comment_length] + "..."
@@ -271,22 +291,30 @@ def fetch_timeline_linked_prs(
     issue_number: str,
     repo_root: Path,
 ) -> list[dict[str, Any]]:
-    """Fetch linked PRs via GraphQL timeline events."""
+    """Fetch linked PRs via paginated GraphQL timeline events."""
     repo_slug = fetch_repo_slug(repo_root)
     if not repo_slug:
-        return []
+        raise RuntimeError("failed to resolve repository slug")
 
     parsed = parse_repo_owner_name(repo_slug)
     if not parsed:
-        return []
+        raise RuntimeError("failed to parse repository slug")
 
     owner, repo = parsed
 
     query = """
-    query($owner: String!, $repo: String!, $number: Int!) {
+    query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
       repository(owner: $owner, name: $repo) {
         issue(number: $number) {
-          timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+          timelineItems(
+            first: 100,
+            after: $endCursor,
+            itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]
+          ) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
             nodes {
               __typename
               ... on CrossReferencedEvent {
@@ -321,6 +349,8 @@ def fetch_timeline_linked_prs(
     result = run_gh_command(
         [
             "api", "graphql",
+            "--paginate",
+            "--slurp",
             "-f", f"query={query}",
             "-f", f"owner={owner}",
             "-f", f"repo={repo}",
@@ -330,45 +360,52 @@ def fetch_timeline_linked_prs(
     )
 
     if result.returncode != 0:
-        return []
+        message = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(message or "failed to fetch linked pull requests")
 
     try:
-        data = json.loads(result.stdout or "{}")
+        pages = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
-        return []
+        raise RuntimeError("failed to parse linked pull request timeline")
 
-    nodes = (
-        data.get("data", {})
-        .get("repository", {})
-        .get("issue", {})
-        .get("timelineItems", {})
-        .get("nodes", [])
-    )
-
+    if not isinstance(pages, list):
+        raise RuntimeError("unexpected paginated timeline payload")
     seen: set[int] = set()
     linked_prs: list[dict[str, Any]] = []
 
-    for node in nodes:
-        typename = node.get("__typename", "")
-        pr_data: dict[str, Any] | None = None
+    for page in pages:
+        nodes = (
+            (page or {})
+            .get("data", {})
+            .get("repository", {})
+            .get("issue", {})
+            .get("timelineItems", {})
+            .get("nodes", [])
+        )
+        if not isinstance(nodes, list):
+            raise RuntimeError("unexpected timeline node payload")
 
-        if typename == "CrossReferencedEvent":
-            source = node.get("source") or {}
-            if source.get("__typename") == "PullRequest":
-                pr_data = source
-        elif typename == "ConnectedEvent":
-            subject = node.get("subject") or {}
-            if subject.get("__typename") == "PullRequest":
-                pr_data = subject
+        for node in nodes:
+            typename = node.get("__typename", "")
+            pr_data: dict[str, Any] | None = None
 
-        if pr_data and pr_data.get("number") and pr_data["number"] not in seen:
-            seen.add(pr_data["number"])
-            linked_prs.append({
-                "number": pr_data["number"],
-                "title": pr_data.get("title", ""),
-                "state": pr_data.get("state", ""),
-                "url": pr_data.get("url", ""),
-            })
+            if typename == "CrossReferencedEvent":
+                source = node.get("source") or {}
+                if source.get("__typename") == "PullRequest":
+                    pr_data = source
+            elif typename == "ConnectedEvent":
+                subject = node.get("subject") or {}
+                if subject.get("__typename") == "PullRequest":
+                    pr_data = subject
+
+            if pr_data and pr_data.get("number") and pr_data["number"] not in seen:
+                seen.add(pr_data["number"])
+                linked_prs.append({
+                    "number": pr_data["number"],
+                    "title": pr_data.get("title", ""),
+                    "state": pr_data.get("state", ""),
+                    "url": pr_data.get("url", ""),
+                })
 
     return linked_prs
 
@@ -537,10 +574,16 @@ def check_file_existence(
 ) -> list[dict[str, Any]]:
     """Check whether referenced files exist in the repository."""
     results: list[dict[str, Any]] = []
+    repo_root = repo_root.resolve()
     for ref in file_refs:
         path_str = ref.split(":")[0]
-        full_path = repo_root / path_str
-        exists = full_path.exists()
+        candidate = (repo_root / path_str).resolve(strict=False)
+        try:
+            candidate.relative_to(repo_root)
+        except ValueError:
+            exists = False
+        else:
+            exists = candidate.exists()
         results.append({
             "reference": ref,
             "path": path_str,
@@ -585,7 +628,7 @@ def render_text_output(results: dict[str, Any]) -> None:
     # Body
     body = issue.get("body", "")
     if body:
-        print(f"\nBODY")
+        print("\nBODY")
         print("-" * 60)
         print(body)
 
@@ -594,7 +637,7 @@ def render_text_output(results: dict[str, Any]) -> None:
 
     sections = parsed.get("sections", {})
     if sections:
-        print(f"\nEXTRACTED SECTIONS")
+        print("\nEXTRACTED SECTIONS")
         print("-" * 60)
         for key, value in sections.items():
             label = key.replace("_", " ").title()
@@ -736,14 +779,18 @@ def main() -> int:
         return 1
 
     # Fetch comments
-    comments = fetch_issue_comments(
-        issue_number,
-        repo_root,
-        max_comment_length=args.max_comment_length,
-    )
+    try:
+        comments = fetch_issue_comments(
+            issue_number,
+            repo_root,
+            max_comment_length=args.max_comment_length,
+        )
 
-    # Fetch linked PRs
-    linked_prs = fetch_timeline_linked_prs(issue_number, repo_root)
+        # Fetch linked PRs
+        linked_prs = fetch_timeline_linked_prs(issue_number, repo_root)
+    except RuntimeError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
 
     # Parse body + comments
     body = issue_data.get("body") or ""

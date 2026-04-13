@@ -82,7 +82,8 @@ Use this contract:
 - `workflow-policy` should allow read-only investigation, but block
   implementation edits until an owner Issue or SPEC is linked.
 - If the owner is a `gwt-spec` Issue, `workflow-policy` should block
-  implementation until local `plan` and `tasks` are present.
+  implementation until the owner SPEC cache has non-empty `plan` and `tasks`
+  sections; local files alone do not unblock it.
 
 ## Platform question tool
 

@@ -909,14 +909,7 @@ fn maybe_surface_pending_discussion_resume_with(model: &mut Model, sessions_dir:
     if runtime.pending_discussion.is_none() {
         prompt_state.prompt_pending = false;
         prompt_state.fallback_armed = false;
-        return;
-    }
-
-    if prompt_state.handled_this_session || !prompt_state.prompt_pending || overlay_blocked {
-        return;
-    }
-
-    if runtime.status != gwt_agent::AgentStatus::WaitingInput {
+        prompt_state.last_handled_proposal = None;
         return;
     }
 
@@ -924,6 +917,18 @@ fn maybe_surface_pending_discussion_resume_with(model: &mut Model, sessions_dir:
         .pending_discussion
         .clone()
         .expect("pending discussion checked");
+    let pending_key = format!("{}::{}", pending.proposal_label, pending.proposal_title);
+    if prompt_state.last_handled_proposal.as_deref() == Some(pending_key.as_str())
+        || !prompt_state.prompt_pending
+        || overlay_blocked
+    {
+        return;
+    }
+
+    if runtime.status != gwt_agent::AgentStatus::WaitingInput {
+        return;
+    }
+
     model.discussion_resume =
         Some(screens::discussion_resume::DiscussionResumeState::with_pending(session_id, pending));
     prompt_state.prompt_pending = false;
@@ -6732,7 +6737,10 @@ fn handle_discussion_resume_message_with(
     };
     let session_id = state.session_id.clone();
     if let Some(prompt_state) = model.discussion_resume_sessions.get_mut(&session_id) {
-        prompt_state.handled_this_session = true;
+        prompt_state.last_handled_proposal = Some(format!(
+            "{}::{}",
+            state.pending.proposal_label, state.pending.proposal_title
+        ));
         prompt_state.prompt_pending = false;
         prompt_state.fallback_armed = false;
     }
@@ -19057,6 +19065,48 @@ services:
 
         maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
         assert!(model.discussion_resume.is_none());
+    }
+
+    #[test]
+    fn different_pending_discussion_can_surface_after_dismiss_in_same_session() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.discussion_resume_sessions.insert(
+            persisted.id.clone(),
+            crate::discussion_resume::ResumePromptSessionState {
+                prompt_pending: true,
+                last_handled_proposal: Some("Proposal A::Hook-driven resume".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let mut runtime = SessionRuntimeState::from_hook_event("Stop").expect("stop runtime");
+        runtime.pending_discussion = Some(PendingDiscussionResume {
+            proposal_label: "Proposal B".to_string(),
+            proposal_title: "Owner linkage".to_string(),
+            next_question: Some("Link a new SPEC owner?".to_string()),
+        });
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+
+        let overlay = model
+            .discussion_resume
+            .as_ref()
+            .expect("discussion resume overlay");
+        assert_eq!(overlay.pending.proposal_label, "Proposal B");
+        assert_eq!(overlay.pending.proposal_title, "Owner linkage");
     }
 
     #[test]

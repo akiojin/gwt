@@ -299,6 +299,29 @@ pub fn apply_agent_card_patch(
     context: AgentCardContext,
     patch: AgentCardPatch,
 ) -> Result<CoordinationSnapshot> {
+    ensure_repo_local_files(worktree_root)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(coordination_lock_path(worktree_root))?;
+    lock.lock_exclusive()?;
+
+    let result = apply_agent_card_patch_locked(worktree_root, context, patch);
+    let unlock_result = lock.unlock();
+    match (result, unlock_result) {
+        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(err.into()),
+    }
+}
+
+fn apply_agent_card_patch_locked(
+    worktree_root: &Path,
+    context: AgentCardContext,
+    patch: AgentCardPatch,
+) -> Result<CoordinationSnapshot> {
     let snapshot = load_snapshot(worktree_root)?;
     let key = if let Some(session_id) = context.session_id.as_deref() {
         if !session_id.trim().is_empty() {
@@ -365,7 +388,7 @@ pub fn apply_agent_card_patch(
     }
     card.updated_at = now;
 
-    append_event(worktree_root, &CoordinationEvent::AgentCardUpsert { card })
+    append_event_locked(worktree_root, &CoordinationEvent::AgentCardUpsert { card })
 }
 
 pub fn append_event(
@@ -725,5 +748,75 @@ mod tests {
                 "events.jsonl".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn concurrent_agent_card_patches_merge_fields_without_losing_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(dir.path().to_path_buf());
+        ensure_repo_local_files(root.as_path()).unwrap();
+
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(coordination_lock_path(root.as_path()))
+            .unwrap();
+        lock_file.lock_exclusive().unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let first_root = Arc::clone(&root);
+        let first_barrier = Arc::clone(&barrier);
+        let first = thread::spawn(move || {
+            first_barrier.wait();
+            apply_agent_card_patch(
+                first_root.as_path(),
+                AgentCardContext {
+                    agent_id: "Codex".into(),
+                    session_id: Some("sess-1".into()),
+                    branch: "feature/coordination".into(),
+                },
+                AgentCardPatch {
+                    status: Some("running".into()),
+                    current_focus: Some("Wire storage".into()),
+                    ..AgentCardPatch::default()
+                },
+            )
+            .unwrap();
+        });
+
+        let second_root = Arc::clone(&root);
+        let second_barrier = Arc::clone(&barrier);
+        let second = thread::spawn(move || {
+            second_barrier.wait();
+            apply_agent_card_patch(
+                second_root.as_path(),
+                AgentCardContext {
+                    agent_id: "Codex".into(),
+                    session_id: Some("sess-1".into()),
+                    branch: "feature/coordination".into(),
+                },
+                AgentCardPatch {
+                    next_action: Some("Add CLI".into()),
+                    ..AgentCardPatch::default()
+                },
+            )
+            .unwrap();
+        });
+
+        barrier.wait();
+        thread::sleep(std::time::Duration::from_millis(50));
+        lock_file.unlock().unwrap();
+
+        first.join().unwrap();
+        second.join().unwrap();
+
+        let snapshot = load_snapshot(root.as_path()).unwrap();
+        assert_eq!(snapshot.cards.cards.len(), 1);
+        let card = &snapshot.cards.cards[0];
+        assert_eq!(card.status.as_deref(), Some("running"));
+        assert_eq!(card.current_focus.as_deref(), Some("Wire storage"));
+        assert_eq!(card.next_action.as_deref(), Some("Add CLI"));
     }
 }

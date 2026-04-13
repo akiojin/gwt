@@ -1,4 +1,5 @@
 use std::io;
+use std::path::Path;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::coordination::{
@@ -100,7 +101,8 @@ pub(super) fn run<E: CliEnv>(
             session_id,
             branch,
         } => {
-            let inferred = current_agent_context_from_env().map_err(io_as_spec_ops_error)?;
+            let inferred =
+                current_agent_context_from_env(env.repo_path()).map_err(io_as_spec_ops_error)?;
             let agent_id = agent_id
                 .or_else(|| inferred.as_ref().map(|context| context.agent_id.clone()))
                 .ok_or_else(|| {
@@ -111,6 +113,11 @@ pub(super) fn run<E: CliEnv>(
             let branch = branch
                 .or_else(|| inferred.as_ref().map(|context| context.branch.clone()))
                 .unwrap_or_default();
+            if branch.trim().is_empty() {
+                return Err(io_as_spec_ops_error(io::Error::other(
+                    "board card set requires --branch or an active gwt agent session with branch context",
+                )));
+            }
             let session_id = session_id.or_else(|| inferred.and_then(|context| context.session_id));
 
             let snapshot = apply_agent_card_patch(
@@ -310,15 +317,26 @@ fn current_author_from_env() -> Option<(AuthorKind, String)> {
     Some((AuthorKind::Agent, session.display_name))
 }
 
-fn current_agent_context_from_env() -> io::Result<Option<AgentCardContext>> {
-    let Some(session) = current_session_from_env()? else {
-        return Ok(None);
-    };
-    Ok(Some(AgentCardContext {
+fn current_agent_context_from_env(worktree_root: &Path) -> io::Result<Option<AgentCardContext>> {
+    Ok(agent_card_context_for_repo(
+        worktree_root,
+        current_session_from_env()?,
+    ))
+}
+
+fn agent_card_context_for_repo(
+    worktree_root: &Path,
+    session: Option<Session>,
+) -> Option<AgentCardContext> {
+    let session = session?;
+    if !same_worktree_path(&session.worktree_path, worktree_root) {
+        return None;
+    }
+    Some(AgentCardContext {
         agent_id: session.display_name,
         session_id: Some(session.id),
         branch: session.branch,
-    }))
+    })
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {
@@ -330,6 +348,17 @@ fn current_session_from_env() -> io::Result<Option<Session>> {
         return Ok(None);
     }
     Session::load(&path).map(Some)
+}
+
+fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn render_snapshot(out: &mut String, snapshot: &gwt_core::coordination::CoordinationSnapshot) {
@@ -504,5 +533,52 @@ mod tests {
         assert_eq!(snapshot.cards.cards[0].status.as_deref(), Some("running"));
         assert_eq!(snapshot.cards.cards[0].role.as_deref(), Some("implementer"));
         assert!(out.contains("agent cards: 1"));
+    }
+
+    #[test]
+    fn board_family_run_card_set_rejects_missing_branch_without_session_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let err = run(
+            &mut env,
+            CliCommand::BoardCardSet {
+                status: "running".into(),
+                role: None,
+                responsibility: None,
+                current_focus: None,
+                next_action: None,
+                blocked_reason: None,
+                topics: vec![],
+                owners: vec![],
+                working_scope: None,
+                handoff_target: None,
+                agent_id: Some("Codex".into()),
+                session_id: None,
+                branch: None,
+            },
+            &mut String::new(),
+        )
+        .expect_err("missing branch must be rejected");
+
+        assert!(
+            err.to_string().contains("requires --branch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn agent_card_context_ignores_session_from_other_repo() {
+        let repo = tempfile::tempdir().unwrap();
+        let other_repo = tempfile::tempdir().unwrap();
+        let session = Session::new(
+            other_repo.path(),
+            "feature/other",
+            gwt_agent::AgentId::Codex,
+        );
+
+        let context = agent_card_context_for_repo(repo.path(), Some(session));
+
+        assert_eq!(context, None);
     }
 }
