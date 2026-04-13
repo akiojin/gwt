@@ -287,7 +287,12 @@ fn decode_sgr_modifiers(cb: u16) -> KeyModifiers {
 
 /// Calculate the next tick deadline.
 pub fn next_tick_deadline() -> Instant {
-    Instant::now() + TICK_RATE
+    next_tick_deadline_from(Instant::now())
+}
+
+/// Calculate the next tick deadline relative to `now`.
+pub fn next_tick_deadline_from(now: Instant) -> Instant {
+    now + TICK_RATE
 }
 
 /// Convert a raw key event into a high-level Message via the keybind system,
