@@ -2055,13 +2055,18 @@ impl Model {
         }
     }
 
+    /// Normalize the model into the startup Welcome state.
+    pub fn apply_startup_welcome_state(&mut self) {
+        self.sessions.clear();
+        self.active_session = 0;
+        self.active_layer = ActiveLayer::Main;
+        self.active_focus = FocusPane::Terminal;
+    }
+
     /// Create the startup model shown before any terminal window exists.
     pub fn new_startup(repo_path: PathBuf) -> Self {
         let mut model = Self::new(repo_path);
-        model.sessions.clear();
-        model.active_session = 0;
-        model.active_layer = ActiveLayer::Main;
-        model.active_focus = FocusPane::Terminal;
+        model.apply_startup_welcome_state();
         model
     }
 

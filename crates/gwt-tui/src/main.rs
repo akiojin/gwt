@@ -669,7 +669,9 @@ fn run_app(
 }
 
 fn restore_startup_session_state_with(model: &mut Model, path: &Path) -> Option<String> {
-    model.restore_session_state_from_path(path)
+    let warning = model.restore_session_state_from_path(path);
+    model.apply_startup_welcome_state();
+    warning
 }
 
 fn should_spawn_default_shell(model: &Model) -> bool {
@@ -808,6 +810,34 @@ session_count = 0
         let warning = restore_startup_session_state_with(&mut restored, &path);
 
         assert!(warning.is_none());
+        assert_eq!(restored.session_count(), 0);
+        assert!(restored.active_session_tab().is_none());
+        assert!(!should_spawn_default_shell(&restored));
+    }
+
+    #[test]
+    fn restore_startup_session_state_with_saved_sessions_still_starts_in_welcome() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            r#"
+display_mode = "grid"
+panel_visible = true
+active_management_tab = "Logs"
+session_count = 3
+"#,
+        )
+        .expect("write saved session state");
+
+        let mut restored = Model::new_startup(PathBuf::from("/tmp/repo"));
+        let warning = restore_startup_session_state_with(&mut restored, &path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.session_layout, SessionLayout::Grid);
+        assert_eq!(restored.management_tab, ManagementTab::Logs);
+        assert_eq!(restored.active_layer, ActiveLayer::Main);
+        assert_eq!(restored.active_focus, FocusPane::Terminal);
         assert_eq!(restored.session_count(), 0);
         assert!(restored.active_session_tab().is_none());
         assert!(!should_spawn_default_shell(&restored));
