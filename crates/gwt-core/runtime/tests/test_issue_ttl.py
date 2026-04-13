@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,30 +19,30 @@ import chroma_index_runner as runner
 
 
 class IssueTtlTests(unittest.TestCase):
-    def _fake_gh_issue_list(self, *args, **kwargs):
-        # subprocess.run mock returning a fake gh issue list result
-        result = mock.MagicMock()
-        result.returncode = 0
-        result.stdout = json.dumps(
-            [
+    def _write_cached_issue(self, root: Path, number: int, title: str, body: str, labels):
+        issue = root / str(number)
+        issue.mkdir(parents=True, exist_ok=True)
+        (issue / "meta.json").write_text(
+            json.dumps(
                 {
-                    "number": 1,
-                    "title": "First issue",
-                    "body": "Body of issue 1",
-                    "labels": [{"name": "bug"}],
-                    "state": "OPEN",
-                    "url": "https://github.com/example/repo/issues/1",
+                    "number": number,
+                    "title": title,
+                    "labels": labels,
+                    "state": "open",
+                    "updated_at": "2026-04-13T00:00:00Z",
+                    "comment_ids": [],
                 }
-            ]
+            )
         )
-        result.stderr = ""
-        return result
+        (issue / "body.md").write_text(body)
 
     def test_index_issues_v2_writes_meta_last_full_refresh(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_root = Path(tmp) / "index_root"
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
+            self._write_cached_issue(cache_root, 1, "First issue", "Body of issue 1", ["bug"])
 
-            with mock.patch("subprocess.run", side_effect=self._fake_gh_issue_list):
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
                 result = runner.action_index_issues_v2(
                     repo_hash="abc1234567890def",
                     project_root=tmp,
@@ -104,7 +105,7 @@ class IssueTtlTests(unittest.TestCase):
                 )
             )
 
-            with mock.patch("subprocess.run", side_effect=self._fake_gh_issue_list) as gh:
+            with mock.patch("subprocess.run") as gh:
                 result = runner.action_index_issues_v2(
                     repo_hash="abc1234567890def",
                     project_root=tmp,
@@ -121,6 +122,14 @@ class IssueTtlTests(unittest.TestCase):
             db_root = Path(tmp) / "index_root"
             issues = db_root / "abc1234567890def" / "issues"
             issues.mkdir(parents=True)
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
+            self._write_cached_issue(
+                cache_root,
+                1,
+                "First issue",
+                "Body of issue 1",
+                ["bug"],
+            )
             now = datetime.datetime.now(datetime.timezone.utc)
             stale = now - datetime.timedelta(minutes=20)
             (issues / "meta.json").write_text(
@@ -133,17 +142,45 @@ class IssueTtlTests(unittest.TestCase):
                 )
             )
 
-            with mock.patch("subprocess.run", side_effect=self._fake_gh_issue_list) as gh:
-                result = runner.action_index_issues_v2(
-                    repo_hash="abc1234567890def",
-                    project_root=tmp,
-                    db_root=db_root,
-                    respect_ttl=True,
-                )
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                with mock.patch("subprocess.run") as gh:
+                    result = runner.action_index_issues_v2(
+                        repo_hash="abc1234567890def",
+                        project_root=tmp,
+                        db_root=db_root,
+                        respect_ttl=True,
+                    )
 
             self.assertTrue(result["ok"], result)
             self.assertFalse(result.get("skipped"))
-            gh.assert_called()
+            gh.assert_not_called()
+
+    def test_index_issues_v2_reads_repo_scoped_issue_cache_without_gh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index_root"
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
+            self._write_cached_issue(
+                cache_root,
+                1776,
+                "Launch Agent issue linkage",
+                "Body from cache",
+                ["ux"],
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                with mock.patch("subprocess.run") as gh:
+                    result = runner.action_index_issues_v2(
+                        repo_hash="abc1234567890def",
+                        project_root=tmp,
+                        db_root=db_root,
+                        respect_ttl=False,
+                    )
+
+            self.assertTrue(result["ok"], result)
+            self.assertFalse(
+                any(call.args and call.args[0] == "gh" for call in gh.call_args_list),
+                gh.call_args_list,
+            )
 
 
 if __name__ == "__main__":

@@ -25,6 +25,31 @@ Cleanup progress モーダルが実際には進んでいても、`Ctrl+G` を押
 3. `Ctrl+G` のような prefix 消費でだけ UI が進む報告は、「手動で Tick を注入すると
    直る」シグナルとして扱い、queue drain と scheduler の両方を確認する。
 
+## 2026-04-13 — fix: Issue / SPEC cache と index は repo 単位の exact cache を唯一の入力にする
+
+### 事象
+
+Branches 一覧や Launch Agent の Issue 選択、Specs 一覧が global cache
+(`~/.gwt/cache/issues/`) を横断しており、開いている repo と無関係な Issue / SPEC が混在した。
+さらに issue index は cache ではなく `gh issue list` から直接作っていたため、
+`GitHub/gh -> cache -> index -> UI` の一方向フローを外していた。
+
+### 原因
+
+- `~/.gwt/cache/issues/` を gwt 専用または global な一覧 source と誤認し、
+  repo hash ごとの境界を consumer 側で維持していなかった。
+- index builder が cache consumer ではなく direct fetcher になっており、
+  UI と index が別の truth source を見ていた。
+
+### 再発防止策
+
+1. `~/.gwt/cache/issues/` を触る変更では、最初に `repo-hash` 配下が current repo の
+   exact cache root であることを確認する。
+2. Issue / SPEC / Launch Agent / index の consumer は全て同じ repo-scoped cache root を
+   共有し、remote fetch は cache 更新レイヤーに閉じ込める。
+3. cache path や startup refresh を変えるときは、consumer 側の Rust test と
+   index runner 側の Python test を同じ変更で固定する。
+
 ## 2026-04-12 — fix: 端末喪失時の crossterm 内部スピンによる CPU 100%
 
 ### 事象
