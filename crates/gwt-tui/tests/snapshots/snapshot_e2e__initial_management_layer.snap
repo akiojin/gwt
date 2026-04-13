@@ -2,19 +2,19 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌ Branches │ Issues │ PRs │...─────────┐┌ › Shell ─────────────────────────────┐
-│ View: Local │ Sort: Default          ││Session: Shell (80x24)                │
-│No branches loaded                    ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-└──────────────────────────────────────┘│                                      │
-┌ Overview │ Git │ Sessions  · No branc┐│                                      │
+╔ Branches │ Issues │ PRs │...═════════╗╭ › Shell ─────────────────────────────╮
+║ View: Local │ Sort: Default          ║│Session: Shell (80x24)                │
+║No branches loaded                    ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+╚══════════════════════════════════════╝│                                      │
+╭ Overview │ Git │ Sessions  · No branc╮│                                      │
 │ No branch selected                   ││                                      │
 │                                      ││                                      │
 │ Docker status                        ││                                      │
@@ -24,5 +24,5 @@ expression: output
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
-└──────────────────────────────────────┘└──────────────────────────────────────┘
+╰──────────────────────────────────────╯╰──────────────────────────────────────╯
  ⎇n/a  │  P:default  │  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp sel  ⇧C clean  a all  mv
