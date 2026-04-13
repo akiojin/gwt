@@ -9468,22 +9468,17 @@ fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let lines = welcome_session_lines();
-    let content_height = (lines.len() as u16).min(inner.height);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(content_height),
-            Constraint::Min(0),
-        ])
-        .split(inner);
+    let content = welcome_session_content_area(inner);
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
 
-    let paragraph = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-    frame.render_widget(paragraph, chunks[1]);
+    let paragraph = Paragraph::new(welcome_session_lines());
+    frame.render_widget(paragraph, content);
 }
 
 fn welcome_session_lines() -> Vec<Line<'static>> {
+    const WELCOME_KEY_WIDTH: usize = 24;
     let command_style = Style::default()
         .fg(theme::color::ACTIVE)
         .add_modifier(Modifier::BOLD);
@@ -9498,13 +9493,26 @@ fn welcome_session_lines() -> Vec<Line<'static>> {
 
     for binding in KeybindRegistry::new().all_bindings() {
         lines.push(Line::from(vec![
-            Span::styled(binding.keys.clone(), command_style),
-            Span::styled("  ", body_style),
+            Span::styled(
+                format!("{:<WELCOME_KEY_WIDTH$}", binding.keys),
+                command_style,
+            ),
             Span::styled(binding.description.clone(), body_style),
         ]));
     }
 
     lines
+}
+
+fn welcome_session_content_area(inner: Rect) -> Rect {
+    let left_padding = if inner.width > 4 { 2 } else { 0 };
+
+    Rect {
+        x: inner.x.saturating_add(left_padding),
+        y: inner.y,
+        width: inner.width.saturating_sub(left_padding),
+        height: inner.height,
+    }
 }
 
 /// Build session tab title line (same pattern as management tabs in Block title).
@@ -13855,6 +13863,20 @@ services:
         assert!(rendered.contains("No terminal windows are open."));
         assert!(rendered.contains("Ctrl+G, c"));
         assert!(rendered.contains("Ctrl+G, g"));
+    }
+
+    #[test]
+    fn render_model_text_zero_sessions_left_aligns_welcome_content() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("║  Welcome"));
+        assert!(rendered.contains("║  Ctrl+G, g"));
+        assert!(rendered.contains("║  Ctrl+G, c"));
     }
 
     #[test]
