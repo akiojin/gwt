@@ -169,8 +169,8 @@ type ScopeMask = u8;
 const SCOPE_FILES: ScopeMask = 1 << 0;
 const SCOPE_FILES_DOCS: ScopeMask = 1 << 1;
 // SPEC-12: SCOPE_SPECS removed. SPECs are now GitHub Issues cached at
-// ~/.gwt/cache/issues/ and indexed through the Issue search scope, not
-// the local specs/ directory watcher.
+// ~/.gwt/cache/issues/<repo-hash>/ and indexed through the Issue search
+// scope, not the local specs/ directory watcher.
 const SCOPE_ALL: ScopeMask = SCOPE_FILES | SCOPE_FILES_DOCS;
 
 const DOC_FILE_EXTENSIONS: &[&str] = &["md", "mdx", "rst", "adoc", "txt"];
