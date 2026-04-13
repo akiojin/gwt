@@ -540,7 +540,7 @@ fn run_app(
     }
 
     // Spawn PTY for the default shell-0 session.
-    if model.active_layer != ActiveLayer::Initialization {
+    if should_spawn_default_shell(&model) {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let (cols, rows) = app::session_content_size(&model);
         // Resize default VtState to match actual pane area.
@@ -672,6 +672,10 @@ fn restore_startup_session_state_with(model: &mut Model, path: &Path) -> Option<
     model.restore_session_state_from_path(path)
 }
 
+fn should_spawn_default_shell(model: &Model) -> bool {
+    model.active_layer != ActiveLayer::Initialization && model.session_count() > 0
+}
+
 fn reset_startup_runtime_state_with(sessions_dir: &Path) -> Option<String> {
     reset_runtime_state_dir(sessions_dir)
         .err()
@@ -783,6 +787,30 @@ mod tests {
         let warning = restore_startup_session_state_with(&mut restored, &path);
 
         assert!(warning.is_some());
+    }
+
+    #[test]
+    fn restore_startup_session_state_with_zero_sessions_skips_default_shell_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            r#"
+display_mode = "tab"
+panel_visible = false
+active_management_tab = "Branches"
+session_count = 0
+"#,
+        )
+        .expect("write zero-session state");
+
+        let mut restored = Model::new(PathBuf::from("/tmp/repo"));
+        let warning = restore_startup_session_state_with(&mut restored, &path);
+
+        assert!(warning.is_none());
+        assert_eq!(restored.session_count(), 0);
+        assert!(restored.active_session_tab().is_none());
+        assert!(!should_spawn_default_shell(&restored));
     }
 
     #[test]

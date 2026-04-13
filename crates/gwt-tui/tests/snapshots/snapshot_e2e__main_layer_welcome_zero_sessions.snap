@@ -1,0 +1,28 @@
+---
+source: crates/gwt-tui/tests/snapshot_e2e.rs
+expression: output
+---
+╔ Welcome ═════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                    Welcome                                   ║
+║                                                                              ║
+║                         No terminal windows are open.                        ║
+║                Open a shell or return to the management panel.               ║
+║                                                                              ║
+║                         Ctrl+G, c  New shell session                         ║
+║                       Ctrl+G, g  Open management panel                       ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+ ⎇n/a  │  P:default  │  C-g,c shell  C-g,g manage  ?:help
