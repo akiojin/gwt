@@ -3495,6 +3495,8 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                         name: session.name.clone(),
                         detail: None,
                         active: index == model.active_session,
+                        launch_summary: Vec::new(),
+                        launch_command_line: None,
                     },
                 })
             }
@@ -3522,12 +3524,82 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                         name: session.name.clone(),
                         detail,
                         active: index == model.active_session,
+                        launch_summary: agent_session_launch_summary(&persisted),
+                        launch_command_line: format_launch_command_line(
+                            &persisted.launch_command,
+                            &persisted.launch_args,
+                        ),
                     },
                 })
             }
             _ => None,
         })
         .collect()
+}
+
+fn agent_session_launch_summary(session: &AgentSession) -> Vec<String> {
+    let mut summary = Vec::new();
+    if let Some(model) = session.model.as_deref() {
+        summary.push(format!("Model: {model}"));
+    }
+    if let Some(reasoning) = session.reasoning_level.as_deref() {
+        summary.push(format!("Reasoning: {reasoning}"));
+    }
+    if let Some(version) = session.tool_version.as_deref() {
+        summary.push(format!("Version: {version}"));
+    }
+    if let Some(resume_session_id) = session.agent_session_id.as_deref() {
+        summary.push(format!("Resume session: {resume_session_id}"));
+    }
+    summary.push(format!(
+        "Permissions: {}",
+        if session.skip_permissions {
+            "Skip confirmations"
+        } else {
+            "Standard"
+        }
+    ));
+    if session.codex_fast_mode {
+        summary.push("Codex fast mode: Enabled".to_string());
+    }
+    summary.push(format!("Runtime: {:?}", session.runtime_target));
+    if let Some(service) = session.docker_service.as_deref() {
+        summary.push(format!("Docker service: {service}"));
+    }
+    summary
+}
+
+fn format_launch_command_line(command: &str, args: &[String]) -> Option<String> {
+    if command.trim().is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_quote_launch_token(command));
+    parts.extend(args.iter().map(|arg| shell_quote_launch_token(arg)));
+    Some(parts.join(" "))
+}
+
+fn shell_quote_launch_token(token: &str) -> String {
+    if !token.is_empty()
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | ':' | '='))
+    {
+        token.to_string()
+    } else {
+        let mut quoted = String::with_capacity(token.len() + 2);
+        quoted.push('\'');
+        for ch in token.chars() {
+            if ch == '\'' {
+                quoted.push_str("'\"'\"'");
+            } else {
+                quoted.push(ch);
+            }
+        }
+        quoted.push('\'');
+        quoted
+    }
 }
 
 fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
@@ -5169,6 +5241,8 @@ fn persist_and_spawn_launch(
     session.runtime_target = config.runtime_target;
     session.docker_service = config.docker_service.clone();
     session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+    session.launch_command = config.command.clone();
+    session.launch_args = config.args.clone();
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
     augment_agent_hook_runtime_launch_config(&mut config, sessions_dir, &session.id);
@@ -14732,6 +14806,19 @@ services:
         let mut matching = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
         matching.model = Some("gpt-5.3-codex".to_string());
         matching.reasoning_level = Some("high".to_string());
+        matching.tool_version = Some("latest".to_string());
+        matching.agent_session_id = Some("sess-abc".to_string());
+        matching.skip_permissions = true;
+        matching.runtime_target = LaunchRuntimeTarget::Docker;
+        matching.docker_service = Some("web".to_string());
+        matching.launch_command = "codex".to_string();
+        matching.launch_args = vec![
+            "--no-alt-screen".to_string(),
+            "--model=gpt-5.3-codex".to_string(),
+            "resume".to_string(),
+            "sess-abc".to_string(),
+            "--yolo".to_string(),
+        ];
         matching.display_name = "Codex".to_string();
         matching.save(dir.path()).expect("persist matching session");
 
@@ -14798,12 +14885,27 @@ services:
                     name: "Codex".to_string(),
                     detail: Some("gpt-5.3-codex · high".to_string()),
                     active: true,
+                    launch_summary: vec![
+                        "Model: gpt-5.3-codex".to_string(),
+                        "Reasoning: high".to_string(),
+                        "Version: latest".to_string(),
+                        "Resume session: sess-abc".to_string(),
+                        "Permissions: Skip confirmations".to_string(),
+                        "Runtime: Docker".to_string(),
+                        "Docker service: web".to_string(),
+                    ],
+                    launch_command_line: Some(
+                        "codex --no-alt-screen --model=gpt-5.3-codex resume sess-abc --yolo"
+                            .to_string(),
+                    ),
                 },
                 screens::branches::DetailSessionSummary {
                     kind: "Shell",
                     name: "Shell: feature/test".to_string(),
                     detail: None,
                     active: false,
+                    launch_summary: Vec::new(),
+                    launch_command_line: None,
                 },
             ]
         );
@@ -17658,6 +17760,50 @@ services:
         assert!(persisted.skip_permissions);
         assert!(persisted.codex_fast_mode);
         assert_eq!(persisted.agent_session_id.as_deref(), Some("sess-abc"));
+        assert!(
+            persisted.launch_command.ends_with("bunx") || persisted.launch_command.ends_with("npx"),
+            "latest tool versions should persist the resolved runner command"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .first()
+                .is_some_and(|arg| arg == "@openai/codex@latest" || arg == "--yes"),
+            "runner-prefixed argv should persist the package launcher prefix"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--no-alt-screen"),
+            "launch args should persist the finalized argv"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "@openai/codex@latest"),
+            "package version selection should be persisted in the final argv"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--model=gpt-5.3-codex"),
+            "model override should be reflected in the persisted argv"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "resume"),
+            "resume subcommand should be persisted"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "sess-abc"),
+            "resume target should be persisted"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "--yolo"),
+            "skip permissions flag should be reflected in persisted argv"
+        );
     }
 
     #[test]

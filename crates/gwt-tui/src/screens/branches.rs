@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -253,6 +253,8 @@ pub struct DetailSessionSummary {
     pub name: String,
     pub detail: Option<String>,
     pub active: bool,
+    pub launch_summary: Vec<String>,
+    pub launch_command_line: Option<String>,
 }
 
 /// Lightweight live session summary rendered directly in the branch list.
@@ -1471,8 +1473,8 @@ fn render_detail_sessions(
         return;
     }
 
-    let mut lines = Vec::new();
     let selected_session = selected_session.min(sessions.len().saturating_sub(1));
+    let mut lines = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
         let selected_marker = if index == selected_session {
             theme::icon::LEFT_ACCENT
@@ -1507,7 +1509,75 @@ fn render_detail_sessions(
         }
     }
 
+    let list_height = session_list_height(area.height, lines.len());
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(list_height), Constraint::Min(0)])
+        .split(area);
     let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, chunks[0]);
+
+    render_selected_session_detail(frame, chunks[1], &sessions[selected_session]);
+}
+
+fn session_list_height(total_height: u16, rendered_lines: usize) -> u16 {
+    let rendered_lines = rendered_lines as u16;
+    if total_height <= 6 {
+        rendered_lines.min(total_height)
+    } else {
+        rendered_lines.min(total_height.saturating_sub(5))
+    }
+}
+
+fn render_selected_session_detail(frame: &mut Frame, area: Rect, session: &DetailSessionSummary) {
+    if area.height == 0 {
+        return;
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " Selected Session",
+            Style::default()
+                .fg(theme::color::FOCUS)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("   Name: {}", session.name),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
+        )),
+    ];
+
+    if session.launch_summary.is_empty() && session.launch_command_line.is_none() {
+        lines.push(Line::from(Span::styled(
+            "   Launch parameters unavailable",
+            theme::style::muted_text(),
+        )));
+    } else {
+        for summary in &session.launch_summary {
+            lines.push(Line::from(Span::styled(
+                format!("   {summary}"),
+                Style::default().fg(theme::color::TEXT_PRIMARY),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "   Launch Command",
+            Style::default()
+                .fg(theme::color::TEXT_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        )));
+        match session.launch_command_line.as_deref() {
+            Some(command_line) => lines.push(Line::from(Span::styled(
+                format!("   {command_line}"),
+                Style::default().fg(theme::color::SURFACE),
+            ))),
+            None => lines.push(Line::from(Span::styled(
+                "   Launch parameters unavailable",
+                theme::style::muted_text(),
+            ))),
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -2357,12 +2427,24 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: Some("gpt-5.3-codex · high".to_string()),
                 active: true,
+                launch_summary: vec![
+                    "Model: gpt-5.3-codex".to_string(),
+                    "Reasoning: high".to_string(),
+                    "Version: latest".to_string(),
+                    "Permissions: Skip confirmations".to_string(),
+                    "Runtime: Host".to_string(),
+                ],
+                launch_command_line: Some(
+                    "codex --no-alt-screen --model=gpt-5.3-codex".to_string(),
+                ),
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2391,6 +2473,16 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("gpt-5.3-codex · high")),
             "Sessions pane should show session detail metadata when available"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Launch Command")),
+            "Sessions pane should show a launch detail section"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("codex --no-alt-screen --model=gpt-5.3-codex")),
+            "Sessions pane should show the persisted exact argv"
         );
     }
 
@@ -2428,12 +2520,16 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: true,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2452,6 +2548,38 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("\u{258E} \u{25CF} Shell  Shell: develop")),
             "Sessions pane should show the selected-row marker on the current row"
+        );
+    }
+
+    #[test]
+    fn render_detail_sessions_shows_unavailable_fallback_for_missing_launch_metadata() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 2;
+        let sessions = vec![DetailSessionSummary {
+            kind: "Agent",
+            name: "Codex".to_string(),
+            detail: Some("gpt-5.3-codex".to_string()),
+            active: true,
+            launch_summary: Vec::new(),
+            launch_command_line: None,
+        }];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &sessions);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Launch parameters unavailable")),
+            "Sessions pane should show a stable fallback when no launch metadata is saved"
         );
     }
 

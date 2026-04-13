@@ -42,6 +42,10 @@ pub struct Session {
     pub docker_service: Option<String>,
     #[serde(default)]
     pub docker_lifecycle_intent: DockerLifecycleIntent,
+    #[serde(default)]
+    pub launch_command: String,
+    #[serde(default)]
+    pub launch_args: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -82,6 +86,8 @@ impl Session {
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            launch_command: String::new(),
+            launch_args: Vec::new(),
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -317,6 +323,13 @@ mod tests {
         session.runtime_target = LaunchRuntimeTarget::Docker;
         session.docker_service = Some("web".into());
         session.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
+        session.launch_command = "codex".into();
+        session.launch_args = vec![
+            "--no-alt-screen".into(),
+            "--model=gpt-5.4".into(),
+            "resume".into(),
+            "--last".into(),
+        ];
 
         session.save(dir.path()).unwrap();
 
@@ -338,6 +351,16 @@ mod tests {
         assert_eq!(
             loaded.docker_lifecycle_intent,
             DockerLifecycleIntent::Restart
+        );
+        assert_eq!(loaded.launch_command, "codex");
+        assert_eq!(
+            loaded.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "--last".to_string()
+            ]
         );
         assert_eq!(loaded.display_name, "Gemini CLI");
     }
@@ -397,6 +420,8 @@ mod tests {
             loaded.docker_lifecycle_intent,
             DockerLifecycleIntent::Connect
         );
+        assert!(loaded.launch_command.is_empty());
+        assert!(loaded.launch_args.is_empty());
     }
 
     #[test]
