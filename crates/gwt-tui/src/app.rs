@@ -8753,11 +8753,35 @@ fn sgr_modifier_bits(modifiers: KeyModifiers) -> u16 {
 
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     let selection = session.vt.selection()?;
-    let (start, end) = normalize_selection(selection);
     session.vt.with_visible_screen(|screen| {
-        let end_col = end.col.saturating_add(1).min(screen.size().1);
+        let (start, end, end_col) = clamp_selection_to_screen(selection, screen)?;
         Some(screen.contents_between(start.row, start.col, end.row, end_col))
     })
+}
+
+fn clamp_selection_to_screen(
+    selection: TerminalSelection,
+    screen: &vt100::Screen,
+) -> Option<(TerminalCell, TerminalCell, u16)> {
+    let (rows, cols) = screen.size();
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+
+    let max_row = rows.saturating_sub(1);
+    let max_col = cols.saturating_sub(1);
+    let clamp_cell = |mut cell: TerminalCell| {
+        cell.row = cell.row.min(max_row);
+        cell.col = cell.col.min(max_col);
+        cell
+    };
+    let clamped = TerminalSelection {
+        anchor: clamp_cell(selection.anchor),
+        focus: clamp_cell(selection.focus),
+    };
+    let (start, end) = normalize_selection(clamped);
+    let end_col = end.col.saturating_add(1).min(cols);
+    Some((start, end, end_col))
 }
 
 fn scroll_session_by_rows(model: &mut Model, session_idx: usize, delta_rows: i16) -> bool {
@@ -11883,6 +11907,68 @@ services:
             Some("line-1"),
             "selection copy should read from the visible snapshot surface instead of the live frame"
         );
+    }
+
+    #[test]
+    fn selected_text_clamps_selection_to_snapshot_width_after_resize() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(12, 8));
+
+        let initial_area = active_session_text_area(&model).expect("initial session text area");
+        let snapshot_cols = initial_area.width;
+        assert!(
+            snapshot_cols > 0,
+            "precondition: snapshot width must be non-zero"
+        );
+
+        let line_a = "A".repeat(snapshot_cols as usize);
+        let line_b = "B".repeat(snapshot_cols as usize);
+        let line_c = "C".repeat(snapshot_cols as usize);
+        let line_d = "D".repeat(snapshot_cols as usize);
+        let line_e = "E".repeat(snapshot_cols as usize);
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &[&line_a, &line_b, &line_c, &line_d, &line_e],
+        );
+
+        let line_f = "F".repeat(snapshot_cols as usize);
+        let line_g = "G".repeat(snapshot_cols as usize);
+        let line_h = "H".repeat(snapshot_cols as usize);
+        let line_i = "I".repeat(snapshot_cols as usize);
+        let line_j = "J".repeat(snapshot_cols as usize);
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &[&line_f, &line_g, &line_h, &line_i, &line_j],
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(session.vt.scroll_snapshot_up(1));
+
+        update(&mut model, Message::Resize(40, 8));
+        let resized_area = active_session_text_area(&model).expect("resized session text area");
+        assert!(
+            resized_area.width > snapshot_cols,
+            "precondition: resized viewport should be wider than the frozen snapshot"
+        );
+
+        let out_of_bounds_col = snapshot_cols.saturating_add(2);
+        let session = model.active_session_tab_mut().expect("active session");
+        session.vt.begin_selection(crate::model::TerminalCell {
+            row: 0,
+            col: out_of_bounds_col,
+        });
+        session.vt.update_selection(crate::model::TerminalCell {
+            row: 1,
+            col: out_of_bounds_col,
+        });
+
+        let copied = selected_text(model.active_session_tab().expect("active session"));
+        let expected = format!("A\n{line_b}");
+        assert_eq!(copied.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
