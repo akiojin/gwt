@@ -526,22 +526,21 @@ mod tests {
     }
 
     #[test]
-    fn claude_hooks_contains_expected_scripts() {
-        use crate::assets::CLAUDE_HOOKS;
-        let files: Vec<&str> = CLAUDE_HOOKS
-            .files()
-            .map(|f| {
-                f.path()
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or("")
-            })
-            .collect();
-        assert!(
-            files.contains(&"gwt-forward-hook.mjs"),
-            "missing gwt-forward-hook.mjs"
-        );
+    fn repo_does_not_keep_claude_hook_scripts() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/hooks/scripts/gwt-forward-hook.mjs",
+            ".claude/hooks/scripts/gwt-block-file-ops.mjs",
+            ".claude/hooks/scripts/gwt-block-cd-command.mjs",
+            ".claude/hooks/scripts/gwt-block-git-branch-ops.mjs",
+            ".claude/hooks/scripts/gwt-block-git-dir-override.mjs",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
+                "unexpected retired claude hook script {relative}"
+            );
+        }
     }
 
     #[test]
@@ -583,6 +582,24 @@ mod tests {
             assert!(
                 std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
                 "unexpected unmanaged local asset {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn repo_does_not_keep_codex_hook_scripts() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".codex/hooks/scripts/gwt-forward-hook.mjs",
+            ".codex/hooks/scripts/gwt-block-file-ops.mjs",
+            ".codex/hooks/scripts/gwt-block-cd-command.mjs",
+            ".codex/hooks/scripts/gwt-block-git-branch-ops.mjs",
+            ".codex/hooks/scripts/gwt-block-git-dir-override.mjs",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
+                "unexpected retired codex hook script {relative}"
             );
         }
     }
@@ -888,6 +905,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gwt_spec_skills_require_user_language_outputs() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-spec-design/SKILL.md",
+            ".codex/skills/gwt-spec-design/SKILL.md",
+            ".claude/skills/gwt-spec-design/references/registration.md",
+            ".claude/skills/gwt-spec-plan/SKILL.md",
+            ".claude/skills/gwt-spec-build/SKILL.md",
+            ".codex/skills/gwt-spec-build/SKILL.md",
+            ".claude/skills/gwt-spec-build/references/completion-gate.md",
+            ".claude/skills/gwt-spec-brainstorm/SKILL.md",
+            ".codex/skills/gwt-spec-brainstorm/SKILL.md",
+            ".claude/skills/gwt-spec-plan/references/quality-gate.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("current user's language"),
+                "expected gwt-spec language contract in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-spec-design/SKILL.md",
+            ".codex/skills/gwt-spec-design/SKILL.md",
+            ".claude/skills/gwt-spec-design/references/registration.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                !content.contains("short English imperative"),
+                "unexpected English-only title rule in {relative}"
+            );
+            assert!(
+                !content.contains("concise English imperative description"),
+                "unexpected English-only title template in {relative}"
+            );
+            assert!(
+                !content.contains("summary in English"),
+                "unexpected English-only description guidance in {relative}"
+            );
+        }
+    }
+
     // ── Integration: full distribution pipeline ──
 
     #[test]
@@ -916,9 +979,16 @@ mod tests {
         assert!(wt.join(".codex/skills/gwt-pr/SKILL.md").exists());
         assert!(!wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".claude/commands/gwt-pr.md").exists());
-        assert!(wt
-            .join(".claude/hooks/scripts/gwt-forward-hook.mjs")
-            .exists());
+        assert!(
+            !wt.join(".claude/hooks/scripts/gwt-forward-hook.mjs")
+                .exists(),
+            "unexpected retired claude hook script"
+        );
+        assert!(
+            !wt.join(".codex/hooks/scripts/gwt-forward-hook.mjs")
+                .exists(),
+            "unexpected retired codex hook script"
+        );
     }
 
     // ── helpers ──

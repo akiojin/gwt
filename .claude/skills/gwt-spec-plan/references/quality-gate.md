@@ -103,8 +103,11 @@ One or more checks fail and at least one failure requires a user decision. Examp
 
 ## Report Format
 
+Use the current user's language for the actual report text. The outline below
+shows structure only.
+
 ```text
-## Analysis Report: SPEC-<id>
+## <Analysis Report in the current user's language>: SPEC-<id>
 
 Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION
 

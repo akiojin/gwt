@@ -69,9 +69,13 @@ const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const MANAGED_ASSET_ROOTS: &[&str] = &[
     ".claude/skills",
     ".claude/commands",
+    // Retired root kept here so startup refresh can still detect and prune
+    // stale Claude gwt hook scripts left by older worktrees.
     ".claude/hooks/scripts",
     ".claude/settings.local.json",
     ".codex/skills",
+    // Retired root kept here so startup refresh can still detect and prune
+    // stale Codex gwt hook scripts left by older worktrees.
     ".codex/hooks/scripts",
     ".codex/hooks.json",
 ];
@@ -815,6 +819,10 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::Quit => {
             model.quit = true;
         }
+        Message::TerminalLost => {
+            tracing::warn!("Controlling terminal lost — shutting down gracefully");
+            model.quit = true;
+        }
         Message::ToggleLayer => {
             match model.active_layer {
                 ActiveLayer::Initialization => {} // blocked
@@ -1243,7 +1251,23 @@ where
 {
     schedule_startup_version_cache_refresh();
     let has_git_remote = repo_has_git_remote(&model.repo_path);
-    reload_cached_issues(model);
+    let issue_cache_root = default_issue_cache_root(&model.repo_path);
+    if let Err(err) = crate::issue_cache::sync_issue_cache_from_remote_if_missing(
+        &model.repo_path,
+        &issue_cache_root,
+    ) {
+        tracing::warn!("startup issue cache sync failed: {err}");
+    }
+    reload_cached_issues_with_paths(
+        model,
+        issue_cache_root.clone(),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+    model.specs.cache_root = issue_cache_root.clone();
+    model.specs.reload_from_cache();
+    if !issue_cache_root.exists() {
+        model.specs.last_error = None;
+    }
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -3191,7 +3215,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::Specs => {
             // SPEC-12 Phase 9: Specs tab is cache-only. `r` triggers a
-            // local cache reload from `~/.gwt/cache/issues/`.
+            // local cache reload from `~/.gwt/cache/issues/<repo-hash>/`.
             match key.code {
                 KeyCode::Char('r') => {
                     model.specs.reload_from_cache();
@@ -3491,6 +3515,8 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                         name: session.name.clone(),
                         detail: None,
                         active: index == model.active_session,
+                        launch_summary: Vec::new(),
+                        launch_command_line: None,
                     },
                 })
             }
@@ -3518,12 +3544,82 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                         name: session.name.clone(),
                         detail,
                         active: index == model.active_session,
+                        launch_summary: agent_session_launch_summary(&persisted),
+                        launch_command_line: format_launch_command_line(
+                            &persisted.launch_command,
+                            &persisted.launch_args,
+                        ),
                     },
                 })
             }
             _ => None,
         })
         .collect()
+}
+
+fn agent_session_launch_summary(session: &AgentSession) -> Vec<String> {
+    let mut summary = Vec::new();
+    if let Some(model) = session.model.as_deref() {
+        summary.push(format!("Model: {model}"));
+    }
+    if let Some(reasoning) = session.reasoning_level.as_deref() {
+        summary.push(format!("Reasoning: {reasoning}"));
+    }
+    if let Some(version) = session.tool_version.as_deref() {
+        summary.push(format!("Version: {version}"));
+    }
+    if let Some(resume_session_id) = session.agent_session_id.as_deref() {
+        summary.push(format!("Resume session: {resume_session_id}"));
+    }
+    summary.push(format!(
+        "Permissions: {}",
+        if session.skip_permissions {
+            "Skip confirmations"
+        } else {
+            "Standard"
+        }
+    ));
+    if session.codex_fast_mode {
+        summary.push("Codex fast mode: Enabled".to_string());
+    }
+    summary.push(format!("Runtime: {:?}", session.runtime_target));
+    if let Some(service) = session.docker_service.as_deref() {
+        summary.push(format!("Docker service: {service}"));
+    }
+    summary
+}
+
+fn format_launch_command_line(command: &str, args: &[String]) -> Option<String> {
+    if command.trim().is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_quote_launch_token(command));
+    parts.extend(args.iter().map(|arg| shell_quote_launch_token(arg)));
+    Some(parts.join(" "))
+}
+
+fn shell_quote_launch_token(token: &str) -> String {
+    if !token.is_empty()
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | ':' | '='))
+    {
+        token.to_string()
+    } else {
+        let mut quoted = String::with_capacity(token.len() + 2);
+        quoted.push('\'');
+        for ch in token.chars() {
+            if ch == '\'' {
+                quoted.push_str("'\"'\"'");
+            } else {
+                quoted.push(ch);
+            }
+        }
+        quoted.push('\'');
+        quoted
+    }
 }
 
 fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
@@ -5165,6 +5261,8 @@ fn persist_and_spawn_launch(
     session.runtime_target = config.runtime_target;
     session.docker_service = config.docker_service.clone();
     session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+    session.launch_command = config.command.clone();
+    session.launch_args = config.args.clone();
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
     augment_agent_hook_runtime_launch_config(&mut config, sessions_dir, &session.id);
@@ -6232,7 +6330,7 @@ fn open_wizard_with_prefill(
             Some(issue_number),
             detected_agents,
             &cache,
-            default_issue_cache_root(),
+            default_issue_cache_root(&model.repo_path),
         )
     } else {
         prepare_wizard_startup(&model.repo_path, spec_context, detected_agents, &cache)
@@ -6640,7 +6738,7 @@ fn prepare_wizard_startup(
         None,
         detected_agents,
         cache,
-        default_issue_cache_root(),
+        default_issue_cache_root(repo_path),
     )
 }
 
@@ -6813,12 +6911,8 @@ struct IssueBranchLinkStore {
     branches: HashMap<String, u64>,
 }
 
-fn default_issue_cache_root() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".gwt")
-        .join("cache")
-        .join("issues")
+fn default_issue_cache_root(repo_path: &std::path::Path) -> PathBuf {
+    crate::issue_cache::issue_cache_root_for_repo_path_or_detached(repo_path)
 }
 
 fn default_issue_linkage_store_path(repo_path: &std::path::Path) -> Option<PathBuf> {
@@ -6834,7 +6928,7 @@ fn handle_issues_message(model: &mut Model, msg: screens::issues::IssuesMessage)
     handle_issues_message_with_paths(
         model,
         msg,
-        default_issue_cache_root(),
+        default_issue_cache_root(&model.repo_path),
         default_issue_linkage_store_path(&model.repo_path),
     );
 }
@@ -6856,7 +6950,7 @@ fn handle_issues_message_with_paths(
 fn reload_cached_issues(model: &mut Model) {
     reload_cached_issues_with_paths(
         model,
-        default_issue_cache_root(),
+        default_issue_cache_root(&model.repo_path),
         default_issue_linkage_store_path(&model.repo_path),
     );
 }
@@ -7419,6 +7513,35 @@ fn title_hit_label_index(
     None
 }
 
+/// Detect which session tab label was clicked in a `build_session_title` Line.
+///
+/// Works by counting non-separator (`│`) spans — each corresponds to one
+/// session in `model.sessions` order.  Returns `None` when the title is
+/// compact (single span), when only one session exists, or when the click
+/// falls outside any label span.
+fn session_title_hit_tab_index(title: &Line<'_>, area: Rect, mouse: MouseEvent) -> Option<usize> {
+    if mouse.row != area.y || title.spans.len() <= 1 {
+        return None;
+    }
+
+    let mut x = area.x.saturating_add(1);
+    let mut session_idx = 0;
+    for span in &title.spans {
+        let content = span.content.as_ref();
+        let width = content.chars().count() as u16;
+        if content.trim() == "│" {
+            x = x.saturating_add(width);
+            continue;
+        }
+        if mouse.column >= x && mouse.column < x.saturating_add(width) {
+            return Some(session_idx);
+        }
+        x = x.saturating_add(width);
+        session_idx += 1;
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GridAxis {
     RowsFirst,
@@ -7722,6 +7845,12 @@ fn handle_session_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
             if !mouse_hits_rect(mouse, session_area) {
                 return false;
             }
+            let title = build_session_title(model, session_area.width);
+            if let Some(tab_idx) = session_title_hit_tab_index(&title, session_area, mouse) {
+                model.active_session = tab_idx;
+                model.active_focus = FocusPane::Terminal;
+                return true;
+            }
             if active_session_content_area(model).is_some_and(|area| mouse_hits_rect(mouse, area)) {
                 return false;
             }
@@ -7921,6 +8050,13 @@ where
             Ok(false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -7931,6 +8067,13 @@ where
             Ok(false)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -7941,6 +8084,13 @@ where
             Ok(false)
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -7958,6 +8108,21 @@ where
         }
         _ => Ok(false),
     }
+}
+
+/// Decide whether a left-button mouse event should be forwarded to the PTY
+/// (because the guest program has enabled SGR mouse reporting) or handled as
+/// local text selection.  Shift held down acts as a bypass so users can still
+/// select text in guests that captured the mouse, matching the behavior of
+/// common terminal emulators (iTerm2, WezTerm, kitty, ...).
+fn should_forward_click_to_pty(model: &Model, mouse: MouseEvent) -> bool {
+    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        return false;
+    }
+    matches!(
+        session_scroll_routing_for_index(model, model.active_session),
+        ScrollInputRouting::PtyMouse
+    )
 }
 
 fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
@@ -8161,6 +8326,76 @@ fn queue_session_mouse_scroll(
     };
     push_input_to_session(model, session_id, bytes);
     true
+}
+
+/// Encode a mouse button event (press / drag / release) as an SGR 1006 report
+/// and queue it for the PTY writer.  Mirrors `queue_session_mouse_scroll` but
+/// for button events instead of wheel events.
+///
+/// Returns `true` when a byte sequence was queued, `false` when the event
+/// does not map to a supported button (or the coordinate falls outside the
+/// session's text area).
+fn queue_session_mouse_click(model: &mut Model, session_idx: usize, mouse: MouseEvent) -> bool {
+    let Some((base_code, final_byte)) = mouse_click_sgr_code(mouse.kind) else {
+        return false;
+    };
+    let Some(cell) = clamped_mouse_terminal_cell_for_index(model, mouse, session_idx) else {
+        return false;
+    };
+
+    reset_session_scrollback_for_input(model, session_idx);
+    let code = base_code | sgr_modifier_bits(mouse.modifiers);
+    let bytes = format!(
+        "\x1b[<{code};{};{}{final_byte}",
+        cell.col.saturating_add(1),
+        cell.row.saturating_add(1),
+    )
+    .into_bytes();
+
+    let Some(session_id) = model
+        .sessions
+        .get(session_idx)
+        .map(|session| session.id.clone())
+    else {
+        return false;
+    };
+    push_input_to_session(model, session_id, bytes);
+    true
+}
+
+/// Map a `MouseEventKind` to its SGR 1006 base button code and terminating
+/// byte (`M` for press/motion, `m` for release).  Returns `None` for events
+/// we do not forward (wheel events are encoded by `queue_session_mouse_scroll`
+/// and moved events are filtered upstream).
+fn mouse_click_sgr_code(kind: MouseEventKind) -> Option<(u16, char)> {
+    match kind {
+        MouseEventKind::Down(button) => Some((sgr_button_base(button), 'M')),
+        MouseEventKind::Drag(button) => Some((sgr_button_base(button) | 32, 'M')),
+        MouseEventKind::Up(button) => Some((sgr_button_base(button), 'm')),
+        _ => None,
+    }
+}
+
+fn sgr_button_base(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
+fn sgr_modifier_bits(modifiers: KeyModifiers) -> u16 {
+    let mut bits = 0u16;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        bits |= 4;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        bits |= 8;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        bits |= 16;
+    }
+    bits
 }
 
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
@@ -10004,6 +10239,65 @@ services:
     }
 
     #[test]
+    fn mouse_click_session_tab_switches_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions.push(crate::model::SessionTab {
+            id: "agent-0".to_string(),
+            name: "Claude Code".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "claude".to_string(),
+                color: crate::model::AgentColor::Green,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.active_session = 0;
+        update(&mut model, Message::Resize(80, 24));
+
+        // The session pane spans the full width in Main layer.
+        let session_area = visible_session_area(&model).expect("session area");
+        let title = build_session_title(&model, session_area.width);
+
+        // Find the x position that falls within the second tab label.
+        let mut x = session_area.x.saturating_add(1);
+        let mut target_x = None;
+        let mut session_idx = 0;
+        for span in &title.spans {
+            let content = span.content.as_ref();
+            let width = content.chars().count() as u16;
+            if content.trim() == "│" {
+                x = x.saturating_add(width);
+                continue;
+            }
+            if session_idx == 1 {
+                target_x = Some(x + 1);
+                break;
+            }
+            x = x.saturating_add(width);
+            session_idx += 1;
+        }
+        let click_x = target_x.expect("second session tab label should exist in the title");
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_x,
+                row: session_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_session, 1,
+            "clicking the second session tab should switch to it"
+        );
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
     fn mouse_click_branch_list_row_selects_branch_and_focuses_list() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
@@ -11199,6 +11493,245 @@ services:
                 .vt
                 .follow_live(),
             "PTY-driven agent scrolling should keep the local viewport pinned to live output"
+        );
+    }
+
+    /// Helper that spins up a single Claude-Code-like agent session with SGR
+    /// mouse reporting (DECSET 1000+1006) already negotiated.  Used by the
+    /// left-click forwarding tests below to avoid copy-pasting fixture setup.
+    fn model_with_agent_mouse_reporting_enabled() -> Model {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1000h\x1b[?1006hframe-1".to_vec(),
+            ),
+        );
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::PtyMouse,
+            "fixture precondition: agent should be in PTY mouse routing",
+        );
+        model
+    }
+
+    #[test]
+    fn agent_left_click_down_forwards_sgr_press_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[<0;1;1M".to_vec());
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "PTY-forwarded clicks must not also start a local text selection",
+        );
+    }
+
+    #[test]
+    fn agent_left_click_up_forwards_sgr_release_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left up should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[<0;1;1m".to_vec(),
+            "release must terminate with lowercase 'm' per SGR 1006",
+        );
+    }
+
+    #[test]
+    fn agent_left_drag_forwards_sgr_motion_event_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x.saturating_add(2),
+                row: area.y.saturating_add(1),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left drag should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[<32;3;2M".to_vec(),
+            "drag encodes base button 0 plus the motion flag 32",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "drag forwarding must not silently update the local selection either",
+        );
+    }
+
+    #[test]
+    fn shift_left_click_bypasses_pty_forwarding_and_starts_local_selection() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::SHIFT,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "Shift+click should act as a local selection bypass, never touching the PTY",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "Shift+click must start a local text selection for copy UX",
+        );
+    }
+
+    #[test]
+    fn agent_left_click_without_mouse_reporting_still_starts_local_selection() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        // No DECSET 1000/1006 → session_scroll_routing must stay LocalViewport.
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::LocalViewport,
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "agents without mouse reporting should keep click handling on the local selection path",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "local-mode left click must begin a text selection as before",
         );
     }
 
@@ -13920,6 +14453,28 @@ services:
         fs::write(dir.join("body.md"), body).expect("write issue cache body");
     }
 
+    fn write_cached_spec(
+        root: &std::path::Path,
+        number: u64,
+        title: &str,
+        state: gwt_github::IssueState,
+        labels: &[&str],
+    ) {
+        gwt_github::Cache::new(root.to_path_buf())
+            .write_snapshot(&gwt_github::client::IssueSnapshot {
+                number: gwt_github::IssueNumber(number),
+                title: title.to_string(),
+                body: format!(
+                    "<!-- gwt-spec id={number} version=1 -->\n<!-- sections:\nspec=body\n-->\n<!-- artifact:spec BEGIN -->\nbody\n<!-- artifact:spec END -->\n"
+                ),
+                labels: labels.iter().map(|label| label.to_string()).collect(),
+                state,
+                updated_at: gwt_github::UpdatedAt::new("2026-04-12T00:00:00Z"),
+                comments: vec![],
+            })
+            .expect("write cached spec");
+    }
+
     #[test]
     fn prepare_wizard_startup_loads_cached_issues_and_prefills_selected_issue() {
         let cache = VersionCache::new();
@@ -14289,6 +14844,19 @@ services:
         let mut matching = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
         matching.model = Some("gpt-5.3-codex".to_string());
         matching.reasoning_level = Some("high".to_string());
+        matching.tool_version = Some("latest".to_string());
+        matching.agent_session_id = Some("sess-abc".to_string());
+        matching.skip_permissions = true;
+        matching.runtime_target = LaunchRuntimeTarget::Docker;
+        matching.docker_service = Some("web".to_string());
+        matching.launch_command = "codex".to_string();
+        matching.launch_args = vec![
+            "--no-alt-screen".to_string(),
+            "--model=gpt-5.3-codex".to_string(),
+            "resume".to_string(),
+            "sess-abc".to_string(),
+            "--yolo".to_string(),
+        ];
         matching.display_name = "Codex".to_string();
         matching.save(dir.path()).expect("persist matching session");
 
@@ -14355,12 +14923,27 @@ services:
                     name: "Codex".to_string(),
                     detail: Some("gpt-5.3-codex · high".to_string()),
                     active: true,
+                    launch_summary: vec![
+                        "Model: gpt-5.3-codex".to_string(),
+                        "Reasoning: high".to_string(),
+                        "Version: latest".to_string(),
+                        "Resume session: sess-abc".to_string(),
+                        "Permissions: Skip confirmations".to_string(),
+                        "Runtime: Docker".to_string(),
+                        "Docker service: web".to_string(),
+                    ],
+                    launch_command_line: Some(
+                        "codex --no-alt-screen --model=gpt-5.3-codex resume sess-abc --yolo"
+                            .to_string(),
+                    ),
                 },
                 screens::branches::DetailSessionSummary {
                     kind: "Shell",
                     name: "Shell: feature/test".to_string(),
                     detail: None,
                     active: false,
+                    launch_summary: Vec::new(),
+                    launch_command_line: None,
                 },
             ]
         );
@@ -17215,6 +17798,50 @@ services:
         assert!(persisted.skip_permissions);
         assert!(persisted.codex_fast_mode);
         assert_eq!(persisted.agent_session_id.as_deref(), Some("sess-abc"));
+        assert!(
+            persisted.launch_command.ends_with("bunx") || persisted.launch_command.ends_with("npx"),
+            "latest tool versions should persist the resolved runner command"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .first()
+                .is_some_and(|arg| arg == "@openai/codex@latest" || arg == "--yes"),
+            "runner-prefixed argv should persist the package launcher prefix"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--no-alt-screen"),
+            "launch args should persist the finalized argv"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "@openai/codex@latest"),
+            "package version selection should be persisted in the final argv"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--model=gpt-5.3-codex"),
+            "model override should be reflected in the persisted argv"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "resume"),
+            "resume subcommand should be persisted"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "sess-abc"),
+            "resume target should be persisted"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "--yolo"),
+            "skip permissions flag should be reflected in persisted argv"
+        );
     }
 
     #[test]
@@ -19352,10 +19979,24 @@ services:
     #[test]
     fn route_key_to_management_issues_refresh_reloads_issue_cache() {
         with_temp_home(|home| {
-            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            let repo_url = "https://github.com/example/repo.git";
+            let issue_cache_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(gwt_core::repo_hash::compute_repo_hash(repo_url).as_str());
             write_issue_cache_meta(&issue_cache_root, 42, "Fix login bug", "open", &["bug"]);
 
-            let mut model = test_model();
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let mut model = Model::new(dir.path().to_path_buf());
             model.management_tab = ManagementTab::Issues;
             model.issues.last_error = Some("stale".to_string());
 
@@ -19397,7 +20038,17 @@ services:
     #[test]
     fn load_initial_data_populates_issues_from_issue_cache() {
         with_temp_home(|home| {
-            let issue_cache_root = home.join(".gwt").join("cache").join("issues");
+            let repo_url = "https://github.com/example/repo.git";
+            let repo_hash = gwt_core::repo_hash::compute_repo_hash(repo_url);
+            let issue_cache_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(repo_hash.as_str());
+            let other_cache_root = home.join(".gwt").join("cache").join("issues").join(
+                gwt_core::repo_hash::compute_repo_hash("https://github.com/example/other.git")
+                    .as_str(),
+            );
             write_issue_cache_meta(
                 &issue_cache_root,
                 1776,
@@ -19405,9 +20056,16 @@ services:
                 "open",
                 &["ux"],
             );
+            write_issue_cache_meta(&other_cache_root, 42, "Other repo issue", "open", &["bug"]);
 
             let dir = tempfile::tempdir().expect("temp repo");
             init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
 
             let mut model = Model::new(dir.path().to_path_buf());
             load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
@@ -19415,6 +20073,91 @@ services:
             assert_eq!(model.issues.issues.len(), 1);
             assert_eq!(model.issues.issues[0].number, 1776);
             assert!(model.issues.last_error.is_none());
+        });
+    }
+
+    #[test]
+    fn load_initial_data_syncs_repo_scoped_issue_cache_when_missing() {
+        with_temp_home(|_home| {
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/example/repo.git",
+                ])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let script = r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  printf '[{"number":1776,"title":"Launch Agent issue linkage","body":"Body from startup sync","labels":[{"name":"ux"}],"state":"OPEN","url":"https://github.com/example/repo/issues/1776","updatedAt":"2026-04-13T00:00:00Z"}]'
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#;
+
+            with_fake_gh(script, || {
+                let mut model = Model::new(dir.path().to_path_buf());
+                load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
+
+                assert_eq!(model.issues.issues.len(), 1);
+                assert_eq!(model.issues.issues[0].number, 1776);
+                assert_eq!(model.issues.issues[0].title, "Launch Agent issue linkage");
+                assert_eq!(model.issues.issues[0].body, "Body from startup sync");
+            });
+        });
+    }
+
+    #[test]
+    fn model_new_loads_specs_from_repo_scoped_cache_only() {
+        with_temp_home(|home| {
+            let repo_url = "https://github.com/example/specs.git";
+            let repo_hash = gwt_core::repo_hash::compute_repo_hash(repo_url);
+            let relevant_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(repo_hash.as_str());
+            let other_root = home.join(".gwt").join("cache").join("issues").join(
+                gwt_core::repo_hash::compute_repo_hash(
+                    "https://github.com/example/other-specs.git",
+                )
+                .as_str(),
+            );
+            write_cached_spec(
+                &relevant_root,
+                1776,
+                "Current repo spec",
+                gwt_github::IssueState::Open,
+                &["gwt-spec", "phase/draft"],
+            );
+            write_cached_spec(
+                &other_root,
+                42,
+                "Other repo spec",
+                gwt_github::IssueState::Open,
+                &["gwt-spec", "phase/draft"],
+            );
+
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let model = Model::new(dir.path().to_path_buf());
+            assert_eq!(model.specs.items.len(), 1);
+            assert_eq!(model.specs.items[0].number, 1776);
+            assert_eq!(model.specs.items[0].title, "Current repo spec");
         });
     }
 
@@ -19440,8 +20183,13 @@ services:
         route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
         let elapsed = start.elapsed();
 
+        // Tight enough to still prove non-blocking behavior (the mock
+        // snapshotter sleeps 250ms, so anything under that disproves "waited
+        // for it"), loose enough to survive CPU contention when the full test
+        // suite runs in parallel — the previous 150ms bound flaked whenever
+        // nearby tests were added.
         assert!(
-            elapsed < std::time::Duration::from_millis(150),
+            elapsed < std::time::Duration::from_millis(230),
             "Branches refresh should not block on branch detail reload: {elapsed:?}"
         );
         assert!(

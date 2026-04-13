@@ -13,6 +13,7 @@ Claude Code では `settings.json`（tracked / ユーザー定義）と `setting
 - `crates/gwt-core/src/config/skill_registration.rs` の `write_managed_codex_hooks()` が `.codex/hooks.json` を全上書き
 - `.codex/hooks.json` は git tracked（v8.17.2 以降）
 - Codex CLI は hooks.json 内の全 hook を並列実行する（上書きではなく累積）
+- Codex の旧 `.codex/hooks/scripts/gwt-*.mjs` runtime assets は廃止済みで、現行の managed hook 契約は `.codex/hooks.json` 内の no-Node command 形状が正本
 
 ### 関連SPEC
 
@@ -65,7 +66,7 @@ As a developer, I want to be able to identify which hooks in `.codex/hooks.json`
 
 ### 識別
 
-- FR-020: gwt managed hooks は `command` フィールドに `gwt-` を含むスクリプトパスで識別する（例: `gwt-forward-hook.mjs`, `gwt-block-git-branch-ops.mjs`）
+- FR-020: gwt managed hooks は `.codex/hooks.json` 内の gwt 管理 command 形状で識別する。現行形は `'<absolute-gwt-path>' hook runtime-state <event>` および `'<absolute-gwt-path>' hook block-bash-policy` であり、旧 `gwt-*.mjs` / `GWT_MANAGED_HOOK` 形状は migration 判定のためにのみ扱う
 - FR-021: 将来的にマーカーコメントや metadata フィールドによる識別への移行を妨げない設計とする
 
 ### dirty worktree 防止

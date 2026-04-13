@@ -6,7 +6,7 @@
 //! `pull`-like commands.
 //!
 //! Filesystem layout (rooted at a configurable directory, typically
-//! `~/.gwt/cache/issues/`):
+//! `~/.gwt/cache/issues/<repo-hash>/`):
 //!
 //! ```text
 //! <root>/
@@ -236,6 +236,32 @@ impl Cache {
             snapshot,
             spec_body,
         })
+    }
+
+    /// List every readable cache entry stored under the cache root.
+    ///
+    /// Non-directory entries, non-numeric directory names, and partially
+    /// unreadable cache entries are skipped so UI consumers can stay on the
+    /// typed cache surface rather than reimplementing the on-disk layout.
+    pub fn list_entries(&self) -> Result<Vec<CacheEntry>, CacheError> {
+        let entries = fs::read_dir(&self.root)?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Ok(number) = name.parse::<u64>() else {
+                continue;
+            };
+            if let Some(cache_entry) = self.load_entry(IssueNumber(number)) {
+                out.push(cache_entry);
+            }
+        }
+        Ok(out)
     }
 
     /// Read a single section by name. Returns `Ok(None)` if the section is

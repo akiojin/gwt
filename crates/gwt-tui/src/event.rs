@@ -11,6 +11,41 @@ use crate::{input_trace, message::Message};
 const TICK_RATE: Duration = Duration::from_millis(100);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(120);
 
+/// Returns `true` if stdin was a terminal when the process started.
+///
+/// Initialised lazily on first call.  In test / piped-stdin environments
+/// this returns `false`, which lets [`is_tty_alive`] skip the health
+/// check entirely (there is no terminal to lose).
+fn stdin_was_initially_terminal() -> bool {
+    use std::io::IsTerminal;
+    use std::sync::OnceLock;
+    static WAS_TERMINAL: OnceLock<bool> = OnceLock::new();
+    *WAS_TERMINAL.get_or_init(|| std::io::stdin().is_terminal())
+}
+
+/// Check whether the controlling terminal is still alive.
+///
+/// Uses `tcgetattr` on stdin to detect both revoked file descriptors
+/// (terminal tab closed, process orphaned) and hung-up terminals
+/// (PTY master closed).  Returns `false` when the terminal is gone,
+/// which prevents calling `crossterm::event::poll()` — crossterm
+/// 0.29's `try_read()` spins indefinitely on a dead TTY fd because
+/// its inner read loop does not break on EOF or EIO.
+///
+/// When stdin was never a terminal (tests, piped input) this always
+/// returns `true` so that normal event polling is not disrupted.
+pub fn is_tty_alive() -> bool {
+    if !stdin_was_initially_terminal() {
+        return true;
+    }
+    use std::os::unix::io::AsRawFd;
+    let fd = std::io::stdin().as_raw_fd();
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: `fd` is the stdin file descriptor and `termios` is a
+    // properly aligned, writable buffer for `tcgetattr`.
+    unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) == 0 }
+}
+
 /// Poll for the next message. Returns `None` on timeout with no events.
 pub fn poll_event(deadline: Instant) -> Option<Message> {
     poll_event_slice(deadline, deadline.saturating_duration_since(Instant::now()))
@@ -19,19 +54,38 @@ pub fn poll_event(deadline: Instant) -> Option<Message> {
 /// Poll for the next message while capping the blocking wait to `max_wait`.
 ///
 /// Returns `None` when the slice times out before the next tick deadline.
+/// Returns `Some(Message::TerminalLost)` when the controlling terminal is
+/// no longer reachable.
 pub fn poll_event_slice(deadline: Instant, max_wait: Duration) -> Option<Message> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Some(Message::Tick);
     }
 
+    if !is_tty_alive() {
+        return Some(Message::TerminalLost);
+    }
+
     let wait = remaining.min(max_wait);
-    if event::poll(wait).unwrap_or(false) {
-        event::read().ok().and_then(translate_event)
-    } else if Instant::now() >= deadline {
-        Some(Message::Tick)
-    } else {
-        None
+    match event::poll(wait) {
+        Ok(true) => event::read().ok().and_then(translate_event),
+        Ok(false) => {
+            if Instant::now() >= deadline {
+                Some(Message::Tick)
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            if stdin_was_initially_terminal() {
+                tracing::warn!(error = %e, "crossterm::event::poll returned error");
+                Some(Message::TerminalLost)
+            } else {
+                // No terminal to begin with (test / piped stdin) — treat
+                // the error the same way the old `unwrap_or(false)` did.
+                None
+            }
+        }
     }
 }
 

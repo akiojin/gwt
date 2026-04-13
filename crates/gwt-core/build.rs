@@ -11,8 +11,6 @@ fn main() {
     // Trigger rebuild when skill/command/hook files change.
     println!("cargo:rerun-if-changed=../../.claude/skills");
     println!("cargo:rerun-if-changed=../../.claude/commands");
-    println!("cargo:rerun-if-changed=../../.claude/hooks/scripts");
-    println!("cargo:rerun-if-changed=../../.codex/hooks/scripts");
 
     // Validate YAML frontmatter in all SKILL.md files at build time.
     if skills_dir.is_dir() {

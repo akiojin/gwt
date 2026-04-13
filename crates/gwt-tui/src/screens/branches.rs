@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -253,6 +253,8 @@ pub struct DetailSessionSummary {
     pub name: String,
     pub detail: Option<String>,
     pub active: bool,
+    pub launch_summary: Vec<String>,
+    pub launch_command_line: Option<String>,
 }
 
 /// Lightweight live session summary rendered directly in the branch list.
@@ -407,6 +409,15 @@ pub struct BranchesState {
 }
 
 impl BranchesState {
+    fn cleanup_policy(&self) -> crate::branch_cleanup::CleanupPolicy<'_> {
+        crate::branch_cleanup::CleanupPolicy::new(
+            &self.branches,
+            self.current_head_branch.as_deref(),
+            &self.active_session_branches,
+            &self.merged_state,
+        )
+    }
+
     /// Return branches filtered by current view mode and search query,
     /// then sorted according to the active `sort_mode`.
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
@@ -621,26 +632,13 @@ impl BranchesState {
         self.branches.iter().find(|item| item.name == branch)
     }
 
-    fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
-        name.strip_prefix("refs/remotes/origin/")
-            .or_else(|| name.strip_prefix("origin/"))
-    }
-
     /// Resolve the local branch that a cleanup action should operate on.
     ///
     /// Local rows resolve to themselves. Remote-tracking rows resolve only
     /// when a matching local branch exists; otherwise they are not cleanup
     /// candidates.
     pub fn cleanup_execution_branch(&self, branch: &str) -> Option<String> {
-        let item = self.branch_item(branch)?;
-        if item.is_local {
-            return Some(item.name.clone());
-        }
-        let local_name = Self::local_branch_for_remote_ref(&item.name)?;
-        self.branches
-            .iter()
-            .find(|candidate| candidate.is_local && candidate.name == local_name)
-            .map(|candidate| candidate.name.clone())
+        self.cleanup_policy().execution_branch(branch)
     }
 
     /// Returns true when `branch` is allowed to participate in Branch Cleanup
@@ -662,55 +660,13 @@ impl BranchesState {
         &self,
         branch: &str,
     ) -> Option<CleanupSelectionBlockedReason> {
-        let item = self.branch_item(branch)?;
-        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
-            return if item.is_local {
-                Some(CleanupSelectionBlockedReason::Unknown)
-            } else {
-                Some(CleanupSelectionBlockedReason::RemoteTrackingWithoutLocal)
-            };
-        };
-        if gwt_git::is_protected_branch(&execution_branch) {
-            return Some(CleanupSelectionBlockedReason::ProtectedBranch);
-        }
-        if self
-            .current_head_branch
-            .as_deref()
-            .is_some_and(|head| head == execution_branch)
-        {
-            return Some(CleanupSelectionBlockedReason::CurrentHead);
-        }
-        if self.active_session_branches.contains(&execution_branch) {
-            return Some(CleanupSelectionBlockedReason::ActiveSession);
-        }
-        if matches!(self.merge_state(&execution_branch), MergeState::Computing) {
-            return Some(CleanupSelectionBlockedReason::MergeCheckRunning);
-        }
-        None
+        self.cleanup_policy().blocked_reason(branch)
     }
 
     /// Return the warning risks that should be surfaced in confirm modal for a
     /// selectable branch.
     pub fn cleanup_selection_risks(&self, branch: &str) -> Vec<CleanupSelectionRisk> {
-        if self.cleanup_selection_blocked_reason(branch).is_some() {
-            return Vec::new();
-        }
-
-        let Some(item) = self.branch_item(branch) else {
-            return Vec::new();
-        };
-        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
-            return Vec::new();
-        };
-
-        let mut risks = Vec::new();
-        if !item.is_local {
-            risks.push(CleanupSelectionRisk::RemoteTracking);
-        }
-        if matches!(self.merge_state(&execution_branch), MergeState::NotMerged) {
-            risks.push(CleanupSelectionRisk::Unmerged);
-        }
-        risks
+        self.cleanup_policy().risks(branch)
     }
 
     /// Returns true when the branch is both a protection-allowed candidate
@@ -763,11 +719,7 @@ impl BranchesState {
 
     /// Returns the merge target for a branch when it is cleanable.
     pub fn cleanup_target(&self, branch: &str) -> Option<gwt_git::MergeTarget> {
-        let execution_branch = self.cleanup_execution_branch(branch)?;
-        match self.merge_state(&execution_branch) {
-            MergeState::Cleanable(target) => Some(target),
-            _ => None,
-        }
+        self.cleanup_policy().target(branch)
     }
 
     /// Returns true when at least one branch is still being computed by
@@ -1521,8 +1473,8 @@ fn render_detail_sessions(
         return;
     }
 
-    let mut lines = Vec::new();
     let selected_session = selected_session.min(sessions.len().saturating_sub(1));
+    let mut lines = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
         let selected_marker = if index == selected_session {
             theme::icon::LEFT_ACCENT
@@ -1557,7 +1509,75 @@ fn render_detail_sessions(
         }
     }
 
+    let list_height = session_list_height(area.height, lines.len());
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(list_height), Constraint::Min(0)])
+        .split(area);
     let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, chunks[0]);
+
+    render_selected_session_detail(frame, chunks[1], &sessions[selected_session]);
+}
+
+fn session_list_height(total_height: u16, rendered_lines: usize) -> u16 {
+    let rendered_lines = rendered_lines as u16;
+    if total_height <= 6 {
+        rendered_lines.min(total_height)
+    } else {
+        rendered_lines.min(total_height.saturating_sub(5))
+    }
+}
+
+fn render_selected_session_detail(frame: &mut Frame, area: Rect, session: &DetailSessionSummary) {
+    if area.height == 0 {
+        return;
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " Selected Session",
+            Style::default()
+                .fg(theme::color::FOCUS)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("   Name: {}", session.name),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
+        )),
+    ];
+
+    if session.launch_summary.is_empty() && session.launch_command_line.is_none() {
+        lines.push(Line::from(Span::styled(
+            "   Launch parameters unavailable",
+            theme::style::muted_text(),
+        )));
+    } else {
+        for summary in &session.launch_summary {
+            lines.push(Line::from(Span::styled(
+                format!("   {summary}"),
+                Style::default().fg(theme::color::TEXT_PRIMARY),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "   Launch Command",
+            Style::default()
+                .fg(theme::color::TEXT_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        )));
+        match session.launch_command_line.as_deref() {
+            Some(command_line) => lines.push(Line::from(Span::styled(
+                format!("   {command_line}"),
+                Style::default().fg(theme::color::SURFACE),
+            ))),
+            None => lines.push(Line::from(Span::styled(
+                "   Launch parameters unavailable",
+                theme::style::muted_text(),
+            ))),
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -2407,12 +2427,24 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: Some("gpt-5.3-codex · high".to_string()),
                 active: true,
+                launch_summary: vec![
+                    "Model: gpt-5.3-codex".to_string(),
+                    "Reasoning: high".to_string(),
+                    "Version: latest".to_string(),
+                    "Permissions: Skip confirmations".to_string(),
+                    "Runtime: Host".to_string(),
+                ],
+                launch_command_line: Some(
+                    "codex --no-alt-screen --model=gpt-5.3-codex".to_string(),
+                ),
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2441,6 +2473,16 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("gpt-5.3-codex · high")),
             "Sessions pane should show session detail metadata when available"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Launch Command")),
+            "Sessions pane should show a launch detail section"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("codex --no-alt-screen --model=gpt-5.3-codex")),
+            "Sessions pane should show the persisted exact argv"
         );
     }
 
@@ -2478,12 +2520,16 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: true,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2502,6 +2548,38 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("\u{258E} \u{25CF} Shell  Shell: develop")),
             "Sessions pane should show the selected-row marker on the current row"
+        );
+    }
+
+    #[test]
+    fn render_detail_sessions_shows_unavailable_fallback_for_missing_launch_metadata() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 2;
+        let sessions = vec![DetailSessionSummary {
+            kind: "Agent",
+            name: "Codex".to_string(),
+            detail: Some("gpt-5.3-codex".to_string()),
+            active: true,
+            launch_summary: Vec::new(),
+            launch_command_line: None,
+        }];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &sessions);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Launch parameters unavailable")),
+            "Sessions pane should show a stable fallback when no launch metadata is saved"
         );
     }
 
