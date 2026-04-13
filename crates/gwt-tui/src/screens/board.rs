@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -16,7 +16,6 @@ use crate::theme;
 pub struct BoardState {
     pub(crate) snapshot: CoordinationSnapshot,
     pub(crate) selected_entry: usize,
-    pub(crate) selected_card: usize,
     pub(crate) composer_open: bool,
     pub(crate) composer_kind: BoardEntryKind,
     pub(crate) composer_text: String,
@@ -27,7 +26,6 @@ impl Default for BoardState {
         Self {
             snapshot: CoordinationSnapshot::default(),
             selected_entry: 0,
-            selected_card: 0,
             composer_open: true,
             composer_kind: BoardEntryKind::Request,
             composer_text: String::new(),
@@ -42,7 +40,6 @@ impl BoardState {
 
     fn clamp_selected(&mut self) {
         super::clamp_index(&mut self.selected_entry, self.snapshot.board.entries.len());
-        super::clamp_index(&mut self.selected_card, self.snapshot.cards.cards.len());
     }
 }
 
@@ -110,27 +107,14 @@ pub fn render(state: &BoardState, frame: &mut Frame, area: Rect) {
         .constraints([Constraint::Min(10), Constraint::Length(7)])
         .split(area);
 
-    let main = chunks[0];
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
-        .split(main);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(columns[1]);
-
-    render_timeline(state, frame, columns[0]);
-    render_entry_detail(state, frame, right[0]);
-    render_cards(state, frame, right[1]);
-
+    render_timeline(state, frame, chunks[0]);
     render_composer(state, frame, chunks[1]);
 }
 
 fn render_timeline(state: &BoardState, frame: &mut Frame, area: Rect) {
     if state.snapshot.board.entries.is_empty() {
-        let paragraph = Paragraph::new("No board entries yet")
-            .block(Block::default().title("Timeline"))
+        let paragraph = Paragraph::new("No chat messages yet")
+            .block(Block::default().title("Chat"))
             .style(theme::style::muted_text());
         frame.render_widget(paragraph, area);
         return;
@@ -143,146 +127,49 @@ fn render_timeline(state: &BoardState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, entry)| {
-            let style = if idx == state.selected_entry {
+            let is_selected = idx == state.selected_entry;
+            let style = if is_selected {
                 theme::style::selected_item()
             } else {
                 theme::style::text()
             };
-            let preview = entry.body.lines().next().unwrap_or("").trim().to_string();
-            let line = Line::from(vec![
-                super::selection_prefix(idx == state.selected_entry),
+            let mut lines = vec![Line::from(vec![
+                super::selection_prefix(is_selected),
                 Span::styled(
                     format!("[{}] ", entry.kind.as_str()),
-                    Style::default().fg(kind_color(&entry.kind)),
+                    Style::default()
+                        .fg(kind_color(&entry.kind))
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("{} ", entry.author),
+                    entry.author.clone(),
                     Style::default()
                         .fg(theme::color::ACTIVE)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(preview, style),
-            ]);
-            ListItem::new(line)
+            ])];
+            for body_line in entry.body.lines() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(body_line.to_string(), style),
+                ]));
+            }
+            if let Some(state_name) = entry.state.as_deref() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("state: {state_name}"), theme::style::muted_text()),
+                ]));
+            }
+            ListItem::new(Text::from(lines))
         })
         .collect();
 
     let mut list_state = ratatui::widgets::ListState::default();
     list_state.select(Some(state.selected_entry));
     let list = List::new(items)
-        .block(Block::default().title(format!("Timeline ({})", state.snapshot.board.entries.len())))
+        .block(Block::default().title(format!("Chat ({})", state.snapshot.board.entries.len())))
         .highlight_style(theme::style::active_item());
     frame.render_stateful_widget(list, area, &mut list_state);
-}
-
-fn render_entry_detail(state: &BoardState, frame: &mut Frame, area: Rect) {
-    let Some(entry) = state.selected_entry() else {
-        let paragraph = Paragraph::new("Select a board entry to inspect the thread")
-            .block(Block::default().title("Thread"))
-            .style(theme::style::muted_text())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
-        return;
-    };
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("[{}]", entry.kind.as_str()),
-                Style::default()
-                    .fg(kind_color(&entry.kind))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                entry.author.clone(),
-                Style::default().fg(theme::color::ACTIVE),
-            ),
-        ]),
-        Line::from(format!(
-            "State: {}",
-            entry.state.as_deref().unwrap_or("n/a")
-        )),
-        Line::from(format!(
-            "Created: {}",
-            entry.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-        )),
-    ];
-
-    if !entry.related_topics.is_empty() {
-        lines.push(Line::from(format!(
-            "Topics: {}",
-            entry.related_topics.join(", ")
-        )));
-    }
-    if !entry.related_owners.is_empty() {
-        lines.push(Line::from(format!(
-            "Owners: {}",
-            entry.related_owners.join(", ")
-        )));
-    }
-    if let Some(parent) = entry.parent_id.as_deref() {
-        lines.push(Line::from(format!("Parent: {parent}")));
-    }
-    lines.push(Line::default());
-    for body_line in entry.body.lines() {
-        lines.push(Line::from(body_line.to_string()));
-    }
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(Block::default().title("Thread"))
-        .wrap(Wrap { trim: false })
-        .style(theme::style::text());
-    frame.render_widget(paragraph, area);
-}
-
-fn render_cards(state: &BoardState, frame: &mut Frame, area: Rect) {
-    if state.snapshot.cards.cards.is_empty() {
-        let paragraph = Paragraph::new("No agent cards yet")
-            .block(Block::default().title("Cards"))
-            .style(theme::style::muted_text())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let mut lines = Vec::new();
-    for (idx, card) in state.snapshot.cards.cards.iter().enumerate() {
-        if idx > 0 {
-            lines.push(Line::default());
-        }
-        let name_style = if idx == state.selected_card {
-            Style::default()
-                .fg(theme::color::ACTIVE)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            theme::style::text()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(card.agent_id.clone(), name_style),
-            Span::raw(" "),
-            Span::styled(
-                format!("[{}]", card.status.as_deref().unwrap_or("unknown")),
-                Style::default().fg(theme::color::FOCUS),
-            ),
-        ]));
-        lines.push(Line::from(format!("Branch: {}", card.branch)));
-        if let Some(focus) = card.current_focus.as_deref() {
-            lines.push(Line::from(format!("Focus: {focus}")));
-        }
-        if let Some(next) = card.next_action.as_deref() {
-            lines.push(Line::from(format!("Next: {next}")));
-        }
-        if let Some(reason) = card.blocked_reason.as_deref() {
-            lines.push(Line::from(format!("Blocked: {reason}")));
-        }
-    }
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(Block::default().title(format!("Cards ({})", state.snapshot.cards.cards.len())))
-        .wrap(Wrap { trim: false })
-        .style(theme::style::text());
-    frame.render_widget(paragraph, area);
 }
 
 fn render_composer(state: &BoardState, frame: &mut Frame, area: Rect) {
@@ -363,7 +250,7 @@ fn kind_color(kind: &BoardEntryKind) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::coordination::{AgentCard, AgentCardsProjection, AuthorKind, BoardProjection};
+    use gwt_core::coordination::{AgentCardsProjection, AuthorKind, BoardProjection};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
     use ratatui::Terminal;
@@ -402,37 +289,31 @@ mod tests {
     fn sample_snapshot() -> CoordinationSnapshot {
         CoordinationSnapshot {
             board: BoardProjection {
-                entries: vec![BoardEntry::new(
-                    AuthorKind::User,
-                    "user",
-                    BoardEntryKind::Request,
-                    "Need a shared board",
-                    None,
-                    None,
-                    vec!["coordination".into()],
-                    vec!["1974".into()],
-                )],
+                entries: vec![
+                    BoardEntry::new(
+                        AuthorKind::User,
+                        "user",
+                        BoardEntryKind::Request,
+                        "Need a shared board",
+                        None,
+                        None,
+                        vec!["coordination".into()],
+                        vec!["1974".into()],
+                    ),
+                    BoardEntry::new(
+                        AuthorKind::Agent,
+                        "Codex",
+                        BoardEntryKind::Status,
+                        "Working on Board tab",
+                        Some("running".into()),
+                        None,
+                        vec!["coordination".into()],
+                        vec!["1974".into()],
+                    ),
+                ],
                 updated_at: chrono::Utc::now(),
             },
-            cards: AgentCardsProjection {
-                cards: vec![AgentCard {
-                    agent_id: "Codex".into(),
-                    session_id: Some("sess-1".into()),
-                    branch: "feature/demo".into(),
-                    role: None,
-                    responsibility: None,
-                    status: Some("running".into()),
-                    current_focus: Some("Board tab".into()),
-                    next_action: Some("Add watcher".into()),
-                    blocked_reason: None,
-                    related_topics: vec![],
-                    related_owners: vec![],
-                    working_scope: None,
-                    handoff_target: None,
-                    updated_at: chrono::Utc::now(),
-                }],
-                updated_at: chrono::Utc::now(),
-            },
+            cards: AgentCardsProjection::default(),
         }
     }
 
@@ -440,7 +321,7 @@ mod tests {
     fn set_snapshot_tracks_tail_and_clamps_selection() {
         let mut state = BoardState::default();
         update(&mut state, BoardMessage::SetSnapshot(sample_snapshot()));
-        assert_eq!(state.selected_entry, 0);
+        state.selected_entry = 1;
 
         let mut snapshot = sample_snapshot();
         snapshot.board.entries.push(BoardEntry::new(
@@ -455,7 +336,7 @@ mod tests {
         ));
         update(&mut state, BoardMessage::SetSnapshot(snapshot));
 
-        assert_eq!(state.selected_entry, 1);
+        assert_eq!(state.selected_entry, 2);
         assert_eq!(
             state.selected_entry().map(|entry| entry.body.as_str()),
             Some("Working")
@@ -519,5 +400,22 @@ mod tests {
         let position = render_cursor_position(&state, 100, 24);
 
         assert_eq!(position, Position::new(4, 23));
+    }
+
+    #[test]
+    fn render_shows_single_chat_timeline_without_cards_or_thread_panes() {
+        let mut state = BoardState::default();
+        update(&mut state, BoardMessage::SetSnapshot(sample_snapshot()));
+
+        let text = buffer_text(&render_buffer(&state, 100, 24));
+
+        assert!(text.contains("Chat (2)"));
+        assert!(text.contains("Need a shared board"));
+        assert!(text.contains("Working on Board tab"));
+        assert!(text.contains("user"));
+        assert!(text.contains("Codex"));
+        assert!(!text.contains("Cards"));
+        assert!(!text.contains("Thread"));
+        assert!(!text.contains("No agent cards yet"));
     }
 }

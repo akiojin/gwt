@@ -12,10 +12,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
 use gwt_agent::{PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
-use gwt_core::coordination::{
-    apply_agent_card_patch, load_snapshot, post_entry, AgentCardContext, AgentCardPatch,
-    AuthorKind, BoardEntry, BoardEntryKind,
-};
+use gwt_core::coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind};
 
 use super::HookError;
 use crate::discussion_resume::load_pending_resume;
@@ -115,43 +112,15 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
 }
 
 fn sync_coordination_for_session(session: &Session, event: &str) -> Result<(), HookError> {
-    let card_status = coordination_status_for_event(event)?;
-    let worktree_root = &session.worktree_path;
-    let snapshot = load_snapshot(worktree_root).map_err(coordination_as_hook_error)?;
-    let current_status = snapshot
-        .cards
-        .cards
-        .iter()
-        .find(|card| card.session_id.as_deref() == Some(session.id.as_str()))
-        .and_then(|card| card.status.as_deref());
-
-    if current_status == Some(card_status) {
-        return Ok(());
-    }
-
-    apply_agent_card_patch(
-        worktree_root,
-        AgentCardContext {
-            agent_id: session.display_name.clone(),
-            session_id: Some(session.id.clone()),
-            branch: session.branch.clone(),
-        },
-        AgentCardPatch {
-            status: Some(card_status.to_string()),
-            ..AgentCardPatch::default()
-        },
-    )
-    .map_err(coordination_as_hook_error)?;
-
-    if let Some(body) = board_entry_body_for_event(session, event) {
+    if let Some((kind, state, body)) = board_entry_body_for_event(session, event) {
         post_entry(
-            worktree_root,
+            &session.worktree_path,
             BoardEntry::new(
                 AuthorKind::Agent,
                 session.display_name.clone(),
-                BoardEntryKind::Status,
+                kind,
                 body,
-                Some(card_status.to_string()),
+                state,
                 None,
                 Vec::new(),
                 Vec::new(),
@@ -163,23 +132,26 @@ fn sync_coordination_for_session(session: &Session, event: &str) -> Result<(), H
     Ok(())
 }
 
-fn coordination_status_for_event(event: &str) -> Result<&'static str, HookError> {
+fn board_entry_body_for_event(
+    session: &Session,
+    event: &str,
+) -> Option<(BoardEntryKind, Option<String>, String)> {
     match event {
-        "SessionStart" | "Stop" => Ok("waiting_input"),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Ok("running"),
-        _ => Err(HookError::InvalidEvent(event.to_string())),
-    }
-}
-
-fn board_entry_body_for_event(session: &Session, event: &str) -> Option<String> {
-    match event {
-        "SessionStart" => Some(format!(
-            "{} started work on {}",
-            session.display_name, session.branch
+        "SessionStart" => Some((
+            BoardEntryKind::Status,
+            Some("waiting_input".into()),
+            format!(
+                "{} started work on {}",
+                session.display_name, session.branch
+            ),
         )),
-        "Stop" => Some(format!(
-            "{} is waiting for input on {}",
-            session.display_name, session.branch
+        "Stop" => Some((
+            BoardEntryKind::Status,
+            Some("waiting_input".into()),
+            format!(
+                "{} is waiting for input on {}",
+                session.display_name, session.branch
+            ),
         )),
         _ => None,
     }
@@ -274,17 +246,17 @@ mod tests {
     }
 
     #[test]
-    fn sync_coordination_for_session_updates_agent_card_status() {
+    fn sync_coordination_for_session_running_event_does_not_append_message() {
         let dir = tempfile::tempdir().unwrap();
         let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
 
         sync_coordination_for_session(&session, "PreToolUse").unwrap();
 
         let snapshot = load_snapshot(dir.path()).unwrap();
-        assert_eq!(snapshot.cards.cards.len(), 1);
-        assert_eq!(snapshot.cards.cards[0].agent_id, "Codex");
-        assert_eq!(snapshot.cards.cards[0].status.as_deref(), Some("running"));
         assert!(snapshot.board.entries.is_empty());
+        let events =
+            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
+        assert_eq!(events.lines().count(), 0);
     }
 
     #[test]
@@ -295,18 +267,9 @@ mod tests {
         sync_coordination_for_session(&session, "SessionStart").unwrap();
 
         let snapshot = load_snapshot(dir.path()).unwrap();
-        assert_eq!(snapshot.cards.cards.len(), 1);
-        assert_eq!(
-            snapshot.cards.cards[0].status.as_deref(),
-            Some("waiting_input")
-        );
         assert_eq!(snapshot.board.entries.len(), 1);
         assert_eq!(snapshot.board.entries[0].kind, BoardEntryKind::Status);
         assert_eq!(snapshot.board.entries[0].author, "Codex");
-        assert_eq!(
-            snapshot.board.entries[0].state.as_deref(),
-            Some("waiting_input")
-        );
         assert!(
             snapshot.board.entries[0].body.contains("feature/demo"),
             "board entry should identify the active branch"
@@ -322,11 +285,10 @@ mod tests {
         sync_coordination_for_session(&session, "PostToolUse").unwrap();
 
         let snapshot = load_snapshot(dir.path()).unwrap();
-        assert_eq!(snapshot.cards.cards.len(), 1);
-        assert_eq!(snapshot.cards.cards[0].status.as_deref(), Some("running"));
+        assert!(snapshot.board.entries.is_empty());
 
         let events =
             std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
-        assert_eq!(events.lines().count(), 1);
+        assert_eq!(events.lines().count(), 0);
     }
 }

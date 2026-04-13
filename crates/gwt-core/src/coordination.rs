@@ -1,6 +1,5 @@
-//! Repo-local coordination storage for shared board and agent cards.
+//! Repo-local coordination storage for a shared board chat timeline.
 
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -15,13 +14,13 @@ use crate::{GwtError, Result};
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
 pub const BOARD_PROJECTION_FILE_NAME: &str = "board.latest.json";
-pub const CARDS_PROJECTION_FILE_NAME: &str = "cards.latest.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorKind {
     User,
     Agent,
+    System,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,7 +196,7 @@ pub struct AgentCardContext {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoordinationEvent {
-    BoardPost { entry: BoardEntry },
+    MessageAppended { entry: BoardEntry },
     AgentCardUpsert { card: AgentCard },
 }
 
@@ -251,10 +250,6 @@ pub fn coordination_board_projection_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(BOARD_PROJECTION_FILE_NAME)
 }
 
-pub fn coordination_cards_projection_path(worktree_root: &Path) -> PathBuf {
-    coordination_dir(worktree_root).join(CARDS_PROJECTION_FILE_NAME)
-}
-
 fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(".lock")
 }
@@ -272,12 +267,6 @@ pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
             &BoardProjection::default(),
         )?;
     }
-    if !coordination_cards_projection_path(worktree_root).exists() {
-        write_atomic_json(
-            &coordination_cards_projection_path(worktree_root),
-            &AgentCardsProjection::default(),
-        )?;
-    }
 
     Ok(())
 }
@@ -286,12 +275,12 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
     Ok(CoordinationSnapshot {
         board: load_json_or_default(&coordination_board_projection_path(worktree_root))?,
-        cards: load_json_or_default(&coordination_cards_projection_path(worktree_root))?,
+        cards: AgentCardsProjection::default(),
     })
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
-    append_event(worktree_root, &CoordinationEvent::BoardPost { entry })
+    append_event(worktree_root, &CoordinationEvent::MessageAppended { entry })
 }
 
 pub fn apply_agent_card_patch(
@@ -431,10 +420,6 @@ fn append_event_locked(
         &coordination_board_projection_path(worktree_root),
         &snapshot.board,
     )?;
-    write_atomic_json(
-        &coordination_cards_projection_path(worktree_root),
-        &snapshot.cards,
-    )?;
     Ok(snapshot)
 }
 
@@ -446,8 +431,6 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
     let reader = BufReader::new(file);
 
     let mut board_entries = Vec::new();
-    let mut cards = BTreeMap::<String, AgentCard>::new();
-
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
@@ -456,28 +439,21 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
         }
         let event: CoordinationEvent = serde_json::from_str(trimmed).map_err(json_error)?;
         match event {
-            CoordinationEvent::BoardPost { entry } => board_entries.push(entry),
-            CoordinationEvent::AgentCardUpsert { card } => {
-                cards.insert(card.key(), card);
-            }
+            CoordinationEvent::MessageAppended { entry } => board_entries.push(entry),
+            CoordinationEvent::AgentCardUpsert { .. } => {}
         }
     }
 
     board_entries.sort_by_key(|entry| entry.created_at);
 
     let now = Utc::now();
-    let mut cards_vec: Vec<AgentCard> = cards.into_values().collect();
-    cards_vec.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
     Ok(CoordinationSnapshot {
         board: BoardProjection {
             entries: board_entries,
             updated_at: now,
         },
-        cards: AgentCardsProjection {
-            cards: cards_vec,
-            updated_at: now,
-        },
+        cards: AgentCardsProjection::default(),
     })
 }
 
@@ -543,10 +519,11 @@ mod tests {
         let snapshot = load_snapshot(dir.path()).unwrap();
 
         assert!(snapshot.board.entries.is_empty());
-        assert!(snapshot.cards.cards.is_empty());
         assert!(coordination_events_path(dir.path()).exists());
         assert!(coordination_board_projection_path(dir.path()).exists());
-        assert!(coordination_cards_projection_path(dir.path()).exists());
+        assert!(!coordination_dir(dir.path())
+            .join("cards.latest.json")
+            .exists());
     }
 
     #[test]
@@ -574,91 +551,42 @@ mod tests {
             "Need a coordination surface"
         );
         let raw = std::fs::read_to_string(coordination_events_path(dir.path())).unwrap();
-        assert!(raw.contains("\"type\":\"board_post\""));
+        assert!(raw.contains("\"type\":\"message_appended\""));
     }
 
     #[test]
-    fn apply_agent_card_patch_keeps_latest_card_state() {
+    fn rebuild_snapshot_reconstructs_message_order_without_cards() {
         let dir = tempfile::tempdir().unwrap();
 
-        apply_agent_card_patch(
-            dir.path(),
-            AgentCardContext {
-                agent_id: "Codex".into(),
-                session_id: Some("sess-1".into()),
-                branch: "feature/coordination".into(),
-            },
-            AgentCardPatch {
-                status: Some("running".into()),
-                current_focus: Some("Wire storage".into()),
-                ..AgentCardPatch::default()
-            },
-        )
-        .unwrap();
-
-        let snapshot = apply_agent_card_patch(
-            dir.path(),
-            AgentCardContext {
-                agent_id: "Codex".into(),
-                session_id: Some("sess-1".into()),
-                branch: "feature/coordination".into(),
-            },
-            AgentCardPatch {
-                next_action: Some("Add CLI".into()),
-                ..AgentCardPatch::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.cards.cards.len(), 1);
-        let card = &snapshot.cards.cards[0];
-        assert_eq!(card.status.as_deref(), Some("running"));
-        assert_eq!(card.current_focus.as_deref(), Some("Wire storage"));
-        assert_eq!(card.next_action.as_deref(), Some("Add CLI"));
-    }
-
-    #[test]
-    fn rebuild_snapshot_reconstructs_latest_cards_and_threads() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let first = BoardEntry::new(
-            AuthorKind::User,
-            "user",
-            BoardEntryKind::Request,
-            "Initial request",
-            None,
-            None,
-            vec![],
-            vec![],
-        );
-        let parent_id = first.id.clone();
-        append_event(dir.path(), &CoordinationEvent::BoardPost { entry: first }).unwrap();
         append_event(
             dir.path(),
-            &CoordinationEvent::BoardPost {
+            &CoordinationEvent::MessageAppended {
                 entry: BoardEntry::new(
-                    AuthorKind::Agent,
-                    "Codex",
-                    BoardEntryKind::Claim,
-                    "I will take this",
+                    AuthorKind::User,
+                    "user",
+                    BoardEntryKind::Request,
+                    "Initial request",
                     None,
-                    Some(parent_id),
+                    None,
                     vec![],
                     vec![],
                 ),
             },
         )
         .unwrap();
-        apply_agent_card_patch(
+        append_event(
             dir.path(),
-            AgentCardContext {
-                agent_id: "Codex".into(),
-                session_id: Some("sess-1".into()),
-                branch: "feature/coordination".into(),
-            },
-            AgentCardPatch {
-                status: Some("waiting_input".into()),
-                ..AgentCardPatch::default()
+            &CoordinationEvent::MessageAppended {
+                entry: BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Codex",
+                    BoardEntryKind::Status,
+                    "Investigating",
+                    Some("running".into()),
+                    None,
+                    vec![],
+                    vec![],
+                ),
             },
         )
         .unwrap();
@@ -666,15 +594,9 @@ mod tests {
         let rebuilt = rebuild_snapshot_from_events(&coordination_events_path(dir.path())).unwrap();
 
         assert_eq!(rebuilt.board.entries.len(), 2);
-        assert_eq!(
-            rebuilt.board.entries[1].parent_id.as_deref(),
-            Some(rebuilt.board.entries[0].id.as_str())
-        );
-        assert_eq!(rebuilt.cards.cards.len(), 1);
-        assert_eq!(
-            rebuilt.cards.cards[0].status.as_deref(),
-            Some("waiting_input")
-        );
+        assert_eq!(rebuilt.board.entries[0].body, "Initial request");
+        assert_eq!(rebuilt.board.entries[1].body, "Investigating");
+        assert!(rebuilt.cards.cards.is_empty());
     }
 
     #[test]
@@ -744,79 +666,8 @@ mod tests {
             vec![
                 ".lock".to_string(),
                 "board.latest.json".to_string(),
-                "cards.latest.json".to_string(),
                 "events.jsonl".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn concurrent_agent_card_patches_merge_fields_without_losing_updates() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = Arc::new(dir.path().to_path_buf());
-        ensure_repo_local_files(root.as_path()).unwrap();
-
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(coordination_lock_path(root.as_path()))
-            .unwrap();
-        lock_file.lock_exclusive().unwrap();
-
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        let first_root = Arc::clone(&root);
-        let first_barrier = Arc::clone(&barrier);
-        let first = thread::spawn(move || {
-            first_barrier.wait();
-            apply_agent_card_patch(
-                first_root.as_path(),
-                AgentCardContext {
-                    agent_id: "Codex".into(),
-                    session_id: Some("sess-1".into()),
-                    branch: "feature/coordination".into(),
-                },
-                AgentCardPatch {
-                    status: Some("running".into()),
-                    current_focus: Some("Wire storage".into()),
-                    ..AgentCardPatch::default()
-                },
-            )
-            .unwrap();
-        });
-
-        let second_root = Arc::clone(&root);
-        let second_barrier = Arc::clone(&barrier);
-        let second = thread::spawn(move || {
-            second_barrier.wait();
-            apply_agent_card_patch(
-                second_root.as_path(),
-                AgentCardContext {
-                    agent_id: "Codex".into(),
-                    session_id: Some("sess-1".into()),
-                    branch: "feature/coordination".into(),
-                },
-                AgentCardPatch {
-                    next_action: Some("Add CLI".into()),
-                    ..AgentCardPatch::default()
-                },
-            )
-            .unwrap();
-        });
-
-        barrier.wait();
-        thread::sleep(std::time::Duration::from_millis(50));
-        lock_file.unlock().unwrap();
-
-        first.join().unwrap();
-        second.join().unwrap();
-
-        let snapshot = load_snapshot(root.as_path()).unwrap();
-        assert_eq!(snapshot.cards.cards.len(), 1);
-        let card = &snapshot.cards.cards[0];
-        assert_eq!(card.status.as_deref(), Some("running"));
-        assert_eq!(card.current_focus.as_deref(), Some("Wire storage"));
-        assert_eq!(card.next_action.as_deref(), Some("Add CLI"));
     }
 }

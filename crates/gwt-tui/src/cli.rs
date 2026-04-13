@@ -208,22 +208,6 @@ pub enum CliCommand {
         topics: Vec<String>,
         owners: Vec<String>,
     },
-    /// `gwt board card set --status <s> [flags...]`.
-    BoardCardSet {
-        status: String,
-        role: Option<String>,
-        responsibility: Option<String>,
-        current_focus: Option<String>,
-        next_action: Option<String>,
-        blocked_reason: Option<String>,
-        topics: Vec<String>,
-        owners: Vec<String>,
-        working_scope: Option<String>,
-        handoff_target: Option<String>,
-        agent_id: Option<String>,
-        session_id: Option<String>,
-        branch: Option<String>,
-    },
     /// `gwt hook <name> [args...]` — dispatch to an in-binary hook handler.
     ///
     /// See SPEC #1942 (CORE-CLI) — replaces `.claude/hooks/scripts/gwt-*.mjs`
@@ -245,7 +229,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwt issue spec <n> [--section <name>|--edit <name> -f <file>] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* | gwt board card set --status <s> [--role <r>] [--responsibility <r>] [--current-focus <t>] [--next-action <t>] [--blocked-reason <t>] [--topic <t>]* [--owner <n>]* [--working-scope <t>] [--handoff-target <t>] [--agent-id <a>] [--session-id <s>] [--branch <b>]"
+                "usage: gwt issue spec <n> [--section <name>|--edit <name> -f <file>] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]*"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -359,9 +343,9 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         cmd @ (CliCommand::ActionsLogs { .. } | CliCommand::ActionsJobLogs { .. }) => {
             actions::run(env, cmd, &mut out)?
         }
-        cmd @ (CliCommand::BoardShow { .. }
-        | CliCommand::BoardPost { .. }
-        | CliCommand::BoardCardSet { .. }) => board::run(env, cmd, &mut out)?,
+        cmd @ (CliCommand::BoardShow { .. } | CliCommand::BoardPost { .. }) => {
+            board::run(env, cmd, &mut out)?
+        }
         CliCommand::Hook { name, rest } => {
             return run_hook(env, &name, &rest);
         }
