@@ -6404,6 +6404,7 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
     if count == 0 {
         return;
     }
+    let terminal_focused = model.active_focus == FocusPane::Terminal;
 
     let cols = (count as f64).sqrt().ceil() as usize;
     let rows = count.div_ceil(cols);
@@ -6443,7 +6444,9 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
                     .borders(Borders::ALL)
                     .border_style(border_style)
                     .title(grid_session_title(session_idx, session));
+                let inner = block.inner(*col_area);
                 frame.render_widget(block, *col_area);
+                render_session_surface(session, frame, inner, terminal_focused && is_active);
             }
         }
     }
@@ -9409,6 +9412,32 @@ mod tests {
         assert!(
             rendered.contains(crate::theme::icon::SESSION_SHELL),
             "grid pane titles should preserve the session-type icon instead of showing name-only chrome"
+        );
+    }
+
+    #[test]
+    fn render_model_text_grid_sessions_render_surface_contents() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan),
+        ];
+        model.active_session = 0;
+
+        append_session_line(&mut model, "shell-0", "grid shell ready");
+
+        let rendered = render_model_text(&model, 120, 24);
+
+        assert!(
+            rendered.contains("grid shell ready"),
+            "grid layout should render shell VT contents instead of empty titled frames"
+        );
+        assert!(
+            rendered.contains("Waiting for agent output"),
+            "grid layout should render the agent placeholder while the PTY is still quiet"
         );
     }
 

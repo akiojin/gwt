@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: grid session layout では pane chrome だけでなく terminal surface まで描画する
+
+### 事象
+
+`display_mode = "grid"` で起動すると shell / agent の PTY spawn 自体は成功しているのに、
+画面上では「起動していない」ように見えた。
+
+### 原因
+
+- `render_grid_sessions()` が各 session cell に対して title 付き border だけを描画し、
+  `render_session_surface()` を一度も呼んでいなかった。
+- そのため tab layout では見えていた shell placeholder / agent placeholder / PTY output が、
+  grid layout では全て欠落していた。
+- 起動ログには `PTY spawned successfully` が出る一方で UI は空枠になるため、
+  launch failure と誤認しやすかった。
+
+### 再発防止策
+
+1. layout を増やすときは chrome だけでなく content renderer まで各 layout で通す。
+2. `render_model_text(..., SessionLayout::Grid)` で shell output と agent placeholder の両方を
+   固定する RED テストを先に追加する。
+3. 「起動しない」報告では spawn log と render path を分けて確認し、process failure と
+   visibility failure を混同しない。
+
 ## 2026-04-14 — fix: managed hook migration は互換 hook 名まで管理対象として扱う
 
 ### 事象
