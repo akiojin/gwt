@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: hook migration では runtime generator と embedded asset bundle を同時に更新する
+
+### 事象
+
+`cargo build -p gwt-tui` が `crates/gwt-skills/src/assets.rs` の `include_dir!` で失敗し、
+削除済みの `.claude/hooks/scripts` / `.codex/hooks/scripts` をまだ compile-time asset として
+要求していた。
+
+### 原因
+
+- hook 実行面は `settings.local.json` / `.codex/hooks.json` 生成で `gwt hook ...` CLI に移行済みだった。
+- しかし `crates/gwt-skills/src/assets.rs` と `crates/gwt-skills/src/distribute.rs` だけが、
+  旧 `.mjs` hook script を bundle / distribute する契約のまま残っていた。
+- そのため source-of-truth が CLI dispatch に切り替わった後も、build-time では
+  存在しない legacy directory を必須入力として参照し続けていた。
+
+### 再発防止策
+
+1. generator で managed runtime surface を切り替えたら、同じ change set で `assets.rs` / `distribute.rs` / テストを必ず照合する。
+2. legacy asset を廃止する移行では「materialize しない」と「stale residue は prune する」を別責務として実装する。
+3. hook migration 後は `cargo build -p gwt-tui` を早い段階で回し、`include_dir!` の compile-time 依存が残っていないか確認する。
+
 ## 2026-04-09 — fix: `tracing_appender::rolling::daily` の日付境界は思い込みで local 扱いしない
 
 ### 事象

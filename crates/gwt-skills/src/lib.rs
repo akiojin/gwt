@@ -522,22 +522,18 @@ mod tests {
     }
 
     #[test]
-    fn claude_hooks_contains_expected_scripts() {
-        use crate::assets::CLAUDE_HOOKS;
-        let files: Vec<&str> = CLAUDE_HOOKS
-            .files()
-            .map(|f| {
-                f.path()
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or("")
-            })
-            .collect();
-        assert!(
-            files.contains(&"gwt-forward-hook.mjs"),
-            "missing gwt-forward-hook.mjs"
-        );
+    fn repo_does_not_keep_legacy_hook_scripts() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/hooks/scripts/gwt-forward-hook.mjs",
+            ".codex/hooks/scripts/gwt-forward-hook.mjs",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
+                "unexpected legacy hook script {relative}"
+            );
+        }
     }
 
     #[test]
@@ -624,14 +620,23 @@ mod tests {
         assert!(wt.join(".claude/settings.local.json").exists());
         assert!(wt.join(".codex/hooks.json").exists());
 
-        // Verify all distribution targets exist
+        // Verify all distribution targets exist and legacy hook scripts stay gone
         assert!(wt.join(".claude/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".codex/skills/gwt-pr/SKILL.md").exists());
         assert!(!wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".claude/commands/gwt-pr.md").exists());
-        assert!(wt
+        assert!(!wt
             .join(".claude/hooks/scripts/gwt-forward-hook.mjs")
             .exists());
+        assert!(!wt
+            .join(".codex/hooks/scripts/gwt-forward-hook.mjs")
+            .exists());
+
+        let claude_settings =
+            std::fs::read_to_string(wt.join(".claude/settings.local.json")).unwrap();
+        let codex_hooks = std::fs::read_to_string(wt.join(".codex/hooks.json")).unwrap();
+        assert!(!claude_settings.contains("gwt-forward-hook.mjs"));
+        assert!(!codex_hooks.contains("gwt-forward-hook.mjs"));
     }
 
     // ── helpers ──
