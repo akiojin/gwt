@@ -5384,6 +5384,7 @@ fn persist_and_spawn_launch(
     session.runtime_target = config.runtime_target;
     session.docker_service = config.docker_service.clone();
     session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+    session.linked_issue_number = config.linked_issue_number;
     session.launch_command = config.command.clone();
     session.launch_args = config.args.clone();
     session.display_name = config.display_name.clone();
@@ -14047,8 +14048,8 @@ services:
 
         let codex_content = fs::read_to_string(&codex_hooks).expect("read migrated codex hooks");
         assert!(
-            codex_content.contains("block-bash-policy"),
-            "startup refresh should consolidate Bash policy hooks"
+            codex_content.contains("workflow-policy"),
+            "startup refresh should consolidate workflow policy hooks"
         );
         assert!(
             !codex_content.contains("GWT_MANAGED_HOOK=runtime-state"),
@@ -14062,7 +14063,7 @@ services:
         let claude_content =
             fs::read_to_string(&claude_settings).expect("read migrated claude settings");
         assert!(
-            claude_content.contains("block-bash-policy"),
+            claude_content.contains("workflow-policy"),
             "startup refresh should regenerate Claude settings too"
         );
         assert!(
@@ -17328,7 +17329,7 @@ services:
         assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
-            serde_json::Value::String("Bash".to_string())
+            serde_json::Value::String("*".to_string())
         );
     }
 

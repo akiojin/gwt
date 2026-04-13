@@ -78,6 +78,11 @@ Use this contract:
   `[active]` to `[parked]`.
 - `Dismiss for now` suppresses the prompt only for the current agent session. A
   later session may surface it again.
+- `PreToolUse` may also dispatch `workflow-policy` before mutating tool calls.
+- `workflow-policy` should allow read-only investigation, but block
+  implementation edits until an owner Issue or SPEC is linked.
+- If the owner is a `gwt-spec` Issue, `workflow-policy` should block
+  implementation until local `plan` and `tasks` are present.
 
 ## Platform question tool
 
@@ -147,6 +152,10 @@ After each answer:
 - remove or refine the resolved unknown
 - re-rank the remaining unresolved questions
 - Ask the next highest-impact question if any remain
+
+When the runtime and user allow delegation, a bounded subagent may be used for
+objective review of competing proposals. Keep that subagent scoped to
+independent comparison work and do not let it replace the main discussion flow.
 
 Do not end the discussion after a single answer when unresolved high-impact
 unknowns still exist.

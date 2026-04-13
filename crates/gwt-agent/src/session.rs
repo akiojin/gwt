@@ -43,6 +43,8 @@ pub struct Session {
     #[serde(default)]
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
+    pub linked_issue_number: Option<u64>,
+    #[serde(default)]
     pub launch_command: String,
     #[serde(default)]
     pub launch_args: Vec<String>,
@@ -97,6 +99,7 @@ impl Session {
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            linked_issue_number: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
             created_at: now,

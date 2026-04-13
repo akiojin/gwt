@@ -43,6 +43,11 @@ fn red_70_should_dispatch_cli_when_first_arg_is_cli_verb() {
         "hook",
         "block-bash-policy"
     ])));
+    assert!(should_dispatch_cli(&argv(&[
+        "gwt",
+        "hook",
+        "workflow-policy"
+    ])));
     assert!(!should_dispatch_cli(&argv(&["gwt"])));
     assert!(!should_dispatch_cli(&argv(&["gwt", "/some/repo/path"])));
 }
@@ -74,7 +79,20 @@ fn red_91_parse_hook_block_without_args() {
 }
 
 #[test]
-fn red_92_parse_hook_empty_is_usage_error() {
+fn red_92_parse_hook_workflow_policy_without_args() {
+    use gwt_tui::cli::parse_hook_args;
+    let cmd = parse_hook_args(&[s("workflow-policy")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Hook {
+            name: "workflow-policy".to_string(),
+            rest: vec![],
+        }
+    );
+}
+
+#[test]
+fn red_93_parse_hook_empty_is_usage_error() {
     use gwt_tui::cli::{parse_hook_args, CliParseError};
     let err = parse_hook_args(&[]).unwrap_err();
     assert!(matches!(err, CliParseError::Usage));
@@ -217,7 +235,7 @@ fn red_78_parse_unknown_subcommand() {
 }
 
 #[test]
-fn red_93_parse_issue_view() {
+fn red_94_parse_issue_view() {
     let cmd = parse_issue_args(&[s("view"), s("42")]).unwrap();
     assert_eq!(
         cmd,

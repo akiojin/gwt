@@ -739,6 +739,8 @@ mod tests {
                 discussion_skill.contains(".claude/settings.local.json")
                     && discussion_skill.contains(".codex/hooks.json")
                     && discussion_skill.contains("SessionStart")
+                    && discussion_skill.contains("PreToolUse")
+                    && discussion_skill.contains("workflow-policy")
                     && discussion_skill.contains("UserPromptSubmit")
                     && discussion_skill.contains("Stop"),
                 "expected discussion skill to describe managed hook resume timing in {relative}"
@@ -748,6 +750,11 @@ mod tests {
                     && discussion_skill.contains("Park proposal")
                     && discussion_skill.contains("Dismiss for now"),
                 "expected discussion skill to define the resume prompt choices in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("objective review")
+                    && discussion_skill.contains("subagent"),
+                "expected discussion skill to describe optional subagent-based objective review in {relative}"
             );
             assert!(
                 !discussion_skill.contains("gh issue list --label gwt-spec --state open"),

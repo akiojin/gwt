@@ -1311,7 +1311,9 @@ fn fetch_actions_job_log_via_gh(
 /// handlers exit 1 with the error chain on stderr; they are never turned
 /// into `decision=block` to avoid false positives under partial outages.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{block_bash_policy, forward, runtime_state, BlockDecision, HookKind};
+    use crate::cli::hook::{
+        block_bash_policy, forward, runtime_state, workflow_policy, BlockDecision, HookKind,
+    };
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -1358,6 +1360,11 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
             }
         }
         HookKind::BlockBashPolicy => match block_bash_policy::handle() {
+            Ok(None) => Ok(0),
+            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::WorkflowPolicy => match workflow_policy::handle() {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
