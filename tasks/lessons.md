@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-13 — spec: shared board を intake 専用に狭めず、通信 + タスク管理 + agent presence を分けて設計する
+
+### 事象
+
+shared board の初期整理を「未分類要求の intake board」中心で進めた結果、
+ユーザーが必要としていた「各エージェントが今何をしていて、次に何をすべきで、
+他へ何を伝えるべきか」という coordination 面を十分に表現できていなかった。
+
+### 原因
+
+- board entry を request intake と会話ログの延長で捉え、agent 自身の current state
+  を first-class な domain object として扱っていなかった。
+- `gwt-discussion` / `workflow-policy` / session runtime の既存責務分離を踏まえず、
+  coordination 面の正本を単一の board stream に寄せすぎた。
+
+### 再発防止策
+
+1. shared board / collaboration 系の設計では、最初に「request stream」と
+   「agent presence / card」を分離して考える。
+2. board を intake 専用と決め打ちせず、communication、next action、blocked、
+   handoff、decision をどこまで正本に持つかを明示する。
+3. 直接 message API を考える前に、shared board と projected latest state で
+   十分な coordination が成立するかを検討する。
+
 ## 2026-04-13 — test: 通知経路が再入する helper では pending PTY queue の観測点を誤らない
 
 ### 事象
