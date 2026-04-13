@@ -14,6 +14,7 @@ use crate::{screens::issues::IssueItem, theme};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WizardStep {
     QuickStart,
+    FocusExistingSession,
     #[default]
     BranchAction,
     AgentSelect,
@@ -39,6 +40,7 @@ impl WizardStep {
     pub fn title(self) -> &'static str {
         match self {
             Self::QuickStart => "Quick Start",
+            Self::FocusExistingSession => "Focus Existing Session",
             Self::BranchAction => "Branch Action",
             Self::AgentSelect => "Select Coding Agent",
             Self::ModelSelect => "Select Model",
@@ -83,10 +85,12 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
         WizardStep::QuickStart => match state.selected_quick_start_action() {
             QuickStartAction::ChooseDifferent => Some(WizardStep::BranchAction),
+            QuickStartAction::FocusExistingSession => Some(WizardStep::FocusExistingSession),
             QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious => {
                 Some(WizardStep::SkipPermissions)
             }
         },
+        WizardStep::FocusExistingSession => None,
         WizardStep::BranchAction => {
             if state.selected == 1 {
                 Some(WizardStep::BranchTypeSelect)
@@ -189,8 +193,9 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
 fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
         WizardStep::QuickStart => None,
+        WizardStep::FocusExistingSession => Some(WizardStep::QuickStart),
         WizardStep::BranchAction => {
-            if state.has_quick_start && !state.quick_start_entries.is_empty() {
+            if state.has_quick_start && state.has_quick_start_actions() {
                 Some(WizardStep::QuickStart)
             } else {
                 None
@@ -369,6 +374,7 @@ impl AgentOption {
 enum QuickStartAction {
     ResumeWithPrevious,
     StartNewWithPrevious,
+    FocusExistingSession,
     ChooseDifferent,
 }
 
@@ -386,6 +392,15 @@ pub struct QuickStartEntry {
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveSessionEntry {
+    pub session_id: String,
+    pub kind: String,
+    pub name: String,
+    pub detail: Option<String>,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -439,6 +454,7 @@ pub struct WizardState {
     pub selected: usize,
     pub has_quick_start: bool,
     pub quick_start_entries: Vec<QuickStartEntry>,
+    pub live_session_entries: Vec<LiveSessionEntry>,
     pub is_new_branch: bool,
     pub base_branch_name: Option<String>,
     pub gh_cli_available: bool,
@@ -451,6 +467,7 @@ pub struct WizardState {
     pub version_options: Vec<VersionOption>,
     pub mode: String,
     pub resume_session_id: Option<String>,
+    pub focus_session_id: Option<String>,
     pub branch_name: String,
     pub issue_id: String,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
@@ -483,6 +500,7 @@ impl Default for WizardState {
             selected: 0,
             has_quick_start: false,
             quick_start_entries: Vec::new(),
+            live_session_entries: Vec::new(),
             is_new_branch: false,
             base_branch_name: None,
             gh_cli_available: true,
@@ -494,6 +512,7 @@ impl Default for WizardState {
             version_options: Vec::new(),
             mode: "normal".to_string(),
             resume_session_id: None,
+            focus_session_id: None,
             branch_name: String::new(),
             issue_id: String::new(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
@@ -519,19 +538,40 @@ impl WizardState {
     fn flow_start_step(&self) -> WizardStep {
         if self.is_new_branch {
             WizardStep::BranchTypeSelect
-        } else if self.has_quick_start && !self.quick_start_entries.is_empty() {
+        } else if self.has_quick_start && self.has_quick_start_actions() {
             WizardStep::QuickStart
         } else {
             WizardStep::BranchAction
         }
     }
 
+    fn has_quick_start_actions(&self) -> bool {
+        !self.quick_start_entries.is_empty() || !self.live_session_entries.is_empty()
+    }
+
+    fn has_live_session_focus_option(&self) -> bool {
+        !self.live_session_entries.is_empty()
+    }
+
     fn quick_start_option_count(&self) -> usize {
-        if self.quick_start_entries.is_empty() {
+        if !self.has_quick_start_actions() {
             0
         } else {
-            self.quick_start_entries.len() * 2 + 1
+            self.quick_start_entries.len() * 2
+                + usize::from(self.has_live_session_focus_option())
+                + 1
         }
+    }
+
+    fn quick_start_focus_existing_index(&self) -> Option<usize> {
+        self.has_live_session_focus_option()
+            .then_some(self.quick_start_entries.len() * 2)
+    }
+
+    fn quick_start_choose_different_index(&self) -> Option<usize> {
+        self.has_quick_start_actions().then_some(
+            self.quick_start_entries.len() * 2 + usize::from(self.has_live_session_focus_option()),
+        )
     }
 
     fn issue_picker_option_count(&self) -> usize {
@@ -583,29 +623,52 @@ impl WizardState {
     }
 
     fn selected_quick_start_action(&self) -> QuickStartAction {
-        let choose_different_index = self.quick_start_entries.len() * 2;
-        if self.quick_start_entries.is_empty() || self.selected >= choose_different_index {
+        let choose_different_index = match self.quick_start_choose_different_index() {
+            Some(index) => index,
+            None => return QuickStartAction::ChooseDifferent,
+        };
+        if self.selected >= choose_different_index {
             QuickStartAction::ChooseDifferent
-        } else if self.selected.is_multiple_of(2) {
+        } else if self.selected < self.quick_start_entries.len() * 2
+            && self.selected.is_multiple_of(2)
+        {
             QuickStartAction::ResumeWithPrevious
-        } else {
+        } else if self.selected < self.quick_start_entries.len() * 2 {
             QuickStartAction::StartNewWithPrevious
+        } else {
+            QuickStartAction::FocusExistingSession
         }
     }
 
     fn selected_quick_start_entry(&self) -> Option<&QuickStartEntry> {
-        if self.quick_start_entries.is_empty() {
+        if self.quick_start_entries.is_empty()
+            || self.selected >= self.quick_start_entries.len() * 2
+        {
             None
         } else {
             self.quick_start_entries.get(self.selected / 2)
         }
     }
 
+    fn selected_live_session_entry(&self) -> Option<&LiveSessionEntry> {
+        self.live_session_entries.get(self.selected)
+    }
+
     fn apply_quick_start_selection(&mut self) {
         let action = self.selected_quick_start_action();
+        if matches!(
+            action,
+            QuickStartAction::ChooseDifferent | QuickStartAction::FocusExistingSession
+        ) {
+            self.mode = "normal".to_string();
+            self.resume_session_id = None;
+            self.focus_session_id = None;
+            return;
+        }
         let Some(entry) = self.selected_quick_start_entry().cloned() else {
             self.mode = "normal".to_string();
             self.resume_session_id = None;
+            self.focus_session_id = None;
             return;
         };
 
@@ -647,18 +710,23 @@ impl WizardState {
                 if let Some(session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(session_id);
+                    self.focus_session_id = None;
                 } else {
                     self.mode = "continue".to_string();
                     self.resume_session_id = None;
+                    self.focus_session_id = None;
                 }
             }
             QuickStartAction::StartNewWithPrevious => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
+                self.focus_session_id = None;
             }
+            QuickStartAction::FocusExistingSession => unreachable!(),
             QuickStartAction::ChooseDifferent => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
+                self.focus_session_id = None;
             }
         }
     }
@@ -923,6 +991,7 @@ impl WizardState {
     pub fn option_count(&self) -> usize {
         match self.step {
             WizardStep::QuickStart => self.quick_start_option_count(),
+            WizardStep::FocusExistingSession => self.live_session_entries.len().max(1),
             WizardStep::BranchAction => 2, // existing branch / create new branch
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
@@ -992,10 +1061,23 @@ impl WizardState {
                     ));
                     options.push(quick_start_action_label(entry, "Start new", false, false));
                 }
-                if !self.quick_start_entries.is_empty() {
+                if self.has_live_session_focus_option() {
+                    options.push("Focus existing session".to_string());
+                }
+                if self.has_quick_start_actions() {
                     options.push("Choose different".to_string());
                 }
                 options
+            }
+            WizardStep::FocusExistingSession => {
+                if self.live_session_entries.is_empty() {
+                    vec!["(no live sessions available)".to_string()]
+                } else {
+                    self.live_session_entries
+                        .iter()
+                        .map(live_session_option_label)
+                        .collect()
+                }
             }
             WizardStep::AgentSelect => {
                 if self.detected_agents.is_empty() {
@@ -1317,14 +1399,21 @@ fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
 fn apply_selection(state: &mut WizardState) {
     let options = state.current_options();
     match state.step {
-        WizardStep::QuickStart => {
-            if !matches!(
-                state.selected_quick_start_action(),
-                QuickStartAction::ChooseDifferent
-            ) {
+        WizardStep::QuickStart => match state.selected_quick_start_action() {
+            QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious => {
                 state.apply_quick_start_selection();
                 state.sync_docker_lifecycle_default();
             }
+            QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => {
+                state.focus_session_id = None;
+            }
+        },
+        WizardStep::FocusExistingSession => {
+            state.focus_session_id = state
+                .selected_live_session_entry()
+                .map(|entry| entry.session_id.clone());
+            state.resume_session_id = None;
+            state.mode = "normal".to_string();
         }
         WizardStep::BranchAction => {
             if state.selected == 0 {
@@ -2164,6 +2253,20 @@ fn quick_start_start_new_marker(is_selected: bool, single_entry: bool) -> &'stat
     }
 }
 
+fn live_session_option_label(entry: &LiveSessionEntry) -> String {
+    let mut label = format!(
+        "{}  {} ({})",
+        entry.kind,
+        entry.name,
+        &entry.session_id[..entry.session_id.len().min(8)]
+    );
+    if let Some(detail) = entry.detail.as_deref() {
+        label.push_str(" · ");
+        label.push_str(detail);
+    }
+    label
+}
+
 /// Compute popup width based on actual content (title + options + hints).
 ///
 /// Mirrors old-TUI `wizard_popup_width`: measure the widest content line,
@@ -2330,7 +2433,24 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         );
     }
 
-    let choose_index = state.quick_start_entries.len() * 2;
+    let choose_index = state
+        .quick_start_choose_different_index()
+        .unwrap_or_default();
+    if let Some(focus_index) = state.quick_start_focus_existing_index() {
+        let focus_marker = if state.selected == focus_index {
+            "> "
+        } else {
+            "  "
+        };
+        let focus_text = format!("{focus_marker}Focus existing session");
+        items.push(
+            ListItem::new(truncate_with_ellipsis(
+                &focus_text,
+                list_area.width as usize,
+            ))
+            .style(wizard_row_style(state.selected == focus_index)),
+        );
+    }
     let choose_marker = if state.selected >= choose_index {
         "> "
     } else {
@@ -2346,6 +2466,36 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     );
 
     frame.render_widget(List::new(items), list_area);
+}
+
+fn render_focus_existing_session_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(truncate_with_ellipsis(
+            &state.branch_name,
+            area.width as usize,
+        ))
+        .style(theme::style::header()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    if area.height <= 1 {
+        return;
+    }
+
+    render_option_list(
+        state,
+        frame,
+        Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        ),
+    );
 }
 
 fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) {
@@ -2472,6 +2622,7 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
 fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
     match state.step {
         WizardStep::QuickStart => render_quick_start_step(state, frame, area),
+        WizardStep::FocusExistingSession => render_focus_existing_session_step(state, frame, area),
         WizardStep::AgentSelect => render_agent_select_step(state, frame, area),
         WizardStep::BranchNameInput => {
             render_input_step(state, frame, area, "Branch Name:", &state.branch_name);
@@ -2726,6 +2877,25 @@ mod tests {
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            },
+        ]
+    }
+
+    fn sample_live_session_entries() -> Vec<LiveSessionEntry> {
+        vec![
+            LiveSessionEntry {
+                session_id: "agent-1".to_string(),
+                kind: "Agent".to_string(),
+                name: "Codex".to_string(),
+                detail: Some("gpt-5.3-codex · high".to_string()),
+                active: false,
+            },
+            LiveSessionEntry {
+                session_id: "shell-2".to_string(),
+                kind: "Shell".to_string(),
+                name: "Shell: feature/test".to_string(),
+                detail: None,
+                active: true,
             },
         ]
     }
@@ -3506,8 +3676,9 @@ mod tests {
         state.step = WizardStep::QuickStart;
         state.has_quick_start = true;
         state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
 
-        assert_eq!(state.option_count(), 5);
+        assert_eq!(state.option_count(), 6);
     }
 
     #[test]
@@ -3530,6 +3701,36 @@ mod tests {
         assert_eq!(state.resume_session_id.as_deref(), Some("sess-12345678"));
         assert!(state.skip_perms);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn select_on_quick_start_focus_existing_session_moves_to_live_session_selector() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
+        state.selected = 4;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::FocusExistingSession);
+        assert_eq!(state.selected, 0);
+        assert!(state.focus_session_id.is_none());
+        assert!(!state.completed);
+    }
+
+    #[test]
+    fn select_on_live_session_selector_marks_focus_target_and_completes() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::FocusExistingSession;
+        state.live_session_entries = sample_live_session_entries();
+        state.selected = 1;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert!(state.completed);
+        assert_eq!(state.focus_session_id.as_deref(), Some("shell-2"));
     }
 
     #[test]
@@ -3670,6 +3871,19 @@ mod tests {
     }
 
     #[test]
+    fn back_from_live_session_selector_returns_to_quick_start() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::FocusExistingSession;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
+
+        update(&mut state, WizardMessage::Back);
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+    }
+
+    #[test]
     fn render_overlay_does_not_panic() {
         let state = WizardState::default();
         let backend = TestBackend::new(80, 24);
@@ -3791,6 +4005,7 @@ mod tests {
         state.has_quick_start = true;
         state.branch_name = "feature/test".to_string();
         state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
 
         let text = render_text(&state, 100, 24);
 
@@ -3800,8 +4015,24 @@ mod tests {
         assert!(text.contains("> Codex Resume (sess-123...)"));
         assert!(text.contains("  Start new"));
         assert!(text.contains("  Claude Code Resume"));
+        assert!(text.contains("Focus existing session"));
         assert!(!text.contains("  Claude Code Start new"));
         assert!(text.contains("Choose different"));
+    }
+
+    #[test]
+    fn render_focus_existing_session_step_lists_live_sessions_for_branch() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::FocusExistingSession;
+        state.branch_name = "feature/test".to_string();
+        state.live_session_entries = sample_live_session_entries();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Focus Existing Session"));
+        assert!(text.contains("feature/test"));
+        assert!(text.contains("Codex (agent-1)"));
+        assert!(text.contains("Shell: feature/test (shell-2)"));
     }
 
     #[test]
@@ -4049,6 +4280,7 @@ mod tests {
         state.has_quick_start = true;
         state.branch_name = "feature/test".to_string();
         state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
         state.selected = 0;
 
         let options = state.current_options();
@@ -4057,7 +4289,8 @@ mod tests {
         assert_eq!(options[1], "Start new");
         assert_eq!(options[2], "Claude Code Resume");
         assert_eq!(options[3], "Start new");
-        assert_eq!(options[4], "Choose different");
+        assert_eq!(options[4], "Focus existing session");
+        assert_eq!(options[5], "Choose different");
     }
 
     #[test]
