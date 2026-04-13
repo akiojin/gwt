@@ -60,7 +60,8 @@ gwt
 
 ## キーバインド
 
-TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用します。
+TUI の主要なキーバインドは `Ctrl+G` プレフィックスを使用します。terminal
+text の copy は、選択中のみプラットフォーム標準の shortcut を使います。
 
 | キーバインド | 操作 |
 |---|---|
@@ -74,6 +75,11 @@ TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用しま
 | `Ctrl+G`, `s` | 設定 |
 | `Ctrl+G`, `?` | ヘルプ / キーバインド一覧 |
 | `Ctrl+G`, `q` | 終了 |
+
+terminal text を選択した状態では、次を使用します。
+
+- macOS: `Cmd+C`
+- Linux / Windows: `Ctrl+Shift+C`
 
 シェルやエージェント端末で日本語 IME の候補選択を調査する場合は、
 `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl` を付けて gwt を起動してください。

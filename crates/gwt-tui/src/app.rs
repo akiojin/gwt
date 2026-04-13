@@ -2496,17 +2496,43 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
 }
 
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
+    if let Err(err) = forward_key_to_active_session_with_clipboard(
+        model,
+        key,
+        current_copy_shortcut_platform(),
+        |text| gwt_clipboard::ClipboardText::set_text(text).map_err(|err| err.to_string()),
+    ) {
+        model.error_queue.push_back(
+            Notification::new(Severity::Error, "terminal", "Copy failed").with_detail(err),
+        );
+    }
+}
+
+fn forward_key_to_active_session_with_clipboard<G>(
+    model: &mut Model,
+    key: crossterm::event::KeyEvent,
+    platform: CopyShortcutPlatform,
+    mut clipboard_writer: G,
+) -> Result<bool, String>
+where
+    G: FnMut(&str) -> Result<(), String>,
+{
+    if maybe_copy_selected_terminal_text(model, key, platform, &mut clipboard_writer)? {
+        return Ok(true);
+    }
+
     reset_active_session_scrollback_for_input(model);
     let Some(bytes) = key_event_to_bytes(key) else {
-        return;
+        return Ok(false);
     };
     let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
-        return;
+        return Ok(false);
     };
     input_trace::trace_pty_forward(key, &session_id, &bytes);
     model
         .pending_pty_inputs
         .push_back(crate::model::PendingPtyInput { session_id, bytes });
+    Ok(false)
 }
 
 fn reset_active_session_scrollback_for_input(model: &mut Model) {
@@ -2516,6 +2542,70 @@ fn reset_active_session_scrollback_for_input(model: &mut Model) {
     if session.vt.viewing_history() {
         session.vt.clear_selection();
         session.vt.set_follow_live(true);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyShortcutPlatform {
+    MacOs,
+    NonMacOs,
+}
+
+fn current_copy_shortcut_platform() -> CopyShortcutPlatform {
+    if cfg!(target_os = "macos") {
+        CopyShortcutPlatform::MacOs
+    } else {
+        CopyShortcutPlatform::NonMacOs
+    }
+}
+
+fn maybe_copy_selected_terminal_text<G>(
+    model: &mut Model,
+    key: crossterm::event::KeyEvent,
+    platform: CopyShortcutPlatform,
+    clipboard_writer: &mut G,
+) -> Result<bool, String>
+where
+    G: FnMut(&str) -> Result<(), String>,
+{
+    if !matches_copy_shortcut(key, platform) {
+        return Ok(false);
+    }
+
+    let selected_text = model
+        .active_session_tab()
+        .and_then(selected_text)
+        .filter(|text| !text.is_empty());
+    let Some(selected_text) = selected_text else {
+        return Ok(false);
+    };
+
+    clipboard_writer(&selected_text)?;
+    if let Some(session) = model.active_session_tab_mut() {
+        session.vt.clear_selection();
+    }
+    Ok(true)
+}
+
+fn matches_copy_shortcut(key: crossterm::event::KeyEvent, platform: CopyShortcutPlatform) -> bool {
+    let is_copy_key = matches!(key.code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'c'));
+    if !is_copy_key || key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+
+    match platform {
+        CopyShortcutPlatform::MacOs => key.modifiers.contains(KeyModifiers::SUPER),
+        CopyShortcutPlatform::NonMacOs => {
+            key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+                && !key.modifiers.contains(KeyModifiers::SUPER)
+        }
+    }
+}
+
+fn clear_session_selection(model: &mut Model, session_index: usize) {
+    if let Some(session) = model.sessions.get_mut(session_index) {
+        session.vt.clear_selection();
     }
 }
 
@@ -5084,16 +5174,24 @@ fn handle_mouse_input_with_tools<F, G>(
     model: &mut Model,
     mouse: MouseEvent,
     mut opener: F,
-    mut clipboard_writer: G,
+    _clipboard_writer: G,
 ) -> Result<bool, String>
 where
     F: FnMut(&str) -> Result<(), String>,
     G: FnMut(&str) -> Result<(), String>,
 {
-    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        && (handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse))
-    {
-        return Ok(true);
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        let previous_active_session = model.active_session;
+        let previous_focus = model.active_focus;
+        if handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse) {
+            clear_session_selection(model, previous_active_session);
+            return Ok(true);
+        }
+        if previous_focus != FocusPane::Terminal && mouse_hits_active_session(model, mouse) {
+            clear_session_selection(model, previous_active_session);
+            model.active_focus = FocusPane::Terminal;
+            return Ok(true);
+        }
     }
 
     let hits_active_session = mouse_hits_active_session(model, mouse);
@@ -5214,14 +5312,8 @@ where
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
-            let selection_text = if let Some(session) = model.active_session_tab_mut() {
+            if let Some(session) = model.active_session_tab_mut() {
                 session.vt.update_selection(cell);
-                selected_text(session)
-            } else {
-                None
-            };
-            if let Some(text) = selection_text.filter(|text| !text.is_empty()) {
-                clipboard_writer(&text)?;
                 return Ok(true);
             }
             Ok(false)
@@ -7434,7 +7526,77 @@ mod tests {
     }
 
     #[test]
-    fn selection_copy_uses_scrollback_viewport_coordinates() {
+    fn mouse_click_focuses_terminal_without_starting_selection() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        update(&mut model, Message::Resize(24, 8));
+        append_session_line(&mut model, "shell-0", "alpha beta");
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "focus click should not begin drag selection"
+        );
+    }
+
+    #[test]
+    fn mouse_focus_switch_clears_existing_terminal_selection() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(120, 30));
+        if let Some(session) = model.active_session_tab_mut() {
+            session.vt.begin_selection(TerminalCell { row: 0, col: 0 });
+            session.vt.update_selection(TerminalCell { row: 0, col: 4 });
+        }
+
+        let (top, _, _) = branches_management_areas(&model);
+        let title = management_tab_title(&model, top.width);
+        let issues_x = title_label_click_x(&title, top.x, "Issues");
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: issues_x,
+                row: top.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Issues);
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "focus click should clear the previous terminal selection"
+        );
+    }
+
+    #[test]
+    fn selection_copy_shortcut_uses_scrollback_viewport_coordinates() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -7498,7 +7660,29 @@ mod tests {
         )
         .expect("selection up succeeds");
 
+        assert_eq!(copied, None, "mouse up should no longer auto-copy");
+
+        forward_key_to_active_session_with_clipboard(
+            &mut model,
+            key(KeyCode::Char('c'), KeyModifiers::SUPER),
+            CopyShortcutPlatform::MacOs,
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut succeeds");
+
         assert_eq!(copied.as_deref(), Some("line-7"));
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "copy shortcut should clear the consumed selection"
+        );
     }
 
     #[test]
@@ -7769,7 +7953,8 @@ mod tests {
     }
 
     #[test]
-    fn selection_copy_uses_snapshot_viewport_surface_when_viewing_past_full_screen_frame() {
+    fn selection_copy_shortcut_uses_snapshot_viewport_surface_when_viewing_past_full_screen_frame()
+    {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -7837,10 +8022,23 @@ mod tests {
         )
         .expect("selection up succeeds");
 
+        assert_eq!(copied, None, "mouse up should no longer auto-copy");
+
+        forward_key_to_active_session_with_clipboard(
+            &mut model,
+            key(KeyCode::Char('c'), KeyModifiers::SUPER),
+            CopyShortcutPlatform::MacOs,
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut succeeds");
+
         assert_eq!(
             copied.as_deref(),
             Some("line-1"),
-            "selection copy should read from the visible snapshot surface instead of the live frame"
+            "copy shortcut should read from the visible snapshot surface instead of the live frame"
         );
     }
 
@@ -13001,6 +13199,71 @@ CUSTOM_ENV = "enabled"
             .back()
             .expect("queued enter input");
         assert_eq!(forwarded.bytes, vec![b'\r']);
+    }
+
+    #[test]
+    fn forward_key_to_active_session_copies_selection_with_non_macos_shortcut() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        append_session_line(&mut model, "shell-0", "copy me");
+        if let Some(session) = model.active_session_tab_mut() {
+            session.vt.begin_selection(TerminalCell { row: 0, col: 0 });
+            session.vt.update_selection(TerminalCell { row: 0, col: 6 });
+        }
+
+        let mut copied = None;
+        let handled = forward_key_to_active_session_with_clipboard(
+            &mut model,
+            key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            CopyShortcutPlatform::NonMacOs,
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut succeeds");
+
+        assert!(handled, "copy shortcut should be consumed by gwt");
+        assert_eq!(copied.as_deref(), Some("copy me"));
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "copy shortcut should not forward bytes to the PTY when selection exists"
+        );
+    }
+
+    #[test]
+    fn forward_key_to_active_session_forwards_copy_shortcut_when_no_selection_exists() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let mut copied = None;
+        let handled = forward_key_to_active_session_with_clipboard(
+            &mut model,
+            key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            CopyShortcutPlatform::NonMacOs,
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("shortcut fallback succeeds");
+
+        assert!(
+            !handled,
+            "copy shortcut should fall through to PTY forwarding when no selection exists"
+        );
+        assert_eq!(copied, None);
+        let forwarded = model.pending_pty_inputs().back().expect("queued PTY input");
+        assert_eq!(forwarded.bytes, vec![0x03]);
     }
 
     #[test]

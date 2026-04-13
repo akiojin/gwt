@@ -64,7 +64,8 @@ gwt
 
 ## Key bindings
 
-All TUI key bindings use the `Ctrl+G` prefix.
+Most TUI key bindings use the `Ctrl+G` prefix. Terminal text copy uses the
+platform shortcut when a selection is active.
 
 | Key binding | Action |
 |---|---|
@@ -78,6 +79,11 @@ All TUI key bindings use the `Ctrl+G` prefix.
 | `Ctrl+G`, `s` | Settings |
 | `Ctrl+G`, `?` | Help / key binding reference |
 | `Ctrl+G`, `q` | Quit |
+
+When terminal text is selected, use:
+
+- macOS: `Cmd+C`
+- Linux / Windows: `Ctrl+Shift+C`
 
 To investigate Japanese IME candidate selection in a shell or agent terminal,
 launch gwt with `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl`. The JSONL

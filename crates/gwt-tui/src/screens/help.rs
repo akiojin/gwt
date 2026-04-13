@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn render_lists_registered_keybindings() {
-        let backend = TestBackend::new(100, 30);
+        let backend = TestBackend::new(160, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let registry = KeybindRegistry::new();
         terminal
@@ -97,6 +97,7 @@ mod tests {
         assert!(text.contains("Help"));
         assert!(text.contains("Ctrl+G, g"));
         assert!(text.contains("Ctrl+G, ?"));
+        assert!(text.contains("Copy selected terminal text"));
         assert!(text.contains("Global"));
         assert!(text.contains("Sessions"));
     }
