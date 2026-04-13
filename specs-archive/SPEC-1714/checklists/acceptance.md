@@ -1,5 +1,0 @@
-- [x] Worktree / Sidebar / tab が local exact cache 経由で Issue タイトルを安定表示できる
-- [x] `gh` rate limit 時でも REST fallback により title lookup が継続できる
-- [x] 差分更新で更新分のみ取り込み、フル同期で stale entry を解消できる
-- [x] 手動更新 UI から diff/full を実行できる
-- [x] #1520 が利用できる `IssueExactCache::all_entries()` 入力インターフェースを local exact cache から提供できる

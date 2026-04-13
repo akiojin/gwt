@@ -1,5 +1,0 @@
-- [x] T001 `config.toml` の canonical sections を spec に固定する
-- [x] T002 `project.toml` の最小メタデータ契約を spec に固定する
-- [x] T003 sidecar 設定ファイルの非対応一覧と no-fallback 方針を spec に反映する
-- [x] T004 repo-local と global-only settings の境界を spec に反映する
-- [x] T005 canonical shape / sidecar 非依存 / write serialization の regression test 要件を反映する

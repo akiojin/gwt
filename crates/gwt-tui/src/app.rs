@@ -66,18 +66,16 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
-const MANAGED_ASSET_ROOTS: &[&str] = &[
+const MANAGED_BUNDLE_TRIGGER_ROOTS: &[&str] = &[
     ".claude/skills",
     ".claude/commands",
     // Retired root kept here so startup refresh can still detect and prune
     // stale Claude gwt hook scripts left by older worktrees.
     ".claude/hooks/scripts",
-    ".claude/settings.local.json",
     ".codex/skills",
     // Retired root kept here so startup refresh can still detect and prune
     // stale Codex gwt hook scripts left by older worktrees.
     ".codex/hooks/scripts",
-    ".codex/hooks.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1507,15 +1505,33 @@ fn refresh_managed_gwt_assets_for_repo_worktrees(model: &Model) {
     paths.extend(model.active_worktree_paths());
 
     for worktree in paths {
-        if !worktree_has_managed_asset_state(&worktree) {
+        if !path_is_git_repo_or_worktree(&worktree) {
             continue;
         }
-        refresh_managed_gwt_assets_for_worktree(&worktree, "startup refresh");
+        refresh_managed_gwt_assets_for_worktree(
+            &worktree,
+            "startup refresh",
+            worktree_has_managed_asset_state(&worktree),
+        );
+    }
+}
+
+fn path_is_git_repo_or_worktree(worktree: &Path) -> bool {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+    {
+        Ok(output) => {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        }
+        Err(_) => false,
     }
 }
 
 fn worktree_has_managed_asset_state(worktree: &Path) -> bool {
-    MANAGED_ASSET_ROOTS
+    MANAGED_BUNDLE_TRIGGER_ROOTS
         .iter()
         .any(|relative| worktree.join(relative).exists())
         || git_tracks_managed_assets(worktree)
@@ -1528,7 +1544,7 @@ fn git_tracks_managed_assets(worktree: &Path) -> bool {
         .arg("ls-files")
         .arg("-z")
         .arg("--")
-        .args(MANAGED_ASSET_ROOTS)
+        .args(MANAGED_BUNDLE_TRIGGER_ROOTS)
         .output()
     {
         Ok(output) => output.status.success() && !output.stdout.is_empty(),
@@ -1536,14 +1552,20 @@ fn git_tracks_managed_assets(worktree: &Path) -> bool {
     }
 }
 
-fn refresh_managed_gwt_assets_for_worktree(worktree: &Path, context: &str) {
-    if let Err(error) = distribute_to_worktree(worktree) {
-        tracing::warn!(
-            worktree = %worktree.display(),
-            error = %error,
-            context,
-            "failed to distribute gwt managed assets"
-        );
+fn refresh_managed_gwt_assets_for_worktree(
+    worktree: &Path,
+    context: &str,
+    materialize_bundle: bool,
+) {
+    if materialize_bundle {
+        if let Err(error) = distribute_to_worktree(worktree) {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                error = %error,
+                context,
+                "failed to distribute gwt managed assets"
+            );
+        }
     }
     if let Err(error) = update_git_exclude(worktree) {
         tracing::warn!(
@@ -5356,7 +5378,7 @@ fn persist_and_spawn_launch(
         .working_dir
         .clone()
         .unwrap_or_else(|| model.repo_path.clone());
-    refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch");
+    refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch", true);
 
     let (mut pty_env, mut remove_env) = spawn_env_with_active_profile(config.env_vars.clone());
     inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
@@ -13722,6 +13744,29 @@ services:
         );
     }
 
+    fn git_resolved_exclude_path(path: &std::path::Path) -> PathBuf {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", "info/exclude"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse --git-path info/exclude");
+        assert!(
+            output.status.success(),
+            "git rev-parse --git-path info/exclude failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let resolved = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("utf8 git-path")
+                .trim(),
+        );
+        if resolved.is_absolute() {
+            resolved
+        } else {
+            path.join(resolved)
+        }
+    }
+
     fn git_checkout_branch_or_create(path: &std::path::Path, name: &str) {
         let checkout = std::process::Command::new("git")
             .args(["checkout", name])
@@ -13960,6 +14005,7 @@ services:
         fs::write(dir.path().join("new.txt"), "new file\n").expect("write untracked file");
 
         let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
         load_initial_data(&mut model);
 
         assert!(
@@ -14339,6 +14385,82 @@ services:
         assert!(
             !claude_content.contains("GWT_MANAGED_HOOK=runtime-state"),
             "startup refresh should remove the legacy runtime marker from Claude settings"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_self_heals_pristine_git_repo_and_linked_worktree_without_materializing_bundles(
+    ) {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let worktree = dir.path().join("wt-feature-pristine");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/pristine",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "linked worktree should expose .git as a file"
+        );
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        for path in [dir.path(), worktree.as_path()] {
+            assert!(
+                path.join(".claude/settings.local.json").exists(),
+                "startup self-heal should generate Claude settings for {}",
+                path.display()
+            );
+            assert!(
+                path.join(".codex/hooks.json").exists(),
+                "startup self-heal should generate Codex hooks for {}",
+                path.display()
+            );
+            assert!(
+                !path.join(".claude/skills/gwt-pr/SKILL.md").exists(),
+                "pristine startup should not materialize bundled skills for {}",
+                path.display()
+            );
+            assert!(
+                !path
+                    .join(".claude/commands/gwt-spec-brainstorm.md")
+                    .exists(),
+                "pristine startup should not materialize bundled commands for {}",
+                path.display()
+            );
+
+            let exclude_path = git_resolved_exclude_path(path);
+            let exclude = fs::read_to_string(&exclude_path).expect("read git exclude");
+            assert!(
+                exclude.contains("# gwt-managed-begin"),
+                "startup self-heal should update git exclude for {}",
+                path.display()
+            );
+            assert!(
+                exclude.contains(".codex/hooks.json"),
+                "startup self-heal should exclude managed hooks for {}",
+                path.display()
+            );
+        }
+
+        assert!(
+            !worktree.join(".git/info/exclude").exists(),
+            "linked worktree startup self-heal should not treat .git as a directory"
         );
     }
 
@@ -17752,6 +17874,72 @@ services:
         assert!(command.contains(" hook runtime-state SessionStart"));
         assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_updates_git_resolved_exclude_for_linked_worktree() {
+        let dir = tempfile::tempdir().expect("temp repo dir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        git_commit_allow_empty(&repo, "initial commit");
+
+        let worktree = dir.path().join("wt-feature-spec-42");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/spec-42",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "linked worktree should expose .git as a file"
+        );
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "gwt-missing-custom-agent-command".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let exclude_path = git_resolved_exclude_path(&worktree);
+        let exclude = fs::read_to_string(&exclude_path).expect("read git exclude");
+        assert!(exclude.contains("# gwt-managed-begin"));
+        assert!(exclude.contains(".codex/hooks.json"));
+        assert!(
+            !worktree.join(".git/info/exclude").exists(),
+            "agent launch should not treat linked worktree .git as a directory"
+        );
     }
 
     #[test]

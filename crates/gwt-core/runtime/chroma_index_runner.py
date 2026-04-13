@@ -83,7 +83,6 @@ SKIP_ROOT_DIRECTORIES = {
     ".claude",
     ".codex",
     "specs",
-    "specs-archive",
     "tasks",
 }
 
