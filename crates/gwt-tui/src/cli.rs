@@ -18,6 +18,7 @@
 //! `migrate-specs`.
 
 mod actions;
+mod board;
 mod env;
 pub mod hook;
 mod issue;
@@ -34,6 +35,7 @@ use gwt_github::{
     SpecOpsError,
 };
 
+pub(crate) use board::parse as parse_board_args;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
 
@@ -195,6 +197,33 @@ pub enum CliCommand {
     ActionsLogs { run_id: u64 },
     /// `gwt actions job-logs --job <id>` — print raw GitHub Actions job logs.
     ActionsJobLogs { job_id: u64 },
+    /// `gwt board show [--json]`.
+    BoardShow { json: bool },
+    /// `gwt board post --kind <kind> (--body <text> | -f <file>)`.
+    BoardPost {
+        kind: String,
+        body: Option<String>,
+        file: Option<String>,
+        parent: Option<String>,
+        topics: Vec<String>,
+        owners: Vec<String>,
+    },
+    /// `gwt board card set --status <s> [flags...]`.
+    BoardCardSet {
+        status: String,
+        role: Option<String>,
+        responsibility: Option<String>,
+        current_focus: Option<String>,
+        next_action: Option<String>,
+        blocked_reason: Option<String>,
+        topics: Vec<String>,
+        owners: Vec<String>,
+        working_scope: Option<String>,
+        handoff_target: Option<String>,
+        agent_id: Option<String>,
+        session_id: Option<String>,
+        branch: Option<String>,
+    },
     /// `gwt hook <name> [args...]` — dispatch to an in-binary hook handler.
     ///
     /// See SPEC #1942 (CORE-CLI) — replaces `.claude/hooks/scripts/gwt-*.mjs`
@@ -216,7 +245,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwt issue spec <n> [--section <name>|--edit <name> -f <file>] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id>"
+                "usage: gwt issue spec <n> [--section <name>|--edit <name> -f <file>] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* | gwt board card set --status <s> [--role <r>] [--responsibility <r>] [--current-focus <t>] [--next-action <t>] [--blocked-reason <t>] [--topic <t>]* [--owner <n>]* [--working-scope <t>] [--handoff-target <t>] [--agent-id <a>] [--session-id <s>] [--branch <b>]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -229,11 +258,11 @@ impl std::error::Error for CliParseError {}
 
 /// Determine whether the given argv (starting at the program name) should be
 /// handled as a CLI invocation. Returns `true` when argv[1..] begins with
-/// `issue`, `pr`, `actions`, or `hook`. The TUI launcher keeps its legacy
+/// `issue`, `pr`, `actions`, `board`, or `hook`. The TUI launcher keeps its legacy
 /// behaviour (positional repo path) for any other shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
     args.get(1)
-        .map(|s| matches!(s.as_str(), "issue" | "pr" | "actions" | "hook"))
+        .map(|s| matches!(s.as_str(), "issue" | "pr" | "actions" | "board" | "hook"))
         .unwrap_or(false)
 }
 
@@ -330,6 +359,9 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         cmd @ (CliCommand::ActionsLogs { .. } | CliCommand::ActionsJobLogs { .. }) => {
             actions::run(env, cmd, &mut out)?
         }
+        cmd @ (CliCommand::BoardShow { .. }
+        | CliCommand::BoardPost { .. }
+        | CliCommand::BoardCardSet { .. }) => board::run(env, cmd, &mut out)?,
         CliCommand::Hook { name, rest } => {
             return run_hook(env, &name, &rest);
         }
@@ -1311,7 +1343,9 @@ fn fetch_actions_job_log_via_gh(
 /// handlers exit 1 with the error chain on stderr; they are never turned
 /// into `decision=block` to avoid false positives under partial outages.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{block_bash_policy, forward, runtime_state, BlockDecision, HookKind};
+    use crate::cli::hook::{
+        block_bash_policy, forward, runtime_state, workflow_policy, BlockDecision, HookKind,
+    };
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -1358,6 +1392,11 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
             }
         }
         HookKind::BlockBashPolicy => match block_bash_policy::handle() {
+            Ok(None) => Ok(0),
+            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::WorkflowPolicy => match workflow_policy::handle() {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),

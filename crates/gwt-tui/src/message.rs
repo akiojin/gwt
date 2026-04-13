@@ -5,6 +5,7 @@ use gwt_core::logging::LogEvent;
 
 use crate::input::voice::VoiceInputMessage;
 use crate::model::ManagementTab;
+use crate::screens::board::BoardMessage;
 use crate::screens::branches::BranchesMessage;
 use crate::screens::cleanup_confirm::CleanupConfirmMessage;
 use crate::screens::cleanup_progress::CleanupProgressMessage;
@@ -86,6 +87,8 @@ pub enum Message {
     DismissError,
     /// Branches screen message.
     Branches(BranchesMessage),
+    /// Board screen message.
+    Board(BoardMessage),
     /// Profiles screen message.
     Profiles(ProfilesMessage),
     /// Issues screen message.
@@ -106,6 +109,8 @@ pub enum Message {
     DockerProgress(DockerProgressMessage),
     /// Service selection overlay message.
     ServiceSelect(ServiceSelectMessage),
+    /// Discussion resume overlay message.
+    DiscussionResume(crate::screens::discussion_resume::DiscussionResumeMessage),
     /// Port selection overlay message.
     PortSelect(PortSelectMessage),
     /// Confirmation dialog message.
@@ -172,6 +177,7 @@ mod tests {
         let _ = Message::PtyOutput("id".into(), vec![0x41]);
         let _ = Message::PasteInput("git status".into());
         let _ = Message::Branches(BranchesMessage::MoveUp);
+        let _ = Message::Board(BoardMessage::MoveUp);
         let _ = Message::Profiles(ProfilesMessage::MoveUp);
         let _ = Message::Issues(IssuesMessage::MoveUp);
         let _ = Message::GitView(GitViewMessage::MoveUp);
@@ -182,6 +188,9 @@ mod tests {
         let _ = Message::Wizard(WizardMessage::MoveUp);
         let _ = Message::DockerProgress(DockerProgressMessage::Advance);
         let _ = Message::ServiceSelect(ServiceSelectMessage::MoveUp);
+        let _ = Message::DiscussionResume(
+            crate::screens::discussion_resume::DiscussionResumeMessage::MoveUp,
+        );
         let _ = Message::PortSelect(PortSelectMessage::MoveUp);
         let _ = Message::Confirm(ConfirmMessage::Toggle);
         let _ = Message::Voice(VoiceInputMessage::StartRecording);

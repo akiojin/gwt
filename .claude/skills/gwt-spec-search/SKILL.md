@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-search
-description: "Semantic search over SPEC Issues (GitHub Issue cache at ~/.gwt/cache/issues/) using vector embeddings. Use when searching for existing specs, finding related specs, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-spec-design and gwt-issue. Use when user says 'search specs', 'find related specs', 'check for duplicate specs', or asks which spec owns a scope."
+description: "Semantic search over SPEC Issues (GitHub Issue cache at ~/.gwt/cache/issues/) using vector embeddings. Use when searching for existing specs, finding related specs, checking for duplicate specs, or determining which spec owns a scope. Mandatory preflight before gwt-discussion when the work may need a SPEC owner. Use when user says 'search specs', 'find related specs', 'check for duplicate specs', or asks which spec owns a scope."
 ---
 
 # SPEC Search

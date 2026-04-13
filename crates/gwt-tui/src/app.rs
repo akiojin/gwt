@@ -18,6 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use chrono::{DateTime, Utc};
+#[cfg(test)]
+use gwt_agent::PendingDiscussionResume;
 use gwt_agent::{
     custom::CustomAgentType, persist_session_status, runtime_state_path, AgentDetector, AgentId,
     AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig, LaunchRuntimeTarget,
@@ -49,6 +51,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 
 use crate::{
     custom_agents::load_custom_agents,
+    discussion_resume::{build_resume_prompt, park_pending_resume},
     input::voice::VoiceInputMessage,
     input_trace,
     message::{GridSessionDirection, Message},
@@ -727,6 +730,7 @@ fn check_pty_exits_with(model: &mut Model, sessions_dir: &Path) {
 
     for id in exited {
         model.pty_handles.remove(&id);
+        clear_discussion_resume_state_for_session(model, &id);
         if let Some(index) = model.sessions.iter().position(|session| session.id == id) {
             if matches!(model.sessions[index].tab_type, SessionTabType::Agent { .. }) {
                 persist_agent_session_stopped(sessions_dir, &id);
@@ -771,6 +775,17 @@ fn bootstrap_agent_session_waiting_input(sessions_dir: &Path, session_id: &str) 
     runtime.source_event = Some("LaunchBootstrap".to_string());
     if let Err(err) = runtime.save(&runtime_path) {
         tracing::warn!(session_id, error = %err, "failed to bootstrap waiting runtime state");
+    }
+}
+
+fn clear_discussion_resume_state_for_session(model: &mut Model, session_id: &str) {
+    model.discussion_resume_sessions.remove(session_id);
+    if model
+        .discussion_resume
+        .as_ref()
+        .is_some_and(|state| state.session_id == session_id)
+    {
+        model.discussion_resume = None;
     }
 }
 
@@ -822,6 +837,96 @@ fn refresh_branch_live_session_summaries(model: &mut Model) {
 
 fn refresh_branch_live_session_summaries_with(model: &mut Model, sessions_dir: &Path) {
     model.branches.live_session_summaries = branch_live_session_summaries_with(model, sessions_dir);
+}
+
+fn overlay_blocks_discussion_resume(model: &Model) -> bool {
+    model.help_visible
+        || !model.error_queue.is_empty()
+        || model.wizard.is_some()
+        || model.service_select.is_some()
+        || model.port_select.is_some()
+        || model.confirm.visible
+        || model.cleanup_confirm.visible
+        || model.cleanup_progress.visible
+        || model
+            .docker_progress
+            .as_ref()
+            .is_some_and(|progress| progress.visible)
+}
+
+fn maybe_surface_pending_discussion_resume(model: &mut Model) {
+    maybe_surface_pending_discussion_resume_with(model, &gwt_sessions_dir());
+}
+
+fn maybe_surface_pending_discussion_resume_with(model: &mut Model, sessions_dir: &Path) {
+    let Some(session_id) = model
+        .active_session_tab()
+        .and_then(|session| match session.tab_type {
+            SessionTabType::Agent { .. } => Some(session.id.clone()),
+            SessionTabType::Shell => None,
+        })
+    else {
+        return;
+    };
+
+    let Ok(runtime) = SessionRuntimeState::load(&runtime_state_path(sessions_dir, &session_id))
+    else {
+        return;
+    };
+    let overlay_blocked =
+        model.discussion_resume.is_some() || overlay_blocks_discussion_resume(model);
+
+    let prompt_state = model
+        .discussion_resume_sessions
+        .entry(session_id.clone())
+        .or_default();
+
+    let source_event = runtime.source_event.clone();
+    if prompt_state.last_source_event != source_event {
+        match source_event.as_deref() {
+            Some("SessionStart") => {
+                prompt_state.saw_session_start = true;
+                if runtime.pending_discussion.is_some() {
+                    prompt_state.prompt_pending = true;
+                }
+            }
+            Some("UserPromptSubmit") => {
+                if !prompt_state.saw_session_start && runtime.pending_discussion.is_some() {
+                    prompt_state.fallback_armed = true;
+                }
+            }
+            Some("Stop") => {
+                if prompt_state.fallback_armed && runtime.pending_discussion.is_some() {
+                    prompt_state.prompt_pending = true;
+                    prompt_state.fallback_armed = false;
+                }
+            }
+            _ => {}
+        }
+        prompt_state.last_source_event = source_event;
+    }
+
+    if runtime.pending_discussion.is_none() {
+        prompt_state.prompt_pending = false;
+        prompt_state.fallback_armed = false;
+        return;
+    }
+
+    if prompt_state.handled_this_session || !prompt_state.prompt_pending || overlay_blocked {
+        return;
+    }
+
+    if runtime.status != gwt_agent::AgentStatus::WaitingInput {
+        return;
+    }
+
+    let pending = runtime
+        .pending_discussion
+        .clone()
+        .expect("pending discussion checked");
+    model.discussion_resume =
+        Some(screens::discussion_resume::DiscussionResumeState::with_pending(session_id, pending));
+    prompt_state.prompt_pending = false;
 }
 
 /// Process a message and update the model (Elm: update).
@@ -998,6 +1103,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Tick => {
             drain_notification_bus(model);
+            model.drain_board_watcher();
             model.drain_logs_watcher();
             drain_ui_log_events(model);
             drain_docker_progress_events(model);
@@ -1012,6 +1118,7 @@ pub fn update(model: &mut Model, msg: Message) {
             model.branches.session_animation_tick =
                 model.branches.session_animation_tick.wrapping_add(1);
             refresh_branch_live_session_summaries(model);
+            maybe_surface_pending_discussion_resume(model);
             // Forward tick to wizard (AI suggest spinner) when active
             if let Some(ref mut wizard) = model.wizard {
                 if wizard.ai_suggest.loading {
@@ -1050,6 +1157,9 @@ pub fn update(model: &mut Model, msg: Message) {
             if let Some(action) = model.branches.pending_docker_action.take() {
                 handle_pending_branch_docker_action(model, action);
             }
+        }
+        Message::Board(msg) => {
+            handle_board_message(model, msg);
         }
         Message::Profiles(msg) => {
             screens::profiles::update(&mut model.profiles, msg);
@@ -1172,6 +1282,9 @@ pub fn update(model: &mut Model, msg: Message) {
                 ));
                 model.pending_session_conversion = Some(pending);
             }
+        }
+        Message::DiscussionResume(msg) => {
+            handle_discussion_resume_message(model, msg);
         }
         Message::PortSelect(msg) => {
             if let Some(ref mut state) = model.port_select {
@@ -2358,6 +2471,9 @@ fn switch_management_tab_with<F, D>(
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
     }
+    if tab == ManagementTab::Board {
+        reload_board(model);
+    }
 }
 
 fn refresh_pr_dashboard_with<F, D>(model: &mut Model, fetch_prs: F, fetch_detail: D)
@@ -2710,6 +2826,19 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
             return true;
         }
     }
+    if model.discussion_resume.is_some() {
+        let msg = match key.code {
+            KeyCode::Down => Some(screens::discussion_resume::DiscussionResumeMessage::MoveDown),
+            KeyCode::Up => Some(screens::discussion_resume::DiscussionResumeMessage::MoveUp),
+            KeyCode::Enter => Some(screens::discussion_resume::DiscussionResumeMessage::Select),
+            KeyCode::Esc => Some(screens::discussion_resume::DiscussionResumeMessage::Cancel),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            update(model, Message::DiscussionResume(msg));
+        }
+        return true;
+    }
     if model
         .docker_progress
         .as_ref()
@@ -2897,6 +3026,7 @@ fn toggle_cleanup_selection_for_selected_branch(model: &mut Model) {
 
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
+    use screens::board::BoardMessage;
     use screens::branches::BranchesMessage;
     use screens::git_view::GitViewMessage;
     use screens::issues::IssuesMessage;
@@ -3009,6 +3139,36 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 if should_prefetch_detail {
                     schedule_branch_detail_prefetch(model);
                 }
+            } else if key.code == KeyCode::Esc {
+                fallback_management_escape(model);
+            }
+        }
+        ManagementTab::Board => {
+            let msg = match key.code {
+                KeyCode::Esc if model.board.composer_open => Some(BoardMessage::CloseComposer),
+                KeyCode::Backspace
+                    if model.board.composer_open || !model.board.composer_text.is_empty() =>
+                {
+                    Some(BoardMessage::ComposerBackspace)
+                }
+                KeyCode::Enter if key.modifiers.is_empty() && model.board.composer_open => {
+                    Some(BoardMessage::SubmitComposer)
+                }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::ComposerInput('\n'))
+                }
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::CycleComposerKind)
+                }
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::Refresh)
+                }
+                KeyCode::Down => Some(BoardMessage::MoveDown),
+                KeyCode::Up => Some(BoardMessage::MoveUp),
+                _ => search_input_char(&key).map(BoardMessage::ComposerInput),
+            };
+            if let Some(m) = msg {
+                update(model, Message::Board(m));
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -4592,6 +4752,74 @@ fn handle_logs_message(model: &mut Model, msg: screens::logs::LogsMessage) {
     screens::logs::update(&mut model.logs, msg);
 }
 
+fn handle_board_message(model: &mut Model, msg: screens::board::BoardMessage) {
+    if matches!(msg, screens::board::BoardMessage::Refresh) {
+        reload_board(model);
+        return;
+    }
+
+    if matches!(msg, screens::board::BoardMessage::SubmitComposer) {
+        submit_board_composer(model);
+        return;
+    }
+
+    screens::board::update(&mut model.board, msg);
+}
+
+fn reload_board(model: &mut Model) {
+    match gwt_core::coordination::load_snapshot(model.repo_path()) {
+        Ok(snapshot) => {
+            screens::board::update(
+                &mut model.board,
+                screens::board::BoardMessage::SetSnapshot(snapshot),
+            );
+        }
+        Err(err) => {
+            model.error_queue.push_back(Notification::new(
+                Severity::Error,
+                "gwt_tui::ui::board",
+                format!("failed to load board snapshot: {err}"),
+            ));
+        }
+    }
+}
+
+fn submit_board_composer(model: &mut Model) {
+    let body = model.board.composer_text.trim().to_string();
+    if body.is_empty() {
+        return;
+    }
+
+    let entry = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::User,
+        "user",
+        model.board.composer_kind.clone(),
+        body,
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+
+    match gwt_core::coordination::post_entry(model.repo_path(), entry) {
+        Ok(snapshot) => {
+            model.board.composer_text.clear();
+            model.board.composer_open = true;
+            screens::board::update(
+                &mut model.board,
+                screens::board::BoardMessage::SetSnapshot(snapshot),
+            );
+        }
+        Err(err) => {
+            model.error_queue.push_back(Notification::new(
+                Severity::Error,
+                "gwt_tui::ui::board",
+                format!("failed to post board entry: {err}"),
+            ));
+        }
+    }
+}
+
 /// Drain the UI log bridge channel and dispatch user-facing events
 /// as toast / error modal messages.
 ///
@@ -4661,6 +4889,7 @@ fn route_paste_input(model: &mut Model, text: String) {
     if model.help_visible
         || !model.error_queue.is_empty()
         || model.service_select.is_some()
+        || model.discussion_resume.is_some()
         || model.confirm.visible
         || model.cleanup_confirm.visible
         || model.cleanup_progress.visible
@@ -5343,6 +5572,7 @@ fn persist_and_spawn_launch(
     session.runtime_target = config.runtime_target;
     session.docker_service = config.docker_service.clone();
     session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+    session.linked_issue_number = config.linked_issue_number;
     session.launch_command = config.command.clone();
     session.launch_args = config.args.clone();
     session.display_name = config.display_name.clone();
@@ -5489,6 +5719,7 @@ fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
     if let Some(pty) = model.pty_handles.remove(&id) {
         let _ = pty.kill();
     }
+    clear_discussion_resume_state_for_session(model, &id);
     model.sessions.remove(model.active_session);
     if model.active_session >= model.sessions.len() {
         model.active_session = model.sessions.len() - 1;
@@ -6464,6 +6695,101 @@ fn open_session_conversion_with(model: &mut Model, detected_agents: Vec<Detected
 
 fn handle_confirm_message(model: &mut Model, msg: screens::confirm::ConfirmMessage) {
     handle_confirm_message_with(model, msg, AgentDetector::detect_all());
+}
+
+fn handle_discussion_resume_message(
+    model: &mut Model,
+    msg: screens::discussion_resume::DiscussionResumeMessage,
+) {
+    handle_discussion_resume_message_with(model, msg, &gwt_sessions_dir());
+}
+
+fn handle_discussion_resume_message_with(
+    model: &mut Model,
+    msg: screens::discussion_resume::DiscussionResumeMessage,
+    sessions_dir: &Path,
+) {
+    use screens::discussion_resume::{DiscussionResumeChoice, DiscussionResumeOutcome};
+
+    let outcome = if let Some(ref mut state) = model.discussion_resume {
+        screens::discussion_resume::update(state, msg)
+    } else {
+        return;
+    };
+
+    let DiscussionResumeOutcome::Selected(choice) = outcome else {
+        return;
+    };
+
+    let Some(state) = model.discussion_resume.take() else {
+        return;
+    };
+    let session_id = state.session_id.clone();
+    if let Some(prompt_state) = model.discussion_resume_sessions.get_mut(&session_id) {
+        prompt_state.handled_this_session = true;
+        prompt_state.prompt_pending = false;
+        prompt_state.fallback_armed = false;
+    }
+
+    match choice {
+        DiscussionResumeChoice::Resume => {
+            let prompt = format!("{}\n", build_resume_prompt(&state.pending));
+            apply_notification(
+                model,
+                Notification::new(
+                    Severity::Info,
+                    "discussion",
+                    format!("Resumed {}", state.pending.proposal_title),
+                ),
+            );
+            push_input_to_session(model, session_id.clone(), prompt.into_bytes());
+        }
+        DiscussionResumeChoice::Park => {
+            let session_path = sessions_dir.join(format!("{session_id}.toml"));
+            match AgentSession::load(&session_path).and_then(|session| {
+                park_pending_resume(&session.worktree_path, &state.pending)
+                    .map(|changed| (session, changed))
+            }) {
+                Ok((_session, true)) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Info,
+                        "discussion",
+                        format!("Parked {}", state.pending.proposal_title),
+                    ),
+                ),
+                Ok((_session, false)) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Warn,
+                        "discussion",
+                        format!(
+                            "No active proposal matched {}",
+                            state.pending.proposal_title
+                        ),
+                    ),
+                ),
+                Err(err) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Error,
+                        "discussion",
+                        format!("Failed to park proposal: {err}"),
+                    ),
+                ),
+            }
+        }
+        DiscussionResumeChoice::Dismiss => {
+            apply_notification(
+                model,
+                Notification::new(
+                    Severity::Info,
+                    "discussion",
+                    format!("Dismissed {}", state.pending.proposal_title),
+                ),
+            );
+        }
+    }
 }
 
 // ---------------- Branch Cleanup integration (FR-018) ----------------
@@ -7451,6 +7777,7 @@ fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
+        ManagementTab::Board => false,
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -9072,6 +9399,7 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
         ManagementTab::Branches => {
             // Handled by render_management_panes directly
         }
+        ManagementTab::Board => screens::board::render(&model.board, frame, area),
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -9267,6 +9595,7 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
             compact,
             model.branches.cleanup_selection_count(),
         ),
+        ManagementTab::Board => board_hint_text(model, compact),
         ManagementTab::Issues => issues_hint_text(model, compact),
         ManagementTab::Settings => {
             if model.settings.editing {
@@ -9302,6 +9631,20 @@ fn issues_hint_text(model: &Model, compact: bool) -> String {
     } else {
         "↑↓:select  Enter:detail  /:search  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help"
             .to_string()
+    }
+}
+
+fn board_hint_text(model: &Model, compact: bool) -> String {
+    if model.board.composer_open {
+        if compact {
+            "type msg  ↵ send  C-j nl  C-k kind  C-r rfsh  Esc done".to_string()
+        } else {
+            "type message  Enter:send  Ctrl+J:new line  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:stop editing".to_string()
+        }
+    } else if compact {
+        "↑↓ sel  type post  C-k kind  C-r rfsh  Esc term".to_string()
+    } else {
+        "↑↓:select  type to post  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:term".to_string()
     }
 }
 
@@ -9498,6 +9841,11 @@ fn render_overlays(model: &Model, frame: &mut Frame, size: Rect) {
     // Service selection overlay
     if let Some(ref svc) = model.service_select {
         screens::service_select::render(svc, frame, size);
+    }
+
+    // Discussion resume proposal overlay
+    if let Some(ref discussion_resume) = model.discussion_resume {
+        screens::discussion_resume::render(discussion_resume, frame, size);
     }
 
     // Port selection overlay
@@ -12884,13 +13232,12 @@ services:
         model.management_tab = ManagementTab::Issues;
         model.active_focus = FocusPane::TabContent;
 
-        let rendered = render_model_text(&model, 220, 24);
+        let rendered = render_model_text(&model, 260, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
         assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
-        // SPEC-12 Phase 9: the Specs tab is now a top-level peer, so the
-        // extra-wide tab strip should include it.
+        assert!(first_line.contains("Board"));
         assert!(first_line.contains("Specs"));
     }
 
@@ -14265,22 +14612,22 @@ services:
         init_git_repo(dir.path());
         git_commit_allow_empty(dir.path(), "initial commit");
 
-        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-discussion.md");
         fs::create_dir_all(tracked_command.parent().expect("tracked command parent"))
             .expect("create tracked command dir");
-        fs::write(&tracked_command, "tracked brainstorm command")
-            .expect("write tracked brainstorm command");
+        fs::write(&tracked_command, "tracked discussion command")
+            .expect("write tracked discussion command");
         let add_tracked_command = std::process::Command::new("git")
-            .args(["add", ".claude/commands/gwt-spec-brainstorm.md"])
+            .args(["add", ".claude/commands/gwt-discussion.md"])
             .current_dir(dir.path())
             .output()
-            .expect("git add tracked brainstorm command");
+            .expect("git add tracked discussion command");
         assert!(
             add_tracked_command.status.success(),
-            "git add tracked brainstorm command failed: {}",
+            "git add tracked discussion command failed: {}",
             String::from_utf8_lossy(&add_tracked_command.stderr)
         );
-        fs::remove_file(&tracked_command).expect("delete tracked brainstorm command");
+        fs::remove_file(&tracked_command).expect("delete tracked discussion command");
 
         let worktree = dir.path().join("wt-feature-sync");
         let add_worktree = std::process::Command::new("git")
@@ -14388,16 +14735,16 @@ services:
         load_initial_data(&mut model);
 
         let tracked_command_content =
-            fs::read_to_string(&tracked_command).expect("tracked brainstorm command restored");
+            fs::read_to_string(&tracked_command).expect("tracked discussion command restored");
         assert!(
-            tracked_command_content.contains("SPEC Brainstorm Command"),
+            tracked_command_content.contains("gwt Discussion Command"),
             "startup refresh should restore missing tracked bundled commands"
         );
 
         let codex_content = fs::read_to_string(&codex_hooks).expect("read migrated codex hooks");
         assert!(
-            codex_content.contains("block-bash-policy"),
-            "startup refresh should consolidate Bash policy hooks"
+            codex_content.contains("workflow-policy"),
+            "startup refresh should consolidate workflow policy hooks"
         );
         assert!(
             !codex_content.contains("GWT_MANAGED_HOOK=runtime-state"),
@@ -14411,7 +14758,7 @@ services:
         let claude_content =
             fs::read_to_string(&claude_settings).expect("read migrated claude settings");
         assert!(
-            claude_content.contains("block-bash-policy"),
+            claude_content.contains("workflow-policy"),
             "startup refresh should regenerate Claude settings too"
         );
         assert!(
@@ -14600,6 +14947,149 @@ services:
         assert_eq!(model.pr_dashboard.prs[0].ci_status, "success");
         assert_eq!(model.pr_dashboard.prs[0].review_status, "approved");
         assert!(model.pr_dashboard.prs[0].mergeable);
+    }
+
+    #[test]
+    fn switch_management_tab_board_loads_coordination_snapshot() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Need coordination",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::Board,
+            |_repo_path| panic!("PR loader should not run for Board"),
+            |_repo_path, _number| panic!("detail loader should not run for Board"),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Board);
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(
+            model.board.snapshot.board.entries[0].body,
+            "Need coordination"
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_enter_posts_entry() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(model.board.composer_open);
+        assert_eq!(model.board.composer_text, "");
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "hi");
+        assert_eq!(
+            model.board.snapshot.board.entries[0].author_kind,
+            gwt_core::coordination::AuthorKind::User
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_j_inserts_newline_before_submit() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "h\ni");
+    }
+
+    #[test]
+    fn route_key_to_management_board_plain_k_starts_input_without_i() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('k'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "k");
+        assert_eq!(
+            model.board.snapshot.board.entries[0].kind,
+            gwt_core::coordination::BoardEntryKind::Request
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_k_cycles_kind_before_post() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(
+            model.board.snapshot.board.entries[0].kind,
+            gwt_core::coordination::BoardEntryKind::Status
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_r_reloads_snapshot() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Reloaded",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "Reloaded");
     }
 
     #[test]
@@ -17860,7 +18350,7 @@ services:
         assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
-            serde_json::Value::String("Bash".to_string())
+            serde_json::Value::String("*".to_string())
         );
     }
 
@@ -18165,7 +18655,7 @@ services:
         fs::create_dir_all(worktree.join(".claude/commands")).expect("create claude commands");
         fs::create_dir_all(worktree.join(".codex/skills/gwt-agent-read"))
             .expect("create stale codex skill");
-        fs::create_dir_all(worktree.join(".claude/skills/gwt-pr/references"))
+        fs::create_dir_all(worktree.join(".claude/skills/gwt-manage-pr/references"))
             .expect("create stale nested claude skill path");
         fs::write(
             worktree.join(".claude/commands/gwt-issue-search.md"),
@@ -18178,7 +18668,7 @@ services:
         )
         .expect("write stale skill");
         fs::write(
-            worktree.join(".claude/skills/gwt-pr/references/legacy.md"),
+            worktree.join(".claude/skills/gwt-manage-pr/references/legacy.md"),
             "legacy nested skill file",
         )
         .expect("write stale nested skill file");
@@ -18190,7 +18680,7 @@ services:
             command: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ] && [ ! -e .claude/skills/gwt-pr/references/legacy.md ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
+                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ] && [ ! -e .claude/skills/gwt-manage-pr/references/legacy.md ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
                 "sh".to_string(),
                 marker.to_string_lossy().into_owned(),
             ],
@@ -18239,7 +18729,7 @@ services:
         );
         assert!(
             !worktree
-                .join(".claude/skills/gwt-pr/references/legacy.md")
+                .join(".claude/skills/gwt-manage-pr/references/legacy.md")
                 .exists(),
             "stale nested skill file should be removed before spawn"
         );
@@ -18430,6 +18920,255 @@ services:
         let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &persisted.id))
             .expect("load stopped runtime");
         assert_eq!(runtime.status, gwt_agent::AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn maybe_surface_pending_discussion_resume_with_opens_on_session_start() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should SessionStart surface the proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let pending = crate::discussion_resume::load_pending_resume(&worktree)
+            .expect("load pending discussion")
+            .expect("pending discussion");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let mut runtime =
+            SessionRuntimeState::from_hook_event("SessionStart").expect("session start runtime");
+        runtime.pending_discussion = Some(pending);
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+
+        let overlay = model
+            .discussion_resume
+            .as_ref()
+            .expect("discussion resume overlay");
+        assert_eq!(overlay.session_id, persisted.id);
+        assert_eq!(overlay.pending.proposal_label, "Proposal A");
+        assert_eq!(overlay.pending.proposal_title, "Hook-driven resume");
+    }
+
+    #[test]
+    fn maybe_surface_pending_discussion_resume_with_uses_user_prompt_submit_fallback() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should Stop surface the fallback proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let pending = crate::discussion_resume::load_pending_resume(&worktree)
+            .expect("load pending discussion")
+            .expect("pending discussion");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let mut runtime =
+            SessionRuntimeState::from_hook_event("UserPromptSubmit").expect("user prompt runtime");
+        runtime.pending_discussion = Some(pending.clone());
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save running runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_none());
+
+        let mut stopped = SessionRuntimeState::from_hook_event("Stop").expect("stop runtime");
+        stopped.pending_discussion = Some(pending);
+        stopped
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save waiting runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_some());
+    }
+
+    #[test]
+    fn handle_discussion_resume_message_with_resume_queues_prompt_input() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+
+        let mut model = test_model();
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+        model.discussion_resume = Some(
+            screens::discussion_resume::DiscussionResumeState::with_pending(
+                "agent-0",
+                PendingDiscussionResume {
+                    proposal_label: "Proposal A".to_string(),
+                    proposal_title: "Hook-driven resume".to_string(),
+                    next_question: Some("Should SessionStart surface the proposal?".to_string()),
+                },
+            ),
+        );
+
+        handle_discussion_resume_message_with(
+            &mut model,
+            screens::discussion_resume::DiscussionResumeMessage::Select,
+            dir.path(),
+        );
+
+        assert!(model.discussion_resume.is_none());
+        let forwarded = model.pending_pty_inputs().back().expect("queued prompt");
+        let prompt = String::from_utf8_lossy(&forwarded.bytes);
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert!(prompt.contains("gwt-discussion"));
+        assert!(prompt.contains(".gwt/discussion.md"));
+    }
+
+    #[test]
+    fn handle_discussion_resume_message_with_park_updates_discussion_file() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should SessionStart surface the proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.discussion_resume = Some(
+            screens::discussion_resume::DiscussionResumeState::with_pending(
+                persisted.id.clone(),
+                PendingDiscussionResume {
+                    proposal_label: "Proposal A".to_string(),
+                    proposal_title: "Hook-driven resume".to_string(),
+                    next_question: Some("Should SessionStart surface the proposal?".to_string()),
+                },
+            ),
+        );
+        if let Some(state) = model.discussion_resume.as_mut() {
+            state.selected = 1;
+        }
+
+        handle_discussion_resume_message_with(
+            &mut model,
+            screens::discussion_resume::DiscussionResumeMessage::Select,
+            dir.path(),
+        );
+
+        let discussion =
+            fs::read_to_string(worktree.join(".gwt/discussion.md")).expect("read discussion file");
+        assert!(discussion.contains("### Proposal A - Hook-driven resume [parked]"));
+        assert!(model.discussion_resume.is_none());
+    }
+
+    #[test]
+    fn dismiss_discussion_resume_suppresses_prompt_for_current_session() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should SessionStart surface the proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let pending = crate::discussion_resume::load_pending_resume(&worktree)
+            .expect("load pending discussion")
+            .expect("pending discussion");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+
+        let mut runtime =
+            SessionRuntimeState::from_hook_event("SessionStart").expect("session start runtime");
+        runtime.pending_discussion = Some(pending);
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_some());
+
+        handle_discussion_resume_message_with(
+            &mut model,
+            screens::discussion_resume::DiscussionResumeMessage::Cancel,
+            dir.path(),
+        );
+        assert!(model.discussion_resume.is_none());
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_none());
     }
 
     #[test]

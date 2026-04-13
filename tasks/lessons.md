@@ -1,5 +1,124 @@
 # Lessons Learned
 
+## 2026-04-13 — tui: 常設入力欄では plain 文字ショートカットを残さない
+
+### 事象
+
+Board tab に常設入力欄を出したあとも `k` / `r` を plain key shortcut のまま残していたため、
+`i` で入力モードに入らない限り本文入力と衝突した。結果として、入力欄が見えていても
+直打ちできず、最初の文字が `k` / `r` の投稿もできなかった。
+
+### 原因
+
+- hidden composer 前提の keybind を引きずり、常設入力欄では「plain printable key は本文入力」
+  が最優先になることを操作契約として固定していなかった。
+- Board を閲覧 UI と入力 UI の中間状態で扱い、shortcut と text entry の責務を分離していなかった。
+
+### 再発防止策
+
+1. 常設入力欄のある TUI では、plain printable key をショートカットに使わない。
+2. printable key と衝突する操作は `Ctrl+<key>` など modifier 付きに移す。
+3. key routing test には「plain key が本文入力になること」と「modifier shortcut が別操作になること」を両方固定する。
+
+## 2026-04-13 — tui: 端末ホストが奪うショートカットを送信キー前提にしない
+
+### 事象
+
+Board tab の composer 送信を `Ctrl+Enter` にしていたが、Terminal.app では別ウィンドウ系の
+ホストショートカットに吸われ、実際には投稿操作として成立しなかった。加えて、
+入力欄自体が hidden composer で、ユーザーが投稿先を見つけにくかった。
+
+### 原因
+
+- TUI 内のキー衝突だけを見て、Terminal.app / iTerm2 などホスト端末が先に処理する
+  ショートカットを確認していなかった。
+- 「入力欄は `i` で開けばよい」という実装都合を優先し、投稿導線が視覚的に存在するかを
+  user-facing UX として見ていなかった。
+
+### 再発防止策
+
+1. TUI の送信・決定系ショートカットは、まずホスト端末で奪われにくいキー
+   (`Enter`, `Ctrl+J`, `Esc` など) を候補にする。
+2. hidden composer やモーダル前提で投稿導線を隠す変更では、常設入力欄が必要かを
+   先に検討する。
+3. 端末依存のショートカット変更では、render test だけでなく key routing test に
+   実際の送信・改行契約を固定する。
+
+## 2026-04-13 — docs/skills: 公開 surface を切り替えたら alias を残す前提を置かない
+
+### 事象
+
+`gwt-discussion` / `gwt-plan-spec` / `gwt-build-spec` / `gwt-manage-pr` を公開入口に
+切り替えたあとも、`gwt-issue` / `gwt-pr` / `gwt-spec-*` を compatibility alias として
+残す前提で skill asset / AGENTS / SPEC を更新してしまい、ユーザーから
+「重複して見えるので不要」と指摘を受けた。
+
+### 原因
+
+- 「後方互換を残すほうが安全」という一般論を優先し、この repo の公開 UX では
+  重複 surface 自体がコストになることを軽視した。
+- skill 本体だけでなく、distribution test、lint script、SPEC 正本まで含めて
+  alias 削除の影響範囲を最初に洗い出していなかった。
+
+### 再発防止策
+
+1. 公開 task entry point を新設したら、まず「alias を残す必要が本当にあるか」を
+   user-facing UX で判断する。
+2. alias を削除する場合は、skill/command asset、distribution test、
+   lint script、AGENTS、SPEC を同じ変更セットで更新する。
+3. `git ls-files` を使う検証スクリプトは、削除済み tracked file を拾って
+   途中状態で壊れないか確認する。
+
+## 2026-04-13 — spec: shared board を intake 専用に狭めず、通信 + タスク管理 + agent presence を分けて設計する
+
+### 事象
+
+shared board の初期整理を「未分類要求の intake board」中心で進めた結果、
+ユーザーが必要としていた「各エージェントが今何をしていて、次に何をすべきで、
+他へ何を伝えるべきか」という coordination 面を十分に表現できていなかった。
+
+### 原因
+
+- board entry を request intake と会話ログの延長で捉え、agent 自身の current state
+  を first-class な domain object として扱っていなかった。
+- `gwt-discussion` / `workflow-policy` / session runtime の既存責務分離を踏まえず、
+  coordination 面の正本を単一の board stream に寄せすぎた。
+
+### 再発防止策
+
+1. shared board / collaboration 系の設計では、最初に「request stream」と
+   「agent presence / card」を分離して考える。
+2. board を intake 専用と決め打ちせず、communication、next action、blocked、
+   handoff、decision をどこまで正本に持つかを明示する。
+3. 直接 message API を考える前に、shared board と projected latest state で
+   十分な coordination が成立するかを検討する。
+
+## 2026-04-13 — test: 通知経路が再入する helper では pending PTY queue の観測点を誤らない
+
+### 事象
+
+`handle_discussion_resume_message_with_resume_queues_prompt_input` のテストで、
+resume prompt を `pending_pty_inputs` に積んだ直後に通知を出した結果、
+通知側の `update()` 再入で queue が即時 drain され、`queued prompt` assertion
+が失敗した。
+
+### 原因
+
+- `crates/gwt-tui/src/app.rs` の helper は `push_input_to_session()` のあとに
+  `apply_notification()` を呼んでいた。
+- `apply_notification()` は内部で `update()` を呼び、`update()` の末尾で
+  `drain_pending_pty_inputs()` が走るため、helper 単体テストの観測点として
+  `pending_pty_inputs` が不安定だった。
+
+### 再発防止策
+
+1. PTY 入力投入と通知発火を同じ helper で行う場合は、`update()` 再入による
+   queue drain の有無を先に確認してからテストを書く。
+2. helper 単体で pending queue を観測したい場合は、通知より後に入力を積むか、
+   queue ではなく配信先を観測する。
+3. TUI テストで「積まれたはずの入力」が見えないときは、実装バグより先に
+   `apply_notification()` などの nested update を疑う。
+
 ## 2026-04-13 — fix: startup self-heal の生成物を bundle materialize の既存状態と混同しない
 
 ### 事象
