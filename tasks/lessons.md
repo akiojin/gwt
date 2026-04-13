@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-13 — fix: startup self-heal の生成物を bundle materialize の既存状態と混同しない
+
+### 事象
+
+`info/exclude` と hook 設定だけを pristine repo/worktree に self-heal したいのに、
+次回 startup で `.claude/settings.local.json` / `.codex/hooks.json` の存在を見て
+埋め込み skill bundle まで materialize してしまう経路が入り得た。
+
+### 原因
+
+- startup refresh の gate が「managed bundle の既存状態」と「self-heal で常に生成する
+  hook 設定ファイル」を同じ root list で判定していた。
+- `git rev-parse --git-path info/exclude` は relative path を返す場合があり、
+  テスト側も実装側も Git が解決した path をそのまま正本として扱う必要があった。
+
+### 再発防止策
+
+1. startup repair の gate は「bundle materialize を許可する signal」と
+   「常に補完すべき self-heal 生成物」を分離する。
+2. linked worktree や bare/alternate Git layout を触るテストでは、
+   `git rev-parse --git-path info/exclude` の戻り値が relative / absolute の両方を
+   取り得る前提で path を解決する。
+3. self-heal 追加時は「1回目の起動」だけでなく「2回目の起動でも余計な materialize が
+   起きない」ことまでテストで固定する。
+
 ## 2026-04-13 — fix: tick 駆動の更新は redraw gate だけでなく deadline の寿命も固定する
 
 ### 事象
