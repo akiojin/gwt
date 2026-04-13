@@ -8204,17 +8204,19 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
     }
 
     let session = model.active_session_tab()?;
-    session
-        .vt
-        .visible_url_regions(Rect::new(0, 0, area.width, area.height))
-        .into_iter()
-        .find(|region| {
-            let row = area.y + region.row;
-            let start_col = area.x + region.start_col;
-            let end_col = area.x + region.end_col;
-            mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
-        })
-        .map(|region| region.url)
+    session.vt.with_visible_screen(|screen| {
+        let render_surface = session_render_surface(session, screen, area);
+        render_surface
+            .url_regions
+            .into_iter()
+            .find(|region| {
+                let row = area.y + region.row;
+                let start_col = area.x + region.start_col;
+                let end_col = area.x + region.end_col;
+                mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
+            })
+            .map(|region| region.url)
+    })
 }
 
 fn scroll_target_session_index(model: &Model, mouse: MouseEvent) -> Option<usize> {
@@ -8665,7 +8667,10 @@ fn render_session_surface(
 ) {
     let text_area = session_text_area(session, area);
     session.vt.with_visible_screen(|screen| {
-        if screen.contents().trim().is_empty() {
+        let render_surface = session_render_surface(session, screen, text_area);
+        let render_screen = render_surface.screen(screen);
+
+        if render_screen.contents().trim().is_empty() {
             match &session.tab_type {
                 crate::model::SessionTabType::Agent { agent_id, color } => {
                     // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
@@ -8721,21 +8726,17 @@ fn render_session_surface(
                 }
             }
         } else {
-            let url_regions =
-                session
-                    .vt
-                    .visible_url_regions(Rect::new(0, 0, text_area.width, text_area.height));
             crate::renderer::render_vt_screen_with_selection_and_urls(
-                screen,
+                render_screen,
                 frame.buffer_mut(),
                 text_area,
                 session.vt.selection(),
-                &url_regions,
+                &render_surface.url_regions,
             );
         }
 
-        if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
-            let (cursor_row, cursor_col) = screen.cursor_position();
+        if show_cursor && !session.vt.viewing_history() && !render_screen.hide_cursor() {
+            let (cursor_row, cursor_col) = render_screen.cursor_position();
             let x = text_area.x + cursor_col;
             let y = text_area.y + cursor_row;
             if x < text_area.right() && y < text_area.bottom() {
@@ -8743,6 +8744,180 @@ fn render_session_surface(
             }
         }
     });
+}
+
+struct SessionRenderSurface {
+    normalized_parser: Option<vt100::Parser>,
+    url_regions: Vec<crate::renderer::UrlRegion>,
+}
+
+impl SessionRenderSurface {
+    fn screen<'a>(&'a self, fallback: &'a vt100::Screen) -> &'a vt100::Screen {
+        self.normalized_parser
+            .as_ref()
+            .map(vt100::Parser::screen)
+            .unwrap_or(fallback)
+    }
+}
+
+fn session_render_surface(
+    session: &crate::model::SessionTab,
+    screen: &vt100::Screen,
+    text_area: Rect,
+) -> SessionRenderSurface {
+    let area = Rect::new(0, 0, text_area.width, text_area.height);
+    let normalized_parser = match &session.tab_type {
+        crate::model::SessionTabType::Agent { agent_id, .. }
+            if agent_id == "codex" && session.vt.selection().is_none() =>
+        {
+            normalized_codex_progress_parser(screen)
+        }
+        _ => None,
+    };
+    let url_regions = if let Some(parser) = normalized_parser.as_ref() {
+        crate::renderer::collect_url_regions(parser.screen(), area)
+    } else {
+        session.vt.visible_url_regions(area)
+    };
+    SessionRenderSurface {
+        normalized_parser,
+        url_regions,
+    }
+}
+
+fn normalized_codex_progress_parser(screen: &vt100::Screen) -> Option<vt100::Parser> {
+    let (rows, cols) = screen.size();
+    let visible_lines: Vec<String> = screen
+        .rows(0, cols)
+        .map(|line| line.trim_end_matches(' ').to_string())
+        .collect();
+    let formatted_rows: Vec<Vec<u8>> = screen.rows_formatted(0, cols).collect();
+    if visible_lines.is_empty() || visible_lines.len() != formatted_rows.len() {
+        return None;
+    }
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let hide_cursor = screen.hide_cursor();
+
+    let mut keep = vec![true; visible_lines.len()];
+    let mut row = 0usize;
+    let mut changed = false;
+    while row < visible_lines.len() {
+        if !is_codex_progress_separator(&visible_lines[row]) {
+            row += 1;
+            continue;
+        }
+
+        let separator_start = row;
+        while row < visible_lines.len() && is_codex_progress_separator(&visible_lines[row]) {
+            row += 1;
+        }
+        let separator_end = row;
+
+        let previous_end = separator_start;
+        let mut previous_start = previous_end;
+        while previous_start > 0 && !is_codex_progress_separator(&visible_lines[previous_start - 1])
+        {
+            previous_start -= 1;
+        }
+
+        let next_start = separator_end;
+        let mut next_end = next_start;
+        while next_end < visible_lines.len()
+            && !is_codex_progress_separator(&visible_lines[next_end])
+        {
+            next_end += 1;
+        }
+
+        let previous_block =
+            codex_progress_block_lines(&visible_lines[previous_start..previous_end]);
+        let next_block = codex_progress_block_lines(&visible_lines[next_start..next_end]);
+        if previous_block
+            .as_ref()
+            .zip(next_block.as_ref())
+            .is_some_and(|(previous, next)| codex_progress_block_repeated(previous, next))
+        {
+            for keep_row in keep.iter_mut().take(next_start).skip(previous_start) {
+                *keep_row = false;
+            }
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let rows_to_keep: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(index, keep_row)| keep_row.then_some(index))
+        .collect();
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(b"\x1b[2J\x1b[H");
+    for (dest_row, src_row) in rows_to_keep.iter().take(rows as usize).enumerate() {
+        let mut positioned_row = format!("\x1b[{};1H\x1b[K", dest_row + 1).into_bytes();
+        positioned_row.extend_from_slice(&formatted_rows[*src_row]);
+        parser.process(&positioned_row);
+    }
+    if rows > 0 && cols > 0 {
+        let cursor_row = usize::from(cursor_row).min(keep.len().saturating_sub(1));
+        let adjusted_cursor_row = keep
+            .iter()
+            .take(cursor_row.saturating_add(1))
+            .filter(|keep_row| **keep_row)
+            .count()
+            .saturating_sub(1)
+            .min(rows_to_keep.len().saturating_sub(1));
+        let adjusted_cursor_col = usize::from(cursor_col)
+            .min(usize::from(cols).saturating_sub(1))
+            .saturating_add(1);
+        let cursor_sequence = format!(
+            "\x1b[{};{}H",
+            adjusted_cursor_row.saturating_add(1),
+            adjusted_cursor_col
+        );
+        parser.process(cursor_sequence.as_bytes());
+    }
+    parser.process(if hide_cursor {
+        b"\x1b[?25l"
+    } else {
+        b"\x1b[?25h"
+    });
+    Some(parser)
+}
+
+fn is_codex_progress_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '─')
+}
+
+fn codex_progress_block_lines(lines: &[String]) -> Option<Vec<String>> {
+    let first = lines.iter().position(|line| !line.trim().is_empty())?;
+    let last = lines.iter().rposition(|line| !line.trim().is_empty())?;
+    let mut normalized = Vec::new();
+    let mut has_bullet = false;
+    let mut has_child = false;
+
+    for line in &lines[first..=last] {
+        let trimmed = line.trim_end().to_string();
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+        has_bullet |= trimmed.starts_with("• ");
+        has_child |= trimmed.starts_with("  ");
+        normalized.push(trimmed);
+    }
+
+    (has_bullet && has_child && normalized.len() >= 2).then_some(normalized)
+}
+
+fn codex_progress_block_repeated(previous: &[String], next: &[String]) -> bool {
+    if previous.len() > next.len() || previous.len() < 2 {
+        return false;
+    }
+
+    next.windows(previous.len())
+        .any(|window| window == previous)
 }
 
 /// Render the full UI (Elm: view).
@@ -12024,6 +12199,189 @@ services:
     }
 
     #[test]
+    fn render_model_text_codex_collapses_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 1);
+        assert_eq!(text.matches("  └ Search alpha").count(), 1);
+    }
+
+    #[test]
+    fn render_model_text_codex_keeps_distinct_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• cache summary updated",
+                "",
+                "• Explored",
+                "  └ Read spec.mdsh",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert!(text.contains("  └ Search alpha"));
+        assert!(text.contains("  └ Read spec.mdsh"));
+    }
+
+    #[test]
+    fn render_model_text_non_codex_keeps_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert_eq!(text.matches("  └ Search alpha").count(), 2);
+    }
+
+    #[test]
+    fn render_model_text_codex_with_selection_keeps_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 5 });
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert_eq!(text.matches("  └ Search alpha").count(), 2);
+    }
+
+    #[test]
+    fn normalized_codex_progress_parser_preserves_cursor_state() {
+        let mut parser = vt100::Parser::new(14, 60, 0);
+        parser.process(
+            concat!(
+                "• contract swapped\r\n",
+                "\r\n",
+                "• Explored\r\n",
+                "  └ Search alpha\r\n",
+                "\r\n",
+                "────────────────────────────────────────\r\n",
+                "• contract swapped\r\n",
+                "\r\n",
+                "• Explored\r\n",
+                "  └ Search alpha\r\n",
+                "\r\n",
+                "• Working\r\n",
+            )
+            .as_bytes(),
+        );
+        parser.process(b"\x1b[12;5H\x1b[?25l");
+
+        let normalized = normalized_codex_progress_parser(parser.screen()).expect("normalized");
+        assert_eq!(normalized.screen().cursor_position(), (5, 4));
+        assert!(normalized.screen().hide_cursor());
+    }
+
+    #[test]
     fn agent_trackpad_drag_forwards_repeated_mouse_wheel_steps_to_pty() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -13130,6 +13488,75 @@ services:
         .into_iter()
         .find(|region| region.url == expected_url)
         .expect("url region");
+
+        let mut opened = None;
+        let opened_result = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + region.start_col,
+                row: area.y + region.row,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            |url| {
+                opened = Some(url.to_string());
+                Ok(())
+            },
+        )
+        .expect("mouse handler succeeds");
+
+        assert!(opened_result);
+        assert_eq!(opened.as_deref(), Some(expected_url));
+    }
+
+    #[test]
+    fn ctrl_click_on_codex_url_uses_normalized_hit_testing() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+        let expected_url = "https://example.com/docs";
+
+        update(&mut model, Message::Resize(80, 20));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                expected_url,
+            ],
+        );
+
+        let area = active_session_text_area(&model).expect("active session area");
+        let region = model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .with_visible_screen(|screen| {
+                let normalized = normalized_codex_progress_parser(screen).expect("normalized");
+                crate::renderer::collect_url_regions(
+                    normalized.screen(),
+                    Rect::new(0, 0, area.width, area.height),
+                )
+                .into_iter()
+                .find(|region| region.url == expected_url)
+                .expect("url region")
+            });
 
         let mut opened = None;
         let opened_result = handle_mouse_input_with(
