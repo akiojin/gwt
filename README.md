@@ -64,8 +64,8 @@ gwt
 
 ## Key bindings
 
-Most TUI key bindings use the `Ctrl+G` prefix. Terminal text copy uses the
-platform shortcut when a selection is active.
+Most TUI key bindings use the `Ctrl+G` prefix. Dragging terminal text copies
+the selection immediately.
 
 | Key binding | Action |
 |---|---|
@@ -80,7 +80,8 @@ platform shortcut when a selection is active.
 | `Ctrl+G`, `?` | Help / key binding reference |
 | `Ctrl+G`, `q` | Quit |
 
-When terminal text is selected, use:
+Drag across terminal text to copy it. When the host terminal forwards the
+shortcut, the platform copy shortcut also works:
 
 - macOS: `Cmd+C`
 - Linux / Windows: `Ctrl+Shift+C`

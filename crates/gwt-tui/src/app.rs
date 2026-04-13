@@ -8269,7 +8269,7 @@ fn handle_mouse_input_with_tools<F, G>(
     model: &mut Model,
     mouse: MouseEvent,
     mut opener: F,
-    _clipboard_writer: G,
+    mut clipboard_writer: G,
 ) -> Result<bool, String>
 where
     F: FnMut(&str) -> Result<(), String>,
@@ -8456,6 +8456,8 @@ where
                 session.vt.update_selection(cell);
                 if session.vt.selection().is_some_and(selection_is_single_cell) {
                     session.vt.clear_selection();
+                } else if let Some(text) = selected_text(session) {
+                    clipboard_writer(&text)?;
                 }
                 return Ok(true);
             }
@@ -11455,21 +11457,12 @@ services:
                 modifiers: KeyModifiers::NONE,
             },
             |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("selection up succeeds");
-        handle_terminal_copy_shortcut_with(
-            &mut model,
-            key(
-                KeyCode::Char('C'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ),
             |text| {
                 copied = Some(text.to_string());
                 Ok(())
             },
         )
-        .expect("copy shortcut succeeds");
+        .expect("selection up succeeds");
 
         assert_eq!(copied.as_deref(), Some("line-7"));
     }
@@ -11803,21 +11796,12 @@ services:
                 modifiers: KeyModifiers::NONE,
             },
             |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("selection up succeeds");
-        handle_terminal_copy_shortcut_with(
-            &mut model,
-            key(
-                KeyCode::Char('C'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ),
             |text| {
                 copied = Some(text.to_string());
                 Ok(())
             },
         )
-        .expect("copy shortcut succeeds");
+        .expect("selection up succeeds");
 
         assert_eq!(
             copied.as_deref(),
@@ -12454,7 +12438,7 @@ services:
     }
 
     #[test]
-    fn codex_drag_selection_requires_copy_shortcut() {
+    fn codex_drag_selection_copies_on_release() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -12519,7 +12503,7 @@ services:
         )
         .expect("left up should succeed");
 
-        assert_eq!(copied, None);
+        assert_eq!(copied.as_deref(), Some("hello"));
         assert!(
             model
                 .active_session_tab()
@@ -12527,21 +12511,8 @@ services:
                 .vt
                 .selection()
                 .is_some(),
-            "dragging should still leave an explicit selection for later copy",
+            "dragging should still leave the explicit selection visible after auto-copy",
         );
-
-        let copied_with_shortcut = handle_terminal_copy_shortcut_with(
-            &mut model,
-            key(KeyCode::Char('c'), KeyModifiers::SUPER),
-            |text| {
-                copied = Some(text.to_string());
-                Ok(())
-            },
-        )
-        .expect("copy shortcut should succeed");
-
-        assert!(copied_with_shortcut);
-        assert_eq!(copied.as_deref(), Some("hello"));
     }
 
     #[test]
