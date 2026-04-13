@@ -52,7 +52,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 use crate::{
     custom_agents::load_custom_agents,
     discussion_resume::{build_resume_prompt, park_pending_resume},
-    input::voice::VoiceInputMessage,
+    input::{keybind::KeybindRegistry, voice::VoiceInputMessage},
     input_trace,
     message::{GridSessionDirection, Message},
     model::{
@@ -1006,17 +1006,11 @@ pub fn update(model: &mut Model, msg: Message) {
             };
         }
         Message::NewShell => {
-            let idx = model.sessions.len();
-            let session = crate::model::SessionTab {
-                id: format!("shell-{idx}"),
-                name: format!("Shell {}", idx + 1),
-                tab_type: SessionTabType::Shell,
-                vt: crate::model::VtState::new(24, 80),
-                created_at: std::time::Instant::now(),
-            };
+            let shell_index = next_shell_index(model);
+            let session = crate::model::shell_session(shell_index);
             let session_id = session.id.clone();
             model.sessions.push(session);
-            model.active_session = idx;
+            model.active_session = model.sessions.len().saturating_sub(1);
 
             // Use actual pane content area for PTY size.
             let (cols, rows) = session_content_size(model);
@@ -5708,7 +5702,7 @@ where
 }
 
 fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
-    if model.sessions.len() <= 1 {
+    if model.sessions.is_empty() {
         return;
     }
 
@@ -5725,10 +5719,28 @@ fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
     }
     clear_discussion_resume_state_for_session(model, &id);
     model.sessions.remove(model.active_session);
-    if model.active_session >= model.sessions.len() {
+    if model.sessions.is_empty() {
+        model.active_session = 0;
+    } else if model.active_session >= model.sessions.len() {
         model.active_session = model.sessions.len() - 1;
     }
     refresh_branch_live_session_summaries_with(model, sessions_dir);
+}
+
+fn next_shell_index(model: &Model) -> usize {
+    model
+        .sessions
+        .iter()
+        .filter_map(|session| match session.tab_type {
+            SessionTabType::Shell => session
+                .id
+                .strip_prefix("shell-")
+                .and_then(|suffix| suffix.parse::<usize>().ok()),
+            SessionTabType::Agent { .. } => None,
+        })
+        .max()
+        .map(|index| index + 1)
+        .unwrap_or(0)
 }
 
 fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Result<(), String> {
@@ -9446,6 +9458,11 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Render the session pane (right side, or full screen).
 fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
+    if model.sessions.is_empty() {
+        render_welcome_session_pane(model, frame, area);
+        return;
+    }
+
     let terminal_focused = model.active_focus == FocusPane::Terminal;
     match model.session_layout {
         SessionLayout::Tab => {
@@ -9460,6 +9477,136 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
         SessionLayout::Grid => {
             render_grid_sessions(model, frame, area);
         }
+    }
+}
+
+fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
+    let pane_focused =
+        model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal;
+    let block = pane_block(Line::from(" Welcome "), pane_focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let intro_lines = welcome_session_intro_lines();
+    let command_lines = welcome_session_command_lines();
+    let content_height = (intro_lines.len() as u16)
+        .saturating_add(welcome_session_command_box_height(&command_lines))
+        .min(inner.height);
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(content_height),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+    let content = vertical[1];
+
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+
+    let intro_height = (intro_lines.len() as u16).min(content.height);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(intro_height), Constraint::Min(0)])
+        .split(content);
+
+    if sections[0].width > 0 && sections[0].height > 0 {
+        let intro = Paragraph::new(intro_lines).alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(intro, sections[0]);
+    }
+
+    let command_box_area = welcome_session_command_box_area(sections[1], &command_lines);
+    if command_box_area.width > 0 && command_box_area.height > 0 {
+        let command_block = welcome_session_command_block();
+        let commands = welcome_session_command_content_area(command_block.inner(command_box_area));
+        frame.render_widget(command_block, command_box_area);
+
+        if commands.width == 0 || commands.height == 0 {
+            return;
+        }
+
+        let paragraph = Paragraph::new(command_lines);
+        frame.render_widget(paragraph, commands);
+    }
+}
+
+fn welcome_session_intro_lines() -> Vec<Line<'static>> {
+    let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
+
+    vec![
+        Line::from(Span::styled("Welcome", theme::style::header())),
+        Line::from(Span::styled("No terminal windows are open.", body_style)),
+    ]
+}
+
+fn welcome_session_command_lines() -> Vec<Line<'static>> {
+    const WELCOME_KEY_WIDTH: usize = 24;
+    let command_style = Style::default()
+        .fg(theme::color::ACTIVE)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
+    let mut lines = Vec::new();
+
+    for binding in KeybindRegistry::new().all_bindings() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<WELCOME_KEY_WIDTH$}", binding.keys),
+                command_style,
+            ),
+            Span::styled(binding.description.clone(), body_style),
+        ]));
+    }
+
+    lines
+}
+
+fn welcome_session_command_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(theme::border::default())
+        .border_style(Style::default().fg(theme::color::BORDER_UNFOCUSED))
+        .title(Line::from(Span::styled(
+            " Commands ",
+            theme::style::header(),
+        )))
+}
+
+fn welcome_session_command_box_height(lines: &[Line<'_>]) -> u16 {
+    (lines.len() as u16).saturating_add(2)
+}
+
+fn welcome_session_command_box_area(area: Rect, lines: &[Line<'_>]) -> Rect {
+    let content_width = lines.iter().map(title_line_width).max().unwrap_or(0);
+    let desired_width = content_width.saturating_add(4).min(area.width as usize) as u16;
+    let height = welcome_session_command_box_height(lines).min(area.height);
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(desired_width) / 2);
+
+    Rect {
+        x,
+        y: area.y,
+        width: desired_width,
+        height,
+    }
+}
+
+fn welcome_session_command_content_area(inner: Rect) -> Rect {
+    let horizontal_padding = if inner.width > 2 { 1 } else { 0 };
+
+    Rect {
+        x: inner.x.saturating_add(horizontal_padding),
+        y: inner.y,
+        width: inner
+            .width
+            .saturating_sub(horizontal_padding.saturating_mul(2)),
+        height: inner.height,
     }
 }
 
@@ -9579,16 +9726,22 @@ fn should_compact_session_title(width: u16, entries: &[(String, Style, &'static 
 /// The status bar keeps session context visible and appends the relevant hints.
 fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
     let compact = area.width <= 80;
-    let hints = match model.active_focus {
-        FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-            branches_list_hint_text_with_selection(
-                compact,
-                model.branches.cleanup_selection_count(),
-            )
+    let hints = if model.sessions.is_empty()
+        && (model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal)
+    {
+        welcome_hint_text(compact)
+    } else {
+        match model.active_focus {
+            FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
+                branches_list_hint_text_with_selection(
+                    compact,
+                    model.branches.cleanup_selection_count(),
+                )
+            }
+            FocusPane::TabContent => management_hint_text(model, compact),
+            FocusPane::BranchDetail => branch_detail_hint_text(model, compact),
+            FocusPane::Terminal => terminal_hint_text(),
         }
-        FocusPane::TabContent => management_hint_text(model, compact),
-        FocusPane::BranchDetail => branch_detail_hint_text(model, compact),
-        FocusPane::Terminal => terminal_hint_text(),
     };
 
     crate::widgets::status_bar::render_with_notification_and_hints(
@@ -9602,6 +9755,14 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
 
 fn terminal_hint_text() -> String {
     "Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2".to_string()
+}
+
+fn welcome_hint_text(compact: bool) -> String {
+    if compact {
+        "C-g,c shell  C-g,g manage  ?:help".to_string()
+    } else {
+        "Ctrl+G, c:new shell  Ctrl+G, g:management  ?:help".to_string()
+    }
 }
 
 fn branches_list_hint_text_with_selection(compact: bool, selection_count: usize) -> String {
@@ -13848,6 +14009,50 @@ services:
     }
 
     #[test]
+    fn render_model_text_zero_sessions_shows_welcome_actions() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("Welcome"));
+        assert!(rendered.contains("No terminal windows are open."));
+        assert!(rendered.contains("Ctrl+G, c"));
+        assert!(rendered.contains("Ctrl+G, g"));
+    }
+
+    #[test]
+    fn render_model_text_zero_sessions_centers_intro_and_command_box() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("║                                    Welcome"));
+        assert!(rendered.contains("║                         No terminal windows are open."));
+        assert!(rendered.contains("║           ╭ Commands"));
+        assert!(rendered.contains("║           │ Ctrl+G, g"));
+        assert!(rendered.contains("║           │ Ctrl+G, c"));
+    }
+
+    #[test]
+    fn render_model_text_management_with_zero_sessions_shows_welcome_pane() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 120, 24);
+
+        assert!(rendered.contains("Welcome"));
+        assert!(rendered.contains("No terminal windows are open."));
+    }
+
+    #[test]
     fn render_model_text_branches_list_hints_remain_visible_at_standard_width() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
@@ -14443,12 +14648,27 @@ services:
     }
 
     #[test]
-    fn update_close_session_wont_remove_last() {
+    fn update_close_session_removes_last() {
         let mut model = test_model();
         assert_eq!(model.session_count(), 1);
 
         update(&mut model, Message::CloseSession);
+        assert_eq!(model.session_count(), 0);
+        assert_eq!(model.active_session, 0);
+    }
+
+    #[test]
+    fn update_new_shell_recreates_primary_shell_after_zero_sessions() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_session = 0;
+
+        update(&mut model, Message::NewShell);
+
         assert_eq!(model.session_count(), 1);
+        assert_eq!(model.active_session, 0);
+        assert_eq!(model.sessions[0].id, "shell-0");
+        assert_eq!(model.sessions[0].name, "Shell");
     }
 
     #[test]
@@ -22003,6 +22223,33 @@ exit 1
             assert!(
                 text.contains(&binding.description),
                 "expected help overlay to contain description {}",
+                binding.description
+            );
+        }
+    }
+
+    #[test]
+    fn render_welcome_session_lists_all_registered_keybindings() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let text = render_model_text(&model, 80, 24);
+        let registry = crate::input::keybind::KeybindRegistry::new();
+
+        assert!(text.contains("Welcome"));
+        assert!(text.contains("No terminal windows are open."));
+        for binding in registry.all_bindings() {
+            assert!(
+                text.contains(&binding.keys),
+                "expected welcome screen to contain binding {}",
+                binding.keys
+            );
+            assert!(
+                text.contains(&binding.description),
+                "expected welcome screen to contain description {}",
                 binding.description
             );
         }
