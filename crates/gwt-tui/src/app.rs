@@ -3237,6 +3237,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     KeyCode::Up => Some(SettingsMessage::MoveUp),
                     KeyCode::Enter => Some(SettingsMessage::StartEdit),
                     KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
+                    KeyCode::Char('[') => Some(SettingsMessage::PrevCategory),
+                    KeyCode::Char(']') => Some(SettingsMessage::NextCategory),
                     KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         Some(SettingsMessage::Save)
                     }
@@ -9683,9 +9685,9 @@ fn generic_management_hint_text(
 
 fn settings_list_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  C-g Tab  Esc term  ?".to_string()
+        "↑↓ sel  ↵ edit  Sp tog  [] cat  S save  C-g Tab  Esc t  ?".to_string()
     } else {
-        "↑↓:select  Enter:edit  Space:toggle  Ctrl+←→:sub-tab  Shift+S:save  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:edit  Space:toggle  []:sub-tab  Shift+S:save  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
     }
 }
 
@@ -13012,7 +13014,7 @@ services:
 
         let rendered = render_model_text(&model, 220, 24);
 
-        assert!(rendered.contains("Ctrl+←→:sub-tab"));
+        assert!(rendered.contains("[]:sub-tab"));
     }
 
     #[test]
@@ -21234,6 +21236,30 @@ services:
         assert_eq!(
             model.profiles.focus,
             screens::profiles::ProfilesFocus::ProfileList
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_settings_brackets_cycle_categories() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::TabContent;
+
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::General
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::Worktree
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::General
         );
     }
 

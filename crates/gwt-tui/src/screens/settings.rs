@@ -944,9 +944,9 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let hints = if state.editing {
         " Enter: save | Esc: cancel"
     } else if state.category == SettingsCategory::CustomAgents {
-        " Enter: cycle/edit/action | Ctrl+Left/Right: category"
+        " Enter: cycle/edit/action | [/]: category"
     } else {
-        " Enter: edit | Space: toggle bool | Ctrl+Left/Right: category"
+        " Enter: edit | Space: toggle bool | [/]: category"
     };
 
     let block = Block::default().title(format!("{}{}", state.category.label(), hints));
