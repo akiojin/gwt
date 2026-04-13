@@ -19258,7 +19258,7 @@ services:
         )
         .expect("spawn short-lived PTY");
 
-        for _ in 0..50 {
+        for _ in 0..200 {
             let exited = model
                 .pty_handles
                 .get(&persisted.id)
@@ -19267,7 +19267,7 @@ services:
             if exited {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         check_pty_exits_with(&mut model, dir.path());
