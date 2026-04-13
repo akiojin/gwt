@@ -128,6 +128,7 @@ fn dispatch_post_normalized_message(
     keybinds: &mut KeybindRegistry,
     msg: Message,
     needs_render: &mut bool,
+    tick_deadline: &mut Instant,
 ) {
     let msg = match msg {
         Message::KeyInput(key) if model.active_layer != ActiveLayer::Initialization => {
@@ -139,6 +140,8 @@ fn dispatch_post_normalized_message(
         other => other,
     };
 
+    let handled_at = Instant::now();
+    *tick_deadline = tick_deadline_after_message(*tick_deadline, handled_at, &msg);
     let was_tick = matches!(msg, Message::Tick);
     let visible_branch_signature_before =
         was_tick.then(|| app::visible_branch_live_indicator_signature(model));
@@ -158,6 +161,7 @@ fn handle_post_normalized_message<F>(
     keybinds: &mut KeybindRegistry,
     first: Message,
     needs_render: &mut bool,
+    tick_deadline: &mut Instant,
     pending_messages: &mut VecDeque<Message>,
     next_message: F,
 ) where
@@ -165,7 +169,7 @@ fn handle_post_normalized_message<F>(
 {
     let burst = drain_mouse_scroll_burst(first, pending_messages, next_message);
     for msg in burst {
-        dispatch_post_normalized_message(model, keybinds, msg, needs_render);
+        dispatch_post_normalized_message(model, keybinds, msg, needs_render, tick_deadline);
         if model.quit {
             break;
         }
@@ -226,6 +230,14 @@ where
 
 fn pty_redraw_poll_slice(now: Instant, last_draw_at: Instant) -> Duration {
     PTY_REDRAW_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last_draw_at))
+}
+
+fn tick_deadline_after_message(current_deadline: Instant, now: Instant, msg: &Message) -> Instant {
+    if matches!(msg, Message::Tick) {
+        event::next_tick_deadline_from(now)
+    } else {
+        current_deadline
+    }
 }
 
 #[cfg(test)]
@@ -673,6 +685,7 @@ fn run_app(
     let mut pending_messages = VecDeque::new();
     let mut needs_render = true;
     let mut last_draw_at = None;
+    let mut tick_deadline = event::next_tick_deadline();
 
     loop {
         if sighup_flag.load(Ordering::Relaxed) {
@@ -697,7 +710,6 @@ fn run_app(
         }
 
         // Event: poll
-        let deadline = event::next_tick_deadline();
         loop {
             if let Some(msg) = input_normalizer.pop_pending(std::time::Instant::now()) {
                 handle_post_normalized_message(
@@ -705,6 +717,7 @@ fn run_app(
                     &mut keybinds,
                     msg,
                     &mut needs_render,
+                    &mut tick_deadline,
                     &mut pending_messages,
                     || input_normalizer.pop_pending(std::time::Instant::now()),
                 );
@@ -715,7 +728,7 @@ fn run_app(
 
             let Some(msg) = next_message_for_loop_iteration(
                 &mut pending_messages,
-                deadline,
+                tick_deadline,
                 had_pty_output,
                 last_draw_at,
                 event::poll_event_slice,
@@ -734,15 +747,18 @@ fn run_app(
                 continue;
             };
 
+            let burst_deadline = tick_deadline;
+
             handle_post_normalized_message(
                 &mut model,
                 &mut keybinds,
                 msg,
                 &mut needs_render,
+                &mut tick_deadline,
                 &mut pending_messages,
                 || {
                     poll_immediate_message_for_scroll_burst(
-                        deadline,
+                        burst_deadline,
                         &mut input_normalizer,
                         terminal_focused,
                     )
@@ -1180,6 +1196,7 @@ mod tests {
         model.active_focus = FocusPane::TabContent;
         let mut keybinds = KeybindRegistry::new();
         let mut needs_render = false;
+        let mut tick_deadline = Instant::now();
 
         dispatch_post_normalized_message(
             &mut model,
@@ -1189,6 +1206,7 @@ mod tests {
                 KeyModifiers::CONTROL,
             )),
             &mut needs_render,
+            &mut tick_deadline,
         );
         dispatch_post_normalized_message(
             &mut model,
@@ -1198,6 +1216,7 @@ mod tests {
                 KeyModifiers::NONE,
             )),
             &mut needs_render,
+            &mut tick_deadline,
         );
 
         assert_eq!(
@@ -1288,6 +1307,44 @@ mod tests {
         assert!(
             should_render_after_tick(&model),
             "visible overlays that depend on tick-driven updates should still redraw"
+        );
+    }
+
+    #[test]
+    fn non_tick_messages_do_not_delay_the_pending_tick_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+
+        let next = tick_deadline_after_message(
+            deadline,
+            now + Duration::from_millis(90),
+            &Message::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )),
+        );
+
+        assert_eq!(
+            next, deadline,
+            "non-tick events must preserve the original deadline so tick-driven cleanup updates do not starve behind unrelated input/output"
+        );
+    }
+
+    #[test]
+    fn tick_messages_schedule_the_next_deadline_from_now() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+        let tick_handled_at = now + Duration::from_millis(90);
+
+        let next = tick_deadline_after_message(deadline, tick_handled_at, &Message::Tick);
+
+        assert!(
+            next >= tick_handled_at + Duration::from_millis(95),
+            "tick handling should move the deadline forward from the time the tick was consumed"
+        );
+        assert!(
+            next <= tick_handled_at + Duration::from_millis(105),
+            "the next deadline should stay close to one tick interval after the consumed tick"
         );
     }
 }

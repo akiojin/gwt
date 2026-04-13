@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-13 — fix: tick 駆動の更新は redraw gate だけでなく deadline の寿命も固定する
+
+### 事象
+
+Cleanup progress モーダルが実際には進んでいても、`Ctrl+G` を押すまで進捗件数や
+`Cleanup Complete` への切り替わりが画面に出なかった。
+
+### 原因
+
+- cleanup worker のイベント drain は `Message::Tick` に依存していた。
+- main loop 側は outer loop を 1 周するたびに `Instant::now() + 100ms` で
+  tick deadline を作り直しており、PTY output や他イベントでループが回り続けると
+  Tick 自体が飢餓した。
+- `Ctrl+G` prefix は keybind 上 `Message::Tick` を直接発行するため、手動で
+  cleanup queue をポンプしたときだけ画面が更新されていた。
+
+### 再発防止策
+
+1. tick 駆動の overlay / modal を追加するときは、redraw gate だけでなく
+   「tick deadline を non-tick イベントで延長しない」ことまでテストで固定する。
+2. event loop の定期処理が `Tick` 依存なら、deadline は Tick を実際に消費するまで
+   保持し、外側ループの都度 `now + interval` で再計算しない。
+3. `Ctrl+G` のような prefix 消費でだけ UI が進む報告は、「手動で Tick を注入すると
+   直る」シグナルとして扱い、queue drain と scheduler の両方を確認する。
+
 ## 2026-04-13 — fix: Issue / SPEC cache と index は repo 単位の exact cache を唯一の入力にする
 
 ### 事象
