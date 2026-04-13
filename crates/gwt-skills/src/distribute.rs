@@ -119,23 +119,30 @@ fn prune_managed_asset_roots(
 }
 
 fn prune_retired_hook_scripts(dest: &Path, report: &mut DistributeReport) -> io::Result<()> {
-    if !dest.exists() {
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dest)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("gwt-") {
-            continue;
+    if dest.exists() {
+        for entry in fs::read_dir(dest)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("gwt-") {
+                continue;
+            }
+            remove_path(&entry.path())?;
+            report.paths_removed += 1;
         }
-        remove_path(&entry.path())?;
-        report.paths_removed += 1;
+
+        if fs::read_dir(dest)?.next().is_none() {
+            fs::remove_dir(dest)?;
+            report.paths_removed += 1;
+        }
     }
 
-    if fs::read_dir(dest)?.next().is_none() {
-        fs::remove_dir(dest)?;
+    let Some(parent) = dest.parent() else {
+        return Ok(());
+    };
+    if parent.exists() && fs::read_dir(parent)?.next().is_none() {
+        fs::remove_dir(parent)?;
+        report.paths_removed += 1;
     }
 
     Ok(())
@@ -355,6 +362,10 @@ mod tests {
         distribute_to_worktree(dir.path()).unwrap();
         let hook = dir.path().join(".codex/hooks/scripts/gwt-forward-hook.mjs");
         assert!(!hook.exists(), "unexpected {}", hook.display());
+        assert!(
+            !dir.path().join(".codex/hooks").exists(),
+            "unexpected stale .codex/hooks directory"
+        );
     }
 
     #[test]
@@ -521,7 +532,7 @@ mod tests {
 
         let removed = prune_stale_gwt_assets(dir.path()).unwrap();
 
-        assert_eq!(removed, 3);
+        assert_eq!(removed, 5);
         assert!(
             !stale_command.exists(),
             "unexpected {}",
@@ -534,8 +545,32 @@ mod tests {
         );
         assert!(!stale_hook.exists(), "unexpected {}", stale_hook.display());
         assert!(
+            !dir.path().join(".claude/hooks").exists(),
+            "unexpected stale .claude/hooks directory"
+        );
+        assert!(
             !dir.path().join(".claude/skills/gwt-pr/SKILL.md").exists(),
             "prune-only sweep must not materialize bundle assets"
+        );
+    }
+
+    #[test]
+    fn prune_stale_gwt_assets_removes_empty_retired_hook_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(dir.path().join(".claude/hooks")).unwrap();
+        fs::create_dir_all(dir.path().join(".codex/hooks")).unwrap();
+
+        let removed = prune_stale_gwt_assets(dir.path()).unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(
+            !dir.path().join(".claude/hooks").exists(),
+            "unexpected stale .claude/hooks directory"
+        );
+        assert!(
+            !dir.path().join(".codex/hooks").exists(),
+            "unexpected stale .codex/hooks directory"
         );
     }
 
@@ -547,6 +582,10 @@ mod tests {
             .path()
             .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
         assert!(!hook.exists(), "unexpected {}", hook.display());
+        assert!(
+            !dir.path().join(".claude/hooks").exists(),
+            "unexpected stale .claude/hooks directory"
+        );
     }
 
     #[test]
