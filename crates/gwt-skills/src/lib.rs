@@ -905,6 +905,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gwt_spec_skills_require_user_language_outputs() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-spec-design/SKILL.md",
+            ".codex/skills/gwt-spec-design/SKILL.md",
+            ".claude/skills/gwt-spec-design/references/registration.md",
+            ".claude/skills/gwt-spec-plan/SKILL.md",
+            ".claude/skills/gwt-spec-build/SKILL.md",
+            ".codex/skills/gwt-spec-build/SKILL.md",
+            ".claude/skills/gwt-spec-build/references/completion-gate.md",
+            ".claude/skills/gwt-spec-brainstorm/SKILL.md",
+            ".codex/skills/gwt-spec-brainstorm/SKILL.md",
+            ".claude/skills/gwt-spec-plan/references/quality-gate.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("current user's language"),
+                "expected gwt-spec language contract in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-spec-design/SKILL.md",
+            ".codex/skills/gwt-spec-design/SKILL.md",
+            ".claude/skills/gwt-spec-design/references/registration.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                !content.contains("short English imperative"),
+                "unexpected English-only title rule in {relative}"
+            );
+            assert!(
+                !content.contains("concise English imperative description"),
+                "unexpected English-only title template in {relative}"
+            );
+            assert!(
+                !content.contains("summary in English"),
+                "unexpected English-only description guidance in {relative}"
+            );
+        }
+    }
+
     // ── Integration: full distribution pipeline ──
 
     #[test]

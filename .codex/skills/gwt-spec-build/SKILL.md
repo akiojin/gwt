@@ -23,6 +23,10 @@ Once started, keep moving until one of these is true:
 
 Routine CI failures, update-branch merges, and test-first edits are handled autonomously.
 
+Use the current user's language for task summaries, completion reports, task
+check updates, and any user-facing text generated while executing the workflow,
+unless an existing artifact must keep its established language.
+
 ## Mode detection
 
 Determine the mode at entry:
@@ -163,7 +167,7 @@ Stop only when:
 ## Exit report
 
 ```text
-## Build Report
+## <Build Report in the current user's language>
 
 Mode: SPEC-<id> | Standalone
 Completed tasks: <N> | <summary>

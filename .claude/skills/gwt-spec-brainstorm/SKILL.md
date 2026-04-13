@@ -64,6 +64,10 @@ For Codex, use `request_user_input` for each high-impact question that
 can be expressed honestly as 2-3 options. Do not switch back to plain
 chat after the first answer while selection UI remains available.
 
+Use the current user's language for decision summaries, SPEC Delta write-backs,
+and any user-facing text generated during the brainstorm, unless you are
+preserving the language of an existing artifact verbatim.
+
 ## Flow
 
 ### Phase 1: Theme + search
@@ -167,7 +171,7 @@ Intake Memo.
 Present the decision summary with your recommendation:
 
 ```text
-## Brainstorm Decision
+## <Brainstorm Decision in the current user's language>
 
 Path: NEW-SPEC | UPDATE-SPEC | ISSUE | CODE-FIX | LESSON | NO-ACTION
 Owner: #<number> or "new"

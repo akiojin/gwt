@@ -198,16 +198,24 @@ Record the model summary in conversation context for use in Phase 3:
 
 > Reference: `references/registration.md`
 
+### Language contract
+
+Use the current user's language for the SPEC title, seeded artifact content,
+clarification text, and any user-facing summaries generated during this
+workflow. Keep the `gwt-spec:` prefix stable, but write the remainder of the
+title in the current user's language rather than forcing English.
+
 ### Create SPEC directory
 
 Determine next SPEC ID, then:
 
 ```bash
 python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." --create --title "gwt-spec: <description>"
+  --repo "." --create --title "gwt-spec: <description in the current user's language>"
 ```
 
-Title convention: always use `gwt-spec:` prefix with a short English imperative.
+Title convention: always use `gwt-spec:` prefix with a short action-oriented
+summary in the current user's language.
 
 ### Directory structure
 
@@ -220,7 +228,8 @@ specs/SPEC-{id}/
 ### Seed spec.md
 
 Write the initial spec.md with this template, populated from intake memo and
-domain model:
+domain model. The headings below are illustrative only; render the actual
+artifact in the current user's language:
 
 ```markdown
 # Feature Specification: <title>
