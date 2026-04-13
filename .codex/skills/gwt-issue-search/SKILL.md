@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-search
-description: "Semantic search over all GitHub Issues using vector embeddings. Use when searching for existing issues, finding related issues, checking for duplicate issues, or determining which issue owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. Use when user says 'search issues', 'find related issues', 'check for duplicates', or asks which issue owns a scope."
+description: "Semantic search over all GitHub Issues using vector embeddings. Use when searching for existing issues, finding related issues, checking for duplicate issues, or determining which issue owns a scope. Mandatory preflight before gwt-register-issue, gwt-fix-issue, and visible SPEC routing decisions. Use when user says 'search issues', 'find related issues', 'check for duplicates', or asks which issue owns a scope."
 ---
 
 # Issue Search
@@ -50,7 +50,8 @@ When the gwt TUI launches an agent pane, the following env vars are exported aut
   --n-results 10
 ```
 
-If the Issue index does not yet exist, the runner builds it inline (full mode) by calling `gh issue list` and embedding the results, then performs the search.
+If the Issue index does not yet exist, the runner builds it inline (full mode) by refreshing
+issue data and embedding the results, then performs the search.
 
 To force a refresh ignoring TTL:
 

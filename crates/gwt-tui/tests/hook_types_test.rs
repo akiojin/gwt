@@ -16,6 +16,10 @@ fn hook_kind_from_name_covers_every_documented_hook() {
         HookKind::from_name("block-bash-policy"),
         Some(HookKind::BlockBashPolicy)
     );
+    assert_eq!(
+        HookKind::from_name("workflow-policy"),
+        Some(HookKind::WorkflowPolicy)
+    );
     assert_eq!(HookKind::from_name("forward"), Some(HookKind::Forward));
 }
 

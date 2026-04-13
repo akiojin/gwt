@@ -1,6 +1,6 @@
 ---
 name: gwt-search
-description: "Mandatory preflight before gwt-spec-design and gwt-issue. Use proactively before creating any SPEC or Issue to prevent duplicates. Searches local SPECs, GitHub Issues, and project files via ChromaDB. Triggers: 'search', 'find related', 'check duplicates'."
+description: "Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. Use proactively before creating any SPEC or Issue owner or before reusing an existing one. Searches local SPECs, GitHub Issues, and project files via ChromaDB. Triggers: 'search', 'find related', 'check duplicates'."
 ---
 
 # Unified Search
@@ -209,9 +209,10 @@ For the docs collection, repeat with `--scope files-docs`.
 
 This skill is a **mandatory preflight step** before:
 
-- `gwt-spec-design` (spec brainstorm, register, clarify, ops)
-- `gwt-spec-register` / `gwt-spec-ops`
-- `gwt-issue-register` / `gwt-issue-resolve`
+- `gwt-discussion`
+- `gwt-register-issue`
+- `gwt-fix-issue`
+- any visible workflow that must decide an existing SPEC/Issue owner
 
 Run at least 2-3 semantic queries derived from the request before creating any new SPEC or Issue.
 

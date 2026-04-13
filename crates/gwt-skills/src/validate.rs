@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn validate_real_skill_frontmatter() {
         let content = r#"---
-name: gwt-pr
+name: gwt-manage-pr
 description: "This skill should be used when the user asks to open a PR."
 allowed-tools: Bash, Read, Glob, Grep
 argument-hint: "[optional context]"

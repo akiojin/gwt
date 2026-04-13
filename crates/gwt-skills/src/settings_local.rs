@@ -19,6 +19,7 @@ const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
 /// like `gwt_skills-abc123def` during unit tests.
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook runtime-state ",
+    " hook workflow-policy",
     " hook block-bash-policy",
     " hook block-git-branch-ops",
     " hook block-cd-command",
@@ -458,7 +459,7 @@ fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Val
         "PreToolUse".to_string(),
         Value::Array(vec![
             runtime_hook("PreToolUse", shell),
-            bash_blockers_hook(target),
+            workflow_policy_hook(target),
         ]),
     );
     hooks.insert(
@@ -540,18 +541,16 @@ fn powershell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-fn bash_blockers_hook(_target: ManagedHookTarget) -> Value {
-    // SPEC #1942 (CORE-CLI): dispatch every bash blocker through the
-    // absolute path of *this* gwt binary so that hooks do not require
-    // `gwt` to be on the user's $PATH. `target` is retained as a
-    // parameter only to keep the call sites consistent across Claude
-    // and Codex; the emitted commands are identical for both.
+fn workflow_policy_hook(_target: ManagedHookTarget) -> Value {
+    // Dispatch the unified workflow gate through the absolute path of
+    // this gwt binary so launched worktrees do not depend on `gwt`
+    // being present on $PATH. `target` stays for call-site symmetry.
     let bin = posix_shell_quote(&gwt_hook_bin_path());
     json!({
-        "matcher": "Bash",
+        "matcher": "*",
         "hooks": [
             {
-                "command": format!("{bin} hook block-bash-policy"),
+                "command": format!("{bin} hook workflow-policy"),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -632,7 +631,7 @@ mod tests {
         assert!(value["hooks"].get("Notification").is_none());
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
-            Value::String("Bash".to_string())
+            Value::String("*".to_string())
         );
     }
 
@@ -695,12 +694,11 @@ mod tests {
             );
         }
 
-        // T-080 + SPEC #1942 amendment: bash-blocker hooks dispatch
-        // through absolute path `'<bin>' hook block-*` (not literal
-        // `gwt hook block-*`).
+        // T-080 + SPEC #1942 amendment: workflow-policy hooks dispatch
+        // through absolute path `'<bin>' hook workflow-policy`.
         let pre_tool_block_hooks = value["hooks"]["PreToolUse"][1]["hooks"]
             .as_array()
-            .expect("bash blockers array");
+            .expect("workflow policy hooks array");
         let actual: Vec<&str> = pre_tool_block_hooks
             .iter()
             .map(|h| h["command"].as_str().unwrap_or(""))
@@ -708,15 +706,15 @@ mod tests {
         assert_eq!(
             actual.len(),
             1,
-            "bash blocker hooks must collapse to a single policy hook, got: {actual:?}"
+            "PreToolUse must collapse to a single workflow policy hook, got: {actual:?}"
         );
         assert!(
-            actual[0].ends_with(" hook block-bash-policy"),
-            "bash blocker hooks must dispatch to block-bash-policy, got: {actual:?}"
+            actual[0].ends_with(" hook workflow-policy"),
+            "workflow policy hook must dispatch to workflow-policy, got: {actual:?}"
         );
         assert!(
             !actual[0].starts_with("gwt hook "),
-            "bash blocker hooks must not use literal `gwt hook ...`, got: {actual:?}"
+            "workflow policy hook must not use literal `gwt hook ...`, got: {actual:?}"
         );
     }
 
@@ -750,16 +748,23 @@ mod tests {
 
         let value: Value = serde_json::from_str(&second).unwrap();
         let pre_tool = value["hooks"]["PreToolUse"].as_array().unwrap();
-        let bash_entries: Vec<_> = pre_tool
+        let workflow_entries: Vec<_> = pre_tool
             .iter()
-            .filter(|entry| entry["matcher"] == "Bash")
+            .filter(|entry| {
+                entry["hooks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|hook| hook["command"].as_str())
+                    .any(|command| command.contains(" hook workflow-policy"))
+            })
             .collect();
         assert_eq!(
-            bash_entries.len(),
+            workflow_entries.len(),
             1,
-            "exactly one Bash matcher entry expected, got {}: {:?}",
-            bash_entries.len(),
-            bash_entries
+            "exactly one workflow-policy entry expected, got {}: {:?}",
+            workflow_entries.len(),
+            workflow_entries
         );
     }
 
@@ -813,8 +818,8 @@ mod tests {
             "tracked legacy node bash blocker must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook block-bash-policy"),
-            "tracked file must be migrated to the consolidated CLI form, got: {content}"
+            content.contains("hook workflow-policy"),
+            "tracked file must be migrated to the consolidated workflow-policy form, got: {content}"
         );
     }
 
@@ -937,7 +942,7 @@ mod tests {
             .any(|command| command.contains(" hook runtime-state PreToolUse")));
         assert!(commands
             .iter()
-            .any(|command| command.contains(" hook block-bash-policy")));
+            .any(|command| command.contains(" hook workflow-policy")));
         assert!(commands.contains(&"my-custom-hook"));
         assert_eq!(
             value["hooks"]["CustomEvent"][0]["hooks"][0]["command"],
@@ -1002,7 +1007,7 @@ mod tests {
         assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
-            Value::String("Bash".to_string())
+            Value::String("*".to_string())
         );
     }
 
@@ -1100,7 +1105,7 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("tracked-command"));
         assert!(!content.contains("hook runtime-state"));
-        assert!(!content.contains("block-bash-policy"));
+        assert!(!content.contains("workflow-policy"));
     }
 
     #[test]
@@ -1181,7 +1186,7 @@ mod tests {
         assert!(pre_tool_commands.contains(&"my-custom-hook"));
         assert!(pre_tool_commands
             .iter()
-            .any(|command| command.contains(" hook block-bash-policy")));
+            .any(|command| command.contains(" hook workflow-policy")));
     }
 
     #[test]
@@ -1335,7 +1340,7 @@ mod tests {
     #[test]
     fn is_gwt_managed_command_recognizes_absolute_path_form() {
         assert!(is_gwt_managed_command(
-            "'/Users/x/.bun/bin/gwt' hook block-bash-policy"
+            "'/Users/x/.bun/bin/gwt' hook workflow-policy"
         ));
         assert!(is_gwt_managed_command(
             "'/Users/x/.bun/bin/gwt' hook runtime-state PreToolUse"
@@ -1395,8 +1400,8 @@ mod tests {
             "tracked PATH-less literal must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook block-bash-policy"),
-            "migrated file must dispatch to block-bash-policy (via absolute path), got: {content}"
+            content.contains("hook workflow-policy"),
+            "migrated file must dispatch to workflow-policy (via absolute path), got: {content}"
         );
     }
 }

@@ -330,7 +330,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let report = distribute_to_worktree(dir.path()).unwrap();
         assert!(report.files_written > 0);
-        let skill_md = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
+        let skill_md = dir.path().join(".claude/skills/gwt-manage-pr/SKILL.md");
         assert!(skill_md.exists(), "expected {}", skill_md.display());
     }
 
@@ -338,7 +338,7 @@ mod tests {
     fn distribute_creates_codex_skills() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
-        let skill_md = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
+        let skill_md = dir.path().join(".codex/skills/gwt-manage-pr/SKILL.md");
         assert!(skill_md.exists(), "expected {}", skill_md.display());
     }
 
@@ -372,7 +372,7 @@ mod tests {
     fn distribute_creates_claude_commands() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
-        let cmd = dir.path().join(".claude/commands/gwt-pr.md");
+        let cmd = dir.path().join(".claude/commands/gwt-manage-pr.md");
         assert!(cmd.exists(), "expected {}", cmd.display());
     }
 
@@ -482,11 +482,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
-        let tracked_skill = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
+        let tracked_skill = dir.path().join(".claude/skills/gwt-manage-pr/SKILL.md");
         let untracked_nested = dir
             .path()
-            .join(".claude/skills/gwt-pr/references/legacy.md");
-        let untracked_codex_nested = dir.path().join(".codex/skills/gwt-pr/legacy.txt");
+            .join(".claude/skills/gwt-manage-pr/references/legacy.md");
+        let untracked_codex_nested = dir.path().join(".codex/skills/gwt-manage-pr/legacy.txt");
 
         fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
         fs::create_dir_all(untracked_nested.parent().unwrap()).unwrap();
@@ -496,7 +496,7 @@ mod tests {
         fs::write(&untracked_codex_nested, "legacy codex file").unwrap();
 
         // Only track the SKILL.md, NOT the nested legacy files.
-        track_path(dir.path(), ".claude/skills/gwt-pr/SKILL.md");
+        track_path(dir.path(), ".claude/skills/gwt-manage-pr/SKILL.md");
 
         distribute_to_worktree(dir.path()).unwrap();
 
@@ -549,7 +549,9 @@ mod tests {
             "unexpected stale .claude/hooks directory"
         );
         assert!(
-            !dir.path().join(".claude/skills/gwt-pr/SKILL.md").exists(),
+            !dir.path()
+                .join(".claude/skills/gwt-manage-pr/SKILL.md")
+                .exists(),
             "prune-only sweep must not materialize bundle assets"
         );
     }
@@ -591,7 +593,7 @@ mod tests {
     #[test]
     fn distribute_overwrites_existing_files() {
         let dir = tempfile::tempdir().unwrap();
-        let skill_md = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
+        let skill_md = dir.path().join(".claude/skills/gwt-manage-pr/SKILL.md");
         fs::create_dir_all(skill_md.parent().unwrap()).unwrap();
         fs::write(&skill_md, "old content").unwrap();
 
@@ -599,7 +601,7 @@ mod tests {
 
         let content = fs::read_to_string(&skill_md).unwrap();
         assert_ne!(content, "old content");
-        assert!(content.contains("gwt-pr"));
+        assert!(content.contains("gwt-manage-pr"));
     }
 
     #[test]
@@ -607,9 +609,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
-        let tracked_skill = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
-        let tracked_command = dir.path().join(".claude/commands/gwt-pr.md");
-        let tracked_codex_skill = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
+        let tracked_skill = dir.path().join(".claude/skills/gwt-manage-pr/SKILL.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-manage-pr.md");
+        let tracked_codex_skill = dir.path().join(".codex/skills/gwt-manage-pr/SKILL.md");
 
         fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
@@ -618,9 +620,9 @@ mod tests {
         fs::write(&tracked_command, "tracked command").unwrap();
         fs::write(&tracked_codex_skill, "tracked codex skill").unwrap();
 
-        track_path(dir.path(), ".claude/skills/gwt-pr/SKILL.md");
-        track_path(dir.path(), ".claude/commands/gwt-pr.md");
-        track_path(dir.path(), ".codex/skills/gwt-pr/SKILL.md");
+        track_path(dir.path(), ".claude/skills/gwt-manage-pr/SKILL.md");
+        track_path(dir.path(), ".claude/commands/gwt-manage-pr.md");
+        track_path(dir.path(), ".codex/skills/gwt-manage-pr/SKILL.md");
 
         distribute_to_worktree(dir.path()).unwrap();
 
@@ -636,41 +638,41 @@ mod tests {
     }
 
     #[test]
-    fn distribute_preserves_tracked_bundled_spec_brainstorm_command() {
+    fn distribute_preserves_tracked_bundled_discussion_command() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
-        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-discussion.md");
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
-        fs::write(&tracked_command, "tracked brainstorm command").unwrap();
+        fs::write(&tracked_command, "tracked discussion command").unwrap();
 
-        track_path(dir.path(), ".claude/commands/gwt-spec-brainstorm.md");
+        track_path(dir.path(), ".claude/commands/gwt-discussion.md");
 
         distribute_to_worktree(dir.path()).unwrap();
 
         assert_eq!(
             fs::read_to_string(&tracked_command).unwrap(),
-            "tracked brainstorm command"
+            "tracked discussion command"
         );
     }
 
     #[test]
-    fn distribute_restores_missing_tracked_bundled_spec_brainstorm_command() {
+    fn distribute_restores_missing_tracked_bundled_discussion_command() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
-        let tracked_command = dir.path().join(".claude/commands/gwt-spec-brainstorm.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-discussion.md");
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
-        fs::write(&tracked_command, "tracked brainstorm command").unwrap();
+        fs::write(&tracked_command, "tracked discussion command").unwrap();
 
-        track_path(dir.path(), ".claude/commands/gwt-spec-brainstorm.md");
+        track_path(dir.path(), ".claude/commands/gwt-discussion.md");
         fs::remove_file(&tracked_command).unwrap();
 
         distribute_to_worktree(dir.path()).unwrap();
 
         let content = fs::read_to_string(&tracked_command).unwrap();
         assert!(
-            content.contains("SPEC Brainstorm Command"),
+            content.contains("gwt Discussion Command"),
             "missing tracked bundled command should be restored from the current bundle"
         );
     }
@@ -685,7 +687,7 @@ mod tests {
 
         assert!(should_skip_tracked_path(
             worktree,
-            &worktree.join(".claude/skills/gwt-pr/SKILL.md"),
+            &worktree.join(".claude/skills/gwt-manage-pr/SKILL.md"),
             &protected_roots,
         ));
         assert!(should_skip_tracked_path(
