@@ -9537,7 +9537,7 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
             continue;
         };
         let is_active = session_idx == model.active_session;
-        let block = grid_session_block(session_idx, session, is_active);
+        let block = grid_session_block(session_idx, session, is_active && terminal_focused);
         let inner = block.inner(pane_area);
         frame.render_widget(block, pane_area);
         render_session_surface(session, frame, inner, is_active && terminal_focused);
@@ -13218,6 +13218,52 @@ services:
             rendered.contains(crate::theme::icon::SESSION_SHELL),
             "grid pane titles should preserve the session-type icon instead of showing name-only chrome"
         );
+    }
+
+    #[test]
+    fn render_model_buffer_grid_active_session_uses_unfocused_border_when_management_has_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+        ];
+        model.active_session = 0;
+
+        let size = Rect::new(0, 0, 120, 24);
+        let [_, session_area] = management_split(size);
+        let pane_area = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("active grid pane area");
+
+        let buffer = render_model_buffer(&model, size.width, size.height);
+
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].symbol(), "╭");
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].fg, Color::Gray);
+    }
+
+    #[test]
+    fn render_model_buffer_grid_active_session_keeps_focused_border_when_terminal_has_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+        ];
+        model.active_session = 0;
+
+        let size = Rect::new(0, 0, 120, 24);
+        let [_, session_area] = management_split(size);
+        let pane_area = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("active grid pane area");
+
+        let buffer = render_model_buffer(&model, size.width, size.height);
+
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].symbol(), "╔");
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].fg, Color::Yellow);
     }
 
     #[test]
