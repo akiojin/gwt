@@ -9468,28 +9468,62 @@ fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let content = welcome_session_content_area(inner);
+    let intro_lines = welcome_session_intro_lines();
+    let command_lines = welcome_session_command_lines();
+    let content_height = (intro_lines.len() + command_lines.len())
+        .try_into()
+        .unwrap_or(u16::MAX);
+    let content_height = content_height.min(inner.height);
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(content_height),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+    let content = vertical[1];
+
     if content.width == 0 || content.height == 0 {
         return;
     }
 
-    let paragraph = Paragraph::new(welcome_session_lines());
-    frame.render_widget(paragraph, content);
+    let intro_height = (intro_lines.len() as u16).min(content.height);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(intro_height), Constraint::Min(0)])
+        .split(content);
+
+    if sections[0].width > 0 && sections[0].height > 0 {
+        let intro = Paragraph::new(intro_lines).alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(intro, sections[0]);
+    }
+
+    let commands = welcome_session_content_area(sections[1]);
+    if commands.width > 0 && commands.height > 0 {
+        let paragraph = Paragraph::new(command_lines);
+        frame.render_widget(paragraph, commands);
+    }
 }
 
-fn welcome_session_lines() -> Vec<Line<'static>> {
+fn welcome_session_intro_lines() -> Vec<Line<'static>> {
+    let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
+
+    vec![
+        Line::from(Span::styled("Welcome", theme::style::header())),
+        Line::from(""),
+        Line::from(Span::styled("No terminal windows are open.", body_style)),
+        Line::from(""),
+    ]
+}
+
+fn welcome_session_command_lines() -> Vec<Line<'static>> {
     const WELCOME_KEY_WIDTH: usize = 24;
     let command_style = Style::default()
         .fg(theme::color::ACTIVE)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
-
-    let mut lines = vec![
-        Line::from(Span::styled("Welcome", theme::style::header())),
-        Line::from(""),
-        Line::from(Span::styled("No terminal windows are open.", body_style)),
-        Line::from(""),
-    ];
+    let mut lines = Vec::new();
 
     for binding in KeybindRegistry::new().all_bindings() {
         lines.push(Line::from(vec![
@@ -13866,7 +13900,7 @@ services:
     }
 
     #[test]
-    fn render_model_text_zero_sessions_left_aligns_welcome_content() {
+    fn render_model_text_zero_sessions_centers_intro_but_left_aligns_commands() {
         let mut model = test_model();
         model.sessions.clear();
         model.active_layer = ActiveLayer::Main;
@@ -13874,7 +13908,8 @@ services:
 
         let rendered = render_model_text(&model, 80, 24);
 
-        assert!(rendered.contains("║  Welcome"));
+        assert!(rendered.contains("║                                    Welcome"));
+        assert!(rendered.contains("║                         No terminal windows are open."));
         assert!(rendered.contains("║  Ctrl+G, g"));
         assert!(rendered.contains("║  Ctrl+G, c"));
     }

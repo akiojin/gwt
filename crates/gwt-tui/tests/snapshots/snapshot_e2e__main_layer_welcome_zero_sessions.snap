@@ -3,9 +3,9 @@ source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
 ╔ Welcome ═════════════════════════════════════════════════════════════════════╗
-║  Welcome                                                                     ║
+║                                    Welcome                                   ║
 ║                                                                              ║
-║  No terminal windows are open.                                               ║
+║                         No terminal windows are open.                        ║
 ║                                                                              ║
 ║  Ctrl+G, g               Toggle management panel                             ║
 ║  Ctrl+G, Tab/Shift+Tab   Cycle focus                                         ║
