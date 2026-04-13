@@ -2,27 +2,27 @@
 source: crates/gwt-tui/tests/snapshot_e2e.rs
 expression: output
 ---
-┌...│ Versions │ Settings │ Logs ──────┐┌ › Shell ─────────────────────────────┐
-│ All │ Error │ Warn+ │ Info+ │ Debug+ ││Session: Shell (80x24)                │
-│No log entries                        ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
-└──────────────────────────────────────┘└──────────────────────────────────────┘
+╔...│ Versions │ Settings │ Logs ══════╗╭ › Shell ─────────────────────────────╮
+║ All │ Error │ Warn+ │ Info+ │ Debug+ ║│Session: Shell (80x24)                │
+║No log entries                        ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+╚══════════════════════════════════════╝╰──────────────────────────────────────╯
  ⎇n/a  │  P:default  │  ↑↓ sel  ↵ dtl  f next  d dbg  r rfsh  C-←→ flt  Esc term

@@ -36,7 +36,7 @@ pub mod color {
     /// Disabled/placeholder text.
     pub const TEXT_DISABLED: Color = Color::DarkGray;
     /// Focused pane border.
-    pub const BORDER_FOCUSED: Color = Color::Cyan;
+    pub const BORDER_FOCUSED: Color = Color::Yellow;
     /// Unfocused pane border.
     pub const BORDER_UNFOCUSED: Color = Color::Gray;
     /// Metadata, alternative highlights.
@@ -57,9 +57,9 @@ pub mod border {
         BorderType::Rounded
     }
 
-    /// Focused pane border — thick lines for emphasis.
+    /// Focused pane border — double lines for emphasis.
     pub const fn focused() -> BorderType {
-        BorderType::Thick
+        BorderType::Double
     }
 
     /// Modal/overlay border — double lines for importance.
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn border_types_are_correct() {
         assert_eq!(border::default(), BorderType::Rounded);
-        assert_eq!(border::focused(), BorderType::Thick);
+        assert_eq!(border::focused(), BorderType::Double);
         assert_eq!(border::modal(), BorderType::Double);
     }
 

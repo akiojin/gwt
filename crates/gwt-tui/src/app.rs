@@ -949,7 +949,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 ActiveLayer::Initialization => {} // blocked
                 ActiveLayer::Main => {
                     model.active_layer = ActiveLayer::Management;
-                    model.active_focus = FocusPane::Terminal;
+                    model.active_focus = FocusPane::TabContent;
                     sync_session_viewports(model);
                 }
                 ActiveLayer::Management => {
@@ -2452,15 +2452,9 @@ fn switch_management_tab_with<F, D>(
     F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
     D: FnOnce(&std::path::Path, u32) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport>,
 {
-    let preserve_terminal_focus =
-        model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal;
     model.management_tab = tab;
     model.active_layer = ActiveLayer::Management;
-    model.active_focus = if preserve_terminal_focus {
-        FocusPane::Terminal
-    } else {
-        FocusPane::TabContent
-    };
+    model.active_focus = FocusPane::TabContent;
     if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
         model.settings.load_category_fields();
     }
@@ -9233,10 +9227,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
 /// Build a bordered block with focus-aware border color (Cyan when focused, Gray otherwise).
 fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
-    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
+    let (border_style, border_type) = theme::pane_border(is_focused);
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
+        .border_type(border_type)
+        .border_style(border_style)
         .title(title)
 }
 
@@ -9443,6 +9438,8 @@ fn build_session_title(model: &Model, width: u16) -> Line<'static> {
 }
 
 fn build_session_title_with(model: &Model, width: u16, sessions_dir: &Path) -> Line<'static> {
+    let pane_focused =
+        model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal;
     let entries: Vec<(String, Style, &'static str)> = model
         .sessions
         .iter()
@@ -9450,7 +9447,7 @@ fn build_session_title_with(model: &Model, width: u16, sessions_dir: &Path) -> L
         .map(|(i, session)| {
             (
                 session_title_label(session, sessions_dir),
-                session_title_style(session, i == model.active_session),
+                session_title_style(session, i == model.active_session, pane_focused),
                 session.tab_type.icon(),
             )
         })
@@ -9494,10 +9491,16 @@ fn load_persisted_branch_label(session_id: &str, sessions_dir: &Path) -> Option<
     }
 }
 
-fn session_title_style(session: &crate::model::SessionTab, is_active: bool) -> Style {
+fn session_title_style(
+    session: &crate::model::SessionTab,
+    is_active: bool,
+    pane_focused: bool,
+) -> Style {
     match &session.tab_type {
         SessionTabType::Shell => {
-            if is_active {
+            if !pane_focused {
+                Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+            } else if is_active {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
@@ -9507,7 +9510,9 @@ fn session_title_style(session: &crate::model::SessionTab, is_active: bool) -> S
         }
         SessionTabType::Agent { color, .. } => {
             let style = Style::default().fg(agent_color_to_ratatui(*color));
-            if is_active {
+            if !pane_focused {
+                style.add_modifier(Modifier::DIM)
+            } else if is_active {
                 style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 style.add_modifier(Modifier::DIM)
@@ -9880,7 +9885,7 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
             continue;
         };
         let is_active = session_idx == model.active_session;
-        let block = grid_session_block(session_idx, session, is_active);
+        let block = grid_session_block(session_idx, session, is_active && terminal_focused);
         let inner = block.inner(pane_area);
         frame.render_widget(block, pane_area);
         render_session_surface(session, frame, inner, is_active && terminal_focused);
@@ -10606,23 +10611,25 @@ services:
     }
 
     #[test]
-    fn pane_block_uses_cyan_border_when_focused() {
+    fn pane_block_uses_yellow_double_border_when_focused() {
         let area = Rect::new(0, 0, 12, 3);
         let mut buffer = Buffer::empty(area);
 
         pane_block(Line::from("Focused"), true).render(area, &mut buffer);
 
-        assert_eq!(buffer[(0, 0)].fg, Color::Cyan);
+        assert_eq!(buffer[(0, 0)].fg, Color::Yellow);
+        assert_eq!(buffer[(0, 0)].symbol(), "╔");
     }
 
     #[test]
-    fn pane_block_uses_gray_border_when_unfocused() {
+    fn pane_block_uses_gray_rounded_border_when_unfocused() {
         let area = Rect::new(0, 0, 12, 3);
         let mut buffer = Buffer::empty(area);
 
         pane_block(Line::from("Unfocused"), false).render(area, &mut buffer);
 
         assert_eq!(buffer[(0, 0)].fg, Color::Gray);
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
     }
 
     #[test]
@@ -13450,6 +13457,8 @@ services:
         let mut model = test_model();
         model.sessions = vec![claude, codex, gemini];
         model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
 
         let title = build_session_title_with(&model, 220, sessions_dir.path());
         let claude_span = title
@@ -13485,6 +13494,47 @@ services:
     }
 
     #[test]
+    fn build_session_title_management_unfocused_dims_active_session_identity() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let (claude, claude_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/claude-active",
+            AgentId::ClaudeCode,
+            crate::model::AgentColor::Yellow,
+        );
+        let (codex, codex_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/codex-idle",
+            AgentId::Codex,
+            crate::model::AgentColor::Cyan,
+        );
+
+        let mut model = test_model();
+        model.sessions = vec![claude, codex];
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        let title = build_session_title_with(&model, 220, sessions_dir.path());
+        let claude_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/claude-active"))
+            .expect("claude span");
+
+        assert_eq!(claude_span.style.fg, Some(Color::Yellow));
+        assert!(claude_span.style.add_modifier.contains(Modifier::DIM));
+        assert!(!claude_span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!claude_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+
+        let _ = fs::remove_file(claude_path);
+        let _ = fs::remove_file(codex_path);
+    }
+
+    #[test]
     fn render_model_text_grid_session_titles_include_index_and_icon() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -13515,6 +13565,52 @@ services:
             rendered.contains(crate::theme::icon::SESSION_SHELL),
             "grid pane titles should preserve the session-type icon instead of showing name-only chrome"
         );
+    }
+
+    #[test]
+    fn render_model_buffer_grid_active_session_uses_unfocused_border_when_management_has_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+        ];
+        model.active_session = 0;
+
+        let size = Rect::new(0, 0, 120, 24);
+        let [_, session_area] = management_split(size);
+        let pane_area = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("active grid pane area");
+
+        let buffer = render_model_buffer(&model, size.width, size.height);
+
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].symbol(), "╭");
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].fg, Color::Gray);
+    }
+
+    #[test]
+    fn render_model_buffer_grid_active_session_keeps_focused_border_when_terminal_has_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+        ];
+        model.active_session = 0;
+
+        let size = Rect::new(0, 0, 120, 24);
+        let [_, session_area] = management_split(size);
+        let pane_area = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("active grid pane area");
+
+        let buffer = render_model_buffer(&model, size.width, size.height);
+
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].symbol(), "╔");
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].fg, Color::Yellow);
     }
 
     #[test]
@@ -14076,7 +14172,7 @@ services:
     }
 
     #[test]
-    fn update_toggle_layer_shows_management_without_stealing_terminal_focus() {
+    fn update_toggle_layer_shows_management_and_focuses_management_content() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -14084,7 +14180,7 @@ services:
         update(&mut model, Message::ToggleLayer);
 
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
     }
 
     #[test]
@@ -14120,6 +14216,22 @@ services:
         );
         assert_eq!(model.management_tab, ManagementTab::Settings);
         assert_eq!(model.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn update_switch_management_tab_from_main_focuses_management_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        update(
+            &mut model,
+            Message::SwitchManagementTab(ManagementTab::Issues),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Issues);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
     }
 
     #[test]
@@ -14804,7 +14916,7 @@ services:
     }
 
     #[test]
-    fn switch_management_tab_pr_dashboard_loads_prs_without_stealing_terminal_focus() {
+    fn switch_management_tab_pr_dashboard_loads_prs_and_focuses_management_content() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -14828,7 +14940,7 @@ services:
 
         assert_eq!(model.management_tab, ManagementTab::PrDashboard);
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
         assert_eq!(model.pr_dashboard.prs.len(), 1);
         assert_eq!(model.pr_dashboard.prs[0].number, 42);
         assert_eq!(model.pr_dashboard.prs[0].title, "Wire PR dashboard");
