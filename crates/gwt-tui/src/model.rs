@@ -510,14 +510,6 @@ pub struct TerminalSelection {
     pub focus: TerminalCell,
 }
 
-/// Deferred left-click state for agent panes that advertise PTY mouse input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PendingTerminalLeftClick {
-    pub session_idx: usize,
-    pub anchor: TerminalCell,
-    pub mouse_down: crossterm::event::MouseEvent,
-}
-
 /// Minimal vt100 screen state wrapper.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenSnapshot {
@@ -1924,9 +1916,9 @@ pub struct Model {
     pub(crate) pty_handles: HashMap<String, gwt_terminal::PtyHandle>,
     /// Last observed row for Terminal.app style right-drag trackpad fallback.
     pub(crate) terminal_trackpad_scroll_row: Option<u16>,
-    /// Deferred left click for PTY mouse-reporting panes until we know whether
-    /// the gesture is a click or a drag-selection.
-    pub(crate) terminal_pending_left_click: Option<PendingTerminalLeftClick>,
+    /// Whether the previous key event armed a pending terminal copy shortcut
+    /// via a standalone Command/Meta modifier key press.
+    pub(crate) terminal_pending_copy_modifier: bool,
     /// Sender for PTY output from background reader threads.
     pub(crate) pty_output_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
     /// Receiver for PTY output drained in the event loop.
@@ -1969,8 +1961,8 @@ impl std::fmt::Debug for Model {
                 &self.terminal_trackpad_scroll_row,
             )
             .field(
-                "terminal_pending_left_click",
-                &self.terminal_pending_left_click,
+                "terminal_pending_copy_modifier",
+                &self.terminal_pending_copy_modifier,
             )
             .field("active_profile", &self.active_profile)
             .field("repo_path", &self.repo_path)
@@ -2052,7 +2044,7 @@ impl Model {
             pending_pty_inputs: VecDeque::new(),
             pty_handles: HashMap::new(),
             terminal_trackpad_scroll_row: None,
-            terminal_pending_left_click: None,
+            terminal_pending_copy_modifier: false,
             pty_output_tx,
             pty_output_rx,
             logs_watcher_rx: None,

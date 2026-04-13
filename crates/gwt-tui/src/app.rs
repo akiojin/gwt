@@ -47,7 +47,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::{
     custom_agents::load_custom_agents,
@@ -8276,7 +8278,6 @@ where
     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         && (handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse))
     {
-        clear_pending_terminal_left_click(model);
         clear_all_session_selections(model);
         return Ok(true);
     }
@@ -8335,7 +8336,6 @@ where
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            clear_pending_terminal_left_click(model);
             let Some(target_session) = scroll_target_session_index(model, mouse) else {
                 return Ok(false);
             };
@@ -8351,7 +8351,6 @@ where
             }
         }
         MouseEventKind::ScrollDown => {
-            clear_pending_terminal_left_click(model);
             let Some(target_session) = scroll_target_session_index(model, mouse) else {
                 return Ok(false);
             };
@@ -8367,12 +8366,10 @@ where
             }
         }
         MouseEventKind::Down(MouseButton::Right) => {
-            clear_pending_terminal_left_click(model);
             model.terminal_trackpad_scroll_row = Some(mouse.row);
             Ok(false)
         }
         MouseEventKind::Drag(MouseButton::Right) => {
-            clear_pending_terminal_left_click(model);
             let Some(previous_row) = model.terminal_trackpad_scroll_row.replace(mouse.row) else {
                 return Ok(false);
             };
@@ -8404,15 +8401,20 @@ where
             }
         }
         MouseEventKind::Up(MouseButton::Right) => {
-            clear_pending_terminal_left_click(model);
             model.terminal_trackpad_scroll_row = None;
             Ok(false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if should_forward_click_to_pty(model, mouse) {
-                return Ok(begin_pending_terminal_left_click(model, mouse));
+                if let Some(session) = model.active_session_tab_mut() {
+                    session.vt.clear_selection();
+                }
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
             }
-            clear_pending_terminal_left_click(model);
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -8424,9 +8426,12 @@ where
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             if should_forward_click_to_pty(model, mouse) {
-                return Ok(continue_pending_terminal_selection(model, mouse));
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
             }
-            clear_pending_terminal_left_click(model);
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -8438,9 +8443,12 @@ where
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if should_forward_click_to_pty(model, mouse) {
-                return Ok(finish_pending_terminal_left_click(model, mouse));
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
             }
-            clear_pending_terminal_left_click(model);
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -8753,69 +8761,6 @@ fn clear_all_session_selections(model: &mut Model) {
     }
 }
 
-fn clear_pending_terminal_left_click(model: &mut Model) {
-    model.terminal_pending_left_click = None;
-}
-
-fn begin_pending_terminal_left_click(model: &mut Model, mouse: MouseEvent) -> bool {
-    let Some(anchor) = mouse_terminal_cell(model, mouse) else {
-        clear_pending_terminal_left_click(model);
-        return false;
-    };
-    if let Some(session) = model.active_session_tab_mut() {
-        session.vt.clear_selection();
-    }
-    model.terminal_pending_left_click = Some(crate::model::PendingTerminalLeftClick {
-        session_idx: model.active_session,
-        anchor,
-        mouse_down: mouse,
-    });
-    true
-}
-
-fn begin_local_selection_from_pending_click(
-    model: &mut Model,
-    pending: crate::model::PendingTerminalLeftClick,
-    focus: TerminalCell,
-) -> bool {
-    let Some(session) = model.sessions.get_mut(pending.session_idx) else {
-        return false;
-    };
-    session.vt.begin_selection(pending.anchor);
-    session.vt.update_selection(focus);
-    true
-}
-
-fn continue_pending_terminal_selection(model: &mut Model, mouse: MouseEvent) -> bool {
-    let Some(pending) = model.terminal_pending_left_click.take() else {
-        return false;
-    };
-    if pending.session_idx != model.active_session {
-        return false;
-    }
-    let Some(focus) = mouse_terminal_cell(model, mouse) else {
-        return false;
-    };
-    begin_local_selection_from_pending_click(model, pending, focus)
-}
-
-fn finish_pending_terminal_left_click(model: &mut Model, mouse: MouseEvent) -> bool {
-    let Some(pending) = model.terminal_pending_left_click.take() else {
-        return false;
-    };
-    if pending.session_idx != model.active_session {
-        return false;
-    }
-    let Some(focus) = mouse_terminal_cell(model, mouse) else {
-        return false;
-    };
-    if focus != pending.anchor {
-        return begin_local_selection_from_pending_click(model, pending, focus);
-    }
-    queue_session_mouse_click(model, pending.session_idx, pending.mouse_down);
-    queue_session_mouse_click(model, pending.session_idx, mouse)
-}
-
 fn selection_is_single_cell(selection: crate::model::TerminalSelection) -> bool {
     selection.anchor == selection.focus
 }
@@ -8837,6 +8782,16 @@ fn is_selection_copy_shortcut(key: crossterm::event::KeyEvent) -> bool {
                 && key.modifiers.contains(KeyModifiers::SHIFT)))
 }
 
+fn is_terminal_copy_modifier_key(key: crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Modifier(ModifierKeyCode::LeftSuper)
+            | KeyCode::Modifier(ModifierKeyCode::RightSuper)
+            | KeyCode::Modifier(ModifierKeyCode::LeftMeta)
+            | KeyCode::Modifier(ModifierKeyCode::RightMeta)
+    )
+}
+
 fn handle_terminal_copy_shortcut_with<G>(
     model: &mut Model,
     key: crossterm::event::KeyEvent,
@@ -8845,7 +8800,23 @@ fn handle_terminal_copy_shortcut_with<G>(
 where
     G: FnMut(&str) -> Result<(), String>,
 {
-    if model.active_focus != FocusPane::Terminal || !is_selection_copy_shortcut(key) {
+    if model.active_focus != FocusPane::Terminal {
+        model.terminal_pending_copy_modifier = false;
+        return Ok(false);
+    }
+
+    if is_terminal_copy_modifier_key(key) {
+        model.terminal_pending_copy_modifier = true;
+        return Ok(true);
+    }
+
+    let shortcut_pressed = is_selection_copy_shortcut(key)
+        || (model.terminal_pending_copy_modifier
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.is_empty());
+    model.terminal_pending_copy_modifier = false;
+
+    if !shortcut_pressed {
         return Ok(false);
     }
 
@@ -12206,7 +12177,7 @@ services:
     }
 
     #[test]
-    fn agent_left_click_down_defers_pty_forwarding_until_release() {
+    fn agent_left_click_down_forwards_sgr_press_to_pty() {
         let mut model = model_with_agent_mouse_reporting_enabled();
         let area = active_session_text_area(&model).expect("active session text area");
         model
@@ -12228,10 +12199,12 @@ services:
         .expect("mouse input should succeed");
 
         assert!(handled);
-        assert!(
-            model.pending_pty_inputs().is_empty(),
-            "mouse down alone should wait until release so drag can become local selection"
-        );
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[<0;1;1M".to_vec());
         assert!(
             model
                 .active_session_tab()
@@ -12244,7 +12217,7 @@ services:
     }
 
     #[test]
-    fn agent_left_click_up_flushes_deferred_press_and_release_to_pty() {
+    fn agent_left_click_up_forwards_sgr_release_to_pty() {
         let mut model = model_with_agent_mouse_reporting_enabled();
         let area = active_session_text_area(&model).expect("active session text area");
 
@@ -12273,21 +12246,10 @@ services:
         .expect("left up should succeed");
 
         assert!(handled);
-        assert_eq!(model.pending_pty_inputs().len(), 2);
-        let press = model
-            .pending_pty_inputs()
-            .front()
-            .expect("queued mouse press");
-        assert_eq!(press.session_id, "agent-0");
-        assert_eq!(
-            press.bytes,
-            b"\x1b[<0;1;1M".to_vec(),
-            "click release should flush the deferred press first",
-        );
         let forwarded = model
             .pending_pty_inputs()
             .back()
-            .expect("queued mouse release");
+            .expect("queued mouse input");
         assert_eq!(forwarded.session_id, "agent-0");
         assert_eq!(
             forwarded.bytes,
@@ -12297,7 +12259,7 @@ services:
     }
 
     #[test]
-    fn agent_left_drag_with_mouse_reporting_starts_local_selection() {
+    fn agent_left_drag_forwards_sgr_motion_event_to_pty() {
         let mut model = model_with_agent_mouse_reporting_enabled();
         let area = active_session_text_area(&model).expect("active session text area");
 
@@ -12326,9 +12288,15 @@ services:
         .expect("left drag should succeed");
 
         assert!(handled);
-        assert!(
-            model.pending_pty_inputs().is_empty(),
-            "dragging should stay local so agent panes do not own selection/copy UX"
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[<32;3;2M".to_vec(),
+            "drag encodes base button 0 plus the motion flag 32",
         );
         assert!(
             model
@@ -12336,8 +12304,8 @@ services:
                 .expect("active session")
                 .vt
                 .selection()
-                .is_some(),
-            "dragging in a mouse-reporting agent should begin a local selection",
+                .is_none(),
+            "drag forwarding must not silently update the local selection either",
         );
     }
 
@@ -12636,6 +12604,51 @@ services:
         let consumed = handle_terminal_copy_shortcut_with(
             &mut model,
             key(KeyCode::Char('c'), KeyModifiers::META),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut should succeed");
+
+        assert!(consumed);
+        assert_eq!(copied.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn standalone_super_modifier_then_c_copies_selected_terminal_text() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 4 });
+
+        let armed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(
+                KeyCode::Modifier(ModifierKeyCode::LeftSuper),
+                KeyModifiers::SUPER,
+            ),
+            |_| Ok(()),
+        )
+        .expect("modifier arm should succeed");
+        assert!(armed);
+
+        let mut copied = None::<String>;
+        let consumed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(KeyCode::Char('c'), KeyModifiers::NONE),
             |text| {
                 copied = Some(text.to_string());
                 Ok(())
