@@ -76,7 +76,7 @@ fn github_issue_block_decision(command: &str) -> BlockDecision {
 Recommended alternatives:\n\
 - read: `gwt issue view <number>`, `gwt issue comments <number>`, `gwt issue linked-prs <number>`\n\
 - write: `gwt issue create --title ... -f <file>`, `gwt issue comment <number> -f <file>`\n\
-- discovery: `gwt-search`, `~/.gwt/cache/issues/`\n\n\
+- discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
         ),
     )

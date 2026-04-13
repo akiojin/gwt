@@ -124,7 +124,7 @@ idle な 100 ms tick では TUI を再描画しないため、バックグラウ
   TUI は Worktree ごとにファイルシステム watcher を常駐させ、Issue 索引は起動時に
   15 分 TTL で非同期リフレッシュします。初回検索時に `intfloat/multilingual-e5-base`
   埋め込みモデル (約 440MB) を `~/.cache/huggingface/` にダウンロードします。
-  SPEC は `gwt-spec` ラベル付き GitHub Issue として格納され、`~/.gwt/cache/issues/` に
+  SPEC は `gwt-spec` ラベル付き GitHub Issue として格納され、`~/.gwt/cache/issues/<repo-hash>/` に
   キャッシュされます。読み取りは `gwt issue spec <n>`、書き込みは
   `gwt issue spec <n> --edit <section> -f <file>` を使用してください。
 
