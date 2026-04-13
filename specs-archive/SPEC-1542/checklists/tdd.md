@@ -1,6 +1,0 @@
-- `config.toml` の canonical sections から round-trip できる
-- `profiles.<name>.ai` から API キー再読込できる
-- retired sidecar file が存在しても runtime 読込経路に影響しない
-- repo-local 設定保存で global-only section が書き出されない
-- 同時更新で `config.toml` section を落とさない
-- `project.toml` から bare repo 名が解決できる

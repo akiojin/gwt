@@ -167,7 +167,6 @@ const WATCHER_BUILTIN_SKIP_PREFIXES: &[&str] = &[
     ".codex",
     ".gemini",
     ".gwt",
-    "specs-archive",
     "tasks",
     "target",
     "node_modules",
@@ -224,5 +223,13 @@ mod tests {
     fn rejects_non_directory() {
         let result = start_watcher(Path::new("/nonexistent/path/xyz"), WatcherConfig::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn removed_specs_archive_prefix_is_not_builtin_skip() {
+        let root = Path::new("/repo");
+        let path = root.join("specs-archive/SPEC-10/spec.md");
+
+        assert!(!is_builtin_skip(root, &path));
     }
 }

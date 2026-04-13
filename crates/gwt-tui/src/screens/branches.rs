@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 use gwt_agent::AgentStatus;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -114,6 +114,7 @@ pub struct BranchItem {
     pub is_local: bool,
     pub category: BranchCategory,
     pub worktree_path: Option<std::path::PathBuf>,
+    pub upstream: Option<String>,
 }
 
 /// Per-branch merge state used by Branch Cleanup (FR-018a/d).
@@ -133,6 +134,56 @@ pub struct CleanupSettings {
     /// Whether the next confirmed cleanup should also delete the matching
     /// remote tracking branch via `gh` / `git push --delete origin`.
     pub delete_remote: bool,
+}
+
+/// Why a branch cannot currently be selected for Branch Cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionBlockedReason {
+    ProtectedBranch,
+    CurrentHead,
+    ActiveSession,
+    MergeCheckRunning,
+    RemoteTrackingWithoutLocal,
+    Unknown,
+}
+
+impl CleanupSelectionBlockedReason {
+    pub fn toast_message(self) -> &'static str {
+        match self {
+            Self::ProtectedBranch => "Cannot select: protected branch",
+            Self::CurrentHead => "Cannot select: current HEAD",
+            Self::ActiveSession => "Cannot select: active session",
+            Self::MergeCheckRunning => "Cannot select: merge check running",
+            Self::RemoteTrackingWithoutLocal => {
+                "Cannot select: remote-tracking without local branch"
+            }
+            Self::Unknown => "Cannot select for cleanup",
+        }
+    }
+}
+
+/// Why a selectable branch still deserves extra warning in the confirm modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionRisk {
+    Unmerged,
+    RemoteTracking,
+}
+
+impl CleanupSelectionRisk {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unmerged => "unmerged",
+            Self::RemoteTracking => "remote-tracking",
+        }
+    }
+}
+
+/// Result of toggling Branch Cleanup selection for one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupSelectionToggle {
+    Selected,
+    Deselected,
+    Blocked(CleanupSelectionBlockedReason),
 }
 
 /// Phase of an in-flight Branch Cleanup execution (FR-018g/h).
@@ -202,6 +253,8 @@ pub struct DetailSessionSummary {
     pub name: String,
     pub detail: Option<String>,
     pub active: bool,
+    pub launch_summary: Vec<String>,
+    pub launch_command_line: Option<String>,
 }
 
 /// Lightweight live session summary rendered directly in the branch list.
@@ -210,26 +263,54 @@ pub struct BranchLiveSessionSummary {
     pub indicators: Vec<BranchLiveSessionIndicator>,
 }
 
+/// Kind of branch-row live session indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchLiveSessionIndicatorKind {
+    Agent,
+    Shell,
+}
+
 /// Lightweight live session indicator rendered directly in the branch list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BranchLiveSessionIndicator {
+    pub kind: BranchLiveSessionIndicatorKind,
     pub status: AgentStatus,
     pub color: crate::model::AgentColor,
+    pub active: bool,
 }
 
-/// Lifecycle action requested for a Docker container.
+/// Visible live-session indicators for a single rendered branch row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisibleBranchLiveIndicatorRow {
+    pub(crate) branch_name: String,
+    pub(crate) indicators: Vec<BranchLiveSessionIndicator>,
+}
+
+/// Lifecycle action requested for a Docker compose service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockerLifecycleAction {
     Start,
     Stop,
     Restart,
+    Recreate,
 }
 
 /// Pending Docker action selected in the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDockerAction {
-    pub container_id: String,
+    pub compose_file: std::path::PathBuf,
+    pub service: String,
     pub action: DockerLifecycleAction,
+}
+
+/// Service-level Docker status shown in Branch Detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerServiceInfo {
+    pub project_root: std::path::PathBuf,
+    pub compose_file: std::path::PathBuf,
+    pub name: String,
+    pub status: gwt_docker::ComposeServiceStatus,
+    pub ports: String,
 }
 
 /// Cached detail payload for a branch.
@@ -237,7 +318,7 @@ pub struct PendingDockerAction {
 pub struct BranchDetailData {
     pub files: Vec<String>,
     pub commits: Vec<String>,
-    pub docker_containers: Vec<gwt_docker::ContainerInfo>,
+    pub docker_services: Vec<DockerServiceInfo>,
 }
 
 /// Background detail-load result for a single branch.
@@ -309,9 +390,9 @@ pub struct BranchesState {
     pub(crate) detail_files: Vec<String>,
     /// Recent commits for the selected branch worktree.
     pub(crate) detail_commits: Vec<String>,
-    /// Docker containers available for the selected branch context.
-    pub(crate) docker_containers: Vec<gwt_docker::ContainerInfo>,
-    /// Selected Docker container index in the overview area.
+    /// Docker compose services available for the selected branch context.
+    pub(crate) docker_services: Vec<DockerServiceInfo>,
+    /// Selected Docker service index in the overview area.
     pub(crate) docker_selected: usize,
     /// Pending Docker action intent to be handled by the caller.
     pub(crate) pending_docker_action: Option<PendingDockerAction>,
@@ -328,6 +409,15 @@ pub struct BranchesState {
 }
 
 impl BranchesState {
+    fn cleanup_policy(&self) -> crate::branch_cleanup::CleanupPolicy<'_> {
+        crate::branch_cleanup::CleanupPolicy::new(
+            &self.branches,
+            self.current_head_branch.as_deref(),
+            &self.active_session_branches,
+            &self.merged_state,
+        )
+    }
+
     /// Return branches filtered by current view mode and search query,
     /// then sorted according to the active `sort_mode`.
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
@@ -379,9 +469,9 @@ impl BranchesState {
         super::clamp_index(&mut self.selected, len);
     }
 
-    /// Clamp selected Docker container index to available containers.
+    /// Clamp selected Docker service index to available services.
     fn clamp_docker_selected(&mut self) {
-        let len = self.docker_containers.len();
+        let len = self.docker_services.len();
         super::clamp_index(&mut self.docker_selected, len);
     }
 
@@ -390,9 +480,9 @@ impl BranchesState {
         super::clamp_index(&mut self.detail_session_selected, len);
     }
 
-    /// Return the currently selected Docker container, if any.
-    fn selected_docker_container(&self) -> Option<&gwt_docker::ContainerInfo> {
-        self.docker_containers.get(self.docker_selected)
+    /// Return the currently selected Docker service, if any.
+    fn selected_docker_service(&self) -> Option<&DockerServiceInfo> {
+        self.docker_services.get(self.docker_selected)
     }
 
     fn selected_branch_name(&self) -> Option<String> {
@@ -402,7 +492,7 @@ impl BranchesState {
     fn apply_detail_data(&mut self, data: &BranchDetailData, reset_docker_selection: bool) {
         self.detail_files = data.files.clone();
         self.detail_commits = data.commits.clone();
-        self.docker_containers = data.docker_containers.clone();
+        self.docker_services = data.docker_services.clone();
         if reset_docker_selection {
             self.docker_selected = 0;
         }
@@ -413,7 +503,7 @@ impl BranchesState {
     fn clear_visible_detail(&mut self) {
         self.detail_files.clear();
         self.detail_commits.clear();
-        self.docker_containers.clear();
+        self.docker_services.clear();
         self.docker_selected = 0;
         self.pending_docker_action = None;
     }
@@ -538,52 +628,68 @@ impl BranchesState {
         self.cleanup_selected.contains(branch)
     }
 
+    fn branch_item(&self, branch: &str) -> Option<&BranchItem> {
+        self.branches.iter().find(|item| item.name == branch)
+    }
+
+    /// Resolve the local branch that a cleanup action should operate on.
+    ///
+    /// Local rows resolve to themselves. Remote-tracking rows resolve only
+    /// when a matching local branch exists; otherwise they are not cleanup
+    /// candidates.
+    pub fn cleanup_execution_branch(&self, branch: &str) -> Option<String> {
+        self.cleanup_policy().execution_branch(branch)
+    }
+
     /// Returns true when `branch` is allowed to participate in Branch Cleanup
     /// selection (FR-018b).
     ///
-    /// Protected names, the current HEAD, and branches with an active agent
-    /// or shell session are rejected. Feature branches that are checked out
-    /// by a worktree **are still candidates** — cleaning up the worktree is
-    /// the whole point of Branch Cleanup in a gwt workflow where every
-    /// branch normally has its own worktree.
+    /// Protected names, the current HEAD, branches with an active agent or
+    /// shell session, merge-check spinner rows, and remote-tracking rows
+    /// without a matching local branch are rejected. Feature branches that are
+    /// checked out by a worktree **are still candidates** — cleaning up the
+    /// worktree is the whole point of Branch Cleanup in a gwt workflow where
+    /// every branch normally has its own worktree.
     pub fn is_cleanable_candidate(&self, branch: &str) -> bool {
-        if gwt_git::is_protected_branch(branch) {
-            return false;
-        }
-        if self
-            .current_head_branch
-            .as_deref()
-            .is_some_and(|head| head == branch)
-        {
-            return false;
-        }
-        if self.active_session_branches.contains(branch) {
-            return false;
-        }
-        true
+        self.cleanup_selection_blocked_reason(branch).is_none()
+    }
+
+    /// Returns the concrete reason a row is currently blocked from cleanup
+    /// selection, or `None` when the row is selectable.
+    pub fn cleanup_selection_blocked_reason(
+        &self,
+        branch: &str,
+    ) -> Option<CleanupSelectionBlockedReason> {
+        self.cleanup_policy().blocked_reason(branch)
+    }
+
+    /// Return the warning risks that should be surfaced in confirm modal for a
+    /// selectable branch.
+    pub fn cleanup_selection_risks(&self, branch: &str) -> Vec<CleanupSelectionRisk> {
+        self.cleanup_policy().risks(branch)
     }
 
     /// Returns true when the branch is both a protection-allowed candidate
-    /// and has a positive merge result that makes it cleanable right now.
+    /// and not blocked by protection/runtime state.
     pub fn is_cleanup_selectable(&self, branch: &str) -> bool {
-        if !self.is_cleanable_candidate(branch) {
-            return false;
-        }
-        matches!(self.merge_state(branch), MergeState::Cleanable(_))
+        self.cleanup_selection_blocked_reason(branch).is_none()
     }
 
     /// Toggle Branch Cleanup selection for `branch`. No-op when the branch
     /// is not currently selectable (FR-018c).
-    pub fn toggle_cleanup_selection(&mut self, branch: &str) -> bool {
-        if !self.is_cleanup_selectable(branch) {
-            return false;
+    pub fn toggle_cleanup_selection(&mut self, branch: &str) -> CleanupSelectionToggle {
+        if let Some(reason) = self.cleanup_selection_blocked_reason(branch) {
+            return CleanupSelectionToggle::Blocked(reason);
+        } else if self.branch_item(branch).is_none() {
+            return CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::Unknown);
         }
         if self.cleanup_selected.contains(branch) {
             self.cleanup_selected.remove(branch);
+            CleanupSelectionToggle::Deselected
         } else {
             self.cleanup_selected.insert(branch.to_string());
+            CleanupSelectionToggle::Selected
         }
-        true
     }
 
     /// Add every currently visible cleanable branch to the selection set.
@@ -613,10 +719,7 @@ impl BranchesState {
 
     /// Returns the merge target for a branch when it is cleanable.
     pub fn cleanup_target(&self, branch: &str) -> Option<gwt_git::MergeTarget> {
-        match self.merge_state(branch) {
-            MergeState::Cleanable(target) => Some(target),
-            _ => None,
-        }
+        self.cleanup_policy().target(branch)
     }
 
     /// Returns true when at least one branch is still being computed by
@@ -631,6 +734,62 @@ impl BranchesState {
     /// while `has_computing_branches()` is true.
     pub fn tick_merge_spinner(&mut self) {
         self.merge_spinner_tick = self.merge_spinner_tick.wrapping_add(1);
+    }
+
+    /// Returns the visible live-session indicators for the currently rendered
+    /// branch rows in `area`.
+    pub(crate) fn visible_live_indicator_rows(
+        &self,
+        area: Rect,
+    ) -> Vec<VisibleBranchLiveIndicatorRow> {
+        if area.width == 0 || area.height == 0 {
+            return Vec::new();
+        }
+
+        let filtered = self.filtered_branches();
+        if filtered.is_empty() {
+            return Vec::new();
+        }
+
+        let selected = self.selected.min(filtered.len().saturating_sub(1));
+        let visible_rows = (area.height as usize).min(filtered.len());
+        let first_visible = selected.saturating_add(1).saturating_sub(visible_rows);
+
+        filtered
+            .iter()
+            .enumerate()
+            .skip(first_visible)
+            .take(visible_rows)
+            .filter_map(|(idx, branch)| {
+                let left_width = branch_row_leading_width(self, branch, idx == selected);
+                let available_width =
+                    (area.width as usize).saturating_sub(left_width.saturating_add(1));
+                let indicators = self
+                    .live_session_summaries
+                    .get(&branch.name)
+                    .into_iter()
+                    .flat_map(|summary| visible_branch_live_indicators(summary, available_width))
+                    .collect::<Vec<_>>();
+                if indicators.is_empty() {
+                    None
+                } else {
+                    Some(VisibleBranchLiveIndicatorRow {
+                        branch_name: branch.name.clone(),
+                        indicators,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    /// Returns true when at least one visible live-session indicator is in
+    /// the animated `Running` state.
+    pub fn has_running_live_sessions(&self, area: Rect) -> bool {
+        self.visible_live_indicator_rows(area).iter().any(|row| {
+            row.indicators
+                .iter()
+                .any(|indicator| indicator.status == AgentStatus::Running)
+        })
     }
 
     /// Current spinner glyph for the `⋯` gutter slot. Cycles through a
@@ -667,16 +826,18 @@ pub enum BranchesMessage {
     LaunchAgent,
     /// Open shell action.
     OpenShell,
-    /// Move to the next Docker container in the overview area.
-    DockerContainerDown,
-    /// Move to the previous Docker container in the overview area.
-    DockerContainerUp,
-    /// Request a start lifecycle action for the selected Docker container.
-    DockerContainerStart,
-    /// Request a stop lifecycle action for the selected Docker container.
-    DockerContainerStop,
-    /// Request a restart lifecycle action for the selected Docker container.
-    DockerContainerRestart,
+    /// Move to the next Docker service in the overview area.
+    DockerServiceDown,
+    /// Move to the previous Docker service in the overview area.
+    DockerServiceUp,
+    /// Request a start lifecycle action for the selected Docker service.
+    DockerServiceStart,
+    /// Request a stop lifecycle action for the selected Docker service.
+    DockerServiceStop,
+    /// Request a restart lifecycle action for the selected Docker service.
+    DockerServiceRestart,
+    /// Request a recreate lifecycle action for the selected Docker service.
+    DockerServiceRecreate,
 }
 
 /// Update branches state in response to a message.
@@ -768,37 +929,49 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::OpenShell => {
             state.pending_open_shell = true;
         }
-        BranchesMessage::DockerContainerDown => {
-            if !state.docker_containers.is_empty() {
-                super::move_down(&mut state.docker_selected, state.docker_containers.len());
+        BranchesMessage::DockerServiceDown => {
+            if !state.docker_services.is_empty() {
+                super::move_down(&mut state.docker_selected, state.docker_services.len());
             }
         }
-        BranchesMessage::DockerContainerUp => {
-            if !state.docker_containers.is_empty() {
-                super::move_up(&mut state.docker_selected, state.docker_containers.len());
+        BranchesMessage::DockerServiceUp => {
+            if !state.docker_services.is_empty() {
+                super::move_up(&mut state.docker_selected, state.docker_services.len());
             }
         }
-        BranchesMessage::DockerContainerStart => {
-            if let Some(container) = state.selected_docker_container() {
+        BranchesMessage::DockerServiceStart => {
+            if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
-                    container_id: container.id.clone(),
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
                     action: DockerLifecycleAction::Start,
                 });
             }
         }
-        BranchesMessage::DockerContainerStop => {
-            if let Some(container) = state.selected_docker_container() {
+        BranchesMessage::DockerServiceStop => {
+            if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
-                    container_id: container.id.clone(),
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
                     action: DockerLifecycleAction::Stop,
                 });
             }
         }
-        BranchesMessage::DockerContainerRestart => {
-            if let Some(container) = state.selected_docker_container() {
+        BranchesMessage::DockerServiceRestart => {
+            if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
-                    container_id: container.id.clone(),
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
                     action: DockerLifecycleAction::Restart,
+                });
+            }
+        }
+        BranchesMessage::DockerServiceRecreate => {
+            if let Some(service) = state.selected_docker_service() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
+                    action: DockerLifecycleAction::Recreate,
                 });
             }
         }
@@ -813,10 +986,20 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
 /// Best-effort: all errors are silently ignored.
 pub fn load_branch_detail(
     branch: &BranchItem,
-    docker_containers: &[gwt_docker::ContainerInfo],
+    docker_services: &[DockerServiceInfo],
 ) -> BranchDetailData {
     let mut detail = BranchDetailData {
-        docker_containers: docker_containers.to_vec(),
+        docker_services: branch
+            .worktree_path
+            .as_ref()
+            .map(|wt_path| {
+                docker_services
+                    .iter()
+                    .filter(|service| service.project_root == *wt_path)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
         ..BranchDetailData::default()
     };
 
@@ -961,50 +1144,7 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, branch)| {
-            let worktree_icon = if branch.worktree_path.is_some() {
-                theme::icon::WORKTREE_ACTIVE
-            } else {
-                theme::icon::WORKTREE_INACTIVE
-            };
-            let head_indicator = if branch.is_head {
-                theme::icon::HEAD_INDICATOR
-            } else {
-                ""
-            };
-            // Branch Cleanup gutter glyphs (FR-018c/d):
-            //   `●` (cyan)   — selected for cleanup
-            //   `✔` (green)  — cleanable now (merged into main or develop)
-            //   spinner      — merge detection still running
-            //   `·` (gray)   — local feature branch with unmerged commits
-            //   `–` (dim)    — protected / current HEAD / active session
-            //   ` ` (blank)  — remote-tracking branch (never a candidate)
-            let spinner_glyph = state.merge_spinner_glyph();
-            let (gutter_glyph, gutter_color) = if !branch.is_local {
-                (" ", theme::color::TEXT_DISABLED)
-            } else if state.is_cleanup_selected(&branch.name) {
-                ("\u{25CF}", theme::color::ACTIVE)
-            } else if !state.is_cleanable_candidate(&branch.name) {
-                ("\u{2013}", theme::color::TEXT_DISABLED)
-            } else {
-                match state.merge_state(&branch.name) {
-                    MergeState::Computing => (spinner_glyph, theme::color::ACTIVE),
-                    MergeState::Cleanable(_) => ("\u{2714}", theme::color::SUCCESS),
-                    MergeState::NotMerged => ("\u{00B7}", theme::color::TEXT_SECONDARY),
-                }
-            };
-
-            let mut spans = vec![
-                super::selection_prefix(idx == state.selected),
-                Span::styled(gutter_glyph, Style::default().fg(gutter_color)),
-                Span::raw(" "),
-                Span::styled(
-                    &branch.name,
-                    Style::default().fg(theme::color::TEXT_PRIMARY),
-                ),
-                Span::raw(" "),
-                Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
-                Span::styled(head_indicator, Style::default().fg(theme::color::SUCCESS)),
-            ];
+            let mut spans = branch_row_leading_spans(state, branch, idx == state.selected);
             let left_width = spans_width(&spans);
             let available_summary_width = area.width as usize;
             if let Some(summary_spans) =
@@ -1039,6 +1179,70 @@ fn render_branch_list(state: &BranchesState, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
+fn branch_row_leading_spans<'a>(
+    state: &BranchesState,
+    branch: &'a BranchItem,
+    is_selected: bool,
+) -> Vec<Span<'a>> {
+    let worktree_icon = if branch.worktree_path.is_some() {
+        theme::icon::WORKTREE_ACTIVE
+    } else {
+        theme::icon::WORKTREE_INACTIVE
+    };
+    let head_indicator = if branch.is_head {
+        theme::icon::HEAD_INDICATOR
+    } else {
+        ""
+    };
+    // Branch Cleanup gutter glyphs (FR-018c/d):
+    //   `●` (cyan)   — selected for cleanup
+    //   `✔` (green)  — safe-selectable local branch
+    //   spinner      — merge detection still running (blocked)
+    //   `·` (gray)   — unsafe-selectable unmerged local branch
+    //   `–` (dim)    — protected / current HEAD / active session
+    //   ` ` (blank)  — remote-tracking row
+    let spinner_glyph = state.merge_spinner_glyph();
+    let blocked_reason = state.cleanup_selection_blocked_reason(&branch.name);
+    let risks = state.cleanup_selection_risks(&branch.name);
+    let (gutter_glyph, gutter_color) = if state.is_cleanup_selected(&branch.name) {
+        ("\u{25CF}", theme::color::ACTIVE)
+    } else if matches!(
+        blocked_reason,
+        Some(CleanupSelectionBlockedReason::MergeCheckRunning)
+    ) {
+        (spinner_glyph, theme::color::ACTIVE)
+    } else if !branch.is_local {
+        (" ", theme::color::TEXT_DISABLED)
+    } else if blocked_reason.is_some() {
+        ("\u{2013}", theme::color::TEXT_DISABLED)
+    } else if risks.contains(&CleanupSelectionRisk::Unmerged) {
+        ("\u{00B7}", theme::color::TEXT_SECONDARY)
+    } else {
+        ("\u{2714}", theme::color::SUCCESS)
+    };
+
+    vec![
+        super::selection_prefix(is_selected),
+        Span::styled(gutter_glyph, Style::default().fg(gutter_color)),
+        Span::raw(" "),
+        Span::styled(
+            &branch.name,
+            Style::default().fg(theme::color::TEXT_PRIMARY),
+        ),
+        Span::raw(" "),
+        Span::styled(worktree_icon, Style::default().fg(theme::color::FOCUS)),
+        Span::styled(head_indicator, Style::default().fg(theme::color::SUCCESS)),
+    ]
+}
+
+fn branch_row_leading_width(
+    state: &BranchesState,
+    branch: &BranchItem,
+    is_selected: bool,
+) -> usize {
+    spans_width(&branch_row_leading_spans(state, branch, is_selected))
+}
+
 fn build_branch_live_summary(
     summary: &BranchLiveSessionSummary,
     animation_tick: usize,
@@ -1048,14 +1252,15 @@ fn build_branch_live_summary(
         return None;
     }
 
-    let spinner = running_spinner_frame(animation_tick);
-    let visible_indicators = summary.indicators.iter().take(available_width);
-    let spans: Vec<Span<'static>> = visible_indicators
-        .map(|indicator| {
-            Span::styled(
-                spinner.to_string(),
-                Style::default().fg(branch_live_indicator_color(indicator.color)),
-            )
+    let spans: Vec<Span<'static>> = visible_branch_live_indicators(summary, available_width)
+        .filter_map(|indicator| {
+            let glyph =
+                branch_live_indicator_glyph(indicator.kind, indicator.status, animation_tick)?;
+            let mut style = Style::default().fg(branch_live_indicator_color(indicator.color));
+            if indicator.active {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Some(Span::styled(glyph.to_string(), style))
         })
         .collect();
 
@@ -1063,6 +1268,36 @@ fn build_branch_live_summary(
         None
     } else {
         Some(spans)
+    }
+}
+
+fn visible_branch_live_indicators(
+    summary: &BranchLiveSessionSummary,
+    available_width: usize,
+) -> impl Iterator<Item = BranchLiveSessionIndicator> + '_ {
+    summary
+        .indicators
+        .iter()
+        .take(available_width)
+        .filter(|indicator| {
+            branch_live_indicator_glyph(indicator.kind, indicator.status, 0).is_some()
+        })
+        .copied()
+}
+
+fn branch_live_indicator_glyph(
+    kind: BranchLiveSessionIndicatorKind,
+    status: AgentStatus,
+    animation_tick: usize,
+) -> Option<char> {
+    if kind == BranchLiveSessionIndicatorKind::Shell {
+        return Some('▸');
+    }
+
+    match status {
+        AgentStatus::Running => Some(running_spinner_frame(animation_tick)),
+        AgentStatus::WaitingInput => Some('●'),
+        AgentStatus::Unknown | AgentStatus::Stopped => None,
     }
 }
 
@@ -1108,18 +1343,15 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
     lines.push(" Docker status".to_string());
     if state.selected_detail_loading() {
         lines.push(" Loading branch details...".to_string());
-    } else if state.docker_containers.is_empty() {
-        lines.push(" No containers found".to_string());
-    } else if let Some(container) = state.selected_docker_container() {
-        lines.push(format!(" Selected: {}", container.name));
-        lines.push(format!(
-            " Status: {}",
-            docker_status_label(container.status)
-        ));
-        lines.push(format!(" Ports: {}", docker_ports_label(&container.ports)));
+    } else if state.docker_services.is_empty() {
+        lines.push(" No Docker services found".to_string());
+    } else if let Some(service) = state.selected_docker_service() {
+        lines.push(format!(" Selected: {}", service.name));
+        lines.push(format!(" Status: {}", docker_status_label(service.status)));
+        lines.push(format!(" Ports: {}", docker_ports_label(&service.ports)));
         lines.push(format!(
             " Controls: {}",
-            docker_controls_hint(container.status)
+            docker_controls_hint(service.status)
         ));
     }
 
@@ -1128,13 +1360,12 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
     frame.render_widget(paragraph, area);
 }
 
-fn docker_status_label(status: gwt_docker::ContainerStatus) -> &'static str {
+fn docker_status_label(status: gwt_docker::ComposeServiceStatus) -> &'static str {
     match status {
-        gwt_docker::ContainerStatus::Created => "Created",
-        gwt_docker::ContainerStatus::Running => "Running",
-        gwt_docker::ContainerStatus::Paused => "Paused",
-        gwt_docker::ContainerStatus::Stopped => "Stopped",
-        gwt_docker::ContainerStatus::Exited => "Exited",
+        gwt_docker::ComposeServiceStatus::Running => "Running",
+        gwt_docker::ComposeServiceStatus::Stopped => "Stopped",
+        gwt_docker::ComposeServiceStatus::Exited => "Exited",
+        gwt_docker::ComposeServiceStatus::NotFound => "Not found",
     }
 }
 
@@ -1146,13 +1377,15 @@ fn docker_ports_label(ports: &str) -> &str {
     }
 }
 
-fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
+fn docker_controls_hint(status: gwt_docker::ComposeServiceStatus) -> &'static str {
     match status {
-        gwt_docker::ContainerStatus::Running => "Up/Down select  T stop  R restart",
-        gwt_docker::ContainerStatus::Paused => "Up/Down select  S start  T stop  R restart",
-        gwt_docker::ContainerStatus::Created
-        | gwt_docker::ContainerStatus::Stopped
-        | gwt_docker::ContainerStatus::Exited => "Up/Down select  S start  R restart",
+        gwt_docker::ComposeServiceStatus::Running => {
+            "Up/Down select  T stop  R restart  C recreate"
+        }
+        gwt_docker::ComposeServiceStatus::Stopped | gwt_docker::ComposeServiceStatus::Exited => {
+            "Up/Down select  S start  C recreate"
+        }
+        gwt_docker::ComposeServiceStatus::NotFound => "Up/Down select  S create/start",
     }
 }
 
@@ -1240,8 +1473,8 @@ fn render_detail_sessions(
         return;
     }
 
-    let mut lines = Vec::new();
     let selected_session = selected_session.min(sessions.len().saturating_sub(1));
+    let mut lines = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
         let selected_marker = if index == selected_session {
             theme::icon::LEFT_ACCENT
@@ -1276,7 +1509,75 @@ fn render_detail_sessions(
         }
     }
 
+    let list_height = session_list_height(area.height, lines.len());
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(list_height), Constraint::Min(0)])
+        .split(area);
     let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, chunks[0]);
+
+    render_selected_session_detail(frame, chunks[1], &sessions[selected_session]);
+}
+
+fn session_list_height(total_height: u16, rendered_lines: usize) -> u16 {
+    let rendered_lines = rendered_lines as u16;
+    if total_height <= 6 {
+        rendered_lines.min(total_height)
+    } else {
+        rendered_lines.min(total_height.saturating_sub(5))
+    }
+}
+
+fn render_selected_session_detail(frame: &mut Frame, area: Rect, session: &DetailSessionSummary) {
+    if area.height == 0 {
+        return;
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " Selected Session",
+            Style::default()
+                .fg(theme::color::FOCUS)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("   Name: {}", session.name),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
+        )),
+    ];
+
+    if session.launch_summary.is_empty() && session.launch_command_line.is_none() {
+        lines.push(Line::from(Span::styled(
+            "   Launch parameters unavailable",
+            theme::style::muted_text(),
+        )));
+    } else {
+        for summary in &session.launch_summary {
+            lines.push(Line::from(Span::styled(
+                format!("   {summary}"),
+                Style::default().fg(theme::color::TEXT_PRIMARY),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "   Launch Command",
+            Style::default()
+                .fg(theme::color::TEXT_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        )));
+        match session.launch_command_line.as_deref() {
+            Some(command_line) => lines.push(Line::from(Span::styled(
+                format!("   {command_line}"),
+                Style::default().fg(theme::color::SURFACE),
+            ))),
+            None => lines.push(Line::from(Span::styled(
+                "   Launch parameters unavailable",
+                theme::style::muted_text(),
+            ))),
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -1296,6 +1597,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "develop".to_string(),
@@ -1303,6 +1605,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Develop,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "feature/login".to_string(),
@@ -1310,6 +1613,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "origin/feature/api".to_string(),
@@ -1317,6 +1621,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "hotfix/crash".to_string(),
@@ -1324,6 +1629,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
         ]
     }
@@ -1336,6 +1642,7 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "zeta-local".to_string(),
@@ -1343,6 +1650,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "yellow-local".to_string(),
@@ -1350,6 +1658,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Other,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "origin/zzz-remote".to_string(),
@@ -1357,25 +1666,27 @@ mod tests {
                 is_local: false,
                 category: BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
         ]
     }
 
-    fn sample_containers() -> Vec<gwt_docker::ContainerInfo> {
+    fn sample_services(project_root: &std::path::Path) -> Vec<DockerServiceInfo> {
+        let compose_file = project_root.join("docker-compose.yml");
         vec![
-            gwt_docker::ContainerInfo {
-                id: "abc123".to_string(),
+            DockerServiceInfo {
+                project_root: project_root.to_path_buf(),
+                compose_file: compose_file.clone(),
                 name: "web".to_string(),
-                status: gwt_docker::ContainerStatus::Running,
-                image: "nginx:latest".to_string(),
-                ports: "0.0.0.0:8080->80/tcp".to_string(),
+                status: gwt_docker::ComposeServiceStatus::Running,
+                ports: "8080:80".to_string(),
             },
-            gwt_docker::ContainerInfo {
-                id: "def456".to_string(),
+            DockerServiceInfo {
+                project_root: project_root.to_path_buf(),
+                compose_file,
                 name: "db".to_string(),
-                status: gwt_docker::ContainerStatus::Stopped,
-                image: "postgres:16".to_string(),
-                ports: String::new(),
+                status: gwt_docker::ComposeServiceStatus::Stopped,
+                ports: "5432:5432".to_string(),
             },
         ]
     }
@@ -1528,6 +1839,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/worktree-a")),
+            upstream: None,
         };
         state.branches = vec![branch.clone()];
         state.detail_cache.insert(
@@ -1869,6 +2181,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
             BranchItem {
                 name: "feature/worktree".to_string(),
@@ -1876,6 +2189,7 @@ mod tests {
                 is_local: true,
                 category: BranchCategory::Feature,
                 worktree_path: Some(PathBuf::from("/tmp/worktree")),
+                upstream: None,
             },
         ];
 
@@ -1984,13 +2298,13 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("No containers found")),
-            "Detail panel should explain when there are no Docker containers"
+                .any(|line| line.contains("No Docker services found")),
+            "Detail panel should explain when there are no Docker services"
         );
     }
 
     #[test]
-    fn load_branch_detail_populates_docker_containers() {
+    fn load_branch_detail_populates_docker_services() {
         let tmp = tempfile::tempdir().expect("create temp worktree");
         let branch = BranchItem {
             name: "feature/docker".to_string(),
@@ -1998,44 +2312,77 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(tmp.path().to_path_buf()),
+            upstream: None,
         };
 
-        let detail = load_branch_detail(&branch, &sample_containers());
+        let detail = load_branch_detail(&branch, &sample_services(tmp.path()));
 
-        assert_eq!(detail.docker_containers.len(), 2);
-        let container = &detail.docker_containers[0];
-        assert_eq!(container.id, "abc123");
-        assert_eq!(container.name, "web");
-        assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
-        assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
+        assert_eq!(detail.docker_services.len(), 2);
+        let service = &detail.docker_services[0];
+        assert_eq!(service.name, "web");
+        assert_eq!(service.status, gwt_docker::ComposeServiceStatus::Running);
+        assert_eq!(service.ports, "8080:80");
+    }
+
+    #[test]
+    fn load_branch_detail_without_worktree_does_not_associate_docker_services() {
+        let branch = BranchItem {
+            name: "origin/feature/docker".to_string(),
+            is_head: false,
+            is_local: false,
+            category: BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        };
+        let detail =
+            load_branch_detail(&branch, &sample_services(std::path::Path::new("/tmp/test")));
+
+        assert!(detail.docker_services.is_empty());
+
+        let mut state = BranchesState::default();
+        state.apply_detail_data(&detail, true);
+        update(&mut state, BranchesMessage::DockerServiceRestart);
+
+        assert!(state.pending_docker_action.is_none());
     }
 
     #[test]
     fn docker_selection_and_lifecycle_intent_update_state() {
         let mut state = BranchesState::default();
-        state.docker_containers = sample_containers();
+        state.docker_services = sample_services(std::path::Path::new("/tmp/test"));
 
-        update(&mut state, BranchesMessage::DockerContainerDown);
+        update(&mut state, BranchesMessage::DockerServiceDown);
         assert_eq!(state.docker_selected, 1);
 
-        update(&mut state, BranchesMessage::DockerContainerUp);
+        update(&mut state, BranchesMessage::DockerServiceUp);
         assert_eq!(state.docker_selected, 0);
 
-        update(&mut state, BranchesMessage::DockerContainerRestart);
+        update(&mut state, BranchesMessage::DockerServiceRestart);
         assert_eq!(
             state.pending_docker_action,
             Some(PendingDockerAction {
-                container_id: "abc123".to_string(),
+                compose_file: std::path::PathBuf::from("/tmp/test/docker-compose.yml"),
+                service: "web".to_string(),
                 action: DockerLifecycleAction::Restart,
+            })
+        );
+
+        update(&mut state, BranchesMessage::DockerServiceRecreate);
+        assert_eq!(
+            state.pending_docker_action,
+            Some(PendingDockerAction {
+                compose_file: std::path::PathBuf::from("/tmp/test/docker-compose.yml"),
+                service: "web".to_string(),
+                action: DockerLifecycleAction::Recreate,
             })
         );
     }
 
     #[test]
-    fn render_detail_overview_shows_selected_docker_container_details() {
+    fn render_detail_overview_shows_selected_docker_service_details() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
-        state.docker_containers = sample_containers();
+        state.docker_services = sample_services(std::path::Path::new("/tmp/test"));
         state.docker_selected = 1;
         state.detail_section = 0;
 
@@ -2051,22 +2398,20 @@ mod tests {
         let lines = buffer_to_lines(terminal.backend().buffer());
         assert!(
             lines.iter().any(|line| line.contains("Selected: db")),
-            "Detail panel should show the selected Docker container"
+            "Detail panel should show the selected Docker service"
         );
         assert!(
             lines.iter().any(|line| line.contains("Status: Stopped")),
             "Detail panel should show Docker status"
         );
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("Ports: No published ports")),
+            lines.iter().any(|line| line.contains("Ports: 5432:5432")),
             "Detail panel should show Docker ports"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Controls: Up/Down select  S start  R restart")),
+                .any(|line| line.contains("Controls: Up/Down select  S start  C recreate")),
             "Detail panel should show Docker control hints"
         );
     }
@@ -2082,12 +2427,24 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: Some("gpt-5.3-codex · high".to_string()),
                 active: true,
+                launch_summary: vec![
+                    "Model: gpt-5.3-codex".to_string(),
+                    "Reasoning: high".to_string(),
+                    "Version: latest".to_string(),
+                    "Permissions: Skip confirmations".to_string(),
+                    "Runtime: Host".to_string(),
+                ],
+                launch_command_line: Some(
+                    "codex --no-alt-screen --model=gpt-5.3-codex".to_string(),
+                ),
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2116,6 +2473,16 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("gpt-5.3-codex · high")),
             "Sessions pane should show session detail metadata when available"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Launch Command")),
+            "Sessions pane should show a launch detail section"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("codex --no-alt-screen --model=gpt-5.3-codex")),
+            "Sessions pane should show the persisted exact argv"
         );
     }
 
@@ -2153,12 +2520,16 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: true,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2181,6 +2552,38 @@ mod tests {
     }
 
     #[test]
+    fn render_detail_sessions_shows_unavailable_fallback_for_missing_launch_metadata() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 2;
+        let sessions = vec![DetailSessionSummary {
+            kind: "Agent",
+            name: "Codex".to_string(),
+            detail: Some("gpt-5.3-codex".to_string()),
+            active: true,
+            launch_summary: Vec::new(),
+            launch_command_line: None,
+        }];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &sessions);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Launch parameters unavailable")),
+            "Sessions pane should show a stable fallback when no launch metadata is saved"
+        );
+    }
+
+    #[test]
     fn render_branch_list_shows_running_summary_on_wide_rows() {
         let mut state = BranchesState::default();
         state.branches = vec![BranchItem {
@@ -2189,13 +2592,16 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-live")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/live".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Blue,
+                    active: false,
                 }],
             },
         );
@@ -2227,13 +2633,16 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-wait")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/wait".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::WaitingInput,
                     color: crate::model::AgentColor::Green,
+                    active: false,
                 }],
             },
         );
@@ -2250,9 +2659,12 @@ mod tests {
         let lines = buffer_to_lines(terminal.backend().buffer());
         assert!(
             lines.iter().any(|line| line.contains("feature/wait"))
-                && lines.iter().any(|line| line.contains("◐"))
+                && lines.iter().any(|line| line.contains("●"))
+                && !lines
+                    .iter()
+                    .any(|line| line.contains("◐") || line.contains("◓") || line.contains("◑") || line.contains("◒"))
                 && !lines.iter().any(|line| line.contains(" wait ")),
-            "waiting rows should keep a spinner-only indicator instead of a textual wait label"
+            "waiting rows should stay visible with a static dot indicator instead of an animated spinner or textual wait label"
         );
     }
 
@@ -2265,13 +2677,16 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/wt-feature-narrow")),
+            upstream: None,
         }];
         state.live_session_summaries.insert(
             "feature/narrow".to_string(),
             BranchLiveSessionSummary {
                 indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
                     status: gwt_agent::AgentStatus::Running,
                     color: crate::model::AgentColor::Blue,
+                    active: false,
                 }],
             },
         );
@@ -2288,6 +2703,80 @@ mod tests {
         assert!(
             lines.iter().any(|line| line.contains("feature/narrow")),
             "narrow rows should preserve the branch label even if the spinner strip must disappear"
+        );
+    }
+
+    #[test]
+    fn visible_live_indicator_rows_ignore_filtered_out_running_branches() {
+        let mut state = BranchesState::default();
+        state.view_mode = ViewMode::All;
+        state.branches = vec![
+            BranchItem {
+                name: "feature/visible".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-visible")),
+                upstream: None,
+            },
+            BranchItem {
+                name: "feature/hidden".to_string(),
+                is_head: false,
+                is_local: true,
+                category: BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-hidden")),
+                upstream: None,
+            },
+        ];
+        state.search_query = "visible".to_string();
+        state.live_session_summaries.insert(
+            "feature/hidden".to_string(),
+            BranchLiveSessionSummary {
+                indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                    active: false,
+                }],
+            },
+        );
+
+        let rows = state.visible_live_indicator_rows(Rect::new(0, 0, 80, 4));
+
+        assert!(
+            rows.is_empty(),
+            "filtered-out branches must not keep the tick redraw gate open"
+        );
+    }
+
+    #[test]
+    fn visible_live_indicator_rows_ignore_running_summaries_without_renderable_width() {
+        let mut state = BranchesState::default();
+        state.branches = vec![BranchItem {
+            name: "feature/this-branch-name-is-too-wide".to_string(),
+            is_head: true,
+            is_local: true,
+            category: BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-wide")),
+            upstream: None,
+        }];
+        state.live_session_summaries.insert(
+            "feature/this-branch-name-is-too-wide".to_string(),
+            BranchLiveSessionSummary {
+                indicators: vec![BranchLiveSessionIndicator {
+                    kind: BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+
+        let rows = state.visible_live_indicator_rows(Rect::new(0, 0, 24, 1));
+
+        assert!(
+            rows.is_empty(),
+            "rows that cannot render even one live indicator must not count as visible animation"
         );
     }
 
@@ -2337,6 +2826,18 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
+        }
+    }
+
+    fn remote(name: &str) -> BranchItem {
+        BranchItem {
+            name: name.to_string(),
+            is_head: false,
+            is_local: false,
+            category: BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
         }
     }
 
@@ -2356,8 +2857,27 @@ mod tests {
     fn toggle_cleanup_selection_skips_computing_branches() {
         let mut state = cleanup_state_with(vec![feature("feature/foo")]);
         // Default state is Computing → not selectable.
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::MergeCheckRunning)
+        );
         assert!(state.cleanup_selected.is_empty());
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_allows_unmerged_branch_and_marks_risk() {
+        let mut state = cleanup_state_with(vec![feature("feature/foo")]);
+        state.set_merge_state("feature/foo", MergeState::NotMerged);
+
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
+        assert!(state.is_cleanup_selected("feature/foo"));
+        assert_eq!(
+            state.cleanup_selection_risks("feature/foo"),
+            vec![CleanupSelectionRisk::Unmerged]
+        );
     }
 
     #[test]
@@ -2368,10 +2888,16 @@ mod tests {
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
 
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
         assert!(state.is_cleanup_selected("feature/foo"));
 
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Deselected
+        );
         assert!(!state.is_cleanup_selected("feature/foo"));
     }
 
@@ -2383,9 +2909,13 @@ mod tests {
             is_local: true,
             category: BranchCategory::Main,
             worktree_path: None,
+            upstream: None,
         }]);
         state.set_merge_state("main", MergeState::Cleanable(gwt_git::MergeTarget::Main));
-        assert!(!state.toggle_cleanup_selection("main"));
+        assert_eq!(
+            state.toggle_cleanup_selection("main"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::ProtectedBranch)
+        );
     }
 
     #[test]
@@ -2396,7 +2926,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::CurrentHead)
+        );
     }
 
     #[test]
@@ -2409,7 +2942,42 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(!state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Blocked(CleanupSelectionBlockedReason::ActiveSession)
+        );
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_allows_remote_tracking_branch_with_local_counterpart() {
+        let mut state =
+            cleanup_state_with(vec![feature("feature/foo"), remote("origin/feature/foo")]);
+        state.set_merge_state(
+            "feature/foo",
+            MergeState::Cleanable(gwt_git::MergeTarget::Main),
+        );
+
+        assert_eq!(
+            state.toggle_cleanup_selection("origin/feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
+        assert!(state.is_cleanup_selected("origin/feature/foo"));
+        assert_eq!(
+            state.cleanup_selection_risks("origin/feature/foo"),
+            vec![CleanupSelectionRisk::RemoteTracking]
+        );
+    }
+
+    #[test]
+    fn toggle_cleanup_selection_rejects_remote_tracking_branch_without_local_counterpart() {
+        let mut state = cleanup_state_with(vec![remote("origin/feature/foo")]);
+
+        assert_eq!(
+            state.toggle_cleanup_selection("origin/feature/foo"),
+            CleanupSelectionToggle::Blocked(
+                CleanupSelectionBlockedReason::RemoteTrackingWithoutLocal
+            )
+        );
     }
 
     #[test]
@@ -2423,21 +2991,27 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
     }
 
     #[test]
-    fn select_all_visible_cleanable_only_picks_cleanable_rows() {
+    fn select_all_visible_cleanup_picks_safe_and_unsafe_rows_but_skips_blocked_rows() {
         let mut state = cleanup_state_with(vec![
             feature("feature/foo"),
             feature("feature/bar"),
             feature("feature/baz"),
+            remote("origin/feature/bar"),
+            remote("origin/feature/remote-only"),
             BranchItem {
                 name: "main".to_string(),
                 is_head: false,
                 is_local: true,
                 category: BranchCategory::Main,
                 worktree_path: None,
+                upstream: None,
             },
         ]);
         state.set_merge_state(
@@ -2457,9 +3031,11 @@ mod tests {
 
         assert!(state.is_cleanup_selected("feature/foo"));
         assert!(state.is_cleanup_selected("feature/bar"));
-        assert!(!state.is_cleanup_selected("feature/baz"));
+        assert!(state.is_cleanup_selected("feature/baz"));
+        assert!(state.is_cleanup_selected("origin/feature/bar"));
+        assert!(!state.is_cleanup_selected("origin/feature/remote-only"));
         assert!(!state.is_cleanup_selected("main"));
-        assert_eq!(state.cleanup_selection_count(), 2);
+        assert_eq!(state.cleanup_selection_count(), 4);
     }
 
     #[test]
@@ -2469,7 +3045,10 @@ mod tests {
             "feature/foo",
             MergeState::Cleanable(gwt_git::MergeTarget::Main),
         );
-        assert!(state.toggle_cleanup_selection("feature/foo"));
+        assert_eq!(
+            state.toggle_cleanup_selection("feature/foo"),
+            CleanupSelectionToggle::Selected
+        );
 
         // Simulate the view-mode toggle and sort cycle paths.
         update(&mut state, BranchesMessage::ToggleView);

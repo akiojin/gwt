@@ -6,7 +6,7 @@
 //! `pull`-like commands.
 //!
 //! Filesystem layout (rooted at a configurable directory, typically
-//! `~/.gwt/cache/issues/`):
+//! `~/.gwt/cache/issues/<repo-hash>/`):
 //!
 //! ```text
 //! <root>/
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::body::{ParseError, SpecBody};
+use crate::body::{ParseError, SpecBody, SpecMeta};
 use crate::client::{
     CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
 };
@@ -140,16 +140,26 @@ impl Cache {
                 body: c.body.clone(),
             })
             .collect();
-        let spec_body = SpecBody::parse(&snapshot.body, &parsed_comments)?;
-
-        let mut desired_sections: HashSet<String> = HashSet::new();
-        for (name, content) in spec_body.sections.iter() {
-            let filename = section_filename(name);
-            let path = sections_dir.join(&filename);
-            write_atomic(&path, content.as_bytes())?;
-            desired_sections.insert(filename);
+        match SpecBody::parse(&snapshot.body, &parsed_comments) {
+            Ok(spec_body) => {
+                let mut desired_sections: HashSet<String> = HashSet::new();
+                for (name, content) in spec_body.sections.iter() {
+                    let filename = section_filename(name);
+                    let path = sections_dir.join(&filename);
+                    write_atomic(&path, content.as_bytes())?;
+                    desired_sections.insert(filename);
+                }
+                prune_unlisted_files(&sections_dir, &desired_sections)?;
+            }
+            Err(ParseError::MissingHeader) => {
+                // Plain GitHub Issues share the same cache root as SPEC Issues
+                // but do not carry gwt-spec section markers. For those entries
+                // we still cache body/meta/comments and simply omit `sections/`.
+                let desired_sections: HashSet<String> = HashSet::new();
+                prune_unlisted_files(&sections_dir, &desired_sections)?;
+            }
+            Err(err) => return Err(CacheError::Parse(err)),
         }
-        prune_unlisted_files(&sections_dir, &desired_sections)?;
 
         // Finally, write meta.json.
         let meta = CacheMeta::from_snapshot(snapshot);
@@ -210,11 +220,48 @@ impl Cache {
                 body: c.body.clone(),
             })
             .collect();
-        let spec_body = SpecBody::parse(&snapshot.body, &parsed_comments).ok()?;
+        let spec_body = match SpecBody::parse(&snapshot.body, &parsed_comments) {
+            Ok(spec_body) => spec_body,
+            Err(ParseError::MissingHeader) => SpecBody {
+                meta: SpecMeta {
+                    id: meta.number.to_string(),
+                    version: 1,
+                },
+                sections_index: crate::body::SectionsIndex::default(),
+                sections: std::collections::BTreeMap::new(),
+            },
+            Err(_) => return None,
+        };
         Some(CacheEntry {
             snapshot,
             spec_body,
         })
+    }
+
+    /// List every readable cache entry stored under the cache root.
+    ///
+    /// Non-directory entries, non-numeric directory names, and partially
+    /// unreadable cache entries are skipped so UI consumers can stay on the
+    /// typed cache surface rather than reimplementing the on-disk layout.
+    pub fn list_entries(&self) -> Result<Vec<CacheEntry>, CacheError> {
+        let entries = fs::read_dir(&self.root)?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Ok(number) = name.parse::<u64>() else {
+                continue;
+            };
+            if let Some(cache_entry) = self.load_entry(IssueNumber(number)) {
+                out.push(cache_entry);
+            }
+        }
+        Ok(out)
     }
 
     /// Read a single section by name. Returns `Ok(None)` if the section is

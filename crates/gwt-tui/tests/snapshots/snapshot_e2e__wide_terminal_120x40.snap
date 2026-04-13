@@ -1,33 +1,32 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 489
 expression: output
 ---
-┌ Branches │ Issues │ PRs │...─────────────────┐┌ › Shell ─────────────────────────────────────────────────────────────┐
-│ View: Local │ Sort: Default                  ││Session: Shell (80x24)                                                │
-│No branches loaded                            ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-└──────────────────────────────────────────────┘│                                                                      │
-┌ Overview │ Git │ Sessions  · No branch select┐│                                                                      │
+╔ Branches │ Issues │ PRs │...═════════════════╗╭ › Shell ─────────────────────────────────────────────────────────────╮
+║ View: Local │ Sort: Default                  ║│Session: Shell (80x24)                                                │
+║No branches loaded                            ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+║                                              ║│                                                                      │
+╚══════════════════════════════════════════════╝│                                                                      │
+╭ Overview │ Git │ Sessions  · No branch select╮│                                                                      │
 │ No branch selected                           ││                                                                      │
 │                                              ││                                                                      │
 │ Docker status                                ││                                                                      │
-│ No containers found                          ││                                                                      │
+│ No Docker services found                     ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
@@ -41,5 +40,5 @@ expression: output
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
-└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
- ▣ Shell  │  ⎇ n/a  │  type: Shell  │  [Mgmt]  │  /tmp/test-repo  │  ↑↓:move  ←→:tab  Enter:wizard  Space:select  Shift+
+╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────╯
+ ▣ Shell  │  ⎇ n/a  │  profile: default  │  type: Shell  │  [Mgmt]  │  ↑↓:move  ←→:tab  Enter:wizard  Space:select  Shif

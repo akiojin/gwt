@@ -43,6 +43,7 @@ impl Pane {
             cols,
             rows,
             env,
+            remove_env: Vec::new(),
             cwd,
         };
         let pty = PtyHandle::spawn(config)?;
@@ -159,11 +160,12 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::read_with_timeout;
+    use crate::test_util::{lock_pty_test, read_with_timeout};
     use std::time::Duration;
 
     #[test]
     fn test_pane_creation() {
+        let _pty_guard = lock_pty_test();
         let pane = Pane::new(
             "test-1".to_string(),
             "/bin/echo".to_string(),
@@ -182,6 +184,7 @@ mod tests {
 
     #[test]
     fn test_process_bytes_updates_screen() {
+        let _pty_guard = lock_pty_test();
         let mut pane = Pane::new(
             "test-2".to_string(),
             "/bin/sleep".to_string(),
@@ -208,6 +211,7 @@ mod tests {
 
     #[test]
     fn test_pane_read_output_through_vt100() {
+        let _pty_guard = lock_pty_test();
         let pane = Pane::new(
             "test-3".to_string(),
             "/bin/echo".to_string(),
@@ -230,6 +234,7 @@ mod tests {
 
     #[test]
     fn test_pane_write_input() {
+        let _pty_guard = lock_pty_test();
         let pane = Pane::new(
             "test-4".to_string(),
             "/bin/cat".to_string(),
@@ -253,7 +258,8 @@ mod tests {
 
     #[test]
     fn test_pane_resize() {
-        let pane = Pane::new(
+        let _pty_guard = lock_pty_test();
+        let mut pane = Pane::new(
             "test-5".to_string(),
             "/bin/sleep".to_string(),
             vec!["60".to_string()],
@@ -261,13 +267,8 @@ mod tests {
             24,
             HashMap::new(),
             None,
-        );
-
-        // PTY resources may be exhausted from parallel tests; skip if so
-        let mut pane = match pane {
-            Ok(p) => p,
-            Err(_) => return,
-        };
+        )
+        .expect("Pane creation failed");
 
         pane.resize(120, 48).expect("resize should succeed");
 
@@ -280,6 +281,7 @@ mod tests {
 
     #[test]
     fn test_pane_check_status_completed() {
+        let _pty_guard = lock_pty_test();
         let mut pane = Pane::new(
             "test-6".to_string(),
             "/usr/bin/true".to_string(),
@@ -310,6 +312,7 @@ mod tests {
 
     #[test]
     fn test_pane_mark_error() {
+        let _pty_guard = lock_pty_test();
         let mut pane = Pane::new(
             "test-7".to_string(),
             "/bin/sleep".to_string(),
@@ -329,6 +332,7 @@ mod tests {
 
     #[test]
     fn test_pane_kill() {
+        let _pty_guard = lock_pty_test();
         let pane = Pane::new(
             "test-8".to_string(),
             "/bin/sleep".to_string(),

@@ -17,20 +17,8 @@ fn hook_kind_from_name_covers_every_documented_hook() {
         Some(HookKind::BlockBashPolicy)
     );
     assert_eq!(
-        HookKind::from_name("block-git-branch-ops"),
-        Some(HookKind::BlockGitBranchOps)
-    );
-    assert_eq!(
-        HookKind::from_name("block-cd-command"),
-        Some(HookKind::BlockCdCommand)
-    );
-    assert_eq!(
-        HookKind::from_name("block-file-ops"),
-        Some(HookKind::BlockFileOps)
-    );
-    assert_eq!(
-        HookKind::from_name("block-git-dir-override"),
-        Some(HookKind::BlockGitDirOverride)
+        HookKind::from_name("workflow-policy"),
+        Some(HookKind::WorkflowPolicy)
     );
     assert_eq!(HookKind::from_name("forward"), Some(HookKind::Forward));
 }

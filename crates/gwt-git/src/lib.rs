@@ -25,4 +25,4 @@ pub use repository::{
     clone_repo, detect_repo_type, initialize_workspace, install_develop_protection, RepoType,
     Repository,
 };
-pub use worktree::{sibling_worktree_path, WorktreeInfo, WorktreeManager};
+pub use worktree::{sibling_worktree_path, RemoteDeleteOutcome, WorktreeInfo, WorktreeManager};

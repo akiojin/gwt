@@ -15,7 +15,9 @@ use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
+use crate::discussion_resume::ResumePromptSessionState;
 use crate::input::voice::VoiceInputState;
+use crate::screens::board::BoardState;
 use crate::screens::branches::{BranchDetailLoadResult, BranchesState};
 use crate::screens::confirm::ConfirmState;
 use crate::screens::docker_progress::DockerProgressState;
@@ -181,6 +183,24 @@ impl FocusPane {
     }
 }
 
+/// Active profile summary shown in the footer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveProfileSummary {
+    /// Resolved active profile name.
+    pub name: String,
+    /// Whether resolution fell back to `default`.
+    pub fallback: bool,
+}
+
+impl Default for ActiveProfileSummary {
+    fn default() -> Self {
+        Self {
+            name: "default".to_string(),
+            fallback: false,
+        }
+    }
+}
+
 /// Session layout mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLayout {
@@ -196,7 +216,9 @@ pub enum ManagementTab {
     Branches,
     Issues,
     PrDashboard,
-    /// SPEC-12 Phase 9: dedicated Specs tab backed by `~/.gwt/cache/issues/`.
+    Board,
+    /// SPEC-12 Phase 9: dedicated Specs tab backed by the repo-scoped issue
+    /// cache under `~/.gwt/cache/issues/<repo-hash>/`.
     /// Displayed as a top-level peer of Branches/Issues/PRs now that SPECs
     /// live as GitHub Issues rather than worktree-local files.
     Specs,
@@ -209,10 +231,11 @@ pub enum ManagementTab {
 
 impl ManagementTab {
     /// All tabs in display order.
-    pub const ALL: [ManagementTab; 9] = [
+    pub const ALL: [ManagementTab; 10] = [
         ManagementTab::Branches,
         ManagementTab::Issues,
         ManagementTab::PrDashboard,
+        ManagementTab::Board,
         ManagementTab::Specs,
         ManagementTab::Profiles,
         ManagementTab::GitView,
@@ -227,6 +250,7 @@ impl ManagementTab {
             Self::Branches => "Branches",
             Self::Issues => "Issues",
             Self::PrDashboard => "PRs",
+            Self::Board => "Board",
             Self::Specs => "Specs",
             Self::Profiles => "Profiles",
             Self::GitView => "Git View",
@@ -307,8 +331,8 @@ pub struct PendingSessionConversion {
     pub target_display_name: String,
 }
 
-/// Shared queue of terminal Docker lifecycle results produced in the background.
-pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressResult>>>;
+/// Shared queue of terminal Docker progress events produced in the background.
+pub type DockerProgressQueue = Arc<Mutex<VecDeque<DockerProgressEvent>>>;
 
 /// Per-branch event emitted by the Branch Cleanup runner background job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +379,7 @@ pub type BranchDetailQueue = Arc<Mutex<VecDeque<BranchDetailLoadResult>>>;
 
 #[cfg(test)]
 pub(crate) type BranchDetailDockerSnapshotter =
-    Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>;
+    Arc<dyn Fn() -> Vec<crate::screens::branches::DockerServiceInfo> + Send + Sync>;
 
 /// Tracked branch-detail preload worker state.
 pub(crate) struct BranchDetailWorker {
@@ -446,11 +470,30 @@ impl std::fmt::Debug for BranchDetailWorker {
     }
 }
 
-/// Result sent from the background Docker lifecycle worker back into the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DockerProgressResult {
-    Completed { message: String },
-    Failed { message: String, detail: String },
+/// Event sent from a background Docker worker back into the TUI.
+#[derive(Debug, Clone)]
+pub enum DockerProgressEvent {
+    Stage {
+        stage: crate::screens::docker_progress::DockerStage,
+        message: String,
+    },
+    Log {
+        entry: Notification,
+    },
+    BranchCompleted {
+        message: String,
+    },
+    BranchFailed {
+        message: String,
+        detail: String,
+    },
+    LaunchReady {
+        config: Box<gwt_agent::LaunchConfig>,
+    },
+    LaunchFailed {
+        message: String,
+        detail: String,
+    },
 }
 
 /// A terminal cell position within the currently visible viewport.
@@ -1806,10 +1849,14 @@ pub struct Model {
     pub quit: bool,
     /// Repository path.
     pub(crate) repo_path: PathBuf,
+    /// Resolved active profile summary for UI/runtime helpers.
+    pub(crate) active_profile: ActiveProfileSummary,
     /// Terminal size.
     pub(crate) terminal_size: (u16, u16),
     /// Branches screen state.
     pub(crate) branches: BranchesState,
+    /// Shared Board screen state.
+    pub(crate) board: BoardState,
     /// Profiles screen state.
     pub(crate) profiles: ProfilesState,
     /// Issues screen state.
@@ -1839,6 +1886,8 @@ pub struct Model {
     pub(crate) branch_detail_docker_snapshotter: Option<BranchDetailDockerSnapshotter>,
     /// Service selection overlay state.
     pub(crate) service_select: Option<ServiceSelectState>,
+    /// Discussion resume proposal overlay.
+    pub(crate) discussion_resume: Option<crate::screens::discussion_resume::DiscussionResumeState>,
     /// Port conflict resolution overlay state.
     pub(crate) port_select: Option<PortSelectState>,
     /// Confirmation dialog state.
@@ -1853,6 +1902,8 @@ pub struct Model {
     pub(crate) merge_state_events: Option<MergeStateChannel>,
     /// Pending session conversion awaiting confirmation.
     pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
+    /// Per-session state machine for unfinished discussion resume prompts.
+    pub(crate) discussion_resume_sessions: HashMap<String, ResumePromptSessionState>,
     /// Launch config built from completed wizard, ready for PTY spawn.
     pub(crate) pending_launch_config: Option<gwt_agent::LaunchConfig>,
     /// Voice input state.
@@ -1874,6 +1925,10 @@ pub struct Model {
     /// (most unit tests).
     pub(crate) logs_watcher_rx:
         Option<std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>>,
+    /// Receiver for Board tab coordination snapshots produced by the
+    /// background repo-local projection watcher.
+    pub(crate) board_watcher_rx:
+        Option<std::sync::mpsc::Receiver<crate::board_watcher::BoardWatcherPacket>>,
     /// Receiver for `tracing::warn!` / `tracing::error!` / `tracing::info!`
     /// events that should surface as toasts or error modal entries.
     /// Fed by a bridge thread that drains the tokio
@@ -1902,6 +1957,7 @@ impl std::fmt::Debug for Model {
                 "terminal_trackpad_scroll_row",
                 &self.terminal_trackpad_scroll_row,
             )
+            .field("active_profile", &self.active_profile)
             .field("repo_path", &self.repo_path)
             .finish()
     }
@@ -1910,6 +1966,8 @@ impl std::fmt::Debug for Model {
 impl Model {
     /// Create a new Model with sensible defaults.
     pub fn new(repo_path: PathBuf) -> Self {
+        let specs_cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo_path);
         let default_session = SessionTab {
             id: "shell-0".to_string(),
             name: "Shell".to_string(),
@@ -1935,8 +1993,10 @@ impl Model {
             error_queue: VecDeque::new(),
             quit: false,
             repo_path,
+            active_profile: ActiveProfileSummary::default(),
             terminal_size: (80, 24),
             branches: BranchesState::default(),
+            board: BoardState::default(),
             profiles: ProfilesState::default(),
             issues: IssuesState::default(),
             git_view: GitViewState::default(),
@@ -1945,12 +2005,15 @@ impl Model {
             logs: LogsState::default(),
             versions: VersionsState::default(),
             specs: {
-                let cache_root = dirs::home_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join(".gwt")
-                    .join("cache")
-                    .join("issues");
-                crate::screens::specs::SpecsState::new(cache_root)
+                let mut specs = crate::screens::specs::SpecsState::new(specs_cache_root);
+                // Silently attempt to load cached SPECs. If the cache
+                // directory doesn't exist yet (first startup before any
+                // `gwt issue spec pull`), we leave the list empty rather
+                // than setting last_error — an error message on a fresh
+                // install is confusing.
+                specs.reload_from_cache();
+                specs.last_error = None;
+                specs
             },
             wizard: None,
             docker_progress: None,
@@ -1959,6 +2022,7 @@ impl Model {
             #[cfg(test)]
             branch_detail_docker_snapshotter: None,
             service_select: None,
+            discussion_resume: None,
             port_select: None,
             confirm: ConfirmState::default(),
             cleanup_confirm: crate::screens::cleanup_confirm::CleanupConfirmState::default(),
@@ -1966,6 +2030,7 @@ impl Model {
             cleanup_events: None,
             merge_state_events: None,
             pending_session_conversion: None,
+            discussion_resume_sessions: HashMap::new(),
             pending_launch_config: None,
             voice: VoiceInputState::default(),
             voice_runtime: VoiceRuntimeState::default(),
@@ -1975,6 +2040,7 @@ impl Model {
             pty_output_tx,
             pty_output_rx,
             logs_watcher_rx: None,
+            board_watcher_rx: None,
             ui_log_rx: None,
             log_reload_handle: None,
             initialization: None,
@@ -1988,6 +2054,15 @@ impl Model {
         rx: std::sync::mpsc::Receiver<crate::logs_watcher::LogsWatcherPacket>,
     ) {
         self.logs_watcher_rx = Some(rx);
+    }
+
+    /// Attach a board-watcher receiver produced by
+    /// [`crate::board_watcher::spawn`].
+    pub fn set_board_watcher_rx(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<crate::board_watcher::BoardWatcherPacket>,
+    ) {
+        self.board_watcher_rx = Some(rx);
     }
 
     /// Attach a UI log event receiver (SPEC-6 FR-015).
@@ -2049,6 +2124,25 @@ impl Model {
         total
     }
 
+    /// Drain pending board-watcher packets into `BoardState`.
+    pub(crate) fn drain_board_watcher(&mut self) -> usize {
+        use crate::board_watcher::BoardWatcherPacket;
+        use crate::screens::board::{update as board_update, BoardMessage};
+        let Some(rx) = self.board_watcher_rx.as_ref() else {
+            return 0;
+        };
+        let mut total = 0usize;
+        while let Ok(packet) = rx.try_recv() {
+            match packet {
+                BoardWatcherPacket::SetSnapshot(snapshot) => {
+                    total += snapshot.board.entries.len() + snapshot.cards.cards.len();
+                    board_update(&mut self.board, BoardMessage::SetSnapshot(snapshot));
+                }
+            }
+        }
+        total
+    }
+
     /// Create a new Model in Initialization layer (no repo detected).
     pub fn new_initialization(repo_path: PathBuf, bare_migration: bool) -> Self {
         let mut model = Self::new(repo_path);
@@ -2078,7 +2172,7 @@ impl Model {
     #[cfg(test)]
     pub(crate) fn set_branch_detail_docker_snapshotter<F>(&mut self, snapshotter: F)
     where
-        F: Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync + 'static,
+        F: Fn() -> Vec<crate::screens::branches::DockerServiceInfo> + Send + Sync + 'static,
     {
         self.branch_detail_docker_snapshotter = Some(Arc::new(snapshotter));
     }
@@ -2374,7 +2468,7 @@ mod tests {
                 .map(|tab| tab.label())
                 .collect::<Vec<_>>(),
             vec![
-                "Branches", "Issues", "PRs", "Specs", "Profiles", "Git View", "Versions",
+                "Branches", "Issues", "PRs", "Board", "Specs", "Profiles", "Git View", "Versions",
                 "Settings", "Logs",
             ]
         );
@@ -2383,9 +2477,41 @@ mod tests {
     }
 
     #[test]
-    fn management_tab_all_has_nine_entries() {
-        // SPEC-12 Phase 9: Specs tab raises the count from 8 to 9.
-        assert_eq!(ManagementTab::ALL.len(), 9);
+    fn management_tab_all_has_ten_entries() {
+        assert_eq!(ManagementTab::ALL.len(), 10);
+    }
+
+    #[test]
+    fn drain_board_watcher_applies_snapshot_packets() {
+        let mut model = Model::new(PathBuf::from("/tmp/repo"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.set_board_watcher_rx(rx);
+
+        tx.send(crate::board_watcher::BoardWatcherPacket::SetSnapshot(
+            gwt_core::coordination::CoordinationSnapshot {
+                board: gwt_core::coordination::BoardProjection {
+                    entries: vec![gwt_core::coordination::BoardEntry::new(
+                        gwt_core::coordination::AuthorKind::User,
+                        "user",
+                        gwt_core::coordination::BoardEntryKind::Request,
+                        "Need a board",
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    updated_at: chrono::Utc::now(),
+                },
+                cards: gwt_core::coordination::AgentCardsProjection::default(),
+            },
+        ))
+        .unwrap();
+
+        let drained = model.drain_board_watcher();
+
+        assert_eq!(drained, 1);
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "Need a board");
     }
 
     #[test]

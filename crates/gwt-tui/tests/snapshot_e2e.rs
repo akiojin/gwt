@@ -4,10 +4,12 @@
 //! Each test renders a screen to a fixed-size buffer and compares
 //! against a stored snapshot (.snap file).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use gwt_config::Settings;
 use gwt_core::logging::LogLevel as Severity;
 use gwt_tui::app;
 use gwt_tui::input::keybind::KeybindRegistry;
@@ -17,10 +19,69 @@ use gwt_tui::screens::branches::{BranchCategory, BranchItem, BranchesMessage};
 use gwt_tui::screens::logs::{LogEntry, LogsMessage};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use tempfile::TempDir;
 
 fn test_model() -> Model {
     std::env::set_var("GWT_TUI_DISABLE_GLOBAL_CUSTOM_AGENTS", "1");
     Model::new(PathBuf::from("/tmp/test-repo"))
+}
+
+struct HomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _home: TempDir,
+}
+
+impl HomeEnvGuard {
+    fn new() -> Self {
+        let previous = std::env::var_os("HOME");
+        let home = tempfile::tempdir().expect("temp home dir");
+        std::env::set_var("HOME", home.path());
+        Self {
+            previous,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+}
+
+struct TestEnvGuard {
+    previous: Vec<(String, Option<std::ffi::OsString>)>,
+}
+
+impl TestEnvGuard {
+    fn new<const N: usize>(entries: [(&str, &str); N]) -> Self {
+        let previous = entries
+            .iter()
+            .map(|(key, value)| {
+                let key = (*key).to_string();
+                let previous = std::env::var_os(&key);
+                std::env::set_var(&key, value);
+                (key, previous)
+            })
+            .collect();
+        Self { previous }
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        for (key, previous) in self.previous.drain(..) {
+            if let Some(previous) = previous {
+                std::env::set_var(&key, previous);
+            } else {
+                std::env::remove_var(&key);
+            }
+        }
+    }
 }
 
 /// Create a KeyEvent (Press only, matching the event.rs filter).
@@ -115,6 +176,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: true,
             category: BranchCategory::Main,
             worktree_path: None,
+            upstream: None,
         },
         BranchItem {
             name: "feature/api".to_string(),
@@ -122,6 +184,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         },
         BranchItem {
             name: "feature/app-shell".to_string(),
@@ -129,6 +192,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         },
         BranchItem {
             name: "origin/release/1.0".to_string(),
@@ -136,6 +200,7 @@ fn sample_branches() -> Vec<BranchItem> {
             is_local: false,
             category: BranchCategory::Other,
             worktree_path: None,
+            upstream: None,
         },
     ]
 }
@@ -326,9 +391,66 @@ fn snapshot_pr_dashboard_tab() {
 
 #[test]
 fn snapshot_profiles_tab() {
+    let home = HomeEnvGuard::new();
+    let config_dir = home._home.path().join(".gwt");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let mut settings = Settings::default();
+    let default = settings
+        .profiles
+        .active_profile_mut()
+        .expect("default profile exists");
+    default.env_vars = HashMap::from([
+        ("A10_OVERRIDE".to_string(), "override-a".to_string()),
+        ("A11_OVERRIDE".to_string(), "override-b".to_string()),
+        ("A12_OVERRIDE".to_string(), "override-c".to_string()),
+        ("A13_OVERRIDE".to_string(), "override-d".to_string()),
+        ("A14_OVERRIDE".to_string(), "override-e".to_string()),
+        ("A15_OVERRIDE".to_string(), "override-f".to_string()),
+        ("A16_OVERRIDE".to_string(), "override-g".to_string()),
+        ("A17_OVERRIDE".to_string(), "override-h".to_string()),
+    ]);
+    default.disabled_env = vec![
+        "A20_DISABLED".to_string(),
+        "A21_DISABLED".to_string(),
+        "A22_DISABLED".to_string(),
+        "A23_DISABLED".to_string(),
+        "A24_DISABLED".to_string(),
+        "A25_DISABLED".to_string(),
+        "A26_DISABLED".to_string(),
+        "A27_DISABLED".to_string(),
+    ];
+    settings
+        .save(&config_dir.join("config.toml"))
+        .expect("save settings");
+
+    let _env = TestEnvGuard::new([
+        ("A00_BASE", "/usr/bin"),
+        ("A01_BASE", "/bin"),
+        ("A02_BASE", "/opt/bin"),
+        ("A03_BASE", "/usr/local/bin"),
+        ("A04_BASE", "/sbin"),
+        ("A05_BASE", "/usr/sbin"),
+        ("A06_BASE", "/opt/homebrew/bin"),
+        ("A07_BASE", "/tmp/bin"),
+        ("A08_BASE", "/var/tmp/bin"),
+        ("A09_BASE", "/custom/bin"),
+        ("A20_DISABLED", "hidden-a"),
+        ("A21_DISABLED", "hidden-b"),
+        ("A22_DISABLED", "hidden-c"),
+        ("A23_DISABLED", "hidden-d"),
+        ("A24_DISABLED", "hidden-e"),
+        ("A25_DISABLED", "hidden-f"),
+        ("A26_DISABLED", "hidden-g"),
+        ("A27_DISABLED", "hidden-h"),
+    ]);
+
     let mut model = test_model();
-    model.active_layer = ActiveLayer::Management;
-    model.management_tab = ManagementTab::Profiles;
+    app::update(
+        &mut model,
+        Message::SwitchManagementTab(ManagementTab::Profiles),
+    );
+    model.active_focus = FocusPane::TabContent;
     let output = render_to_string(&model, 80, 24);
     insta::assert_snapshot!("profiles_tab", output);
 }
@@ -602,7 +724,7 @@ fn e2e_ctrl_g_q_quits() {
 }
 
 #[test]
-fn e2e_management_tab_switch_via_ctrl_g_s_preserves_terminal_focus() {
+fn e2e_management_tab_switch_via_ctrl_g_s_focuses_management_content() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     model.active_layer = ActiveLayer::Main;
@@ -613,11 +735,11 @@ fn e2e_management_tab_switch_via_ctrl_g_s_preserves_terminal_focus() {
 
     assert_eq!(model.management_tab, ManagementTab::Settings);
     assert_eq!(model.active_layer, ActiveLayer::Management);
-    assert_eq!(model.active_focus, FocusPane::Terminal);
+    assert_eq!(model.active_focus, FocusPane::TabContent);
 }
 
 #[test]
-fn e2e_management_tab_switch_via_ctrl_g_i_preserves_terminal_focus() {
+fn e2e_management_tab_switch_via_ctrl_g_i_focuses_management_content() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     model.active_layer = ActiveLayer::Main;
@@ -627,11 +749,11 @@ fn e2e_management_tab_switch_via_ctrl_g_i_preserves_terminal_focus() {
     send_key(&mut model, &mut kb, press(KeyCode::Char('i')));
 
     assert_eq!(model.management_tab, ManagementTab::Issues);
-    assert_eq!(model.active_focus, FocusPane::Terminal);
+    assert_eq!(model.active_focus, FocusPane::TabContent);
 }
 
 #[test]
-fn e2e_ctrl_g_b_opens_branches_without_stealing_terminal_focus() {
+fn e2e_ctrl_g_b_opens_branches_and_focuses_management_content() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     model.management_tab = ManagementTab::Issues;
@@ -641,7 +763,7 @@ fn e2e_ctrl_g_b_opens_branches_without_stealing_terminal_focus() {
     send_key(&mut model, &mut kb, press(KeyCode::Char('b')));
 
     assert_eq!(model.management_tab, ManagementTab::Branches);
-    assert_eq!(model.active_focus, FocusPane::Terminal);
+    assert_eq!(model.active_focus, FocusPane::TabContent);
 }
 
 #[test]
@@ -862,20 +984,22 @@ fn e2e_shift_enter_on_branch_opens_shell_session() {
 }
 
 #[test]
-fn e2e_space_on_branch_moves_focus_to_detail_without_opening_wizard() {
+fn e2e_space_on_protected_branch_keeps_focus_without_opening_wizard() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     app::update(
         &mut model,
         Message::Branches(BranchesMessage::SetBranches(sample_branches())),
     );
+    send_key(&mut model, &mut kb, press(KeyCode::Up));
+    send_key(&mut model, &mut kb, press(KeyCode::Up));
 
     assert!(!model.has_wizard());
     assert_eq!(model.active_focus, FocusPane::TabContent);
 
     send_key(&mut model, &mut kb, press(KeyCode::Char(' ')));
 
-    assert_eq!(model.active_focus, FocusPane::BranchDetail);
+    assert_eq!(model.active_focus, FocusPane::TabContent);
     assert!(!model.has_wizard());
 }
 

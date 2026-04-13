@@ -83,7 +83,6 @@ SKIP_ROOT_DIRECTORIES = {
     ".claude",
     ".codex",
     "specs",
-    "specs-archive",
     "tasks",
 }
 
@@ -1657,6 +1656,50 @@ def _parse_iso(value: str) -> Optional[datetime.datetime]:
         return None
 
 
+def _issue_cache_root(repo_hash: str) -> Path:
+    return Path.home() / ".gwt" / "cache" / "issues" / repo_hash
+
+
+def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
+    root = _issue_cache_root(repo_hash)
+    if not root.is_dir():
+        return []
+
+    issues: List[Dict[str, Any]] = []
+    for entry in sorted(root.iterdir(), key=lambda item: item.name):
+        if not entry.is_dir():
+            continue
+        try:
+            number = int(entry.name)
+        except ValueError:
+            continue
+        meta_path = entry / "meta.json"
+        body_path = entry / "body.md"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError, ValueError):
+            continue
+        try:
+            body = body_path.read_text() if body_path.is_file() else ""
+        except OSError:
+            body = ""
+        labels = meta.get("labels", [])
+        if isinstance(labels, str):
+            labels = [labels]
+        issues.append(
+            {
+                "number": number,
+                "title": meta.get("title", ""),
+                "body": body[:2000],
+                "state": meta.get("state", ""),
+                "labels": [label for label in labels if isinstance(label, str)],
+            }
+        )
+    return issues
+
+
 def action_index_issues_v2(
     repo_hash: str,
     project_root: str,
@@ -1699,32 +1742,7 @@ def action_index_issues_v2(
     )
 
     with acquire_lock(db_path, exclusive=True):
-        try:
-            result = subprocess.run(
-                [
-                    "gh", "issue", "list",
-                    "--state", "all",
-                    "--limit", "200",
-                    "--json", "number,title,body,labels,state,url",
-                ],
-                cwd=str(Path(project_root).resolve()),
-                capture_output=True,
-                encoding="utf-8",
-                check=True,
-            )
-            issues = json.loads(result.stdout) if result.stdout else []
-        except subprocess.CalledProcessError as exc:
-            return {
-                "ok": False,
-                "error_code": "RUNTIME_ERROR",
-                "error": f"gh issue list failed: {(exc.stderr or '').strip()}",
-            }
-        except (json.JSONDecodeError, ValueError) as exc:
-            return {
-                "ok": False,
-                "error_code": "RUNTIME_ERROR",
-                "error": f"Failed to parse gh output: {exc}",
-            }
+        issues = _load_cached_issue_documents(repo_hash)
 
         client, collection = _make_chroma_collection(db_path, V2_ISSUES_COLLECTION)
         try:
@@ -1741,17 +1759,16 @@ def action_index_issues_v2(
             for issue in issues:
                 number = issue.get("number", 0)
                 title = issue.get("title", "")
-                body = (issue.get("body") or "")[:2000]
+                body = issue.get("body", "")
                 state = issue.get("state", "")
-                url = issue.get("url", "")
-                labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
+                labels = issue.get("labels", [])
                 ids.append(str(number))
                 documents.append(f"{title}\n{body}")
                 metadatas.append(
                     {
                         "number": number,
                         "title": title,
-                        "url": url,
+                        "url": "",
                         "state": state,
                         "labels": ",".join(labels),
                     }

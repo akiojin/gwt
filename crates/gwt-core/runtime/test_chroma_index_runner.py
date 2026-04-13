@@ -15,7 +15,7 @@ class ChromaIndexRunnerTests(unittest.TestCase):
         self.assertEqual(runner.classify_file_bucket('.claude/skills/gwt-search/SKILL.md'), 'skip')
         self.assertEqual(runner.classify_file_bucket('.codex/skills/gwt-search/SKILL.md'), 'skip')
         self.assertEqual(runner.classify_file_bucket('specs/SPEC-9/spec.md'), 'skip')
-        self.assertEqual(runner.classify_file_bucket('specs-archive/SPEC-9/spec.md'), 'skip')
+        self.assertEqual(runner.classify_file_bucket('specs-archive/SPEC-9/spec.md'), 'docs')
         self.assertEqual(runner.classify_file_bucket('crates/gwt-tui/tests/snapshots/view.snap'), 'skip')
 
     def test_index_files_writes_code_and_docs_collections_without_embedded_assets(self):

@@ -24,6 +24,8 @@ pub struct SpawnConfig {
     pub rows: u16,
     /// Environment variables to set.
     pub env: HashMap<String, String>,
+    /// Inherited environment variable names to remove before applying `env`.
+    pub remove_env: Vec<String>,
     /// Working directory.
     pub cwd: Option<PathBuf>,
 }
@@ -57,6 +59,9 @@ impl PtyHandle {
         cmd.args(&config.args);
         if let Some(ref cwd) = config.cwd {
             cmd.cwd(cwd);
+        }
+        for key in &config.remove_env {
+            cmd.env_remove(key);
         }
         for (key, value) in &config.env {
             cmd.env(key, value);
@@ -156,7 +161,7 @@ impl PtyHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::read_with_timeout;
+    use crate::test_util::{lock_pty_test, read_with_timeout};
     use std::time::Duration;
 
     fn echo_config(msg: &str) -> SpawnConfig {
@@ -166,6 +171,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         }
     }
@@ -177,12 +183,14 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         }
     }
 
     #[test]
     fn test_spawn_and_read_output() {
+        let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(echo_config("hello")).expect("spawn failed");
         let reader = handle.reader().expect("reader failed");
         let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
@@ -192,12 +200,14 @@ mod tests {
 
     #[test]
     fn test_write_input() {
+        let _pty_guard = lock_pty_test();
         let config = SpawnConfig {
             command: "/bin/cat".to_string(),
             args: vec![],
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
@@ -213,12 +223,14 @@ mod tests {
 
     #[test]
     fn test_resize() {
+        let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(sleep_config("1")).expect("spawn failed");
         handle.resize(120, 48).expect("resize should succeed");
     }
 
     #[test]
     fn test_kill() {
+        let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(sleep_config("60")).expect("spawn failed");
         handle.kill().expect("kill should succeed");
 
@@ -235,6 +247,7 @@ mod tests {
 
     #[test]
     fn test_try_wait_running() {
+        let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(sleep_config("60")).expect("spawn failed");
         let result = handle.try_wait().expect("try_wait failed");
         assert!(result.is_none(), "Process should still be running");
@@ -243,6 +256,7 @@ mod tests {
 
     #[test]
     fn test_try_wait_completed() {
+        let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(echo_config("done")).expect("spawn failed");
         let mut exited = false;
         for _ in 0..50 {
@@ -258,6 +272,7 @@ mod tests {
 
     #[test]
     fn test_spawn_with_env() {
+        let _pty_guard = lock_pty_test();
         let mut env = HashMap::new();
         env.insert("GWT_TEST_VAR".to_string(), "test_value".to_string());
         let config = SpawnConfig {
@@ -266,6 +281,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env,
+            remove_env: Vec::new(),
             cwd: None,
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
@@ -280,6 +296,7 @@ mod tests {
 
     #[test]
     fn test_spawn_with_cwd() {
+        let _pty_guard = lock_pty_test();
         let temp = std::env::temp_dir();
         let config = SpawnConfig {
             command: "/bin/pwd".to_string(),
@@ -287,6 +304,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: Some(temp.clone()),
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
@@ -307,15 +325,45 @@ mod tests {
 
     #[test]
     fn test_spawn_invalid_command_fails() {
+        let _pty_guard = lock_pty_test();
         let config = SpawnConfig {
             command: "/nonexistent/binary".to_string(),
             args: vec![],
             cols: 80,
             rows: 24,
             env: HashMap::new(),
+            remove_env: Vec::new(),
             cwd: None,
         };
         let result = PtyHandle::spawn(config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spawn_with_removed_inherited_env() {
+        let _pty_guard = lock_pty_test();
+        let mut env = HashMap::new();
+        env.insert("GWT_REMOVE_CHECK".to_string(), "expected".to_string());
+        let config = SpawnConfig {
+            command: "/usr/bin/env".to_string(),
+            args: vec![],
+            cols: 80,
+            rows: 24,
+            env,
+            remove_env: vec!["HOME".to_string()],
+            cwd: None,
+        };
+        let handle = PtyHandle::spawn(config).expect("spawn failed");
+        let reader = handle.reader().expect("reader failed");
+        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains("GWT_REMOVE_CHECK=expected"),
+            "Expected env var in: {text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("HOME=")),
+            "Expected inherited HOME to be removed from: {text}"
+        );
     }
 }

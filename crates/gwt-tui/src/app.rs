@@ -1,8 +1,9 @@
 //! App — Update and View functions for the Elm Architecture.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
+use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -17,19 +18,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use chrono::{DateTime, Utc};
+#[cfg(test)]
+use gwt_agent::PendingDiscussionResume;
 use gwt_agent::{
     custom::CustomAgentType, persist_session_status, runtime_state_path, AgentDetector, AgentId,
-    AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig, Session as AgentSession,
-    SessionMode, SessionRuntimeState, VersionCache, GWT_SESSION_ID_ENV,
+    AgentLaunchBuilder, CustomCodingAgent, DetectedAgent, LaunchConfig, LaunchRuntimeTarget,
+    Session as AgentSession, SessionMode, SessionRuntimeState, VersionCache, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
 };
 use gwt_ai::{suggest_branch_name, AIClient};
-use gwt_config::{AISettings, Settings, VoiceConfig};
+use gwt_config::{AISettings, ConfigError, Settings, VoiceConfig};
 use gwt_core::logging::{LogEvent as Notification, LogLevel as Severity};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
-    distribute_to_worktree, generate_codex_hooks, generate_settings_local, prune_stale_gwt_assets,
-    update_git_exclude,
+    distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
+};
+use gwt_terminal::protocol::{
+    build_paste_input_bytes, key_event_to_bytes, screen_requests_bracketed_paste,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -38,6 +43,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
@@ -45,13 +51,14 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 
 use crate::{
     custom_agents::load_custom_agents,
+    discussion_resume::{build_resume_prompt, park_pending_resume},
     input::voice::VoiceInputMessage,
     input_trace,
-    message::Message,
+    message::{GridSessionDirection, Message},
     model::{
-        ActiveLayer, BranchDetailQueue, DockerProgressQueue, DockerProgressResult, FocusPane,
-        ManagementTab, Model, PendingSessionConversion, ScrollbackStrategy, SessionLayout,
-        SessionTabType, TerminalCell, TerminalSelection,
+        ActiveLayer, ActiveProfileSummary, BranchDetailQueue, DockerProgressEvent,
+        DockerProgressQueue, FocusPane, ManagementTab, Model, PendingSessionConversion,
+        ScrollbackStrategy, SessionLayout, SessionTabType, TerminalCell, TerminalSelection,
     },
     screens, theme,
 };
@@ -65,6 +72,17 @@ static STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT: AtomicBool = AtomicBool
 /// cannot monopolize the UI thread.
 const BRANCH_DETAIL_EVENTS_PER_TICK_BUDGET: usize = 8;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
+const MANAGED_BUNDLE_TRIGGER_ROOTS: &[&str] = &[
+    ".claude/skills",
+    ".claude/commands",
+    // Retired root kept here so startup refresh can still detect and prune
+    // stale Claude gwt hook scripts left by older worktrees.
+    ".claude/hooks/scripts",
+    ".codex/skills",
+    // Retired root kept here so startup refresh can still detect and prune
+    // stale Codex gwt hook scripts left by older worktrees.
+    ".codex/hooks/scripts",
+];
 
 // ---------------------------------------------------------------------------
 // PTY lifecycle helpers
@@ -165,25 +183,36 @@ pub fn session_content_size(model: &Model) -> (u16, u16) {
 }
 
 fn sync_session_viewports(model: &mut Model) {
-    let Some(content) = active_session_content_area(model) else {
+    let Some(session_area) = visible_session_area(model) else {
         return;
     };
-    let render_width = model
-        .active_session_tab()
-        .map(|session| session_text_area(session, content).width)
-        .unwrap_or(content.width);
 
-    for pty in model.pty_handles.values() {
-        let _ = pty.resize(render_width, content.height);
-    }
-    for session in &mut model.sessions {
+    for session_idx in 0..model.sessions.len() {
+        let Some(content) = session_content_area_for_index(model, session_area, session_idx) else {
+            continue;
+        };
+        let render_width = model
+            .sessions
+            .get(session_idx)
+            .map(|session| session_text_area(session, content).width)
+            .unwrap_or(content.width);
+
+        let session_id = model.sessions[session_idx].id.clone();
+        if let Some(pty) = model.pty_handles.get(&session_id) {
+            let _ = pty.resize(render_width, content.height);
+        }
+
+        let session = &mut model.sessions[session_idx];
         let current_scrollback = session.vt.scrollback();
         session.vt.resize(content.height, render_width);
         session
             .vt
             .set_scrollback(current_scrollback.min(session.vt.max_scrollback()));
     }
+
     if let Some(session) = model.active_session_tab() {
+        let content = active_session_content_area(model).unwrap_or(session_area);
+        let render_width = session_text_area(session, content).width;
         crate::scroll_debug::log_lazy(|| {
             format!(
             "event=viewport_sync session={} content_width={} content_height={} render_width={} vt_rows={} vt_cols={} scrollback={} max_scrollback={} follow_live={}",
@@ -674,6 +703,21 @@ fn check_pty_exits(model: &mut Model) {
     check_pty_exits_with(model, &gwt_sessions_dir());
 }
 
+fn focus_session_by_id(model: &mut Model, session_id: &str) -> bool {
+    if let Some(index) = model
+        .sessions
+        .iter()
+        .position(|session| session.id == session_id)
+    {
+        model.active_layer = ActiveLayer::Main;
+        model.active_session = index;
+        model.active_focus = FocusPane::Terminal;
+        true
+    } else {
+        false
+    }
+}
+
 fn check_pty_exits_with(model: &mut Model, sessions_dir: &Path) {
     let exited: Vec<String> = model
         .pty_handles
@@ -686,6 +730,7 @@ fn check_pty_exits_with(model: &mut Model, sessions_dir: &Path) {
 
     for id in exited {
         model.pty_handles.remove(&id);
+        clear_discussion_resume_state_for_session(model, &id);
         if let Some(index) = model.sessions.iter().position(|session| session.id == id) {
             if matches!(model.sessions[index].tab_type, SessionTabType::Agent { .. }) {
                 persist_agent_session_stopped(sessions_dir, &id);
@@ -720,16 +765,27 @@ fn persist_agent_session_stopped(sessions_dir: &Path, session_id: &str) {
     }
 }
 
-fn bootstrap_agent_session_running(sessions_dir: &Path, session_id: &str) {
+fn bootstrap_agent_session_waiting_input(sessions_dir: &Path, session_id: &str) {
     let runtime_path = runtime_state_path(sessions_dir, session_id);
     if runtime_path.exists() {
         return;
     }
 
-    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    let mut runtime = SessionRuntimeState::new(gwt_agent::AgentStatus::WaitingInput);
     runtime.source_event = Some("LaunchBootstrap".to_string());
     if let Err(err) = runtime.save(&runtime_path) {
-        tracing::warn!(session_id, error = %err, "failed to bootstrap running runtime state");
+        tracing::warn!(session_id, error = %err, "failed to bootstrap waiting runtime state");
+    }
+}
+
+fn clear_discussion_resume_state_for_session(model: &mut Model, session_id: &str) {
+    model.discussion_resume_sessions.remove(session_id);
+    if model
+        .discussion_resume
+        .as_ref()
+        .is_some_and(|state| state.session_id == session_id)
+    {
+        model.discussion_resume = None;
     }
 }
 
@@ -783,13 +839,114 @@ fn refresh_branch_live_session_summaries_with(model: &mut Model, sessions_dir: &
     model.branches.live_session_summaries = branch_live_session_summaries_with(model, sessions_dir);
 }
 
+fn overlay_blocks_discussion_resume(model: &Model) -> bool {
+    model.help_visible
+        || !model.error_queue.is_empty()
+        || model.wizard.is_some()
+        || model.service_select.is_some()
+        || model.port_select.is_some()
+        || model.confirm.visible
+        || model.cleanup_confirm.visible
+        || model.cleanup_progress.visible
+        || model
+            .docker_progress
+            .as_ref()
+            .is_some_and(|progress| progress.visible)
+}
+
+fn maybe_surface_pending_discussion_resume(model: &mut Model) {
+    maybe_surface_pending_discussion_resume_with(model, &gwt_sessions_dir());
+}
+
+fn maybe_surface_pending_discussion_resume_with(model: &mut Model, sessions_dir: &Path) {
+    let Some(session_id) = model
+        .active_session_tab()
+        .and_then(|session| match session.tab_type {
+            SessionTabType::Agent { .. } => Some(session.id.clone()),
+            SessionTabType::Shell => None,
+        })
+    else {
+        return;
+    };
+
+    let Ok(runtime) = SessionRuntimeState::load(&runtime_state_path(sessions_dir, &session_id))
+    else {
+        return;
+    };
+    let overlay_blocked =
+        model.discussion_resume.is_some() || overlay_blocks_discussion_resume(model);
+
+    let prompt_state = model
+        .discussion_resume_sessions
+        .entry(session_id.clone())
+        .or_default();
+
+    let source_event = runtime.source_event.clone();
+    if prompt_state.last_source_event != source_event {
+        match source_event.as_deref() {
+            Some("SessionStart") => {
+                prompt_state.saw_session_start = true;
+                if runtime.pending_discussion.is_some() {
+                    prompt_state.prompt_pending = true;
+                }
+            }
+            Some("UserPromptSubmit") => {
+                if !prompt_state.saw_session_start && runtime.pending_discussion.is_some() {
+                    prompt_state.fallback_armed = true;
+                }
+            }
+            Some("Stop") => {
+                if prompt_state.fallback_armed && runtime.pending_discussion.is_some() {
+                    prompt_state.prompt_pending = true;
+                    prompt_state.fallback_armed = false;
+                }
+            }
+            _ => {}
+        }
+        prompt_state.last_source_event = source_event;
+    }
+
+    if runtime.pending_discussion.is_none() {
+        prompt_state.prompt_pending = false;
+        prompt_state.fallback_armed = false;
+        prompt_state.last_handled_proposal = None;
+        return;
+    }
+
+    let pending = runtime
+        .pending_discussion
+        .clone()
+        .expect("pending discussion checked");
+    let pending_key = format!("{}::{}", pending.proposal_label, pending.proposal_title);
+    if prompt_state.last_handled_proposal.as_deref() == Some(pending_key.as_str())
+        || !prompt_state.prompt_pending
+        || overlay_blocked
+    {
+        return;
+    }
+
+    if runtime.status != gwt_agent::AgentStatus::WaitingInput {
+        return;
+    }
+
+    model.discussion_resume =
+        Some(screens::discussion_resume::DiscussionResumeState::with_pending(session_id, pending));
+    prompt_state.prompt_pending = false;
+}
+
 /// Process a message and update the model (Elm: update).
 pub fn update(model: &mut Model, msg: Message) {
     let previous_active_session = model.active_session;
     let previous_active_focus = model.active_focus;
+    let previous_session_count = model.sessions.len();
+    let previous_session_layout = model.session_layout;
 
     match msg {
         Message::Quit => {
+            model.quit = true;
+        }
+        Message::TerminalLost => {
+            tracing::warn!("Controlling terminal lost — shutting down gracefully");
             model.quit = true;
         }
         Message::ToggleLayer => {
@@ -797,7 +954,7 @@ pub fn update(model: &mut Model, msg: Message) {
                 ActiveLayer::Initialization => {} // blocked
                 ActiveLayer::Main => {
                     model.active_layer = ActiveLayer::Management;
-                    model.active_focus = FocusPane::Terminal;
+                    model.active_focus = FocusPane::TabContent;
                     sync_session_viewports(model);
                 }
                 ActiveLayer::Management => {
@@ -839,6 +996,9 @@ pub fn update(model: &mut Model, msg: Message) {
                 model.active_session = idx;
             }
         }
+        Message::MoveGridSession(direction) => {
+            move_grid_session(model, direction);
+        }
         Message::ToggleSessionLayout => {
             model.session_layout = match model.session_layout {
                 SessionLayout::Tab => SessionLayout::Grid,
@@ -867,12 +1027,14 @@ pub fn update(model: &mut Model, msg: Message) {
             }
 
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let (env, remove_env) = spawn_env_with_active_profile(HashMap::new());
             let config = gwt_terminal::pty::SpawnConfig {
                 command: shell,
                 args: vec![],
                 cols,
                 rows,
-                env: HashMap::new(),
+                env,
+                remove_env,
                 cwd: Some(model.repo_path.clone()),
             };
             if let Err(e) = spawn_pty_for_session(model, &session_id, config) {
@@ -946,6 +1108,7 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Tick => {
             drain_notification_bus(model);
+            model.drain_board_watcher();
             model.drain_logs_watcher();
             drain_ui_log_events(model);
             drain_docker_progress_events(model);
@@ -960,6 +1123,7 @@ pub fn update(model: &mut Model, msg: Message) {
             model.branches.session_animation_tick =
                 model.branches.session_animation_tick.wrapping_add(1);
             refresh_branch_live_session_summaries(model);
+            maybe_surface_pending_discussion_resume(model);
             // Forward tick to wizard (AI suggest spinner) when active
             if let Some(ref mut wizard) = model.wizard {
                 if wizard.ai_suggest.loading {
@@ -999,11 +1163,14 @@ pub fn update(model: &mut Model, msg: Message) {
                 handle_pending_branch_docker_action(model, action);
             }
         }
+        Message::Board(msg) => {
+            handle_board_message(model, msg);
+        }
         Message::Profiles(msg) => {
             screens::profiles::update(&mut model.profiles, msg);
         }
         Message::Issues(msg) => {
-            screens::issues::update(&mut model.issues, msg);
+            handle_issues_message(model, msg);
         }
         Message::GitView(msg) => {
             screens::git_view::update(&mut model.git_view, msg);
@@ -1021,11 +1188,21 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::versions::update(&mut model.versions, msg);
         }
         Message::Wizard(msg) => {
-            let launch_config = if let Some(ref mut wizard) = model.wizard {
+            let (launch_config, focus_session_id) = if let Some(ref mut wizard) = model.wizard {
                 screens::wizard::update(wizard, msg);
+                let project_root = wizard
+                    .worktree_path
+                    .clone()
+                    .unwrap_or_else(|| model.repo_path.clone());
+                sync_wizard_docker_status(wizard, &project_root);
                 maybe_start_wizard_branch_suggestions(wizard);
                 let completed = wizard.completed;
-                let launch_config = if completed {
+                let focus_session_id = if completed {
+                    wizard.focus_session_id.clone()
+                } else {
+                    None
+                };
+                let launch_config = if completed && focus_session_id.is_none() {
                     Some(build_launch_config_from_wizard(wizard))
                 } else {
                     None
@@ -1033,11 +1210,22 @@ pub fn update(model: &mut Model, msg: Message) {
                 if wizard.completed || wizard.cancelled {
                     model.wizard = None;
                 }
-                launch_config
+                (launch_config, focus_session_id)
             } else {
-                None
+                (None, None)
             };
-            if let Some(config) = launch_config {
+            if let Some(session_id) = focus_session_id {
+                if !focus_session_by_id(model, &session_id) {
+                    apply_notification(
+                        model,
+                        Notification::new(
+                            Severity::Warn,
+                            "session",
+                            format!("Session {session_id} is no longer available"),
+                        ),
+                    );
+                }
+            } else if let Some(config) = launch_config {
                 model.pending_launch_config = Some(config);
                 materialize_pending_launch(model);
                 model.active_focus = FocusPane::Terminal;
@@ -1099,6 +1287,9 @@ pub fn update(model: &mut Model, msg: Message) {
                 ));
                 model.pending_session_conversion = Some(pending);
             }
+        }
+        Message::DiscussionResume(msg) => {
+            handle_discussion_resume_message(model, msg);
         }
         Message::PortSelect(msg) => {
             if let Some(ref mut state) = model.port_select {
@@ -1167,6 +1358,9 @@ pub fn update(model: &mut Model, msg: Message) {
         Message::OpenWizardWithSpec(spec_context) => {
             open_wizard(model, Some(spec_context));
         }
+        Message::OpenWizardWithIssue(issue_number) => {
+            open_wizard_with_issue(model, issue_number);
+        }
         Message::CloseWizard => {
             model.wizard = None;
         }
@@ -1177,6 +1371,15 @@ pub fn update(model: &mut Model, msg: Message) {
         previous_active_session,
         previous_active_focus,
     );
+
+    if previous_session_count != model.sessions.len()
+        || previous_session_layout != model.session_layout
+    {
+        sync_session_viewports(model);
+    }
+    if previous_active_session != model.active_session {
+        refresh_branch_live_session_summaries(model);
+    }
 
     // Flush buffered PTY input after every message so keystrokes reach the PTY
     // without waiting for the next Tick.
@@ -1198,6 +1401,23 @@ where
 {
     schedule_startup_version_cache_refresh();
     let has_git_remote = repo_has_git_remote(&model.repo_path);
+    let issue_cache_root = default_issue_cache_root(&model.repo_path);
+    if let Err(err) = crate::issue_cache::sync_issue_cache_from_remote_if_missing(
+        &model.repo_path,
+        &issue_cache_root,
+    ) {
+        tracing::warn!("startup issue cache sync failed: {err}");
+    }
+    reload_cached_issues_with_paths(
+        model,
+        issue_cache_root.clone(),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+    model.specs.cache_root = issue_cache_root.clone();
+    model.specs.reload_from_cache();
+    if !issue_cache_root.exists() {
+        model.specs.last_error = None;
+    }
 
     // -- Branches --
     if let Ok(branches) = gwt_git::branch::list_branches(&model.repo_path) {
@@ -1209,6 +1429,7 @@ where
                 is_local: b.is_local,
                 category: screens::branches::categorize_branch(&b.name),
                 worktree_path: None,
+                upstream: b.upstream.clone(),
             })
             .collect();
         screens::branches::update(
@@ -1269,7 +1490,7 @@ where
         }
         model.branches.checked_out_branches = checked_out;
     }
-    prune_stale_gwt_assets_for_repo_worktrees(model);
+    refresh_managed_gwt_assets_for_repo_worktrees(model);
 
     // Refresh the protection inputs the Cleanup gutter consults. The HEAD
     // branch tracks the gwt-tui process itself; active session branches are
@@ -1280,6 +1501,16 @@ where
         .iter()
         .find(|b| b.is_head)
         .map(|b| b.name.clone());
+    if let Some(head_branch_name) = model.branches.current_head_branch.clone() {
+        if let Some(item) = model
+            .branches
+            .branches
+            .iter_mut()
+            .find(|branch| branch.name == head_branch_name && branch.worktree_path.is_none())
+        {
+            item.worktree_path = Some(model.repo_path.clone());
+        }
+    }
     refresh_active_session_branches(model);
 
     // Compute Branch Cleanup merge state (FR-018a/d). This is currently a
@@ -1389,19 +1620,97 @@ fn load_git_view_with<S, C, B, P>(
     );
 }
 
-fn prune_stale_gwt_assets_for_repo_worktrees(model: &Model) {
+fn refresh_managed_gwt_assets_for_repo_worktrees(model: &Model) {
     let mut paths = std::collections::HashSet::new();
     paths.insert(model.repo_path().to_path_buf());
     paths.extend(model.active_worktree_paths());
 
     for worktree in paths {
-        if let Err(error) = prune_stale_gwt_assets(&worktree) {
+        if !path_is_git_repo_or_worktree(&worktree) {
+            continue;
+        }
+        refresh_managed_gwt_assets_for_worktree(
+            &worktree,
+            "startup refresh",
+            worktree_has_managed_asset_state(&worktree),
+        );
+    }
+}
+
+fn path_is_git_repo_or_worktree(worktree: &Path) -> bool {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+    {
+        Ok(output) => {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        }
+        Err(_) => false,
+    }
+}
+
+fn worktree_has_managed_asset_state(worktree: &Path) -> bool {
+    MANAGED_BUNDLE_TRIGGER_ROOTS
+        .iter()
+        .any(|relative| worktree.join(relative).exists())
+        || git_tracks_managed_assets(worktree)
+}
+
+fn git_tracks_managed_assets(worktree: &Path) -> bool {
+    match Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--")
+        .args(MANAGED_BUNDLE_TRIGGER_ROOTS)
+        .output()
+    {
+        Ok(output) => output.status.success() && !output.stdout.is_empty(),
+        Err(_) => false,
+    }
+}
+
+fn refresh_managed_gwt_assets_for_worktree(
+    worktree: &Path,
+    context: &str,
+    materialize_bundle: bool,
+) {
+    if materialize_bundle {
+        if let Err(error) = distribute_to_worktree(worktree) {
             tracing::warn!(
                 worktree = %worktree.display(),
                 error = %error,
-                "failed to prune stale gwt assets during initial data refresh"
+                context,
+                "failed to distribute gwt managed assets"
             );
         }
+    }
+    if let Err(error) = update_git_exclude(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to update gwt managed excludes"
+        );
+    }
+    if let Err(error) = generate_settings_local(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to regenerate Claude hook settings"
+        );
+    }
+    if let Err(error) = generate_codex_hooks(worktree) {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            error = %error,
+            context,
+            "failed to regenerate Codex hook settings"
+        );
     }
 }
 
@@ -1452,6 +1761,684 @@ fn parse_current_pr_link_json(json: &str) -> gwt_core::Result<Option<String>> {
         .map(ToOwned::to_owned))
 }
 
+struct LoadedProfileSettings {
+    settings: Settings,
+    status: ActiveProfileSummary,
+}
+
+fn validation_error(reason: impl Into<String>) -> ConfigError {
+    ConfigError::ValidationError {
+        reason: reason.into(),
+    }
+}
+
+fn load_settings_with_active_profile_fallback() -> LoadedProfileSettings {
+    match Settings::load() {
+        Ok(mut settings) => {
+            let configured_active = settings.profiles.active.clone();
+            let resolution = settings.profiles.normalize_active_profile();
+            if resolution.fallback {
+                tracing::warn!(
+                    configured_active = ?configured_active,
+                    resolved_active = %resolution.name,
+                    "active profile missing or invalid; falling back to default"
+                );
+            }
+            LoadedProfileSettings {
+                settings,
+                status: ActiveProfileSummary {
+                    name: resolution.name,
+                    fallback: resolution.fallback,
+                },
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load settings; falling back to default profile");
+            LoadedProfileSettings {
+                settings: Settings::default(),
+                status: ActiveProfileSummary {
+                    name: "default".to_string(),
+                    fallback: true,
+                },
+            }
+        }
+    }
+}
+
+fn profiles_state_from_settings(
+    settings: &Settings,
+    previous: Option<&screens::profiles::ProfilesState>,
+    preferred_selection: Option<&str>,
+) -> screens::profiles::ProfilesState {
+    let base_env: BTreeMap<String, String> = std::env::vars().collect();
+    let profiles: Vec<screens::profiles::ProfileItem> = settings
+        .profiles
+        .profiles
+        .iter()
+        .map(|profile| {
+            let mut env_vars: Vec<screens::profiles::EnvVarItem> = profile
+                .env_vars
+                .iter()
+                .map(|(key, value)| screens::profiles::EnvVarItem {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+            env_vars.sort_by(|left, right| left.key.cmp(&right.key));
+            let mut disabled_env = profile.disabled_env.clone();
+            disabled_env.sort();
+            let merged_preview = profile
+                .merged_env_pairs(std::env::vars())
+                .into_iter()
+                .map(|(key, value)| screens::profiles::EnvVarItem { key, value })
+                .collect();
+            let env_rows = profile_env_rows(profile, &base_env);
+
+            screens::profiles::ProfileItem {
+                name: profile.name.clone(),
+                active: settings.profiles.active.as_deref() == Some(profile.name.as_str()),
+                env_count: profile.env_vars.len(),
+                description: profile.description.clone(),
+                env_vars,
+                disabled_env,
+                env_rows,
+                merged_preview,
+                deletable: profile.name != "default",
+            }
+        })
+        .collect();
+
+    let previous_selection = previous
+        .and_then(|state| state.selected_profile())
+        .map(|profile| profile.name.as_str());
+    let selected = preferred_selection
+        .and_then(|name| profiles.iter().position(|profile| profile.name == name))
+        .or_else(|| {
+            previous_selection
+                .and_then(|name| profiles.iter().position(|profile| profile.name == name))
+        })
+        .or_else(|| profiles.iter().position(|profile| profile.active))
+        .unwrap_or(0);
+
+    let mut state = screens::profiles::ProfilesState {
+        profiles,
+        selected,
+        focus: previous.map(|state| state.focus).unwrap_or_default(),
+        env_selected: previous.map(|state| state.env_selected).unwrap_or_default(),
+        disabled_selected: previous
+            .map(|state| state.disabled_selected)
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    state.clamp_selection();
+    state
+}
+
+pub fn refresh_active_profile_state(model: &mut Model) {
+    model.active_profile = load_settings_with_active_profile_fallback().status;
+}
+
+fn sync_profiles_state_from_settings(model: &mut Model, preferred_selection: Option<&str>) {
+    let loaded = load_settings_with_active_profile_fallback();
+    model.active_profile = loaded.status;
+    model.profiles =
+        profiles_state_from_settings(&loaded.settings, Some(&model.profiles), preferred_selection);
+}
+
+pub fn spawn_env_with_active_profile(
+    mut base_env: HashMap<String, String>,
+) -> (HashMap<String, String>, Vec<String>) {
+    let loaded = load_settings_with_active_profile_fallback();
+    let Some(profile) = loaded.settings.profiles.active_profile() else {
+        return (base_env, Vec::new());
+    };
+
+    let mut remove_env = Vec::new();
+    for key in &profile.disabled_env {
+        if !base_env.contains_key(key) && !profile.env_vars.contains_key(key) {
+            remove_env.push(key.clone());
+        }
+    }
+    remove_env.sort();
+    remove_env.dedup();
+
+    for (key, value) in &profile.env_vars {
+        base_env.insert(key.clone(), value.clone());
+    }
+
+    (base_env, remove_env)
+}
+
+fn apply_profiles_warning(
+    model: &mut Model,
+    summary: impl Into<String>,
+    detail: impl Into<String>,
+) {
+    apply_notification(
+        model,
+        Notification::new(Severity::Warn, "profiles", summary.into()).with_detail(detail.into()),
+    );
+}
+
+fn apply_profiles_info(model: &mut Model, message: impl Into<String>) {
+    apply_notification(
+        model,
+        Notification::new(Severity::Info, "profiles", message.into()),
+    );
+}
+
+fn current_profile_name(model: &Model) -> Option<String> {
+    model
+        .profiles
+        .selected_profile()
+        .map(|profile| profile.name.clone())
+}
+
+fn profile_env_rows(
+    profile: &gwt_config::Profile,
+    base_env: &BTreeMap<String, String>,
+) -> Vec<screens::profiles::ProfileEnvRow> {
+    let mut keys: BTreeSet<String> = base_env.keys().cloned().collect();
+    keys.extend(profile.env_vars.keys().cloned());
+    keys.extend(profile.disabled_env.iter().cloned());
+
+    keys.into_iter()
+        .map(|key| {
+            let (kind, value) = if let Some(value) = profile.env_vars.get(&key) {
+                (
+                    screens::profiles::ProfileEnvRowKind::Override,
+                    Some(value.clone()),
+                )
+            } else if profile.disabled_env.iter().any(|item| item == &key) {
+                (
+                    screens::profiles::ProfileEnvRowKind::Disabled,
+                    base_env.get(&key).cloned(),
+                )
+            } else {
+                (
+                    screens::profiles::ProfileEnvRowKind::Base,
+                    base_env.get(&key).cloned(),
+                )
+            };
+
+            screens::profiles::ProfileEnvRow { key, value, kind }
+        })
+        .collect()
+}
+
+fn refresh_profiles_with_focus(
+    model: &mut Model,
+    preferred_selection: Option<&str>,
+    focus: screens::profiles::ProfilesFocus,
+    env_key: Option<&str>,
+    disabled_key: Option<&str>,
+) {
+    sync_profiles_state_from_settings(model, preferred_selection);
+    model.profiles.focus = focus;
+    if let Some(key) = env_key.or(disabled_key) {
+        if let Some(profile) = model.profiles.selected_profile() {
+            if let Some(index) = profile.env_rows.iter().position(|row| row.key == key) {
+                model.profiles.env_selected = index;
+                model.profiles.disabled_selected = index;
+            }
+        }
+    }
+    model.profiles.clamp_selection();
+}
+
+fn submit_profiles_form(model: &mut Model) {
+    use screens::profiles::{ProfileMode, ProfilesFocus};
+
+    match model.profiles.mode {
+        ProfileMode::CreateProfile => {
+            let name = model.profiles.input_name.trim().to_string();
+            let description = model.profiles.input_description.clone();
+            match Settings::update_global(|settings| {
+                let mut profile = gwt_config::Profile::new(&name);
+                profile.description = description.clone();
+                settings.profiles.add(profile).map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&name),
+                        ProfilesFocus::ProfileList,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(model, format!("Created profile '{name}'"));
+                }
+                Err(err) => {
+                    apply_profiles_warning(model, "Failed to create profile", err.to_string());
+                }
+            }
+        }
+        ProfileMode::EditProfile => {
+            let Some(current_name) = current_profile_name(model) else {
+                return;
+            };
+            let new_name = model.profiles.input_name.trim().to_string();
+            let description = model.profiles.input_description.clone();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .update_profile(&current_name, &new_name, &description)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&new_name),
+                        ProfilesFocus::ProfileList,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(model, format!("Updated profile '{new_name}'"));
+                }
+                Err(err) => {
+                    apply_profiles_warning(model, "Failed to update profile", err.to_string());
+                }
+            }
+        }
+        ProfileMode::CreateEnvVar => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let key = model.profiles.input_key.trim().to_string();
+            let value = model.profiles.input_value.clone();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .set_env_var(&profile_name, &key, &value)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::Environment,
+                        Some(&key),
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Saved environment variable '{key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to save environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        ProfileMode::EditEnvVar => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(current_key) = model.profiles.selected_env_var().map(|env| env.key.clone())
+            else {
+                return;
+            };
+            let new_key = model.profiles.input_key.trim().to_string();
+            let new_value = model.profiles.input_value.clone();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .update_env_var(&profile_name, &current_key, &new_key, &new_value)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::Environment,
+                        Some(&new_key),
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Updated environment variable '{new_key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to update environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        ProfileMode::CreateDisabledEnv => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let key = model.profiles.input_key.trim().to_string();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .add_disabled_env(&profile_name, &key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::Environment,
+                        None,
+                        Some(&key),
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Blocked OS environment variable '{key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to block OS environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        ProfileMode::EditDisabledEnv => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(current_key) = model.profiles.selected_disabled_env().map(str::to_string)
+            else {
+                return;
+            };
+            let new_key = model.profiles.input_key.trim().to_string();
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .update_disabled_env(&profile_name, &current_key, &new_key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::Environment,
+                        None,
+                        Some(&new_key),
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Updated blocked OS environment variable '{new_key}' in '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to update blocked OS environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn delete_profiles_selection(model: &mut Model) {
+    use screens::profiles::{ProfileMode, ProfilesFocus};
+
+    match model.profiles.mode {
+        ProfileMode::ConfirmDeleteProfile => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .delete_profile(&profile_name)
+                    .map(|_| ())
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    let preferred = if profile_name == "default" {
+                        Some("default")
+                    } else {
+                        None
+                    };
+                    refresh_profiles_with_focus(
+                        model,
+                        preferred,
+                        ProfilesFocus::ProfileList,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(model, format!("Deleted profile '{profile_name}'"));
+                }
+                Err(err) => {
+                    apply_profiles_warning(model, "Failed to delete profile", err.to_string());
+                    model.profiles.mode = ProfileMode::List;
+                }
+            }
+        }
+        ProfileMode::ConfirmDeleteEnvVar => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(key) = model.profiles.selected_env_var().map(|env| env.key.clone()) else {
+                return;
+            };
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .remove_env_var(&profile_name, &key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::Environment,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!("Deleted environment variable '{key}' from '{profile_name}'"),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to delete environment variable",
+                        err.to_string(),
+                    );
+                    model.profiles.mode = ProfileMode::List;
+                }
+            }
+        }
+        ProfileMode::ConfirmDeleteDisabledEnv => {
+            let Some(profile_name) = current_profile_name(model) else {
+                return;
+            };
+            let Some(key) = model.profiles.selected_disabled_env().map(str::to_string) else {
+                return;
+            };
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .remove_disabled_env(&profile_name, &key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        ProfilesFocus::Environment,
+                        None,
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!(
+                            "Removed blocked OS environment variable '{key}' from '{profile_name}'"
+                        ),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to remove blocked OS environment variable",
+                        err.to_string(),
+                    );
+                    model.profiles.mode = ProfileMode::List;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn delete_profiles_environment_row(model: &mut Model) {
+    let Some(profile_name) = current_profile_name(model) else {
+        return;
+    };
+    let Some(row) = model.profiles.selected_env_row().cloned() else {
+        return;
+    };
+
+    match row.kind {
+        screens::profiles::ProfileEnvRowKind::Base => {
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .add_disabled_env(&profile_name, &row.key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        screens::profiles::ProfilesFocus::Environment,
+                        None,
+                        Some(&row.key),
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!(
+                            "Disabled OS environment variable '{}' in '{}'",
+                            row.key, profile_name
+                        ),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to disable OS environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        screens::profiles::ProfileEnvRowKind::Override => {
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .remove_env_var(&profile_name, &row.key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        screens::profiles::ProfilesFocus::Environment,
+                        Some(&row.key),
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!(
+                            "Removed profile override '{}' from '{}'",
+                            row.key, profile_name
+                        ),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to remove profile override",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+        screens::profiles::ProfileEnvRowKind::Disabled => {
+            match Settings::update_global(|settings| {
+                settings
+                    .profiles
+                    .remove_disabled_env(&profile_name, &row.key)
+                    .map_err(validation_error)
+            }) {
+                Ok(()) => {
+                    refresh_profiles_with_focus(
+                        model,
+                        Some(&profile_name),
+                        screens::profiles::ProfilesFocus::Environment,
+                        Some(&row.key),
+                        None,
+                    );
+                    apply_profiles_info(
+                        model,
+                        format!(
+                            "Restored OS environment variable '{}' in '{}'",
+                            row.key, profile_name
+                        ),
+                    );
+                }
+                Err(err) => {
+                    apply_profiles_warning(
+                        model,
+                        "Failed to restore OS environment variable",
+                        err.to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn switch_active_profile_from_profiles_tab(model: &mut Model) {
+    let Some(profile_name) = model
+        .profiles
+        .selected_profile()
+        .map(|profile| profile.name.clone())
+    else {
+        return;
+    };
+
+    match Settings::update_global(|settings| {
+        settings
+            .profiles
+            .switch(&profile_name)
+            .map_err(validation_error)
+    }) {
+        Ok(()) => sync_profiles_state_from_settings(model, Some(&profile_name)),
+        Err(err) => {
+            apply_notification(
+                model,
+                Notification::new(
+                    Severity::Warn,
+                    "profiles",
+                    "Failed to switch active profile",
+                )
+                .with_detail(err.to_string()),
+            );
+            sync_profiles_state_from_settings(model, Some(&profile_name));
+        }
+    }
+}
+
 fn switch_management_tab(model: &mut Model, tab: ManagementTab) {
     switch_management_tab_with(
         model,
@@ -1470,20 +2457,27 @@ fn switch_management_tab_with<F, D>(
     F: FnOnce(&std::path::Path) -> gwt_core::Result<Vec<gwt_git::PrStatus>>,
     D: FnOnce(&std::path::Path, u32) -> gwt_core::Result<screens::pr_dashboard::PrDetailReport>,
 {
-    let preserve_terminal_focus =
-        model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal;
     model.management_tab = tab;
     model.active_layer = ActiveLayer::Management;
-    model.active_focus = if preserve_terminal_focus {
-        FocusPane::Terminal
-    } else {
-        FocusPane::TabContent
-    };
+    model.active_focus = FocusPane::TabContent;
     if tab == ManagementTab::Settings && model.settings.fields.is_empty() {
         model.settings.load_category_fields();
     }
+    if tab == ManagementTab::Profiles {
+        let preferred_selection = model
+            .profiles
+            .selected_profile()
+            .map(|profile| profile.name.clone());
+        sync_profiles_state_from_settings(model, preferred_selection.as_deref());
+    }
+    if tab == ManagementTab::Issues {
+        reload_cached_issues(model);
+    }
     if tab == ManagementTab::PrDashboard {
         refresh_pr_dashboard_with(model, fetch_prs, fetch_detail);
+    }
+    if tab == ManagementTab::Board {
+        reload_board(model);
     }
 }
 
@@ -1679,8 +2673,46 @@ fn route_key_to_initialization(model: &mut Model, key: crossterm::event::KeyEven
 ///
 /// This keeps non-terminal surfaces animated while allowing terminal-focused
 /// IME composition to proceed without idle repaints.
+fn visible_branch_live_indicator_rows(
+    model: &Model,
+) -> Vec<crate::screens::branches::VisibleBranchLiveIndicatorRow> {
+    visible_branches_list_area(model)
+        .map(|area| model.branches.visible_live_indicator_rows(area))
+        .unwrap_or_default()
+}
+
+pub fn visible_branch_live_indicator_signature(model: &Model) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in visible_branch_live_indicator_rows(model) {
+        row.branch_name.hash(&mut hasher);
+        for indicator in row.indicators {
+            branch_live_indicator_kind_tag(indicator.kind).hash(&mut hasher);
+            branch_live_indicator_status_tag(indicator.status).hash(&mut hasher);
+            branch_live_indicator_color_tag(indicator.color).hash(&mut hasher);
+            indicator.active.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+pub fn should_render_after_tick_with_visible_branch_signature(
+    visible_branch_signature_before: u64,
+    model: &Model,
+) -> bool {
+    visible_branch_signature_before != visible_branch_live_indicator_signature(model)
+        || tick_redraw_required(model)
+}
+
 pub fn tick_redraw_required(model: &Model) -> bool {
     if model.active_focus != FocusPane::Terminal {
+        return true;
+    }
+
+    if model.active_layer == ActiveLayer::Management
+        && model.management_tab == ManagementTab::Branches
+        && visible_branches_list_area(model)
+            .is_some_and(|area| model.branches.has_running_live_sessions(area))
+    {
         return true;
     }
 
@@ -1692,7 +2724,58 @@ pub fn tick_redraw_required(model: &Model) -> bool {
             .docker_progress
             .as_ref()
             .is_some_and(|progress| progress.visible)
+        || model.cleanup_progress.visible
         || model.voice.is_active()
+}
+
+fn visible_branches_list_area(model: &Model) -> Option<Rect> {
+    if model.active_layer != ActiveLayer::Management
+        || model.management_tab != ManagementTab::Branches
+    {
+        return None;
+    }
+
+    let management = visible_management_area(model)?;
+    let top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(management)[0];
+    let list_inner = pane_block(management_tab_title(model, top.width), false).inner(top);
+    Some(
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(list_inner)[1],
+    )
+}
+
+fn branch_live_indicator_status_tag(status: gwt_agent::AgentStatus) -> u8 {
+    match status {
+        gwt_agent::AgentStatus::Unknown => 0,
+        gwt_agent::AgentStatus::Running => 1,
+        gwt_agent::AgentStatus::WaitingInput => 2,
+        gwt_agent::AgentStatus::Stopped => 3,
+    }
+}
+
+fn branch_live_indicator_kind_tag(
+    kind: crate::screens::branches::BranchLiveSessionIndicatorKind,
+) -> u8 {
+    match kind {
+        crate::screens::branches::BranchLiveSessionIndicatorKind::Agent => 0,
+        crate::screens::branches::BranchLiveSessionIndicatorKind::Shell => 1,
+    }
+}
+
+fn branch_live_indicator_color_tag(color: crate::model::AgentColor) -> u8 {
+    match color {
+        crate::model::AgentColor::Green => 0,
+        crate::model::AgentColor::Blue => 1,
+        crate::model::AgentColor::Cyan => 2,
+        crate::model::AgentColor::Yellow => 3,
+        crate::model::AgentColor::Magenta => 4,
+        crate::model::AgentColor::Gray => 5,
+    }
 }
 
 fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool {
@@ -1748,6 +2831,19 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
             return true;
         }
     }
+    if model.discussion_resume.is_some() {
+        let msg = match key.code {
+            KeyCode::Down => Some(screens::discussion_resume::DiscussionResumeMessage::MoveDown),
+            KeyCode::Up => Some(screens::discussion_resume::DiscussionResumeMessage::MoveUp),
+            KeyCode::Enter => Some(screens::discussion_resume::DiscussionResumeMessage::Select),
+            KeyCode::Esc => Some(screens::discussion_resume::DiscussionResumeMessage::Cancel),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            update(model, Message::DiscussionResume(msg));
+        }
+        return true;
+    }
     if model
         .docker_progress
         .as_ref()
@@ -1796,6 +2892,12 @@ fn route_overlay_key(model: &mut Model, key: crossterm::event::KeyEvent) -> bool
     // Branch Cleanup confirm modal — Enter confirms, Esc cancels (FR-018e).
     if model.cleanup_confirm.visible {
         let msg = match key.code {
+            KeyCode::Char('r')
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                Some(screens::cleanup_confirm::CleanupConfirmMessage::ToggleRemote)
+            }
             KeyCode::Enter => Some(screens::cleanup_confirm::CleanupConfirmMessage::Confirm),
             KeyCode::Esc => Some(screens::cleanup_confirm::CleanupConfirmMessage::Cancel),
             _ => None,
@@ -1818,20 +2920,22 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     let msg = match key.code {
         KeyCode::Left => Some(BranchesMessage::PrevDetailSection),
         KeyCode::Right => Some(BranchesMessage::NextDetailSection),
+        KeyCode::Char(' ') => {
+            toggle_cleanup_selection_for_selected_branch(model);
+            return;
+        }
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::SHIFT)
-                && model.branches.detail_section != 3
+                && model.branches.detail_section != 2
                 && selected_branch_has_worktree(model) =>
         {
             Some(BranchesMessage::OpenShell)
         }
-        KeyCode::Up if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerUp)
-        }
+        KeyCode::Up if model.branches.detail_section == 0 => Some(BranchesMessage::DockerServiceUp),
         KeyCode::Down if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerDown)
+            Some(BranchesMessage::DockerServiceDown)
         }
-        KeyCode::Up if model.branches.detail_section == 3 => {
+        KeyCode::Up if model.branches.detail_section == 2 => {
             let len = branch_session_matches(model).len();
             if len > 0 {
                 model.branches.clamp_detail_session_selected(len);
@@ -1844,7 +2948,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
             }
             None
         }
-        KeyCode::Down if model.branches.detail_section == 3 => {
+        KeyCode::Down if model.branches.detail_section == 2 => {
             let len = branch_session_matches(model).len();
             if len > 0 {
                 model.branches.clamp_detail_session_selected(len);
@@ -1853,7 +2957,7 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
             }
             None
         }
-        KeyCode::Enter if model.branches.detail_section == 3 => {
+        KeyCode::Enter if model.branches.detail_section == 2 => {
             let sessions = branch_session_matches(model);
             model.branches.clamp_detail_session_selected(sessions.len());
             if let Some(selected) = sessions.get(model.branches.detail_session_selected) {
@@ -1864,13 +2968,16 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
         }
         KeyCode::Enter => Some(BranchesMessage::LaunchAgent),
         KeyCode::Char('s') if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerStart)
+            Some(BranchesMessage::DockerServiceStart)
         }
         KeyCode::Char('t') if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerStop)
+            Some(BranchesMessage::DockerServiceStop)
         }
         KeyCode::Char('r') if model.branches.detail_section == 0 => {
-            Some(BranchesMessage::DockerContainerRestart)
+            Some(BranchesMessage::DockerServiceRestart)
+        }
+        KeyCode::Char('c') if model.branches.detail_section == 0 => {
+            Some(BranchesMessage::DockerServiceRecreate)
         }
         KeyCode::Char('m') => {
             screens::branches::update(&mut model.branches, BranchesMessage::ToggleView);
@@ -1902,8 +3009,29 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
     }
 }
 
+fn toggle_cleanup_selection_for_selected_branch(model: &mut Model) {
+    let Some(name) = model
+        .branches
+        .selected_branch()
+        .map(|branch| branch.name.clone())
+    else {
+        return;
+    };
+    match model.branches.toggle_cleanup_selection(&name) {
+        screens::branches::CleanupSelectionToggle::Selected
+        | screens::branches::CleanupSelectionToggle::Deselected => {}
+        screens::branches::CleanupSelectionToggle::Blocked(reason) => {
+            apply_notification(
+                model,
+                Notification::new(Severity::Info, "cleanup", reason.toast_message()),
+            );
+        }
+    }
+}
+
 /// Route a key event to the active management tab's screen message.
 fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
+    use screens::board::BoardMessage;
     use screens::branches::BranchesMessage;
     use screens::git_view::GitViewMessage;
     use screens::issues::IssuesMessage;
@@ -1917,11 +3045,13 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
     if !is_in_text_input_mode(model) && !key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Right => {
-                model.management_tab = model.management_tab.next();
+                let next = model.management_tab.next();
+                switch_management_tab(model, next);
                 return;
             }
             KeyCode::Left => {
-                model.management_tab = model.management_tab.prev();
+                let prev = model.management_tab.prev();
+                switch_management_tab(model, prev);
                 return;
             }
             _ => {}
@@ -1950,17 +3080,11 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => Some(BranchesMessage::MoveDown),
                 KeyCode::Up => Some(BranchesMessage::MoveUp),
                 // Space: toggle Branch Cleanup selection on the focused row
-                // (FR-018c). Falls back to focusing the Branch Detail pane
-                // when there is no selectable branch in scope.
+                // (FR-018c). Blocked rows stay focused and surface a
+                // short-lived Info toast that explains why cleanup selection
+                // is not currently allowed.
                 KeyCode::Char(' ') => {
-                    if let Some(name) = model.branches.selected_branch().map(|b| b.name.clone()) {
-                        let toggled = model.branches.toggle_cleanup_selection(&name);
-                        if !toggled {
-                            model.active_focus = FocusPane::BranchDetail;
-                        }
-                    } else {
-                        model.active_focus = FocusPane::BranchDetail;
-                    }
+                    toggle_cleanup_selection_for_selected_branch(model);
                     return;
                 }
                 // Shift+C: open the Cleanup Confirm modal (FR-018e).
@@ -2009,12 +3133,62 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
+                let should_prefetch_detail = matches!(
+                    m,
+                    BranchesMessage::MoveUp
+                        | BranchesMessage::MoveDown
+                        | BranchesMessage::ToggleSort
+                        | BranchesMessage::ToggleView
+                );
                 screens::branches::update(&mut model.branches, m);
+                if should_prefetch_detail {
+                    schedule_branch_detail_prefetch(model);
+                }
+            } else if key.code == KeyCode::Esc {
+                fallback_management_escape(model);
+            }
+        }
+        ManagementTab::Board => {
+            let msg = match key.code {
+                KeyCode::Esc if model.board.composer_open => Some(BoardMessage::CloseComposer),
+                KeyCode::Backspace
+                    if model.board.composer_open || !model.board.composer_text.is_empty() =>
+                {
+                    Some(BoardMessage::ComposerBackspace)
+                }
+                KeyCode::Enter if key.modifiers.is_empty() && model.board.composer_open => {
+                    Some(BoardMessage::SubmitComposer)
+                }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::ComposerInput('\n'))
+                }
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::CycleComposerKind)
+                }
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(BoardMessage::Refresh)
+                }
+                KeyCode::Down => Some(BoardMessage::MoveDown),
+                KeyCode::Up => Some(BoardMessage::MoveUp),
+                _ => search_input_char(&key).map(BoardMessage::ComposerInput),
+            };
+            if let Some(m) = msg {
+                update(model, Message::Board(m));
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
         }
         ManagementTab::Issues => {
+            if key.code == KeyCode::Enter
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+                && model.issues.detail_view
+            {
+                if let Some(issue) = model.issues.selected_issue() {
+                    update(model, Message::OpenWizardWithIssue(issue.number.into()));
+                }
+                return;
+            }
+
             if model.issues.search_active {
                 let msg = match key.code {
                     KeyCode::Esc => Some(IssuesMessage::SearchClear),
@@ -2022,7 +3196,7 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     _ => search_input_char(&key).map(IssuesMessage::SearchInput),
                 };
                 if let Some(m) = msg {
-                    screens::issues::update(&mut model.issues, m);
+                    update(model, Message::Issues(m));
                     return;
                 }
             }
@@ -2036,9 +3210,9 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                 _ => None,
             };
             if let Some(m) = msg {
-                screens::issues::update(&mut model.issues, m);
+                update(model, Message::Issues(m));
             } else if key.code == KeyCode::Esc && model.issues.detail_view {
-                screens::issues::update(&mut model.issues, IssuesMessage::ToggleDetail);
+                update(model, Message::Issues(IssuesMessage::ToggleDetail));
             } else if key.code == KeyCode::Esc {
                 fallback_management_escape(model);
             }
@@ -2163,27 +3337,100 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
             }
         }
         ManagementTab::Profiles => {
-            let msg = match key.code {
-                KeyCode::Down => Some(ProfilesMessage::MoveDown),
-                KeyCode::Up => Some(ProfilesMessage::MoveUp),
-                KeyCode::Enter => Some(ProfilesMessage::ToggleActive),
-                KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
-                KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
-                KeyCode::Char('d') => Some(ProfilesMessage::StartDelete),
-                KeyCode::Esc if model.profiles.mode != screens::profiles::ProfileMode::List => {
-                    Some(ProfilesMessage::Cancel)
+            use screens::profiles::{ProfileMode, ProfilesFocus};
+
+            match model.profiles.mode {
+                ProfileMode::List => {
+                    let msg = match key.code {
+                        KeyCode::BackTab => Some(ProfilesMessage::FocusLeft),
+                        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            Some(ProfilesMessage::FocusLeft)
+                        }
+                        KeyCode::Tab => Some(ProfilesMessage::FocusRight),
+                        KeyCode::Down => Some(ProfilesMessage::MoveDown),
+                        KeyCode::Up => Some(ProfilesMessage::MoveUp),
+                        KeyCode::Enter => match model.profiles.focus {
+                            ProfilesFocus::ProfileList => Some(ProfilesMessage::ToggleActive),
+                            ProfilesFocus::Environment
+                                if model.profiles.selected_env_row().is_some() =>
+                            {
+                                Some(ProfilesMessage::StartEdit)
+                            }
+                            _ => None,
+                        },
+                        KeyCode::Char('n') => Some(ProfilesMessage::StartCreate),
+                        KeyCode::Char('e') => Some(ProfilesMessage::StartEdit),
+                        KeyCode::Char('d') => None,
+                        _ => None,
+                    };
+                    if key.code == KeyCode::Char('d') {
+                        if model.profiles.focus == ProfilesFocus::ProfileList {
+                            if model
+                                .profiles
+                                .selected_profile()
+                                .is_some_and(|profile| !profile.deletable)
+                            {
+                                apply_profiles_warning(
+                                    model,
+                                    "Default profile cannot be deleted",
+                                    "The permanent default profile remains available even when no custom profiles exist.",
+                                );
+                            } else {
+                                screens::profiles::update(
+                                    &mut model.profiles,
+                                    ProfilesMessage::StartDelete,
+                                );
+                            }
+                        } else if model.profiles.focus == ProfilesFocus::Environment {
+                            delete_profiles_environment_row(model);
+                        }
+                    } else if let Some(m) = msg {
+                        if matches!(m, ProfilesMessage::ToggleActive) {
+                            switch_active_profile_from_profiles_tab(model);
+                        } else {
+                            screens::profiles::update(&mut model.profiles, m);
+                        }
+                    } else if key.code == KeyCode::Esc {
+                        fallback_management_escape(model);
+                    }
                 }
-                _ => None,
-            };
-            if let Some(m) = msg {
-                screens::profiles::update(&mut model.profiles, m);
-            } else if key.code == KeyCode::Esc {
-                fallback_management_escape(model);
+                ProfileMode::CreateProfile
+                | ProfileMode::EditProfile
+                | ProfileMode::CreateEnvVar
+                | ProfileMode::EditEnvVar
+                | ProfileMode::CreateDisabledEnv
+                | ProfileMode::EditDisabledEnv => {
+                    let msg = match key.code {
+                        KeyCode::Enter => Some(ProfilesMessage::Confirm),
+                        KeyCode::Esc => Some(ProfilesMessage::Cancel),
+                        KeyCode::Backspace => Some(ProfilesMessage::Backspace),
+                        KeyCode::Tab => Some(ProfilesMessage::NextField),
+                        KeyCode::Char(ch) => Some(ProfilesMessage::InputChar(ch)),
+                        _ => None,
+                    };
+                    if let Some(m) = msg {
+                        match m {
+                            ProfilesMessage::Confirm => submit_profiles_form(model),
+                            _ => screens::profiles::update(&mut model.profiles, m),
+                        }
+                    } else if key.code == KeyCode::Esc {
+                        fallback_management_escape(model);
+                    }
+                }
+                ProfileMode::ConfirmDeleteProfile
+                | ProfileMode::ConfirmDeleteEnvVar
+                | ProfileMode::ConfirmDeleteDisabledEnv => match key.code {
+                    KeyCode::Enter => delete_profiles_selection(model),
+                    KeyCode::Esc => {
+                        screens::profiles::update(&mut model.profiles, ProfilesMessage::Cancel);
+                    }
+                    _ => {}
+                },
             }
         }
         ManagementTab::Specs => {
             // SPEC-12 Phase 9: Specs tab is cache-only. `r` triggers a
-            // local cache reload from `~/.gwt/cache/issues/`.
+            // local cache reload from `~/.gwt/cache/issues/<repo-hash>/`.
             match key.code {
                 KeyCode::Char('r') => {
                     model.specs.reload_from_cache();
@@ -2257,14 +3504,16 @@ fn check_branch_pending_actions(model: &mut Model) {
                 .clone()
                 .unwrap_or_else(|| model.repo_path.clone());
             open_wizard(model, None);
-            if let Some(ref mut wizard) = model.wizard {
+            if let Some(mut wizard) = model.wizard.take() {
                 wizard.worktree_path = worktree_path;
                 configure_existing_branch_wizard_with_sessions(
-                    wizard,
+                    &mut wizard,
+                    model,
                     &quick_start_root,
                     &gwt_sessions_dir(),
                     &branch_name,
                 );
+                model.wizard = Some(wizard);
             }
         }
     }
@@ -2291,12 +3540,14 @@ fn check_branch_pending_actions(model: &mut Model) {
                 }
 
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                let (env, remove_env) = spawn_env_with_active_profile(HashMap::new());
                 let config = gwt_terminal::pty::SpawnConfig {
                     command: shell,
                     args: vec![],
                     cols,
                     rows,
-                    env: HashMap::new(),
+                    env,
+                    remove_env,
                     cwd: Some(wt_path.clone()),
                 };
                 if let Err(e) = spawn_pty_for_session(model, &session_id, config) {
@@ -2336,40 +3587,72 @@ fn branch_live_session_summaries_with(
 ) -> HashMap<String, screens::branches::BranchLiveSessionSummary> {
     let mut summaries: HashMap<String, screens::branches::BranchLiveSessionSummary> =
         HashMap::new();
+    let active_session_id = model.active_session_tab().map(|session| session.id.clone());
 
     for session in &model.sessions {
-        let SessionTabType::Agent { agent_id, color } = &session.tab_type else {
-            continue;
-        };
+        match &session.tab_type {
+            SessionTabType::Agent { agent_id, color } => {
+                let path = sessions_dir.join(format!("{}.toml", session.id));
+                let Ok(persisted) = AgentSession::load(&path) else {
+                    continue;
+                };
+                let runtime_status =
+                    agent_session_runtime_status(sessions_dir, &session.id, &persisted);
+                let is_active = active_session_id.as_deref() == Some(session.id.as_str());
+                let status = if matches!(
+                    runtime_status,
+                    gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
+                ) {
+                    runtime_status
+                } else if is_active {
+                    gwt_agent::AgentStatus::WaitingInput
+                } else {
+                    continue;
+                };
 
-        let path = sessions_dir.join(format!("{}.toml", session.id));
-        let Ok(persisted) = AgentSession::load(&path) else {
-            continue;
-        };
-        let status = agent_session_runtime_status(sessions_dir, &session.id, &persisted);
-        if !matches!(
-            status,
-            gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
-        ) {
-            continue;
+                let candidate = screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status,
+                    color: branch_spinner_palette_color(agent_id, *color),
+                    active: is_active,
+                };
+                summaries
+                    .entry(persisted.branch.clone())
+                    .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
+                        indicators: Vec::new(),
+                    })
+                    .indicators
+                    .push(candidate);
+            }
+            SessionTabType::Shell => {}
         }
+    }
 
-        let candidate = screens::branches::BranchLiveSessionIndicator {
-            status,
-            color: branch_spinner_palette_color(agent_id, *color),
-        };
-        summaries
-            .entry(persisted.branch.clone())
-            .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
-                indicators: Vec::new(),
-            })
-            .indicators
-            .push(candidate);
+    if let Some(active_session) = model.active_session_tab() {
+        if matches!(&active_session.tab_type, SessionTabType::Shell) {
+            if let Some(branch) = active_session.name.strip_prefix("Shell: ") {
+                summaries
+                    .entry(branch.to_string())
+                    .or_insert_with(|| screens::branches::BranchLiveSessionSummary {
+                        indicators: Vec::new(),
+                    })
+                    .indicators
+                    .push(screens::branches::BranchLiveSessionIndicator {
+                        kind: screens::branches::BranchLiveSessionIndicatorKind::Shell,
+                        status: gwt_agent::AgentStatus::WaitingInput,
+                        color: crate::model::AgentColor::Gray,
+                        active: true,
+                    });
+            }
+        }
     }
 
     for summary in summaries.values_mut() {
         summary.indicators.sort_by_key(|indicator| {
-            std::cmp::Reverse(branch_live_session_priority(indicator.status))
+            (
+                std::cmp::Reverse(u8::from(indicator.active)),
+                std::cmp::Reverse(branch_live_session_priority(indicator.status)),
+            )
         });
     }
 
@@ -2432,8 +3715,20 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
         return Vec::new();
     };
 
-    let branch_name = branch.name.as_str();
-    let branch_worktree = branch.worktree_path.as_deref().unwrap_or(model.repo_path());
+    branch_session_matches_for(
+        model,
+        sessions_dir,
+        branch.name.as_str(),
+        branch.worktree_path.as_deref().unwrap_or(model.repo_path()),
+    )
+}
+
+fn branch_session_matches_for(
+    model: &Model,
+    sessions_dir: &Path,
+    branch_name: &str,
+    branch_worktree: &Path,
+) -> Vec<BranchSessionMatch> {
     let branch_shell_name = format!("Shell: {branch_name}");
 
     model
@@ -2449,6 +3744,8 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                         name: session.name.clone(),
                         detail: None,
                         active: index == model.active_session,
+                        launch_summary: Vec::new(),
+                        launch_command_line: None,
                     },
                 })
             }
@@ -2476,12 +3773,100 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                         name: session.name.clone(),
                         detail,
                         active: index == model.active_session,
+                        launch_summary: agent_session_launch_summary(&persisted),
+                        launch_command_line: format_launch_command_line(
+                            &persisted.launch_command,
+                            &persisted.launch_args,
+                        ),
                     },
                 })
             }
             _ => None,
         })
         .collect()
+}
+
+fn branch_live_session_entries_with(
+    model: &Model,
+    sessions_dir: &Path,
+    branch_name: &str,
+    branch_worktree: &Path,
+) -> Vec<screens::wizard::LiveSessionEntry> {
+    branch_session_matches_for(model, sessions_dir, branch_name, branch_worktree)
+        .into_iter()
+        .map(|entry| screens::wizard::LiveSessionEntry {
+            session_id: model.sessions[entry.session_index].id.clone(),
+            kind: entry.summary.kind.to_string(),
+            name: entry.summary.name,
+            detail: entry.summary.detail,
+            active: entry.summary.active,
+        })
+        .collect()
+}
+
+fn agent_session_launch_summary(session: &AgentSession) -> Vec<String> {
+    let mut summary = Vec::new();
+    if let Some(model) = session.model.as_deref() {
+        summary.push(format!("Model: {model}"));
+    }
+    if let Some(reasoning) = session.reasoning_level.as_deref() {
+        summary.push(format!("Reasoning: {reasoning}"));
+    }
+    if let Some(version) = session.tool_version.as_deref() {
+        summary.push(format!("Version: {version}"));
+    }
+    if let Some(resume_session_id) = session.agent_session_id.as_deref() {
+        summary.push(format!("Resume session: {resume_session_id}"));
+    }
+    summary.push(format!(
+        "Permissions: {}",
+        if session.skip_permissions {
+            "Skip confirmations"
+        } else {
+            "Standard"
+        }
+    ));
+    if session.codex_fast_mode {
+        summary.push("Codex fast mode: Enabled".to_string());
+    }
+    summary.push(format!("Runtime: {:?}", session.runtime_target));
+    if let Some(service) = session.docker_service.as_deref() {
+        summary.push(format!("Docker service: {service}"));
+    }
+    summary
+}
+
+fn format_launch_command_line(command: &str, args: &[String]) -> Option<String> {
+    if command.trim().is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_quote_launch_token(command));
+    parts.extend(args.iter().map(|arg| shell_quote_launch_token(arg)));
+    Some(parts.join(" "))
+}
+
+fn shell_quote_launch_token(token: &str) -> String {
+    if !token.is_empty()
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | ':' | '='))
+    {
+        token.to_string()
+    } else {
+        let mut quoted = String::with_capacity(token.len() + 2);
+        quoted.push('\'');
+        for ch in token.chars() {
+            if ch == '\'' {
+                quoted.push_str("'\"'\"'");
+            } else {
+                quoted.push(ch);
+            }
+        }
+        quoted.push('\'');
+        quoted
+    }
 }
 
 fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
@@ -2496,43 +3881,17 @@ fn search_input_char(key: &crossterm::event::KeyEvent) -> Option<char> {
 }
 
 fn forward_key_to_active_session(model: &mut Model, key: crossterm::event::KeyEvent) {
-    if let Err(err) = forward_key_to_active_session_with_clipboard(
-        model,
-        key,
-        current_copy_shortcut_platform(),
-        |text| gwt_clipboard::ClipboardText::set_text(text).map_err(|err| err.to_string()),
-    ) {
-        model.error_queue.push_back(
-            Notification::new(Severity::Error, "terminal", "Copy failed").with_detail(err),
-        );
-    }
-}
-
-fn forward_key_to_active_session_with_clipboard<G>(
-    model: &mut Model,
-    key: crossterm::event::KeyEvent,
-    platform: CopyShortcutPlatform,
-    mut clipboard_writer: G,
-) -> Result<bool, String>
-where
-    G: FnMut(&str) -> Result<(), String>,
-{
-    if maybe_copy_selected_terminal_text(model, key, platform, &mut clipboard_writer)? {
-        return Ok(true);
-    }
-
     reset_active_session_scrollback_for_input(model);
     let Some(bytes) = key_event_to_bytes(key) else {
-        return Ok(false);
+        return;
     };
     let Some(session_id) = model.active_session_tab().map(|session| session.id.clone()) else {
-        return Ok(false);
+        return;
     };
     input_trace::trace_pty_forward(key, &session_id, &bytes);
     model
         .pending_pty_inputs
         .push_back(crate::model::PendingPtyInput { session_id, bytes });
-    Ok(false)
 }
 
 fn reset_active_session_scrollback_for_input(model: &mut Model) {
@@ -2542,70 +3901,6 @@ fn reset_active_session_scrollback_for_input(model: &mut Model) {
     if session.vt.viewing_history() {
         session.vt.clear_selection();
         session.vt.set_follow_live(true);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CopyShortcutPlatform {
-    MacOs,
-    NonMacOs,
-}
-
-fn current_copy_shortcut_platform() -> CopyShortcutPlatform {
-    if cfg!(target_os = "macos") {
-        CopyShortcutPlatform::MacOs
-    } else {
-        CopyShortcutPlatform::NonMacOs
-    }
-}
-
-fn maybe_copy_selected_terminal_text<G>(
-    model: &mut Model,
-    key: crossterm::event::KeyEvent,
-    platform: CopyShortcutPlatform,
-    clipboard_writer: &mut G,
-) -> Result<bool, String>
-where
-    G: FnMut(&str) -> Result<(), String>,
-{
-    if !matches_copy_shortcut(key, platform) {
-        return Ok(false);
-    }
-
-    let selected_text = model
-        .active_session_tab()
-        .and_then(selected_text)
-        .filter(|text| !text.is_empty());
-    let Some(selected_text) = selected_text else {
-        return Ok(false);
-    };
-
-    clipboard_writer(&selected_text)?;
-    if let Some(session) = model.active_session_tab_mut() {
-        session.vt.clear_selection();
-    }
-    Ok(true)
-}
-
-fn matches_copy_shortcut(key: crossterm::event::KeyEvent, platform: CopyShortcutPlatform) -> bool {
-    let is_copy_key = matches!(key.code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'c'));
-    if !is_copy_key || key.modifiers.contains(KeyModifiers::ALT) {
-        return false;
-    }
-
-    match platform {
-        CopyShortcutPlatform::MacOs => key.modifiers.contains(KeyModifiers::SUPER),
-        CopyShortcutPlatform::NonMacOs => {
-            key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.modifiers.contains(KeyModifiers::SHIFT)
-                && !key.modifiers.contains(KeyModifiers::SUPER)
-        }
-    }
-}
-
-fn clear_session_selection(model: &mut Model, session_index: usize) {
-    if let Some(session) = model.sessions.get_mut(session_index) {
-        session.vt.clear_selection();
     }
 }
 
@@ -2631,6 +3926,86 @@ fn apply_notification(model: &mut Model, notification: Notification) {
     if let Some(msg) = crate::notification_router::route(&notification) {
         update(model, msg);
     }
+}
+
+fn mirror_log_event_without_watcher(model: &mut Model, event: Notification) {
+    if model.logs_watcher_rx.is_none() {
+        screens::logs::update(
+            &mut model.logs,
+            screens::logs::LogsMessage::AppendEntries(vec![event]),
+        );
+    }
+}
+
+fn emit_log_event(event: &Notification) {
+    let detail = event.detail.as_deref().unwrap_or("");
+    let action = event
+        .fields
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let service = event
+        .fields
+        .get("service")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let stream = event
+        .fields
+        .get("stream")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    match event.severity {
+        Severity::Debug => {
+            tracing::debug!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+        Severity::Info => {
+            tracing::info!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+        Severity::Warn => {
+            tracing::warn!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+        Severity::Error => {
+            tracing::error!(
+                target: "docker",
+                detail = %detail,
+                action = %action,
+                service = %service,
+                stream = %stream,
+                "{}",
+                event.message
+            );
+        }
+    }
+}
+
+fn record_log_event(model: &mut Model, event: Notification) {
+    mirror_log_event_without_watcher(model, event.clone());
+    emit_log_event(&event);
 }
 
 fn workspace_initialization_warning<E: ToString>(err: E) -> Notification {
@@ -2743,26 +4118,20 @@ fn handle_pending_branch_docker_action(
         return;
     }
 
-    let container_label = model
-        .branches
-        .docker_containers
-        .iter()
-        .find(|container| container.id == action.container_id)
-        .map(|container| container.name.clone())
-        .unwrap_or_else(|| action.container_id.clone());
+    let service_label = action.service.clone();
 
     emit_branch_docker_progress(
         model,
         screens::docker_progress::DockerStage::StartingContainer,
         format!(
-            "{} container {container_label}",
+            "{} service {service_label}",
             start_message_for_action(action.action)
         ),
     );
 
     let events = Arc::new(Mutex::new(VecDeque::new()));
     model.docker_progress_events = Some(events.clone());
-    spawn_docker_progress_worker(events, action, container_label);
+    spawn_docker_progress_worker(events, action, service_label);
 }
 
 fn emit_branch_docker_progress(
@@ -2779,46 +4148,63 @@ fn emit_branch_docker_progress(
     );
 }
 
+fn push_docker_progress_event(events: &DockerProgressQueue, event: DockerProgressEvent) {
+    if let Ok(mut queue) = events.lock() {
+        queue.push_back(event);
+    }
+}
+
 fn spawn_docker_progress_worker(
     events: DockerProgressQueue,
     action: screens::branches::PendingDockerAction,
-    container_label: String,
+    service_label: String,
 ) {
     use screens::branches::DockerLifecycleAction;
 
     thread::spawn(move || {
         let outcome = match action.action {
             DockerLifecycleAction::Start => {
-                gwt_docker::start(&action.container_id).map(|()| DockerProgressResult::Completed {
-                    message: format!("Started container {container_label}"),
+                gwt_docker::compose_up(&action.compose_file, &action.service).map(|()| {
+                    DockerProgressEvent::BranchCompleted {
+                        message: format!("Started service {service_label}"),
+                    }
                 })
             }
             DockerLifecycleAction::Stop => {
-                gwt_docker::stop(&action.container_id).map(|()| DockerProgressResult::Completed {
-                    message: format!("Stopped container {container_label}"),
+                gwt_docker::compose_stop(&action.compose_file, &action.service).map(|()| {
+                    DockerProgressEvent::BranchCompleted {
+                        message: format!("Stopped service {service_label}"),
+                    }
                 })
             }
-            DockerLifecycleAction::Restart => gwt_docker::restart(&action.container_id).map(|()| {
-                DockerProgressResult::Completed {
-                    message: format!("Restarted container {container_label}"),
-                }
-            }),
+            DockerLifecycleAction::Restart => {
+                gwt_docker::compose_restart(&action.compose_file, &action.service).map(|()| {
+                    DockerProgressEvent::BranchCompleted {
+                        message: format!("Restarted service {service_label}"),
+                    }
+                })
+            }
+            DockerLifecycleAction::Recreate => {
+                gwt_docker::compose_up_force_recreate(&action.compose_file, &action.service).map(
+                    |()| DockerProgressEvent::BranchCompleted {
+                        message: format!("Recreated service {service_label}"),
+                    },
+                )
+            }
         };
 
         let event = match outcome {
             Ok(result) => result,
-            Err(err) => DockerProgressResult::Failed {
+            Err(err) => DockerProgressEvent::BranchFailed {
                 message: format!(
-                    "Failed to {} container {container_label}",
+                    "Failed to {} service {service_label}",
                     verb_for_action(action.action)
                 ),
                 detail: err.to_string(),
             },
         };
 
-        if let Ok(mut queue) = events.lock() {
-            queue.push_back(event);
-        }
+        push_docker_progress_event(&events, event);
     });
 }
 
@@ -2832,9 +4218,15 @@ fn drain_docker_progress_events(model: &mut Model) {
         return;
     };
 
-    model.docker_progress_events = None;
     match event {
-        DockerProgressResult::Completed { message } => {
+        DockerProgressEvent::Stage { stage, message } => {
+            emit_branch_docker_progress(model, stage, message);
+        }
+        DockerProgressEvent::Log { entry } => {
+            record_log_event(model, entry);
+        }
+        DockerProgressEvent::BranchCompleted { message } => {
+            model.docker_progress_events = None;
             emit_branch_docker_progress(
                 model,
                 screens::docker_progress::DockerStage::Ready,
@@ -2846,7 +4238,8 @@ fn drain_docker_progress_events(model: &mut Model) {
                 Message::Notify(Notification::new(Severity::Info, "docker", message)),
             );
         }
-        DockerProgressResult::Failed { message, detail } => {
+        DockerProgressEvent::BranchFailed { message, detail } => {
+            model.docker_progress_events = None;
             update(
                 model,
                 Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetError(
@@ -2856,6 +4249,36 @@ fn drain_docker_progress_events(model: &mut Model) {
             update(
                 model,
                 Message::Notify(
+                    Notification::new(Severity::Error, "docker", message).with_detail(detail),
+                ),
+            );
+        }
+        DockerProgressEvent::LaunchReady { config } => {
+            model.docker_progress_events = None;
+            let result = persist_and_spawn_launch(model, &gwt_sessions_dir(), *config);
+            update(
+                model,
+                Message::DockerProgress(screens::docker_progress::DockerProgressMessage::Hide),
+            );
+            if let Err(err) = result {
+                update(
+                    model,
+                    Message::PushErrorNotification(
+                        Notification::new(Severity::Error, "session", "Agent launch failed")
+                            .with_detail(err),
+                    ),
+                );
+            }
+        }
+        DockerProgressEvent::LaunchFailed { message, detail } => {
+            model.docker_progress_events = None;
+            update(
+                model,
+                Message::DockerProgress(screens::docker_progress::DockerProgressMessage::Hide),
+            );
+            update(
+                model,
+                Message::PushErrorNotification(
                     Notification::new(Severity::Error, "docker", message).with_detail(detail),
                 ),
             );
@@ -2873,6 +4296,7 @@ fn refresh_branches(model: &mut Model) {
                 is_local: branch.is_local,
                 category: screens::branches::categorize_branch(&branch.name),
                 worktree_path: None,
+                upstream: branch.upstream.clone(),
             })
             .collect();
         screens::branches::update(
@@ -2904,6 +4328,16 @@ fn refresh_branches(model: &mut Model) {
         .iter()
         .find(|b| b.is_head)
         .map(|b| b.name.clone());
+    if let Some(head_branch_name) = model.branches.current_head_branch.clone() {
+        if let Some(item) = model
+            .branches
+            .branches
+            .iter_mut()
+            .find(|branch| branch.name == head_branch_name && branch.worktree_path.is_none())
+        {
+            item.worktree_path = Some(model.repo_path.clone());
+        }
+    }
     refresh_active_session_branches(model);
     refresh_cleanup_merge_state(model);
 
@@ -3044,7 +4478,12 @@ fn refresh_active_session_branches_with(model: &mut Model, sessions_dir: &Path) 
             SessionTabType::Agent { .. } => {
                 let path = sessions_dir.join(format!("{}.toml", session.id));
                 if let Ok(persisted) = AgentSession::load(&path) {
-                    active.insert(persisted.branch.clone());
+                    if !matches!(
+                        agent_session_runtime_status(sessions_dir, &session.id, &persisted),
+                        gwt_agent::AgentStatus::Stopped
+                    ) {
+                        active.insert(persisted.branch.clone());
+                    }
                 } else if let Some((_, branch)) = session.name.split_once(": ") {
                     // Fall back to the tab title only when no persisted
                     // metadata exists (e.g., freshly spawned session before
@@ -3083,13 +4522,13 @@ fn spawn_branch_detail_worker(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
-    docker_snapshotter: Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync>,
+    docker_snapshotter: Arc<dyn Fn() -> Vec<screens::branches::DockerServiceInfo> + Send + Sync>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         if cancel.load(Ordering::SeqCst) {
             return;
         }
-        let docker_containers = docker_snapshotter();
+        let docker_services = docker_snapshotter();
         if cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -3098,21 +4537,63 @@ fn spawn_branch_detail_worker(
             cancel,
             generation,
             branches,
-            docker_containers,
+            docker_services,
             screens::branches::load_branch_detail,
         );
     })
 }
 
 fn branch_detail_docker_snapshotter(
-    _model: &Model,
-) -> Arc<dyn Fn() -> Vec<gwt_docker::ContainerInfo> + Send + Sync> {
+    model: &Model,
+) -> Arc<dyn Fn() -> Vec<screens::branches::DockerServiceInfo> + Send + Sync> {
     #[cfg(test)]
-    if let Some(snapshotter) = _model.branch_detail_docker_snapshotter.as_ref() {
+    if let Some(snapshotter) = model.branch_detail_docker_snapshotter.as_ref() {
         return snapshotter.clone();
     }
 
-    Arc::new(|| gwt_docker::list_containers().unwrap_or_default())
+    let branches = model.branches.branches.clone();
+    Arc::new(move || snapshot_branch_detail_docker_services(&branches))
+}
+
+fn snapshot_branch_detail_docker_services(
+    branches: &[screens::branches::BranchItem],
+) -> Vec<screens::branches::DockerServiceInfo> {
+    let mut services = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for branch in branches {
+        let Some(project_root) = branch.worktree_path.as_ref() else {
+            continue;
+        };
+        let files = gwt_docker::detect_docker_files(project_root);
+        let Some(compose_file) = docker_compose_file_for_launch(project_root, &files)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let Ok(parsed_services) = gwt_docker::parse_compose_file(&compose_file) else {
+            continue;
+        };
+
+        for service in parsed_services {
+            let service_name = service.name;
+            if !seen.insert((project_root.clone(), service_name.clone())) {
+                continue;
+            }
+            let status = gwt_docker::compose_service_status(&compose_file, &service_name)
+                .unwrap_or(gwt_docker::ComposeServiceStatus::NotFound);
+            services.push(screens::branches::DockerServiceInfo {
+                project_root: project_root.clone(),
+                compose_file: compose_file.clone(),
+                name: service_name,
+                status,
+                ports: service.ports.join(", "),
+            });
+        }
+    }
+
+    services
 }
 
 #[cfg(test)]
@@ -3121,13 +4602,13 @@ fn spawn_branch_detail_worker_with_loader<F>(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
-    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    docker_services: Vec<screens::branches::DockerServiceInfo>,
     loader: F,
 ) -> thread::JoinHandle<()>
 where
     F: Fn(
             &screens::branches::BranchItem,
-            &[gwt_docker::ContainerInfo],
+            &[screens::branches::DockerServiceInfo],
         ) -> screens::branches::BranchDetailData
         + Send
         + 'static,
@@ -3138,7 +4619,7 @@ where
             cancel,
             generation,
             branches,
-            docker_containers,
+            docker_services,
             loader,
         );
     })
@@ -3149,19 +4630,19 @@ fn run_branch_detail_worker<F>(
     cancel: Arc<AtomicBool>,
     generation: u64,
     branches: Vec<screens::branches::BranchItem>,
-    docker_containers: Vec<gwt_docker::ContainerInfo>,
+    docker_services: Vec<screens::branches::DockerServiceInfo>,
     loader: F,
 ) where
     F: Fn(
         &screens::branches::BranchItem,
-        &[gwt_docker::ContainerInfo],
+        &[screens::branches::DockerServiceInfo],
     ) -> screens::branches::BranchDetailData,
 {
     for branch in branches {
         if cancel.load(Ordering::SeqCst) {
             return;
         }
-        let data = loader(&branch, &docker_containers);
+        let data = loader(&branch, &docker_services);
         if cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -3206,6 +4687,7 @@ fn start_message_for_action(action: screens::branches::DockerLifecycleAction) ->
         DockerLifecycleAction::Start => "Starting",
         DockerLifecycleAction::Stop => "Stopping",
         DockerLifecycleAction::Restart => "Restarting",
+        DockerLifecycleAction::Recreate => "Recreating",
     }
 }
 
@@ -3216,6 +4698,7 @@ fn verb_for_action(action: screens::branches::DockerLifecycleAction) -> &'static
         DockerLifecycleAction::Start => "start",
         DockerLifecycleAction::Stop => "stop",
         DockerLifecycleAction::Restart => "restart",
+        DockerLifecycleAction::Recreate => "recreate",
     }
 }
 
@@ -3272,6 +4755,74 @@ fn handle_logs_message(model: &mut Model, msg: screens::logs::LogsMessage) {
         return;
     }
     screens::logs::update(&mut model.logs, msg);
+}
+
+fn handle_board_message(model: &mut Model, msg: screens::board::BoardMessage) {
+    if matches!(msg, screens::board::BoardMessage::Refresh) {
+        reload_board(model);
+        return;
+    }
+
+    if matches!(msg, screens::board::BoardMessage::SubmitComposer) {
+        submit_board_composer(model);
+        return;
+    }
+
+    screens::board::update(&mut model.board, msg);
+}
+
+fn reload_board(model: &mut Model) {
+    match gwt_core::coordination::load_snapshot(model.repo_path()) {
+        Ok(snapshot) => {
+            screens::board::update(
+                &mut model.board,
+                screens::board::BoardMessage::SetSnapshot(snapshot),
+            );
+        }
+        Err(err) => {
+            model.error_queue.push_back(Notification::new(
+                Severity::Error,
+                "gwt_tui::ui::board",
+                format!("failed to load board snapshot: {err}"),
+            ));
+        }
+    }
+}
+
+fn submit_board_composer(model: &mut Model) {
+    let body = model.board.composer_text.trim().to_string();
+    if body.is_empty() {
+        return;
+    }
+
+    let entry = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::User,
+        "user",
+        model.board.composer_kind.clone(),
+        body,
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+
+    match gwt_core::coordination::post_entry(model.repo_path(), entry) {
+        Ok(snapshot) => {
+            model.board.composer_text.clear();
+            model.board.composer_open = true;
+            screens::board::update(
+                &mut model.board,
+                screens::board::BoardMessage::SetSnapshot(snapshot),
+            );
+        }
+        Err(err) => {
+            model.error_queue.push_back(Notification::new(
+                Severity::Error,
+                "gwt_tui::ui::board",
+                format!("failed to post board entry: {err}"),
+            ));
+        }
+    }
 }
 
 /// Drain the UI log bridge channel and dispatch user-facing events
@@ -3343,6 +4894,7 @@ fn route_paste_input(model: &mut Model, text: String) {
     if model.help_visible
         || !model.error_queue.is_empty()
         || model.service_select.is_some()
+        || model.discussion_resume.is_some()
         || model.confirm.visible
         || model.cleanup_confirm.visible
         || model.cleanup_progress.visible
@@ -3415,6 +4967,17 @@ fn route_non_terminal_paste(model: &mut Model, text: &str) -> bool {
                         screens::settings::update(
                             &mut model.settings,
                             screens::settings::SettingsMessage::InputChar(ch),
+                        );
+                    });
+                    true
+                }
+                ManagementTab::Profiles
+                    if model.profiles.mode != screens::profiles::ProfileMode::List =>
+                {
+                    paste_text_input_chars(text, |ch| {
+                        screens::profiles::update(
+                            &mut model.profiles,
+                            screens::profiles::ProfilesMessage::InputChar(ch),
                         );
                     });
                     true
@@ -3605,15 +5168,15 @@ fn request_branch_suggestions(context: &str) -> Result<Vec<String>, String> {
 }
 
 fn branch_suggestion_client() -> Result<AIClient, String> {
-    if let Ok(settings) = Settings::load() {
-        if let Some(ai_settings) = settings
-            .profiles
-            .active_profile()
-            .and_then(|profile| profile.ai_settings.as_ref())
-        {
-            if ai_settings.is_enabled() {
-                return ai_client_from_settings(ai_settings);
-            }
+    let loaded = load_settings_with_active_profile_fallback();
+    if let Some(ai_settings) = loaded
+        .settings
+        .profiles
+        .active_profile()
+        .and_then(|profile| profile.ai_settings.as_ref())
+    {
+        if ai_settings.is_enabled() {
+            return ai_client_from_settings(ai_settings);
         }
     }
 
@@ -3690,8 +5253,8 @@ fn build_launch_config_from_wizard_with_custom_agents(
         builder = builder.version(&wizard.version);
     }
 
-    if !wizard.reasoning.is_empty() && wizard.reasoning != "medium" {
-        builder = builder.reasoning_level(&wizard.reasoning);
+    if let Some(reasoning_level) = wizard_reasoning_level_for_launch(wizard) {
+        builder = builder.reasoning_level(reasoning_level);
     }
 
     if wizard.agent_id == "codex" && wizard.codex_fast_mode {
@@ -3701,6 +5264,11 @@ fn build_launch_config_from_wizard_with_custom_agents(
     if wizard.skip_perms {
         builder = builder.skip_permissions(true);
     }
+    builder = builder.runtime_target(wizard.runtime_target);
+    if let Some(docker_service) = wizard.docker_service.as_deref() {
+        builder = builder.docker_service(docker_service);
+    }
+    builder = builder.docker_lifecycle_intent(wizard.docker_lifecycle_intent);
     let session_mode = match wizard.mode.as_str() {
         "continue" => SessionMode::Continue,
         "resume" if wizard.resume_session_id.is_some() => SessionMode::Resume,
@@ -3713,9 +5281,15 @@ fn build_launch_config_from_wizard_with_custom_agents(
     }
 
     let mut config = builder.build();
-    if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
+    if !wizard.version.is_empty() {
+        config.tool_version = Some(wizard.version.clone());
+    }
+    if let Some(reasoning_level) = wizard_reasoning_level_for_launch(wizard) {
+        config.reasoning_level = Some(reasoning_level.to_string());
+    } else if wizard.agent_id == "codex" && !wizard.reasoning.is_empty() {
         config.reasoning_level = Some(wizard.reasoning.clone());
     }
+    config.linked_issue_number = wizard.issue_id.parse::<u64>().ok();
     config
 }
 
@@ -3780,11 +5354,31 @@ fn build_custom_launch_config_from_wizard(
         resume_session_id: wizard.resume_session_id.clone(),
         skip_permissions: wizard.skip_perms,
         codex_fast_mode: false,
+        runtime_target: wizard.runtime_target,
+        docker_service: wizard.docker_service.clone(),
+        docker_lifecycle_intent: wizard.docker_lifecycle_intent,
+        linked_issue_number: wizard.issue_id.parse::<u64>().ok(),
     }
 }
 
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
+}
+
+fn wizard_reasoning_level_for_launch(wizard: &screens::wizard::WizardState) -> Option<&str> {
+    match wizard.agent_id.as_str() {
+        "codex" if !wizard.reasoning.is_empty() => Some(wizard.reasoning.as_str()),
+        "claude"
+            if !wizard.reasoning.is_empty()
+                && matches!(
+                    wizard.model.as_str(),
+                    "Default (Opus 4.6)" | "opus" | "sonnet"
+                ) =>
+        {
+            Some(wizard.reasoning.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<String> {
@@ -3801,15 +5395,50 @@ fn wizard_launch_base_branch(wizard: &screens::wizard::WizardState) -> Option<St
 }
 
 fn materialize_pending_launch(model: &mut Model) {
+    if model
+        .pending_launch_config
+        .as_ref()
+        .is_some_and(|config| config.runtime_target == LaunchRuntimeTarget::Docker)
+    {
+        if model.docker_progress_events.is_some() {
+            update(
+                model,
+                Message::PushErrorNotification(Notification::new(
+                    Severity::Error,
+                    "docker",
+                    "Docker launch already running",
+                )),
+            );
+            return;
+        }
+        if let Some(config) = model.pending_launch_config.take() {
+            if let Err(err) = link_selected_issue_to_branch(&model.repo_path, &config) {
+                update(
+                    model,
+                    Message::PushErrorNotification(
+                        Notification::new(Severity::Error, "session", "Agent launch failed")
+                            .with_detail(err),
+                    ),
+                );
+                return;
+            }
+            if let Err(err) = persist_issue_linkage(&model.repo_path, &config) {
+                tracing::warn!("issue linkage store update failed: {err}");
+            } else if config.linked_issue_number.is_some() {
+                reload_cached_issues(model);
+            }
+            start_async_docker_launch(model, config);
+        }
+        return;
+    }
+
     if let Err(err) = materialize_pending_launch_with(model, &gwt_sessions_dir()) {
-        apply_notification(
+        update(
             model,
-            Notification::new(
-                Severity::Warn,
-                "session",
-                "Launch metadata was not persisted",
-            )
-            .with_detail(err),
+            Message::PushErrorNotification(
+                Notification::new(Severity::Error, "session", "Agent launch failed")
+                    .with_detail(err),
+            ),
         );
     }
 }
@@ -3823,12 +5452,110 @@ fn materialize_pending_launch_with(
     model: &mut Model,
     sessions_dir: &std::path::Path,
 ) -> Result<(), String> {
+    materialize_pending_launch_with_hooks(
+        model,
+        sessions_dir,
+        link_selected_issue_to_branch,
+        resolve_launch_worktree,
+    )
+}
+
+fn materialize_pending_launch_with_hooks<Link, Resolve>(
+    model: &mut Model,
+    sessions_dir: &std::path::Path,
+    link_issue: Link,
+    resolve_worktree: Resolve,
+) -> Result<(), String>
+where
+    Link: FnOnce(&std::path::Path, &LaunchConfig) -> Result<(), String>,
+    Resolve: FnOnce(&std::path::Path, &mut LaunchConfig) -> Result<(), String>,
+{
     let Some(mut config) = model.pending_launch_config.take() else {
         return Ok(());
     };
 
-    resolve_launch_worktree(&model.repo_path, &mut config)?;
+    link_issue(&model.repo_path, &config)?;
+    resolve_worktree(&model.repo_path, &mut config)?;
+    if let Err(err) = persist_issue_linkage(&model.repo_path, &config) {
+        tracing::warn!("issue linkage store update failed: {err}");
+    } else if config.linked_issue_number.is_some() {
+        reload_cached_issues(model);
+    }
+    if let Err(err) = apply_docker_runtime_to_launch_config(&model.repo_path, &mut config) {
+        update(
+            model,
+            Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetError(
+                err.clone(),
+            )),
+        );
+        update(
+            model,
+            Message::PushErrorNotification(
+                Notification::new(Severity::Error, "docker", "Docker launch failed")
+                    .with_detail(err),
+            ),
+        );
+        return Ok(());
+    }
+    persist_and_spawn_launch(model, sessions_dir, config)
+}
 
+fn start_async_docker_launch(model: &mut Model, config: LaunchConfig) {
+    update(
+        model,
+        Message::DockerProgress(screens::docker_progress::DockerProgressMessage::SetStage {
+            stage: screens::docker_progress::DockerStage::DetectingFiles,
+            message: "Preparing Docker launch".to_string(),
+        }),
+    );
+
+    let events = Arc::new(Mutex::new(VecDeque::new()));
+    model.docker_progress_events = Some(events.clone());
+    spawn_docker_launch_worker(events, model.repo_path.clone(), config);
+}
+
+fn spawn_docker_launch_worker(
+    events: DockerProgressQueue,
+    repo_path: PathBuf,
+    mut config: LaunchConfig,
+) {
+    thread::spawn(move || {
+        let outcome = (|| -> Result<LaunchConfig, String> {
+            resolve_launch_worktree(&repo_path, &mut config)?;
+            apply_docker_runtime_to_launch_config_with_progress(
+                &repo_path,
+                &mut config,
+                |stage, message| {
+                    push_docker_progress_event(
+                        &events,
+                        DockerProgressEvent::Stage { stage, message },
+                    );
+                },
+                |entry| {
+                    push_docker_progress_event(&events, DockerProgressEvent::Log { entry });
+                },
+            )?;
+            Ok(config)
+        })();
+
+        let event = match outcome {
+            Ok(config) => DockerProgressEvent::LaunchReady {
+                config: Box::new(config),
+            },
+            Err(detail) => DockerProgressEvent::LaunchFailed {
+                message: "Docker launch failed".to_string(),
+                detail,
+            },
+        };
+        push_docker_progress_event(&events, event);
+    });
+}
+
+fn persist_and_spawn_launch(
+    model: &mut Model,
+    sessions_dir: &std::path::Path,
+    mut config: LaunchConfig,
+) -> Result<(), String> {
     let worktree = config
         .working_dir
         .clone()
@@ -3847,6 +5574,12 @@ fn materialize_pending_launch_with(
     session.agent_session_id = config.resume_session_id.clone();
     session.skip_permissions = config.skip_permissions;
     session.codex_fast_mode = config.codex_fast_mode;
+    session.runtime_target = config.runtime_target;
+    session.docker_service = config.docker_service.clone();
+    session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+    session.linked_issue_number = config.linked_issue_number;
+    session.launch_command = config.command.clone();
+    session.launch_args = config.args.clone();
     session.display_name = config.display_name.clone();
     session.save(sessions_dir).map_err(|err| err.to_string())?;
     augment_agent_hook_runtime_launch_config(&mut config, sessions_dir, &session.id);
@@ -3868,47 +5601,30 @@ fn materialize_pending_launch_with(
     model.active_session = model.sessions.len().saturating_sub(1);
     model.active_layer = ActiveLayer::Main;
 
-    // Use actual pane content area for PTY size.
     let (cols, rows) = session_content_size(model);
     if let Some(s) = model.sessions.last_mut() {
         s.vt.resize(rows, cols);
     }
 
-    // Prepare hook assets before the agent process starts so the first turn
-    // can emit runtime state immediately. Take an owned PathBuf so the borrow
-    // does not outlive the immutable borrow of `model`.
     let worktree: std::path::PathBuf = config
         .working_dir
         .clone()
         .unwrap_or_else(|| model.repo_path.clone());
-    if let Err(e) = distribute_to_worktree(&worktree) {
-        tracing::warn!("skill distribution failed: {e}");
-    }
-    if let Err(e) = update_git_exclude(&worktree) {
-        tracing::warn!("git exclude update failed: {e}");
-    }
-    if let Err(e) = generate_settings_local(&worktree) {
-        tracing::warn!("settings.local.json generation failed: {e}");
-    }
-    if let Err(e) = generate_codex_hooks(&worktree) {
-        tracing::warn!("hooks.json generation failed: {e}");
-    }
+    refresh_managed_gwt_assets_for_worktree(&worktree, "agent launch", true);
 
-    // Spawn PTY process for the agent session.
-    let mut pty_env = config.env_vars.clone();
+    let (mut pty_env, mut remove_env) = spawn_env_with_active_profile(config.env_vars.clone());
     inject_agent_hook_runtime_env(&mut pty_env, sessions_dir, &session.id);
+    remove_env.retain(|key| !pty_env.contains_key(key));
     let pty_config = gwt_terminal::pty::SpawnConfig {
         command: config.command.clone(),
         args: config.args.clone(),
         cols,
         rows,
         env: pty_env,
+        remove_env,
         cwd: config.working_dir.clone(),
     };
     let repo_path_for_watcher = model.repo_path.clone();
-    // Emit the agent-launch audit event before delegating to the
-    // shared PTY helper. The helper itself logs only generic
-    // metadata (FR-020 / reviewer comment B2).
     emit_agent_launch_event(&model.repo_path, &tab_id, &pty_config);
     if let Err(e) = spawn_pty_for_session(model, &tab_id, pty_config) {
         apply_notification(
@@ -3920,14 +5636,10 @@ fn materialize_pending_launch_with(
             ),
         );
     } else {
-        bootstrap_agent_session_running(sessions_dir, &session.id);
+        bootstrap_agent_session_waiting_input(sessions_dir, &session.id);
         // Phase 8: ensure a watcher is running for this Worktree so live
         // SPEC/file edits feed the incremental indexer.
         crate::index_worker::ensure_watcher(&repo_path_for_watcher, &worktree);
-        // Kick an initial integrity build for this worktree (only when a
-        // pane actually opens) so the index reflects current on-disk state
-        // before the first search. Throttled by a global semaphore so
-        // multiple pane opens don't overwhelm the system.
         crate::index_worker::kick_initial_build_for_worktree(&repo_path_for_watcher, &worktree);
     }
 
@@ -3943,6 +5655,57 @@ fn materialize_pending_launch_with(
     );
 
     Ok(())
+}
+
+fn link_selected_issue_to_branch(
+    repo_path: &std::path::Path,
+    config: &LaunchConfig,
+) -> Result<(), String> {
+    link_selected_issue_to_branch_with(repo_path, config, |cwd, args| {
+        let output = Command::new("gh")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .map_err(|err| format!("gh issue develop: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "gh issue develop: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    })
+}
+
+fn link_selected_issue_to_branch_with<Run>(
+    repo_path: &std::path::Path,
+    config: &LaunchConfig,
+    run: Run,
+) -> Result<(), String>
+where
+    Run: FnOnce(&std::path::Path, &[String]) -> Result<(), String>,
+{
+    let Some(issue_number) = config.linked_issue_number else {
+        return Ok(());
+    };
+    let branch_name = config
+        .branch
+        .as_deref()
+        .ok_or_else(|| "issue linkage requires a branch name".to_string())?;
+    let base_branch = config
+        .base_branch
+        .as_deref()
+        .unwrap_or(DEFAULT_NEW_BRANCH_BASE_BRANCH);
+    let args = vec![
+        "issue".to_string(),
+        "develop".to_string(),
+        issue_number.to_string(),
+        "--name".to_string(),
+        branch_name.to_string(),
+        "--base".to_string(),
+        base_branch.to_string(),
+    ];
+    run(repo_path, &args)
 }
 
 fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
@@ -3961,6 +5724,7 @@ fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
     if let Some(pty) = model.pty_handles.remove(&id) {
         let _ = pty.kill();
     }
+    clear_discussion_resume_state_for_session(model, &id);
     model.sessions.remove(model.active_session);
     if model.active_session >= model.sessions.len() {
         model.active_session = model.sessions.len() - 1;
@@ -3996,7 +5760,13 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
 
     let main_repo_path =
         gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = existing_worktree_for_branch(&main_repo_path, &branch_name)? {
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let worktrees = manager.list().map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
+        .map(|worktree| worktree.path.clone())
+    {
         config.working_dir = Some(existing_worktree.clone());
         config.env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
@@ -4011,7 +5781,6 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
 
     manager
         .fetch_origin()
@@ -4042,7 +5811,20 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
             .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
     }
 
-    let worktree_path = gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let preferred_worktree_path =
+        gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+    let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
+        .ok_or_else(|| {
+            format!("failed to resolve available worktree path for branch {branch_name}")
+        })?;
+    if worktree_path != preferred_worktree_path {
+        tracing::warn!(
+            branch = branch_name,
+            preferred = %preferred_worktree_path.display(),
+            selected = %worktree_path.display(),
+            "preferred worktree path is occupied; using suffixed fallback"
+        );
+    }
     if local_branch_exists(&main_repo_path, &branch_name)? {
         manager
             .create(&branch_name, &worktree_path)
@@ -4061,6 +5843,656 @@ fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Resul
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct DockerLaunchPlan {
+    compose_file: PathBuf,
+    service: String,
+    container_cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerExecProgram {
+    executable: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerPackageRunnerCandidate {
+    executable: &'static str,
+    base_args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DevContainerLaunchDefaults {
+    service: Option<String>,
+    workspace_folder: Option<String>,
+    compose_file: Option<PathBuf>,
+}
+
+fn apply_docker_runtime_to_launch_config(
+    repo_path: &Path,
+    config: &mut LaunchConfig,
+) -> Result<(), String> {
+    apply_docker_runtime_to_launch_config_with_progress(repo_path, config, |_, _| {}, |_| {})
+}
+
+fn apply_docker_runtime_to_launch_config_with_progress<F, G>(
+    repo_path: &Path,
+    config: &mut LaunchConfig,
+    mut emit_progress: F,
+    mut emit_log: G,
+) -> Result<(), String>
+where
+    F: FnMut(screens::docker_progress::DockerStage, String),
+    G: FnMut(Notification),
+{
+    if config.runtime_target != LaunchRuntimeTarget::Docker {
+        return Ok(());
+    }
+
+    emit_progress(
+        screens::docker_progress::DockerStage::DetectingFiles,
+        "Resolving Docker launch configuration".to_string(),
+    );
+    let worktree = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
+    ensure_docker_launch_runtime_ready()?;
+    ensure_docker_launch_service_ready(
+        &launch,
+        config.docker_lifecycle_intent,
+        &mut emit_progress,
+        &mut emit_log,
+    )?;
+    maybe_inject_docker_sandbox_env(&launch, config)?;
+    emit_progress(
+        screens::docker_progress::DockerStage::WaitingForServices,
+        format!(
+            "Checking launch command in Docker service {}",
+            launch.service
+        ),
+    );
+    let runtime_program = resolve_docker_exec_program(&launch, config)?;
+
+    let mut args = vec![
+        "compose".to_string(),
+        "-f".to_string(),
+        launch.compose_file.display().to_string(),
+        "exec".to_string(),
+        "-w".to_string(),
+        launch.container_cwd.clone(),
+    ];
+    args.extend(docker_compose_exec_env_args(&config.env_vars));
+    args.push(launch.service.clone());
+    args.push(runtime_program.executable);
+    args.extend(runtime_program.args);
+
+    config.command = docker_binary_for_launch();
+    config.args = args;
+    config
+        .env_vars
+        .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    config.docker_service = Some(launch.service);
+
+    Ok(())
+}
+
+fn docker_compose_up_log_entry(
+    service: &str,
+    stream: Option<gwt_docker::CommandOutputStream>,
+    message: impl Into<String>,
+) -> Notification {
+    let stream_label = stream.map(|stream| match stream {
+        gwt_docker::CommandOutputStream::Stdout => "stdout",
+        gwt_docker::CommandOutputStream::Stderr => "stderr",
+    });
+    let rendered = match stream_label {
+        Some(label) => format!("[{service}][{label}] {}", message.into()),
+        None => format!("[{service}] {}", message.into()),
+    };
+    let severity = match stream {
+        Some(gwt_docker::CommandOutputStream::Stderr) => Severity::Warn,
+        _ => Severity::Info,
+    };
+    let mut event = Notification::new(severity, "docker", rendered)
+        .with_field(
+            "action",
+            serde_json::Value::String("compose_up".to_string()),
+        )
+        .with_field("service", serde_json::Value::String(service.to_string()));
+    if let Some(label) = stream_label {
+        event = event.with_field("stream", serde_json::Value::String(label.to_string()));
+    }
+    event
+}
+
+fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
+    if !gwt_docker::docker_available() {
+        return Err("Docker is not installed or not available on PATH".to_string());
+    }
+    if !gwt_docker::compose_available() {
+        return Err("docker compose is not available".to_string());
+    }
+    if !gwt_docker::daemon_running() {
+        return Err("Docker daemon is not running".to_string());
+    }
+    Ok(())
+}
+
+fn maybe_inject_docker_sandbox_env(
+    launch: &DockerLaunchPlan,
+    config: &mut LaunchConfig,
+) -> Result<(), String> {
+    if cfg!(windows) || !matches!(config.agent_id, AgentId::ClaudeCode) || !config.skip_permissions
+    {
+        return Ok(());
+    }
+
+    let is_root = gwt_docker::compose_service_user_is_root(&launch.compose_file, &launch.service)
+        .map_err(|err| {
+        format!(
+            "Failed to determine Docker user for service '{}': {err}",
+            launch.service
+        )
+    })?;
+    if is_root {
+        config
+            .env_vars
+            .insert("IS_SANDBOX".to_string(), "1".to_string());
+    }
+    Ok(())
+}
+
+fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<String> {
+    let mut keys = env_vars.keys().collect::<Vec<_>>();
+    keys.sort();
+
+    let mut args = Vec::new();
+    for key in keys {
+        let key = key.trim();
+        if key.is_empty() || !is_valid_docker_env_key(key) {
+            continue;
+        }
+        let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
+        args.push("-e".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    args
+}
+
+fn is_valid_docker_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn resolve_docker_exec_program(
+    launch: &DockerLaunchPlan,
+    config: &LaunchConfig,
+) -> Result<DockerExecProgram, String> {
+    let Some(version_spec) = docker_package_version_spec(config) else {
+        ensure_docker_launch_command_ready(launch, &config.command)?;
+        return Ok(DockerExecProgram {
+            executable: config.command.clone(),
+            args: config.args.clone(),
+        });
+    };
+
+    resolve_docker_package_runner(launch, config, &version_spec)
+}
+
+fn docker_package_version_spec(config: &LaunchConfig) -> Option<String> {
+    let package = config.agent_id.package_name()?;
+    let version = config.tool_version.as_deref()?;
+    if version == "installed" || version.is_empty() {
+        return None;
+    }
+
+    Some(if version == "latest" {
+        format!("{package}@latest")
+    } else {
+        format!("{package}@{version}")
+    })
+}
+
+fn resolve_docker_package_runner(
+    launch: &DockerLaunchPlan,
+    config: &LaunchConfig,
+    version_spec: &str,
+) -> Result<DockerExecProgram, String> {
+    let agent_args = strip_docker_package_runner_args(&config.args, version_spec);
+    let candidates = vec![
+        DockerPackageRunnerCandidate {
+            executable: "bunx",
+            base_args: vec![version_spec.to_string()],
+        },
+        DockerPackageRunnerCandidate {
+            executable: "npx",
+            base_args: vec!["--yes".to_string(), version_spec.to_string()],
+        },
+    ];
+    let mut failures = Vec::new();
+
+    for candidate in candidates {
+        let output = gwt_docker::compose_service_exec_capture(
+            &launch.compose_file,
+            &launch.service,
+            Some(&launch.container_cwd),
+            &candidate.probe_args(),
+        )
+        .map_err(|err| err.to_string())?;
+        if output.status.success() {
+            return Ok(candidate.into_exec_program(agent_args.clone()));
+        }
+        failures.push(format!(
+            "{}: {}",
+            candidate.executable,
+            docker_compose_exec_failure_detail(&output)
+        ));
+    }
+
+    Err(format!(
+        "Selected Docker runtime cannot launch {version_spec} in service '{}'. {}",
+        launch.service,
+        failures.join(" | ")
+    ))
+}
+
+fn strip_docker_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
+    if args.first().is_some_and(|first| first == "--yes")
+        && args.get(1).is_some_and(|arg| arg == version_spec)
+    {
+        return args[2..].to_vec();
+    }
+    if args.first().is_some_and(|arg| arg == version_spec) {
+        return args[1..].to_vec();
+    }
+    args.to_vec()
+}
+
+fn docker_compose_exec_failure_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    output
+        .status
+        .code()
+        .map(|code| format!("exit code {code}"))
+        .unwrap_or_else(|| "terminated by signal".to_string())
+}
+
+fn ensure_docker_launch_command_ready(
+    launch: &DockerLaunchPlan,
+    command: &str,
+) -> Result<(), String> {
+    let available =
+        gwt_docker::compose_service_has_command(&launch.compose_file, &launch.service, command)
+            .map_err(|err| err.to_string())?;
+    if available {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Command '{command}' is not available in Docker service '{}'",
+        launch.service
+    ))
+}
+
+impl DockerPackageRunnerCandidate {
+    fn probe_args(&self) -> Vec<String> {
+        let mut args = vec![self.executable.to_string()];
+        args.extend(self.base_args.clone());
+        args.push("--version".to_string());
+        args
+    }
+
+    fn into_exec_program(self, mut agent_args: Vec<String>) -> DockerExecProgram {
+        let mut args = self.base_args;
+        args.append(&mut agent_args);
+        DockerExecProgram {
+            executable: self.executable.to_string(),
+            args,
+        }
+    }
+}
+
+fn ensure_docker_launch_service_ready<F, G>(
+    launch: &DockerLaunchPlan,
+    intent: gwt_agent::DockerLifecycleIntent,
+    emit_progress: &mut F,
+    emit_log: &mut G,
+) -> Result<(), String>
+where
+    F: FnMut(screens::docker_progress::DockerStage, String),
+    G: FnMut(Notification),
+{
+    let status = gwt_docker::compose_service_status(&launch.compose_file, &launch.service)
+        .map_err(|err| err.to_string())?;
+    let action = normalize_docker_launch_action(intent, status);
+
+    match action {
+        DockerLaunchServiceAction::Connect => return Ok(()),
+        DockerLaunchServiceAction::Start => {
+            emit_progress(
+                screens::docker_progress::DockerStage::BuildingImage,
+                format!(
+                    "Building image and starting Docker service {}",
+                    launch.service
+                ),
+            );
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!("Running docker compose up -d {}", launch.service),
+            ));
+            gwt_docker::compose_up_with_output(
+                &launch.compose_file,
+                &launch.service,
+                |stream, line| {
+                    emit_log(docker_compose_up_log_entry(
+                        &launch.service,
+                        Some(stream),
+                        line.to_string(),
+                    ));
+                },
+            )
+            .map_err(|err| err.to_string())?;
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!("docker compose up -d {} completed", launch.service),
+            ));
+        }
+        DockerLaunchServiceAction::Restart => {
+            emit_progress(
+                screens::docker_progress::DockerStage::StartingContainer,
+                format!("Restarting Docker service {}", launch.service),
+            );
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!("Running docker compose restart {}", launch.service),
+            ));
+            gwt_docker::compose_restart(&launch.compose_file, &launch.service)
+                .map_err(|err| err.to_string())?;
+        }
+        DockerLaunchServiceAction::Recreate => {
+            emit_progress(
+                screens::docker_progress::DockerStage::StartingContainer,
+                format!("Recreating Docker service {}", launch.service),
+            );
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!(
+                    "Running docker compose up -d --force-recreate {}",
+                    launch.service
+                ),
+            ));
+            gwt_docker::compose_up_force_recreate_with_output(
+                &launch.compose_file,
+                &launch.service,
+                |stream, line| {
+                    emit_log(docker_compose_up_log_entry(
+                        &launch.service,
+                        Some(stream),
+                        line.to_string(),
+                    ));
+                },
+            )
+            .map_err(|err| err.to_string())?;
+            emit_log(docker_compose_up_log_entry(
+                &launch.service,
+                None,
+                format!(
+                    "docker compose up -d --force-recreate {} completed",
+                    launch.service
+                ),
+            ));
+        }
+    }
+
+    emit_progress(
+        screens::docker_progress::DockerStage::WaitingForServices,
+        format!("Waiting for Docker service {}", launch.service),
+    );
+    let running = gwt_docker::compose_service_is_running(&launch.compose_file, &launch.service)
+        .map_err(|err| err.to_string())?;
+    if running {
+        return Ok(());
+    }
+
+    let mut message = format!(
+        "docker compose service '{}' is not running after startup.",
+        launch.service
+    );
+    if let Ok(logs) = gwt_docker::compose_service_logs(&launch.compose_file, &launch.service) {
+        let trimmed = logs.trim();
+        if !trimmed.is_empty() {
+            message.push_str("\n\n");
+            message.push_str(trimmed);
+        }
+    }
+    Err(message)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerLaunchServiceAction {
+    Connect,
+    Start,
+    Restart,
+    Recreate,
+}
+
+fn normalize_docker_launch_action(
+    intent: gwt_agent::DockerLifecycleIntent,
+    status: gwt_docker::ComposeServiceStatus,
+) -> DockerLaunchServiceAction {
+    use gwt_agent::DockerLifecycleIntent;
+    use gwt_docker::ComposeServiceStatus;
+
+    match intent {
+        DockerLifecycleIntent::Recreate => DockerLaunchServiceAction::Recreate,
+        DockerLifecycleIntent::Restart if status == ComposeServiceStatus::Running => {
+            DockerLaunchServiceAction::Restart
+        }
+        DockerLifecycleIntent::Connect
+        | DockerLifecycleIntent::Start
+        | DockerLifecycleIntent::Restart
+        | DockerLifecycleIntent::CreateAndStart => match status {
+            ComposeServiceStatus::Running => DockerLaunchServiceAction::Connect,
+            ComposeServiceStatus::Stopped
+            | ComposeServiceStatus::Exited
+            | ComposeServiceStatus::NotFound => DockerLaunchServiceAction::Start,
+        },
+    }
+}
+
+fn resolve_docker_launch_plan(
+    worktree: &Path,
+    selected_service: Option<&str>,
+) -> Result<DockerLaunchPlan, String> {
+    let files = gwt_docker::detect_docker_files(worktree);
+    let compose_file = docker_compose_file_for_launch(worktree, &files)?.ok_or_else(|| {
+        "Docker launch requires a docker-compose.yml or devcontainer compose target".to_string()
+    })?;
+    let services = gwt_docker::parse_compose_file(&compose_file).map_err(|err| err.to_string())?;
+    if services.is_empty() {
+        return Err("Docker launch requires at least one compose service".to_string());
+    }
+
+    let devcontainer_defaults = docker_devcontainer_defaults(worktree, &files);
+    let service_name = selected_service
+        .map(str::to_string)
+        .or_else(|| {
+            devcontainer_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.service.clone())
+        })
+        .or_else(|| {
+            if services.len() == 1 {
+                services.first().map(|service| service.name.clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            "Multiple Docker services detected; select a Docker service in Launch Agent Wizard"
+                .to_string()
+        })?;
+
+    let service = services
+        .iter()
+        .find(|service| service.name == service_name)
+        .ok_or_else(|| {
+            format!("Selected Docker service was not found in compose file: {service_name}")
+        })?;
+
+    let container_cwd = devcontainer_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.workspace_folder.clone())
+        .or_else(|| service.working_dir.clone())
+        .or_else(|| compose_workspace_mount_target(worktree, service))
+        .ok_or_else(|| {
+            format!(
+                "Docker service {} is missing working_dir/workspaceFolder and no project-root volume mount was detected",
+                service.name
+            )
+        })?;
+
+    Ok(DockerLaunchPlan {
+        compose_file,
+        service: service.name.clone(),
+        container_cwd,
+    })
+}
+
+fn docker_binary_for_launch() -> String {
+    std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
+}
+
+fn docker_compose_file_for_launch(
+    project_root: &Path,
+    files: &gwt_docker::DockerFiles,
+) -> Result<Option<PathBuf>, String> {
+    Ok(docker_devcontainer_defaults(project_root, files)
+        .and_then(|defaults| defaults.compose_file)
+        .or_else(|| files.compose_file.clone()))
+}
+
+fn docker_devcontainer_defaults(
+    project_root: &Path,
+    files: &gwt_docker::DockerFiles,
+) -> Option<DevContainerLaunchDefaults> {
+    let devcontainer_dir = files.devcontainer_dir.as_ref()?;
+    let path = devcontainer_dir.join("devcontainer.json");
+    if !path.is_file() {
+        return None;
+    }
+
+    let config = gwt_docker::DevContainerConfig::load(&path).ok()?;
+    let compose_file = config
+        .docker_compose_file
+        .as_ref()
+        .and_then(|value| {
+            value
+                .to_vec()
+                .into_iter()
+                .map(|candidate| devcontainer_dir.join(candidate))
+                .find(|path| path.is_file())
+        })
+        .or_else(|| files.compose_file.clone())
+        .or_else(|| {
+            let fallback = project_root.join("docker-compose.yml");
+            fallback.is_file().then_some(fallback)
+        });
+
+    Some(DevContainerLaunchDefaults {
+        service: config.service,
+        workspace_folder: config.workspace_folder,
+        compose_file,
+    })
+}
+
+fn compose_workspace_mount_target(
+    project_root: &Path,
+    service: &gwt_docker::ComposeService,
+) -> Option<String> {
+    service
+        .volumes
+        .iter()
+        .find(|mount| mount_source_matches_project_root(&mount.source, project_root))
+        .map(|mount| mount.target.clone())
+}
+
+fn mount_source_matches_project_root(source: &str, project_root: &Path) -> bool {
+    let normalized = source
+        .trim()
+        .trim_end_matches(['/', '\\'])
+        .trim_end_matches("/.");
+
+    if matches!(normalized, "." | "$PWD" | "${PWD}") {
+        return true;
+    }
+
+    let source_path = Path::new(normalized);
+    source_path.is_absolute() && same_worktree_path(source_path, project_root)
+}
+
+fn first_available_worktree_path(
+    preferred_path: &Path,
+    worktrees: &[gwt_git::WorktreeInfo],
+) -> Option<PathBuf> {
+    if !worktree_path_is_occupied(preferred_path, worktrees) && !preferred_path.exists() {
+        return Some(preferred_path.to_path_buf());
+    }
+
+    for suffix in 2usize.. {
+        let candidate = suffixed_worktree_path(preferred_path, suffix)?;
+        if !worktree_path_is_occupied(&candidate, worktrees) && !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(format!("{file_name}-{suffix}"));
+    Some(candidate)
+}
+
+fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
+    worktrees
+        .iter()
+        .any(|worktree| same_worktree_path(&worktree.path, path))
+}
+
+fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
@@ -4069,22 +6501,6 @@ fn origin_remote_ref(branch_name: &str) -> String {
     } else {
         format!("origin/{branch_name}")
     }
-}
-
-fn existing_worktree_for_branch(
-    repo_path: &Path,
-    branch_name: &str,
-) -> Result<Option<PathBuf>, String> {
-    let manager = gwt_git::WorktreeManager::new(repo_path);
-    manager
-        .list()
-        .map_err(|err| err.to_string())
-        .map(|worktrees| {
-            worktrees
-                .into_iter()
-                .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
-                .map(|worktree| worktree.path)
-        })
 }
 
 fn current_git_branch(repo_path: &Path) -> Result<String, String> {
@@ -4125,14 +6541,20 @@ fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, Stri
 
 fn configure_existing_branch_wizard_with_sessions(
     wizard: &mut screens::wizard::WizardState,
+    model: &Model,
     repo_path: &std::path::Path,
     sessions_dir: &std::path::Path,
     branch_name: &str,
 ) {
     wizard.is_new_branch = false;
     wizard.branch_name = branch_name.to_string();
+    apply_wizard_docker_context(wizard, repo_path);
     wizard.quick_start_entries = load_quick_start_entries(repo_path, sessions_dir, branch_name);
-    wizard.has_quick_start = !wizard.quick_start_entries.is_empty();
+    wizard.live_session_entries =
+        branch_live_session_entries_with(model, sessions_dir, branch_name, repo_path);
+    wizard.has_quick_start =
+        !wizard.quick_start_entries.is_empty() || !wizard.live_session_entries.is_empty();
+    wizard.focus_session_id = None;
     wizard.step = if wizard.has_quick_start {
         screens::wizard::WizardStep::QuickStart
     } else {
@@ -4192,19 +6614,50 @@ fn load_quick_start_entries(
             tool_label: session.display_name.clone(),
             model: session.model.clone(),
             reasoning: session.reasoning_level.clone(),
-            version: session.tool_version.clone(),
+            version: session.tool_version.clone().or_else(|| {
+                session
+                    .agent_id
+                    .package_name()
+                    .map(|_| "installed".to_string())
+            }),
             resume_session_id: session.agent_session_id.clone(),
             skip_permissions: session.skip_permissions,
             codex_fast_mode: session.codex_fast_mode,
+            runtime_target: session.runtime_target,
+            docker_service: session.docker_service.clone(),
+            docker_lifecycle_intent: session.docker_lifecycle_intent,
         })
         .collect()
 }
 
 fn open_wizard(model: &mut Model, spec_context: Option<screens::wizard::SpecContext>) {
+    open_wizard_with_prefill(model, spec_context, None);
+}
+
+fn open_wizard_with_issue(model: &mut Model, issue_number: u64) {
+    open_wizard_with_prefill(model, None, Some(issue_number));
+}
+
+fn open_wizard_with_prefill(
+    model: &mut Model,
+    spec_context: Option<screens::wizard::SpecContext>,
+    initial_issue_number: Option<u64>,
+) {
     let cache_path = wizard_version_cache_path();
     let cache = VersionCache::load(&cache_path);
     let detected_agents = AgentDetector::detect_all();
-    let (wizard, refresh_targets) = prepare_wizard_startup(spec_context, detected_agents, &cache);
+    let (wizard, refresh_targets) = if let Some(issue_number) = initial_issue_number {
+        prepare_wizard_startup_with_issue_cache_root(
+            &model.repo_path,
+            spec_context,
+            Some(issue_number),
+            detected_agents,
+            &cache,
+            default_issue_cache_root(&model.repo_path),
+        )
+    } else {
+        prepare_wizard_startup(&model.repo_path, spec_context, detected_agents, &cache)
+    };
 
     model.wizard = Some(wizard);
     schedule_wizard_version_cache_refresh(cache_path, refresh_targets);
@@ -4249,10 +6702,107 @@ fn handle_confirm_message(model: &mut Model, msg: screens::confirm::ConfirmMessa
     handle_confirm_message_with(model, msg, AgentDetector::detect_all());
 }
 
+fn handle_discussion_resume_message(
+    model: &mut Model,
+    msg: screens::discussion_resume::DiscussionResumeMessage,
+) {
+    handle_discussion_resume_message_with(model, msg, &gwt_sessions_dir());
+}
+
+fn handle_discussion_resume_message_with(
+    model: &mut Model,
+    msg: screens::discussion_resume::DiscussionResumeMessage,
+    sessions_dir: &Path,
+) {
+    use screens::discussion_resume::{DiscussionResumeChoice, DiscussionResumeOutcome};
+
+    let outcome = if let Some(ref mut state) = model.discussion_resume {
+        screens::discussion_resume::update(state, msg)
+    } else {
+        return;
+    };
+
+    let DiscussionResumeOutcome::Selected(choice) = outcome else {
+        return;
+    };
+
+    let Some(state) = model.discussion_resume.take() else {
+        return;
+    };
+    let session_id = state.session_id.clone();
+    if let Some(prompt_state) = model.discussion_resume_sessions.get_mut(&session_id) {
+        prompt_state.last_handled_proposal = Some(format!(
+            "{}::{}",
+            state.pending.proposal_label, state.pending.proposal_title
+        ));
+        prompt_state.prompt_pending = false;
+        prompt_state.fallback_armed = false;
+    }
+
+    match choice {
+        DiscussionResumeChoice::Resume => {
+            let prompt = format!("{}\n", build_resume_prompt(&state.pending));
+            apply_notification(
+                model,
+                Notification::new(
+                    Severity::Info,
+                    "discussion",
+                    format!("Resumed {}", state.pending.proposal_title),
+                ),
+            );
+            push_input_to_session(model, session_id.clone(), prompt.into_bytes());
+        }
+        DiscussionResumeChoice::Park => {
+            let session_path = sessions_dir.join(format!("{session_id}.toml"));
+            match AgentSession::load(&session_path).and_then(|session| {
+                park_pending_resume(&session.worktree_path, &state.pending)
+                    .map(|changed| (session, changed))
+            }) {
+                Ok((_session, true)) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Info,
+                        "discussion",
+                        format!("Parked {}", state.pending.proposal_title),
+                    ),
+                ),
+                Ok((_session, false)) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Warn,
+                        "discussion",
+                        format!(
+                            "No active proposal matched {}",
+                            state.pending.proposal_title
+                        ),
+                    ),
+                ),
+                Err(err) => apply_notification(
+                    model,
+                    Notification::new(
+                        Severity::Error,
+                        "discussion",
+                        format!("Failed to park proposal: {err}"),
+                    ),
+                ),
+            }
+        }
+        DiscussionResumeChoice::Dismiss => {
+            apply_notification(
+                model,
+                Notification::new(
+                    Severity::Info,
+                    "discussion",
+                    format!("Dismissed {}", state.pending.proposal_title),
+                ),
+            );
+        }
+    }
+}
+
 // ---------------- Branch Cleanup integration (FR-018) ----------------
 
 fn open_cleanup_confirm_for_selection(model: &mut Model) {
-    use screens::branches::MergeState;
     use screens::cleanup_confirm::CleanupConfirmRow;
 
     // FR-018c: the selection set persists across view-mode / sort / search
@@ -4267,13 +6817,18 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
             if !model.branches.is_cleanup_selected(&branch.name) {
                 return None;
             }
-            match model.branches.merge_state(&branch.name) {
-                MergeState::Cleanable(target) => Some(CleanupConfirmRow {
-                    branch: branch.name.clone(),
-                    target,
-                }),
-                _ => None,
-            }
+            let execution_branch = model.branches.cleanup_execution_branch(&branch.name)?;
+            Some(CleanupConfirmRow {
+                branch: branch.name.clone(),
+                target: model.branches.cleanup_target(&branch.name),
+                execution_branch,
+                upstream: if branch.is_local {
+                    branch.upstream.clone()
+                } else {
+                    Some(origin_remote_ref(&branch.name))
+                },
+                risks: model.branches.cleanup_selection_risks(&branch.name),
+            })
         })
         .collect();
     rows.sort_by(|a, b| a.branch.cmp(&b.branch));
@@ -4284,13 +6839,15 @@ fn open_cleanup_confirm_for_selection(model: &mut Model) {
             Notification::new(
                 gwt_core::logging::LogLevel::Warn,
                 "cleanup",
-                "No cleanable branches selected",
+                "No cleanup branches selected",
             ),
         );
         return;
     }
 
-    model.cleanup_confirm.show(rows);
+    model
+        .cleanup_confirm
+        .show(rows, model.branches.cleanup_settings.delete_remote);
 }
 
 fn handle_cleanup_confirm_message(
@@ -4300,6 +6857,7 @@ fn handle_cleanup_confirm_message(
     use screens::cleanup_confirm::CleanupConfirmOutcome;
 
     let outcome = screens::cleanup_confirm::update(&mut model.cleanup_confirm, msg);
+    model.branches.cleanup_settings.delete_remote = model.cleanup_confirm.delete_remote;
     match outcome {
         CleanupConfirmOutcome::Pending => {}
         CleanupConfirmOutcome::Cancelled => {}
@@ -4374,7 +6932,9 @@ fn start_cleanup_run(model: &mut Model) {
         return;
     }
 
-    model.cleanup_progress.show(branches.len(), false);
+    let rows = model.cleanup_confirm.rows.clone();
+    let delete_remote = model.cleanup_confirm.delete_remote;
+    model.cleanup_progress.show(rows.len(), delete_remote);
 
     let queue: crate::model::CleanupEventQueue =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -4397,10 +6957,11 @@ fn start_cleanup_run(model: &mut Model) {
                 .map(|path| (item.name.clone(), path.clone()))
         })
         .collect();
-
     std::thread::spawn(move || {
         let manager = gwt_git::WorktreeManager::new(&repo_path);
-        for branch in branches {
+        for row in rows {
+            let branch = row.branch.clone();
+            let execution_branch = row.execution_branch.clone();
             queue
                 .lock()
                 .unwrap()
@@ -4412,11 +6973,11 @@ fn start_cleanup_run(model: &mut Model) {
             // Branches with their own worktree are still candidates — the
             // whole point of Branch Cleanup is to remove the worktree along
             // with the branch.
-            let blocked_reason = if gwt_git::is_protected_branch(&branch) {
+            let blocked_reason = if gwt_git::is_protected_branch(&execution_branch) {
                 Some("protected branch".to_string())
-            } else if current_head_branch.as_deref() == Some(branch.as_str()) {
+            } else if current_head_branch.as_deref() == Some(execution_branch.as_str()) {
                 Some("current HEAD".to_string())
-            } else if active_session_branches.contains(&branch) {
+            } else if active_session_branches.contains(&execution_branch) {
                 Some("active session".to_string())
             } else {
                 None
@@ -4425,7 +6986,7 @@ fn start_cleanup_run(model: &mut Model) {
             let (success, message) = if let Some(reason) = blocked_reason {
                 (false, Some(reason))
             } else {
-                match manager.cleanup_branch(&branch) {
+                match manager.cleanup_branch(&execution_branch) {
                     Ok(()) => {
                         // Phase 8: shut the per-worktree index watcher down
                         // and drop the on-disk index dir ONLY after git has
@@ -4434,10 +6995,20 @@ fn start_cleanup_run(model: &mut Model) {
                         // (dirty worktree, git error, ...), the surviving
                         // worktree would stop being indexed until something
                         // explicitly recreated the watcher.
-                        if let Some(path) = worktree_paths.get(&branch) {
+                        if let Some(path) = worktree_paths.get(&execution_branch) {
                             let _ = crate::index_worker::shutdown_and_remove(&repo_path, path);
                         }
-                        (true, None)
+                        if delete_remote {
+                            match manager
+                                .delete_remote_branch(&execution_branch, row.upstream.as_deref())
+                            {
+                                Ok(gwt_git::RemoteDeleteOutcome::Deleted)
+                                | Ok(gwt_git::RemoteDeleteOutcome::SkippedMissing) => (true, None),
+                                Err(err) => (false, Some(format!("remote delete failed: {err}"))),
+                            }
+                        } else {
+                            (true, None)
+                        }
                     }
                     Err(err) => (false, Some(err.to_string())),
                 }
@@ -4577,15 +7148,35 @@ fn schedule_startup_version_cache_refresh_with<Detect, Spawn, Schedule>(
 }
 
 fn prepare_wizard_startup(
+    repo_path: &Path,
     spec_context: Option<screens::wizard::SpecContext>,
     detected_agents: Vec<DetectedAgent>,
     cache: &VersionCache,
+) -> (screens::wizard::WizardState, Vec<AgentId>) {
+    prepare_wizard_startup_with_issue_cache_root(
+        repo_path,
+        spec_context,
+        None,
+        detected_agents,
+        cache,
+        default_issue_cache_root(repo_path),
+    )
+}
+
+fn prepare_wizard_startup_with_issue_cache_root(
+    repo_path: &Path,
+    spec_context: Option<screens::wizard::SpecContext>,
+    initial_issue_number: Option<u64>,
+    detected_agents: Vec<DetectedAgent>,
+    cache: &VersionCache,
+    issue_cache_root: PathBuf,
 ) -> (screens::wizard::WizardState, Vec<AgentId>) {
     let branch_name = spec_context
         .as_ref()
         .and_then(|ctx| ctx.branch_seed())
         .unwrap_or_default();
-    let starts_new_branch = spec_context.is_some();
+    let starts_new_branch = spec_context.is_some() || initial_issue_number.is_some();
+    let (cached_issues, issue_load_error) = load_cached_wizard_issues(&issue_cache_root);
 
     let mut wizard = screens::wizard::WizardState {
         step: if starts_new_branch {
@@ -4597,9 +7188,19 @@ fn prepare_wizard_startup(
         gh_cli_available: gwt_core::process::command_exists("gh"),
         ai_enabled: false,
         branch_name,
+        issue_id: initial_issue_number
+            .map(|number| number.to_string())
+            .unwrap_or_default(),
+        issue_picker: screens::wizard::IssuePickerState {
+            issues: cached_issues,
+            search_query: String::new(),
+            search_active: false,
+            load_error: issue_load_error,
+        },
         spec_context,
         ..Default::default()
     };
+    apply_wizard_docker_context(&mut wizard, repo_path);
 
     let (agents, refresh_targets) = build_wizard_agent_options(detected_agents, cache);
     if !agents.is_empty() {
@@ -4610,6 +7211,341 @@ fn prepare_wizard_startup(
     }
 
     (wizard, refresh_targets)
+}
+
+fn apply_wizard_docker_context(wizard: &mut screens::wizard::WizardState, project_root: &Path) {
+    wizard.docker_context = detect_wizard_docker_context(project_root);
+    wizard.runtime_target = if wizard.docker_context.is_some() {
+        LaunchRuntimeTarget::Docker
+    } else {
+        LaunchRuntimeTarget::Host
+    };
+    if wizard.docker_service.is_none() {
+        wizard.docker_service = wizard
+            .docker_context
+            .as_ref()
+            .and_then(|context| context.suggested_service.clone());
+    }
+    sync_wizard_docker_status(wizard, project_root);
+}
+
+fn sync_wizard_docker_status(wizard: &mut screens::wizard::WizardState, project_root: &Path) {
+    let status = detect_wizard_docker_service_status(wizard, project_root);
+    wizard.docker_service_status = status;
+    if !wizard_docker_lifecycle_supported(status, wizard.docker_lifecycle_intent) {
+        wizard.docker_lifecycle_intent = default_docker_lifecycle_intent(status);
+    }
+}
+
+fn detect_wizard_docker_service_status(
+    wizard: &screens::wizard::WizardState,
+    project_root: &Path,
+) -> gwt_docker::ComposeServiceStatus {
+    if wizard.runtime_target != LaunchRuntimeTarget::Docker {
+        return gwt_docker::ComposeServiceStatus::NotFound;
+    }
+
+    let Some(service) = wizard.docker_service.as_deref().or_else(|| {
+        wizard
+            .docker_context
+            .as_ref()
+            .and_then(|context| context.suggested_service.as_deref())
+    }) else {
+        return gwt_docker::ComposeServiceStatus::NotFound;
+    };
+
+    let files = gwt_docker::detect_docker_files(project_root);
+    let Some(compose_file) = docker_compose_file_for_launch(project_root, &files)
+        .ok()
+        .flatten()
+    else {
+        return gwt_docker::ComposeServiceStatus::NotFound;
+    };
+
+    gwt_docker::compose_service_status(&compose_file, service)
+        .unwrap_or(gwt_docker::ComposeServiceStatus::NotFound)
+}
+
+fn default_docker_lifecycle_intent(
+    status: gwt_docker::ComposeServiceStatus,
+) -> gwt_agent::DockerLifecycleIntent {
+    match status {
+        gwt_docker::ComposeServiceStatus::Running => gwt_agent::DockerLifecycleIntent::Connect,
+        gwt_docker::ComposeServiceStatus::Stopped | gwt_docker::ComposeServiceStatus::Exited => {
+            gwt_agent::DockerLifecycleIntent::Start
+        }
+        gwt_docker::ComposeServiceStatus::NotFound => {
+            gwt_agent::DockerLifecycleIntent::CreateAndStart
+        }
+    }
+}
+
+fn wizard_docker_lifecycle_supported(
+    status: gwt_docker::ComposeServiceStatus,
+    intent: gwt_agent::DockerLifecycleIntent,
+) -> bool {
+    match status {
+        gwt_docker::ComposeServiceStatus::Running => matches!(
+            intent,
+            gwt_agent::DockerLifecycleIntent::Connect
+                | gwt_agent::DockerLifecycleIntent::Restart
+                | gwt_agent::DockerLifecycleIntent::Recreate
+        ),
+        gwt_docker::ComposeServiceStatus::Stopped | gwt_docker::ComposeServiceStatus::Exited => {
+            matches!(
+                intent,
+                gwt_agent::DockerLifecycleIntent::Start
+                    | gwt_agent::DockerLifecycleIntent::Recreate
+            )
+        }
+        gwt_docker::ComposeServiceStatus::NotFound => {
+            matches!(intent, gwt_agent::DockerLifecycleIntent::CreateAndStart)
+        }
+    }
+}
+
+fn detect_wizard_docker_context(
+    project_root: &Path,
+) -> Option<screens::wizard::DockerWizardContext> {
+    let files = gwt_docker::detect_docker_files(project_root);
+
+    let compose_file = docker_compose_file_for_launch(project_root, &files)
+        .ok()
+        .flatten()?;
+    let services = gwt_docker::parse_compose_file(&compose_file).ok()?;
+    if services.is_empty() {
+        return None;
+    }
+
+    let suggested_service = docker_devcontainer_defaults(project_root, &files)
+        .and_then(|defaults| defaults.service)
+        .or_else(|| services.first().map(|service| service.name.clone()));
+
+    Some(screens::wizard::DockerWizardContext {
+        services: services.into_iter().map(|service| service.name).collect(),
+        suggested_service,
+    })
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct IssueBranchLinkStore {
+    branches: HashMap<String, u64>,
+}
+
+fn default_issue_cache_root(repo_path: &std::path::Path) -> PathBuf {
+    crate::issue_cache::issue_cache_root_for_repo_path_or_detached(repo_path)
+}
+
+fn default_issue_linkage_store_path(repo_path: &std::path::Path) -> Option<PathBuf> {
+    let repo_hash = crate::index_worker::detect_repo_hash(repo_path)?;
+    Some(
+        gwt_cache_dir()
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str())),
+    )
+}
+
+fn handle_issues_message(model: &mut Model, msg: screens::issues::IssuesMessage) {
+    handle_issues_message_with_paths(
+        model,
+        msg,
+        default_issue_cache_root(&model.repo_path),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+}
+
+fn handle_issues_message_with_paths(
+    model: &mut Model,
+    msg: screens::issues::IssuesMessage,
+    issue_cache_root: PathBuf,
+    linkage_store_path: Option<PathBuf>,
+) {
+    if matches!(msg, screens::issues::IssuesMessage::Refresh) {
+        reload_cached_issues_with_paths(model, issue_cache_root, linkage_store_path);
+        return;
+    }
+
+    screens::issues::update(&mut model.issues, msg);
+}
+
+fn reload_cached_issues(model: &mut Model) {
+    reload_cached_issues_with_paths(
+        model,
+        default_issue_cache_root(&model.repo_path),
+        default_issue_linkage_store_path(&model.repo_path),
+    );
+}
+
+fn reload_cached_issues_with_paths(
+    model: &mut Model,
+    issue_cache_root: PathBuf,
+    linkage_store_path: Option<PathBuf>,
+) {
+    let (issues, issue_load_error) =
+        load_cached_issues_with_linkage(&issue_cache_root, linkage_store_path.as_deref());
+    screens::issues::update(
+        &mut model.issues,
+        screens::issues::IssuesMessage::SetIssues(issues),
+    );
+    model.issues.last_error = issue_load_error;
+    if model.issues.selected_issue().is_none() {
+        model.issues.detail_view = false;
+    }
+}
+
+fn load_cached_wizard_issues(
+    cache_root: &std::path::Path,
+) -> (Vec<screens::issues::IssueItem>, Option<String>) {
+    load_cached_issues_with_linkage(cache_root, None)
+}
+
+fn load_cached_issues_with_linkage(
+    cache_root: &std::path::Path,
+    linkage_store_path: Option<&std::path::Path>,
+) -> (Vec<screens::issues::IssueItem>, Option<String>) {
+    let linked_branches_by_issue = load_issue_linkage_map(linkage_store_path);
+    let dir = match std::fs::read_dir(cache_root) {
+        Ok(dir) => dir,
+        Err(err) => return (Vec::new(), Some(err.to_string())),
+    };
+
+    let mut issues = Vec::new();
+    for entry in dir.flatten() {
+        if !entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(number) = name.parse::<u32>() else {
+            continue;
+        };
+        let meta_path = entry.path().join("meta.json");
+        let Ok(meta_bytes) = std::fs::read(&meta_path) else {
+            continue;
+        };
+        let Ok(meta): Result<serde_json::Value, _> = serde_json::from_slice(&meta_bytes) else {
+            continue;
+        };
+        let title = meta
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let state = meta
+            .get("state")
+            .and_then(|value| value.as_str())
+            .unwrap_or("open")
+            .to_string();
+        let labels = meta
+            .get("labels")
+            .and_then(|value| value.as_array())
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|label| label.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let body = std::fs::read_to_string(entry.path().join("body.md")).unwrap_or_default();
+        let linked_branches = linked_branches_by_issue
+            .get(&number)
+            .cloned()
+            .unwrap_or_default();
+
+        issues.push(screens::issues::IssueItem {
+            number,
+            title,
+            state,
+            labels,
+            body,
+            linked_branches,
+        });
+    }
+
+    issues.sort_by(|left, right| right.number.cmp(&left.number));
+    (issues, None)
+}
+
+fn load_issue_linkage_map(
+    linkage_store_path: Option<&std::path::Path>,
+) -> HashMap<u32, Vec<String>> {
+    let mut by_issue: HashMap<u32, Vec<String>> = HashMap::new();
+    let Some(store_path) = linkage_store_path else {
+        return by_issue;
+    };
+    let store = match read_issue_linkage_store(store_path) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!("issue linkage store read failed: {err}");
+            return by_issue;
+        }
+    };
+
+    for (branch_name, issue_number) in store.branches {
+        let Ok(issue_number) = u32::try_from(issue_number) else {
+            continue;
+        };
+        by_issue.entry(issue_number).or_default().push(branch_name);
+    }
+
+    for branches in by_issue.values_mut() {
+        branches.sort();
+    }
+
+    by_issue
+}
+
+fn persist_issue_linkage(repo_path: &std::path::Path, config: &LaunchConfig) -> Result<(), String> {
+    let Some(issue_number) = config.linked_issue_number else {
+        return Ok(());
+    };
+    let Some(branch_name) = config.branch.as_deref() else {
+        return Ok(());
+    };
+    let Some(store_path) = default_issue_linkage_store_path(repo_path) else {
+        return Ok(());
+    };
+    persist_issue_linkage_at_path(&store_path, issue_number, branch_name)
+}
+
+fn persist_issue_linkage_at_path(
+    store_path: &std::path::Path,
+    issue_number: u64,
+    branch_name: &str,
+) -> Result<(), String> {
+    if branch_name.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut store = read_issue_linkage_store(store_path)?;
+    store.branches.insert(branch_name.to_string(), issue_number);
+
+    if let Some(parent) = store_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create issue linkage store dir: {err}"))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&store)
+        .map_err(|err| format!("serialize issue linkage store: {err}"))?;
+    std::fs::write(store_path, bytes).map_err(|err| format!("write issue linkage store: {err}"))
+}
+
+fn read_issue_linkage_store(store_path: &std::path::Path) -> Result<IssueBranchLinkStore, String> {
+    match std::fs::read(store_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|err| format!("parse issue linkage store {}: {err}", store_path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(IssueBranchLinkStore::default())
+        }
+        Err(err) => Err(format!(
+            "read issue linkage store {}: {err}",
+            store_path.display()
+        )),
+    }
 }
 /// All builtin agent IDs in display order.
 const BUILTIN_AGENTS: [AgentId; 4] = [
@@ -4773,34 +7709,11 @@ fn run_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<Ag
 fn handle_paste_input(model: &mut Model, text: String) {
     let bracketed_paste_enabled = model
         .active_session_tab()
-        .map(|session| vt_requests_bracketed_paste(&session.vt))
+        .map(|session| screen_requests_bracketed_paste(session.vt.screen()))
         .unwrap_or(false);
 
     if let Some(bytes) = build_paste_input_bytes(&text, bracketed_paste_enabled) {
         push_input_to_active_session(model, bytes);
-    }
-}
-
-fn vt_requests_bracketed_paste(vt: &crate::model::VtState) -> bool {
-    vt.screen()
-        .input_mode_formatted()
-        .windows(b"\x1b[?2004h".len())
-        .any(|window| window == b"\x1b[?2004h")
-}
-
-fn build_paste_input_bytes(text: &str, bracketed_paste_enabled: bool) -> Option<Vec<u8>> {
-    if text.is_empty() {
-        return None;
-    }
-
-    if bracketed_paste_enabled {
-        let mut bytes = Vec::with_capacity(text.len() + 12);
-        bytes.extend_from_slice(b"\x1b[200~");
-        bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(b"\x1b[201~");
-        Some(bytes)
-    } else {
-        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -4868,70 +7781,11 @@ fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
     }
 }
 
-fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
-    match key.code {
-        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            control_char_bytes(ch)
-        }
-        KeyCode::Char(ch) => Some(ch.to_string().into_bytes()),
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
-        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
-        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
-        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
-        KeyCode::F(n) => f_key_to_bytes(n),
-        _ => None,
-    }
-}
-
-fn f_key_to_bytes(n: u8) -> Option<Vec<u8>> {
-    match n {
-        // F1-F4: SS3 sequences (xterm PC-style default)
-        1 => Some(b"\x1bOP".to_vec()),
-        2 => Some(b"\x1bOQ".to_vec()),
-        3 => Some(b"\x1bOR".to_vec()),
-        4 => Some(b"\x1bOS".to_vec()),
-        // F5-F12: CSI sequences
-        5 => Some(b"\x1b[15~".to_vec()),
-        6 => Some(b"\x1b[17~".to_vec()),
-        7 => Some(b"\x1b[18~".to_vec()),
-        8 => Some(b"\x1b[19~".to_vec()),
-        9 => Some(b"\x1b[20~".to_vec()),
-        10 => Some(b"\x1b[21~".to_vec()),
-        11 => Some(b"\x1b[23~".to_vec()),
-        12 => Some(b"\x1b[24~".to_vec()),
-        _ => None,
-    }
-}
-
-fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
-    let ch = ch.to_ascii_lowercase();
-    match ch {
-        '@' | ' ' => Some(vec![0x00]),
-        'a'..='z' => Some(vec![(ch as u8) & 0x1f]),
-        '[' => Some(vec![0x1b]),
-        '\\' => Some(vec![0x1c]),
-        ']' => Some(vec![0x1d]),
-        '^' => Some(vec![0x1e]),
-        '_' => Some(vec![0x1f]),
-        _ => None,
-    }
-}
-
 /// Check if the active management screen is in a text input mode (search, edit).
 fn is_in_text_input_mode(model: &Model) -> bool {
     match model.management_tab {
         ManagementTab::Branches => model.branches.search_active,
+        ManagementTab::Board => false,
         ManagementTab::Issues => model.issues.search_active,
         ManagementTab::Settings => model.settings.editing,
         _ => false,
@@ -4998,32 +7852,216 @@ fn title_hit_label_index(
     None
 }
 
+/// Detect which session tab label was clicked in a `build_session_title` Line.
+///
+/// Works by counting non-separator (`│`) spans — each corresponds to one
+/// session in `model.sessions` order.  Returns `None` when the title is
+/// compact (single span), when only one session exists, or when the click
+/// falls outside any label span.
+fn session_title_hit_tab_index(title: &Line<'_>, area: Rect, mouse: MouseEvent) -> Option<usize> {
+    if mouse.row != area.y || title.spans.len() <= 1 {
+        return None;
+    }
+
+    let mut x = area.x.saturating_add(1);
+    let mut session_idx = 0;
+    for span in &title.spans {
+        let content = span.content.as_ref();
+        let width = content.chars().count() as u16;
+        if content.trim() == "│" {
+            x = x.saturating_add(width);
+            continue;
+        }
+        if mouse.column >= x && mouse.column < x.saturating_add(width) {
+            return Some(session_idx);
+        }
+        x = x.saturating_add(width);
+        session_idx += 1;
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridAxis {
+    RowsFirst,
+    ColumnsFirst,
+}
+
+fn responsive_grid_axis(area: Rect) -> GridAxis {
+    if area.height > area.width {
+        GridAxis::ColumnsFirst
+    } else {
+        GridAxis::RowsFirst
+    }
+}
+
+fn grid_primary_count(count: usize) -> usize {
+    (count as f64).sqrt().ceil() as usize
+}
+
 fn grid_session_pane_area(area: Rect, count: usize, target_index: usize) -> Option<Rect> {
     if count == 0 || target_index >= count {
         return None;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
+    let primary = grid_primary_count(count);
+    match responsive_grid_axis(area) {
+        GridAxis::RowsFirst => {
+            let rows = count.div_ceil(primary);
+            let row_constraints: Vec<Constraint> = (0..rows)
+                .map(|_| Constraint::Ratio(1, rows as u32))
+                .collect();
+            let row_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(row_constraints)
+                .split(area);
 
-    let target_row = target_index / cols;
-    let start = target_row * cols;
-    let end = (start + cols).min(count);
-    let n = end - start;
-    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-    let col_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_constraints)
-        .split(row_chunks[target_row]);
+            let target_row = target_index / primary;
+            let start = target_row * primary;
+            let end = (start + primary).min(count);
+            let n = end - start;
+            let col_constraints: Vec<Constraint> =
+                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+            let col_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(col_constraints)
+                .split(row_chunks[target_row]);
 
-    col_chunks.get(target_index - start).copied()
+            col_chunks.get(target_index - start).copied()
+        }
+        GridAxis::ColumnsFirst => {
+            let cols = count.div_ceil(primary);
+            let col_constraints: Vec<Constraint> = (0..cols)
+                .map(|_| Constraint::Ratio(1, cols as u32))
+                .collect();
+            let col_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(col_constraints)
+                .split(area);
+
+            let target_col = target_index / primary;
+            let start = target_col * primary;
+            let end = (start + primary).min(count);
+            let n = end - start;
+            let row_constraints: Vec<Constraint> =
+                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+            let row_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(row_constraints)
+                .split(col_chunks[target_col]);
+
+            row_chunks.get(target_index - start).copied()
+        }
+    }
+}
+
+fn move_grid_session(model: &mut Model, direction: GridSessionDirection) {
+    if model.session_layout != SessionLayout::Grid {
+        return;
+    }
+
+    let Some(session_area) = visible_session_area(model) else {
+        return;
+    };
+    let Some(next_session) = adjacent_grid_session_index(
+        session_area,
+        model.sessions.len(),
+        model.active_session,
+        direction,
+    ) else {
+        return;
+    };
+
+    model.active_session = next_session;
+}
+
+fn adjacent_grid_session_index(
+    area: Rect,
+    count: usize,
+    active_index: usize,
+    direction: GridSessionDirection,
+) -> Option<usize> {
+    let current_area = grid_session_pane_area(area, count, active_index)?;
+    let current_center = rect_center_doubled(current_area);
+    let mut aligned_best: Option<(i32, i32, usize)> = None;
+    let mut fallback_best: Option<(i32, i32, usize)> = None;
+
+    for candidate_index in 0..count {
+        if candidate_index == active_index {
+            continue;
+        }
+        let Some(candidate_area) = grid_session_pane_area(area, count, candidate_index) else {
+            continue;
+        };
+        let candidate_center = rect_center_doubled(candidate_area);
+        let Some((primary_distance, secondary_distance)) =
+            directional_center_distances(current_center, candidate_center, direction)
+        else {
+            continue;
+        };
+        let key = (primary_distance, secondary_distance, candidate_index);
+        let overlaps = match direction {
+            GridSessionDirection::Left | GridSessionDirection::Right => {
+                rects_overlap_vertically(current_area, candidate_area)
+            }
+            GridSessionDirection::Up | GridSessionDirection::Down => {
+                rects_overlap_horizontally(current_area, candidate_area)
+            }
+        };
+        let slot = if overlaps {
+            &mut aligned_best
+        } else {
+            &mut fallback_best
+        };
+        if slot.as_ref().is_none_or(|best| key < *best) {
+            *slot = Some(key);
+        }
+    }
+
+    aligned_best
+        .or(fallback_best)
+        .map(|(_, _, candidate_index)| candidate_index)
+}
+
+fn rect_center_doubled(area: Rect) -> (i32, i32) {
+    (
+        i32::from(area.x) * 2 + i32::from(area.width),
+        i32::from(area.y) * 2 + i32::from(area.height),
+    )
+}
+
+fn directional_center_distances(
+    current_center: (i32, i32),
+    candidate_center: (i32, i32),
+    direction: GridSessionDirection,
+) -> Option<(i32, i32)> {
+    match direction {
+        GridSessionDirection::Left if candidate_center.0 < current_center.0 => Some((
+            current_center.0 - candidate_center.0,
+            (candidate_center.1 - current_center.1).abs(),
+        )),
+        GridSessionDirection::Right if candidate_center.0 > current_center.0 => Some((
+            candidate_center.0 - current_center.0,
+            (candidate_center.1 - current_center.1).abs(),
+        )),
+        GridSessionDirection::Up if candidate_center.1 < current_center.1 => Some((
+            current_center.1 - candidate_center.1,
+            (candidate_center.0 - current_center.0).abs(),
+        )),
+        GridSessionDirection::Down if candidate_center.1 > current_center.1 => Some((
+            candidate_center.1 - current_center.1,
+            (candidate_center.0 - current_center.0).abs(),
+        )),
+        _ => None,
+    }
+}
+
+fn rects_overlap_vertically(left: Rect, right: Rect) -> bool {
+    left.y < right.bottom() && right.y < left.bottom()
+}
+
+fn rects_overlap_horizontally(top: Rect, bottom: Rect) -> bool {
+    top.x < bottom.right() && bottom.x < top.right()
 }
 
 fn handle_management_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
@@ -5095,6 +8133,42 @@ fn handle_management_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
             model,
             Message::SwitchManagementTab(ManagementTab::ALL[tab_idx]),
         );
+        model.active_focus = FocusPane::TabContent;
+        return true;
+    }
+
+    if model.management_tab == ManagementTab::Profiles
+        && model.profiles.mode == screens::profiles::ProfileMode::List
+    {
+        let inner = pane_block(title, false).inner(management_area);
+        let layout = screens::profiles::layout_areas(inner);
+
+        if mouse_hits_rect(mouse, layout.list) {
+            model.profiles.focus = screens::profiles::ProfilesFocus::ProfileList;
+            if mouse_hits_rect(mouse, layout.list_content) {
+                let row = mouse.row.saturating_sub(layout.list_content.y) as usize;
+                if row < model.profiles.profiles.len() {
+                    model.profiles.selected = row;
+                    model.profiles.clamp_selection();
+                }
+            }
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
+
+        if mouse_hits_rect(mouse, layout.env) {
+            model.profiles.focus = screens::profiles::ProfilesFocus::Environment;
+            if mouse_hits_rect(mouse, layout.env_content) {
+                if let Some(profile) = model.profiles.selected_profile() {
+                    let row = mouse.row.saturating_sub(layout.env_content.y) as usize;
+                    if row < profile.env_rows.len() {
+                        model.profiles.env_selected = row;
+                    }
+                }
+            }
+            model.active_focus = FocusPane::TabContent;
+            return true;
+        }
     }
     model.active_focus = FocusPane::TabContent;
     true
@@ -5109,6 +8183,12 @@ fn handle_session_mouse_focus(model: &mut Model, mouse: MouseEvent) -> bool {
         SessionLayout::Tab => {
             if !mouse_hits_rect(mouse, session_area) {
                 return false;
+            }
+            let title = build_session_title(model, session_area.width);
+            if let Some(tab_idx) = session_title_hit_tab_index(&title, session_area, mouse) {
+                model.active_session = tab_idx;
+                model.active_focus = FocusPane::Terminal;
+                return true;
             }
             if active_session_content_area(model).is_some_and(|area| mouse_hits_rect(mouse, area)) {
                 return false;
@@ -5174,24 +8254,16 @@ fn handle_mouse_input_with_tools<F, G>(
     model: &mut Model,
     mouse: MouseEvent,
     mut opener: F,
-    _clipboard_writer: G,
+    mut clipboard_writer: G,
 ) -> Result<bool, String>
 where
     F: FnMut(&str) -> Result<(), String>,
     G: FnMut(&str) -> Result<(), String>,
 {
-    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-        let previous_active_session = model.active_session;
-        let previous_focus = model.active_focus;
-        if handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse) {
-            clear_session_selection(model, previous_active_session);
-            return Ok(true);
-        }
-        if previous_focus != FocusPane::Terminal && mouse_hits_active_session(model, mouse) {
-            clear_session_selection(model, previous_active_session);
-            model.active_focus = FocusPane::Terminal;
-            return Ok(true);
-        }
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && (handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse))
+    {
+        return Ok(true);
     }
 
     let hits_active_session = mouse_hits_active_session(model, mouse);
@@ -5219,10 +8291,17 @@ where
     }
 
     if !hits_active_session {
-        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && scroll_target_session_index(model, mouse).is_some()
+        {
+            model.active_focus = FocusPane::Terminal;
+        } else if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
             model.terminal_trackpad_scroll_row = None;
+        } else {
+            return Ok(false);
         }
-        return Ok(false);
     }
 
     if matches!(
@@ -5241,22 +8320,32 @@ where
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, 1, "wheel");
+            let Some(target_session) = scroll_target_session_index(model, mouse) else {
+                return Ok(false);
+            };
+            let routing = session_scroll_routing_for_index(model, target_session);
+            log_session_scroll_routing(model, target_session, routing, 1, "wheel");
             match routing {
-                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, 1)),
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_session_by_rows(model, target_session, 1))
+                }
                 ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, 1))
+                    Ok(queue_session_mouse_scroll(model, target_session, mouse, 1))
                 }
             }
         }
         MouseEventKind::ScrollDown => {
-            let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, -1, "wheel");
+            let Some(target_session) = scroll_target_session_index(model, mouse) else {
+                return Ok(false);
+            };
+            let routing = session_scroll_routing_for_index(model, target_session);
+            log_session_scroll_routing(model, target_session, routing, -1, "wheel");
             match routing {
-                ScrollInputRouting::LocalViewport => Ok(scroll_active_session_by_rows(model, -1)),
+                ScrollInputRouting::LocalViewport => {
+                    Ok(scroll_session_by_rows(model, target_session, -1))
+                }
                 ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, -1))
+                    Ok(queue_session_mouse_scroll(model, target_session, mouse, -1))
                 }
             }
         }
@@ -5274,14 +8363,25 @@ where
             }
             let delta_rows = delta_rows.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
             let routing = active_session_scroll_routing(model);
-            log_active_session_scroll_routing(model, routing, delta_rows, "trackpad_drag");
+            log_session_scroll_routing(
+                model,
+                model.active_session,
+                routing,
+                delta_rows,
+                "trackpad_drag",
+            );
             match routing {
-                ScrollInputRouting::LocalViewport => {
-                    Ok(scroll_active_session_by_rows(model, delta_rows))
-                }
-                ScrollInputRouting::PtyMouse => {
-                    Ok(queue_active_session_mouse_scroll(model, mouse, delta_rows))
-                }
+                ScrollInputRouting::LocalViewport => Ok(scroll_session_by_rows(
+                    model,
+                    model.active_session,
+                    delta_rows,
+                )),
+                ScrollInputRouting::PtyMouse => Ok(queue_session_mouse_scroll(
+                    model,
+                    model.active_session,
+                    mouse,
+                    delta_rows,
+                )),
             }
         }
         MouseEventKind::Up(MouseButton::Right) => {
@@ -5289,6 +8389,13 @@ where
             Ok(false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -5299,6 +8406,13 @@ where
             Ok(false)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
@@ -5309,17 +8423,45 @@ where
             Ok(false)
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if should_forward_click_to_pty(model, mouse) {
+                return Ok(queue_session_mouse_click(
+                    model,
+                    model.active_session,
+                    mouse,
+                ));
+            }
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
-            if let Some(session) = model.active_session_tab_mut() {
+            let selection_text = if let Some(session) = model.active_session_tab_mut() {
                 session.vt.update_selection(cell);
+                selected_text(session)
+            } else {
+                None
+            };
+            if let Some(text) = selection_text.filter(|text| !text.is_empty()) {
+                clipboard_writer(&text)?;
                 return Ok(true);
             }
             Ok(false)
         }
         _ => Ok(false),
     }
+}
+
+/// Decide whether a left-button mouse event should be forwarded to the PTY
+/// (because the guest program has enabled SGR mouse reporting) or handled as
+/// local text selection.  Shift held down acts as a bypass so users can still
+/// select text in guests that captured the mouse, matching the behavior of
+/// common terminal emulators (iTerm2, WezTerm, kitty, ...).
+fn should_forward_click_to_pty(model: &Model, mouse: MouseEvent) -> bool {
+    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        return false;
+    }
+    matches!(
+        session_scroll_routing_for_index(model, model.active_session),
+        ScrollInputRouting::PtyMouse
+    )
 }
 
 fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
@@ -5333,17 +8475,34 @@ fn url_at_mouse_position(model: &Model, mouse: MouseEvent) -> Option<String> {
     }
 
     let session = model.active_session_tab()?;
-    session
-        .vt
-        .visible_url_regions(Rect::new(0, 0, area.width, area.height))
-        .into_iter()
-        .find(|region| {
-            let row = area.y + region.row;
-            let start_col = area.x + region.start_col;
-            let end_col = area.x + region.end_col;
-            mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
-        })
-        .map(|region| region.url)
+    session.vt.with_visible_screen(|screen| {
+        let render_surface = session_render_surface(session, screen, area);
+        render_surface
+            .url_regions
+            .into_iter()
+            .find(|region| {
+                let row = area.y + region.row;
+                let start_col = area.x + region.start_col;
+                let end_col = area.x + region.end_col;
+                mouse.row == row && mouse.column >= start_col && mouse.column <= end_col
+            })
+            .map(|region| region.url)
+    })
+}
+
+fn scroll_target_session_index(model: &Model, mouse: MouseEvent) -> Option<usize> {
+    match model.session_layout {
+        SessionLayout::Tab => {
+            mouse_hits_active_session(model, mouse).then_some(model.active_session)
+        }
+        SessionLayout::Grid => {
+            let session_area = visible_session_area(model)?;
+            (0..model.sessions.len()).find(|&session_idx| {
+                grid_session_pane_area(session_area, model.sessions.len(), session_idx)
+                    .is_some_and(|pane_area| mouse_hits_rect(mouse, pane_area))
+            })
+        }
+    }
 }
 
 fn mouse_hits_active_session(model: &Model, mouse: MouseEvent) -> bool {
@@ -5371,8 +8530,19 @@ fn mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell>
     })
 }
 
-fn clamped_mouse_terminal_cell(model: &Model, mouse: MouseEvent) -> Option<TerminalCell> {
-    let area = active_session_text_area(model)?;
+fn session_text_area_for_index(model: &Model, session_idx: usize) -> Option<Rect> {
+    let session_area = visible_session_area(model)?;
+    let area = session_content_area_for_index(model, session_area, session_idx)?;
+    let session = model.sessions.get(session_idx)?;
+    Some(session_text_area(session, area))
+}
+
+fn clamped_mouse_terminal_cell_for_index(
+    model: &Model,
+    mouse: MouseEvent,
+    session_idx: usize,
+) -> Option<TerminalCell> {
+    let area = session_text_area_for_index(model, session_idx)?;
     if area.width == 0 || area.height == 0 || mouse.row < area.y || mouse.row >= area.bottom() {
         return None;
     }
@@ -5398,6 +8568,13 @@ fn active_session_scroll_routing(model: &Model) -> ScrollInputRouting {
     session_scroll_routing(session)
 }
 
+fn session_scroll_routing_for_index(model: &Model, session_idx: usize) -> ScrollInputRouting {
+    let Some(session) = model.sessions.get(session_idx) else {
+        return ScrollInputRouting::LocalViewport;
+    };
+    session_scroll_routing(session)
+}
+
 fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRouting {
     if !matches!(session.tab_type, SessionTabType::Agent { .. }) {
         return ScrollInputRouting::LocalViewport;
@@ -5410,13 +8587,14 @@ fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRout
     ScrollInputRouting::LocalViewport
 }
 
-fn log_active_session_scroll_routing(
+fn log_session_scroll_routing(
     model: &Model,
+    session_idx: usize,
     routing: ScrollInputRouting,
     delta_rows: i16,
     source: &str,
 ) {
-    let Some(session) = model.active_session_tab() else {
+    let Some(session) = model.sessions.get(session_idx) else {
         return;
     };
     crate::scroll_debug::log_lazy(|| {
@@ -5436,8 +8614,25 @@ fn log_active_session_scroll_routing(
     });
 }
 
-fn queue_active_session_mouse_scroll(
+fn push_input_to_session(model: &mut Model, session_id: String, bytes: Vec<u8>) {
+    model
+        .pending_pty_inputs
+        .push_back(crate::model::PendingPtyInput { session_id, bytes });
+}
+
+fn reset_session_scrollback_for_input(model: &mut Model, session_idx: usize) {
+    let Some(session) = model.sessions.get_mut(session_idx) else {
+        return;
+    };
+    if session.vt.viewing_history() {
+        session.vt.clear_selection();
+        session.vt.set_follow_live(true);
+    }
+}
+
+fn queue_session_mouse_scroll(
     model: &mut Model,
+    session_idx: usize,
     mouse: MouseEvent,
     delta_rows: i16,
 ) -> bool {
@@ -5445,11 +8640,11 @@ fn queue_active_session_mouse_scroll(
         return false;
     }
 
-    let Some(cell) = clamped_mouse_terminal_cell(model, mouse) else {
+    let Some(cell) = clamped_mouse_terminal_cell_for_index(model, mouse, session_idx) else {
         return false;
     };
 
-    reset_active_session_scrollback_for_input(model);
+    reset_session_scrollback_for_input(model, session_idx);
     let steps = usize::from(delta_rows.unsigned_abs());
     let code = if delta_rows > 0 { 64 } else { 65 };
     let mut bytes = Vec::with_capacity(steps.saturating_mul(12));
@@ -5463,8 +8658,85 @@ fn queue_active_session_mouse_scroll(
             .as_bytes(),
         );
     }
-    push_input_to_active_session(model, bytes);
+    let Some(session_id) = model
+        .sessions
+        .get(session_idx)
+        .map(|session| session.id.clone())
+    else {
+        return false;
+    };
+    push_input_to_session(model, session_id, bytes);
     true
+}
+
+/// Encode a mouse button event (press / drag / release) as an SGR 1006 report
+/// and queue it for the PTY writer.  Mirrors `queue_session_mouse_scroll` but
+/// for button events instead of wheel events.
+///
+/// Returns `true` when a byte sequence was queued, `false` when the event
+/// does not map to a supported button (or the coordinate falls outside the
+/// session's text area).
+fn queue_session_mouse_click(model: &mut Model, session_idx: usize, mouse: MouseEvent) -> bool {
+    let Some((base_code, final_byte)) = mouse_click_sgr_code(mouse.kind) else {
+        return false;
+    };
+    let Some(cell) = clamped_mouse_terminal_cell_for_index(model, mouse, session_idx) else {
+        return false;
+    };
+
+    reset_session_scrollback_for_input(model, session_idx);
+    let code = base_code | sgr_modifier_bits(mouse.modifiers);
+    let bytes = format!(
+        "\x1b[<{code};{};{}{final_byte}",
+        cell.col.saturating_add(1),
+        cell.row.saturating_add(1),
+    )
+    .into_bytes();
+
+    let Some(session_id) = model
+        .sessions
+        .get(session_idx)
+        .map(|session| session.id.clone())
+    else {
+        return false;
+    };
+    push_input_to_session(model, session_id, bytes);
+    true
+}
+
+/// Map a `MouseEventKind` to its SGR 1006 base button code and terminating
+/// byte (`M` for press/motion, `m` for release).  Returns `None` for events
+/// we do not forward (wheel events are encoded by `queue_session_mouse_scroll`
+/// and moved events are filtered upstream).
+fn mouse_click_sgr_code(kind: MouseEventKind) -> Option<(u16, char)> {
+    match kind {
+        MouseEventKind::Down(button) => Some((sgr_button_base(button), 'M')),
+        MouseEventKind::Drag(button) => Some((sgr_button_base(button) | 32, 'M')),
+        MouseEventKind::Up(button) => Some((sgr_button_base(button), 'm')),
+        _ => None,
+    }
+}
+
+fn sgr_button_base(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
+fn sgr_modifier_bits(modifiers: KeyModifiers) -> u16 {
+    let mut bits = 0u16;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        bits |= 4;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        bits |= 8;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        bits |= 16;
+    }
+    bits
 }
 
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
@@ -5476,8 +8748,8 @@ fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     })
 }
 
-fn scroll_active_session_by_rows(model: &mut Model, delta_rows: i16) -> bool {
-    let Some(session) = model.active_session_tab_mut() else {
+fn scroll_session_by_rows(model: &mut Model, session_idx: usize, delta_rows: i16) -> bool {
+    let Some(session) = model.sessions.get_mut(session_idx) else {
         return false;
     };
 
@@ -5557,7 +8829,7 @@ fn active_session_content_area(model: &Model) -> Option<Rect> {
         main_area
     };
 
-    session_content_area(model, session_area)
+    session_content_area_for_index(model, session_area, model.active_session)
 }
 
 fn active_session_text_area(model: &Model) -> Option<Rect> {
@@ -5589,55 +8861,38 @@ fn management_split(area: Rect) -> [Rect; 2] {
     [lr[0], lr[1]]
 }
 
-fn session_content_area(model: &Model, session_area: Rect) -> Option<Rect> {
+fn session_content_area_for_index(
+    model: &Model,
+    session_area: Rect,
+    session_idx: usize,
+) -> Option<Rect> {
     match model.session_layout {
         SessionLayout::Tab => {
-            model.active_session_tab()?;
+            model.sessions.get(session_idx)?;
             Some(
                 pane_block(
                     build_session_title(model, session_area.width),
-                    model.active_focus == FocusPane::Terminal,
+                    model.active_focus == FocusPane::Terminal
+                        && session_idx == model.active_session,
                 )
                 .inner(session_area),
             )
         }
-        SessionLayout::Grid => active_grid_session_content_area(model, session_area),
+        SessionLayout::Grid => active_grid_session_content_area(model, session_area, session_idx),
     }
 }
 
-fn active_grid_session_content_area(model: &Model, area: Rect) -> Option<Rect> {
+fn active_grid_session_content_area(model: &Model, area: Rect, session_idx: usize) -> Option<Rect> {
     let count = model.sessions.len();
-    if count == 0 || model.active_session >= count {
+    if count == 0 || session_idx >= count {
         return None;
     }
 
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
-
-    let target_row = model.active_session / cols;
-    let start = target_row * cols;
-    let end = (start + cols).min(count);
-    let n = end - start;
-    let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-    let col_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_constraints)
-        .split(row_chunks[target_row]);
-
-    let target_col = model.active_session - start;
-    let session = model.sessions.get(model.active_session)?;
+    let pane_area = grid_session_pane_area(area, count, session_idx)?;
+    let session = model.sessions.get(session_idx)?;
     Some(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(session.name.as_str())
-            .inner(col_chunks[target_col]),
+        grid_session_block(session_idx, session, session_idx == model.active_session)
+            .inner(pane_area),
     )
 }
 
@@ -5683,7 +8938,10 @@ fn render_session_surface(
 ) {
     let text_area = session_text_area(session, area);
     session.vt.with_visible_screen(|screen| {
-        if screen.contents().trim().is_empty() {
+        let render_surface = session_render_surface(session, screen, text_area);
+        let render_screen = render_surface.screen(screen);
+
+        if render_screen.contents().trim().is_empty() {
             match &session.tab_type {
                 crate::model::SessionTabType::Agent { agent_id, color } => {
                     // Braille spinner driven by elapsed time (~5 fps via 100ms tick)
@@ -5739,21 +8997,17 @@ fn render_session_surface(
                 }
             }
         } else {
-            let url_regions =
-                session
-                    .vt
-                    .visible_url_regions(Rect::new(0, 0, text_area.width, text_area.height));
             crate::renderer::render_vt_screen_with_selection_and_urls(
-                screen,
+                render_screen,
                 frame.buffer_mut(),
                 text_area,
                 session.vt.selection(),
-                &url_regions,
+                &render_surface.url_regions,
             );
         }
 
-        if show_cursor && !session.vt.viewing_history() && !screen.hide_cursor() {
-            let (cursor_row, cursor_col) = screen.cursor_position();
+        if show_cursor && !session.vt.viewing_history() && !render_screen.hide_cursor() {
+            let (cursor_row, cursor_col) = render_screen.cursor_position();
             let x = text_area.x + cursor_col;
             let y = text_area.y + cursor_row;
             if x < text_area.right() && y < text_area.bottom() {
@@ -5761,6 +9015,180 @@ fn render_session_surface(
             }
         }
     });
+}
+
+struct SessionRenderSurface {
+    normalized_parser: Option<vt100::Parser>,
+    url_regions: Vec<crate::renderer::UrlRegion>,
+}
+
+impl SessionRenderSurface {
+    fn screen<'a>(&'a self, fallback: &'a vt100::Screen) -> &'a vt100::Screen {
+        self.normalized_parser
+            .as_ref()
+            .map(vt100::Parser::screen)
+            .unwrap_or(fallback)
+    }
+}
+
+fn session_render_surface(
+    session: &crate::model::SessionTab,
+    screen: &vt100::Screen,
+    text_area: Rect,
+) -> SessionRenderSurface {
+    let area = Rect::new(0, 0, text_area.width, text_area.height);
+    let normalized_parser = match &session.tab_type {
+        crate::model::SessionTabType::Agent { agent_id, .. }
+            if agent_id == "codex" && session.vt.selection().is_none() =>
+        {
+            normalized_codex_progress_parser(screen)
+        }
+        _ => None,
+    };
+    let url_regions = if let Some(parser) = normalized_parser.as_ref() {
+        crate::renderer::collect_url_regions(parser.screen(), area)
+    } else {
+        session.vt.visible_url_regions(area)
+    };
+    SessionRenderSurface {
+        normalized_parser,
+        url_regions,
+    }
+}
+
+fn normalized_codex_progress_parser(screen: &vt100::Screen) -> Option<vt100::Parser> {
+    let (rows, cols) = screen.size();
+    let visible_lines: Vec<String> = screen
+        .rows(0, cols)
+        .map(|line| line.trim_end_matches(' ').to_string())
+        .collect();
+    let formatted_rows: Vec<Vec<u8>> = screen.rows_formatted(0, cols).collect();
+    if visible_lines.is_empty() || visible_lines.len() != formatted_rows.len() {
+        return None;
+    }
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let hide_cursor = screen.hide_cursor();
+
+    let mut keep = vec![true; visible_lines.len()];
+    let mut row = 0usize;
+    let mut changed = false;
+    while row < visible_lines.len() {
+        if !is_codex_progress_separator(&visible_lines[row]) {
+            row += 1;
+            continue;
+        }
+
+        let separator_start = row;
+        while row < visible_lines.len() && is_codex_progress_separator(&visible_lines[row]) {
+            row += 1;
+        }
+        let separator_end = row;
+
+        let previous_end = separator_start;
+        let mut previous_start = previous_end;
+        while previous_start > 0 && !is_codex_progress_separator(&visible_lines[previous_start - 1])
+        {
+            previous_start -= 1;
+        }
+
+        let next_start = separator_end;
+        let mut next_end = next_start;
+        while next_end < visible_lines.len()
+            && !is_codex_progress_separator(&visible_lines[next_end])
+        {
+            next_end += 1;
+        }
+
+        let previous_block =
+            codex_progress_block_lines(&visible_lines[previous_start..previous_end]);
+        let next_block = codex_progress_block_lines(&visible_lines[next_start..next_end]);
+        if previous_block
+            .as_ref()
+            .zip(next_block.as_ref())
+            .is_some_and(|(previous, next)| codex_progress_block_repeated(previous, next))
+        {
+            for keep_row in keep.iter_mut().take(next_start).skip(previous_start) {
+                *keep_row = false;
+            }
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let rows_to_keep: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(index, keep_row)| keep_row.then_some(index))
+        .collect();
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(b"\x1b[2J\x1b[H");
+    for (dest_row, src_row) in rows_to_keep.iter().take(rows as usize).enumerate() {
+        let mut positioned_row = format!("\x1b[{};1H\x1b[K", dest_row + 1).into_bytes();
+        positioned_row.extend_from_slice(&formatted_rows[*src_row]);
+        parser.process(&positioned_row);
+    }
+    if rows > 0 && cols > 0 {
+        let cursor_row = usize::from(cursor_row).min(keep.len().saturating_sub(1));
+        let adjusted_cursor_row = keep
+            .iter()
+            .take(cursor_row.saturating_add(1))
+            .filter(|keep_row| **keep_row)
+            .count()
+            .saturating_sub(1)
+            .min(rows_to_keep.len().saturating_sub(1));
+        let adjusted_cursor_col = usize::from(cursor_col)
+            .min(usize::from(cols).saturating_sub(1))
+            .saturating_add(1);
+        let cursor_sequence = format!(
+            "\x1b[{};{}H",
+            adjusted_cursor_row.saturating_add(1),
+            adjusted_cursor_col
+        );
+        parser.process(cursor_sequence.as_bytes());
+    }
+    parser.process(if hide_cursor {
+        b"\x1b[?25l"
+    } else {
+        b"\x1b[?25h"
+    });
+    Some(parser)
+}
+
+fn is_codex_progress_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '─')
+}
+
+fn codex_progress_block_lines(lines: &[String]) -> Option<Vec<String>> {
+    let first = lines.iter().position(|line| !line.trim().is_empty())?;
+    let last = lines.iter().rposition(|line| !line.trim().is_empty())?;
+    let mut normalized = Vec::new();
+    let mut has_bullet = false;
+    let mut has_child = false;
+
+    for line in &lines[first..=last] {
+        let trimmed = line.trim_end().to_string();
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+        has_bullet |= trimmed.starts_with("• ");
+        has_child |= trimmed.starts_with("  ");
+        normalized.push(trimmed);
+    }
+
+    (has_bullet && has_child && normalized.len() >= 2).then_some(normalized)
+}
+
+fn codex_progress_block_repeated(previous: &[String], next: &[String]) -> bool {
+    if previous.len() > next.len() || previous.len() < 2 {
+        return false;
+    }
+
+    next.windows(previous.len())
+        .any(|window| window == previous)
 }
 
 /// Render the full UI (Elm: view).
@@ -5807,10 +9235,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
 /// Build a bordered block with focus-aware border color (Cyan when focused, Gray otherwise).
 fn pane_block(title: Line<'static>, is_focused: bool) -> Block<'static> {
-    let border_color = if is_focused { Color::Cyan } else { Color::Gray };
+    let (border_style, border_type) = theme::pane_border(is_focused);
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
+        .border_type(border_type)
+        .border_style(border_style)
         .title(title)
 }
 
@@ -5978,6 +9407,7 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
         ManagementTab::Branches => {
             // Handled by render_management_panes directly
         }
+        ManagementTab::Board => screens::board::render(&model.board, frame, area),
         ManagementTab::Issues => screens::issues::render(&model.issues, frame, area),
         ManagementTab::PrDashboard => {
             screens::pr_dashboard::render(&model.pr_dashboard, frame, area)
@@ -6016,6 +9446,8 @@ fn build_session_title(model: &Model, width: u16) -> Line<'static> {
 }
 
 fn build_session_title_with(model: &Model, width: u16, sessions_dir: &Path) -> Line<'static> {
+    let pane_focused =
+        model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal;
     let entries: Vec<(String, Style, &'static str)> = model
         .sessions
         .iter()
@@ -6023,7 +9455,7 @@ fn build_session_title_with(model: &Model, width: u16, sessions_dir: &Path) -> L
         .map(|(i, session)| {
             (
                 session_title_label(session, sessions_dir),
-                session_title_style(session, i == model.active_session),
+                session_title_style(session, i == model.active_session, pane_focused),
                 session.tab_type.icon(),
             )
         })
@@ -6067,10 +9499,16 @@ fn load_persisted_branch_label(session_id: &str, sessions_dir: &Path) -> Option<
     }
 }
 
-fn session_title_style(session: &crate::model::SessionTab, is_active: bool) -> Style {
+fn session_title_style(
+    session: &crate::model::SessionTab,
+    is_active: bool,
+    pane_focused: bool,
+) -> Style {
     match &session.tab_type {
         SessionTabType::Shell => {
-            if is_active {
+            if !pane_focused {
+                Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+            } else if is_active {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
@@ -6080,7 +9518,9 @@ fn session_title_style(session: &crate::model::SessionTab, is_active: bool) -> S
         }
         SessionTabType::Agent { color, .. } => {
             let style = Style::default().fg(agent_color_to_ratatui(*color));
-            if is_active {
+            if !pane_focused {
+                style.add_modifier(Modifier::DIM)
+            } else if is_active {
                 style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 style.add_modifier(Modifier::DIM)
@@ -6163,6 +9603,7 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
             compact,
             model.branches.cleanup_selection_count(),
         ),
+        ManagementTab::Board => board_hint_text(model, compact),
         ManagementTab::Issues => issues_hint_text(model, compact),
         ManagementTab::Settings => {
             if model.settings.editing {
@@ -6198,6 +9639,20 @@ fn issues_hint_text(model: &Model, compact: bool) -> String {
     } else {
         "↑↓:select  Enter:detail  /:search  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help"
             .to_string()
+    }
+}
+
+fn board_hint_text(model: &Model, compact: bool) -> String {
+    if model.board.composer_open {
+        if compact {
+            "type msg  ↵ send  C-j nl  C-k kind  C-r rfsh  Esc done".to_string()
+        } else {
+            "type message  Enter:send  Ctrl+J:new line  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:stop editing".to_string()
+        }
+    } else if compact {
+        "↑↓ sel  type post  C-k kind  C-r rfsh  Esc term".to_string()
+    } else {
+        "↑↓:select  type to post  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:term".to_string()
     }
 }
 
@@ -6273,12 +9728,29 @@ fn pr_dashboard_hint_text(model: &Model, compact: bool) -> String {
 }
 
 fn profiles_hint_text(model: &Model, compact: bool) -> String {
-    if model.profiles.mode != screens::profiles::ProfileMode::List {
+    use screens::profiles::{ProfileMode, ProfilesFocus};
+
+    if model.profiles.mode != ProfileMode::List {
         generic_management_hint_text(compact, false, "cancel")
     } else if compact {
-        "↑↓ sel  ↵ tog  n new  e edit  d del  C-g Tab  Esc term".to_string()
+        match model.profiles.focus {
+            ProfilesFocus::ProfileList => {
+                "Tab pane  S-Tab back  ↑↓ sel  ↵ act  n/e/d  Esc term".to_string()
+            }
+            ProfilesFocus::Environment => {
+                "Tab pane  S-Tab back  ↑↓ env  ↵/e edit  n add  d del/rst  Esc term".to_string()
+            }
+        }
     } else {
-        "↑↓:select  Enter:toggle  n:new  e:edit  d:delete  Ctrl+G, Tab:focus  Esc:term".to_string()
+        match model.profiles.focus {
+            ProfilesFocus::ProfileList => {
+                "Tab:next pane  Shift+Tab:prev pane  ↑↓:select  Enter:activate  n:new  e:edit  d:delete  Esc:term".to_string()
+            }
+            ProfilesFocus::Environment => {
+                "Tab:next pane  Shift+Tab:prev pane  ↑↓:env  Enter/e:edit  n:add  d:delete/restore  Esc:term"
+                    .to_string()
+            }
+        }
     }
 }
 
@@ -6313,45 +9785,47 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
         };
         let docker_hints = model
             .branches
-            .docker_containers
+            .docker_services
             .get(model.branches.docker_selected)
-            .map(|container| match container.status {
-                gwt_docker::ContainerStatus::Running => "  T/R",
-                gwt_docker::ContainerStatus::Paused => "  S/T/R",
-                gwt_docker::ContainerStatus::Created
-                | gwt_docker::ContainerStatus::Stopped
-                | gwt_docker::ContainerStatus::Exited => "  S/R",
+            .map(|service| match service.status {
+                gwt_docker::ComposeServiceStatus::Running => "  T/R/C",
+                gwt_docker::ComposeServiceStatus::Stopped
+                | gwt_docker::ComposeServiceStatus::Exited => "  S/C",
+                gwt_docker::ComposeServiceStatus::NotFound => "  S",
             })
             .unwrap_or("");
         return match model.branches.detail_section {
-            0 => format!("←→ sec  ↵ act{direct_action_hints}{docker_hints}  mvf?  C-g↔P  Esc←"),
-            3 => "↑↓ ses  ←→ sec  ↵ focus  mvf?  C-g↔P  Esc←".to_string(),
-            _ => format!("←→ sec  ↵ act{direct_action_hints}  mvf?  C-g↔P  Esc←"),
+            0 => format!(
+                "←→ sec  ↵ act{direct_action_hints}{docker_hints}  Sp sel  mvf?  C-g↔P  Esc←"
+            ),
+            2 => "↑↓ ses  ←→ sec  ↵ focus  Sp sel  mvf?  C-g↔P  Esc←".to_string(),
+            _ => format!("←→ sec  ↵ act{direct_action_hints}  Sp sel  mvf?  C-g↔P  Esc←"),
         };
     }
     match model.branches.detail_section {
         0 => {
             let docker_hints = model
                 .branches
-                .docker_containers
+                .docker_services
                 .get(model.branches.docker_selected)
-                .map(|container| match container.status {
-                    gwt_docker::ContainerStatus::Running => "  T:stop  R:restart",
-                    gwt_docker::ContainerStatus::Paused => "  S:start  T:stop  R:restart",
-                    gwt_docker::ContainerStatus::Created
-                    | gwt_docker::ContainerStatus::Stopped
-                    | gwt_docker::ContainerStatus::Exited => "  S:start  R:restart",
+                .map(|service| match service.status {
+                    gwt_docker::ComposeServiceStatus::Running => {
+                        "  T:stop  R:restart  C:recreate"
+                    }
+                    gwt_docker::ComposeServiceStatus::Stopped
+                    | gwt_docker::ComposeServiceStatus::Exited => "  S:start  C:recreate",
+                    gwt_docker::ComposeServiceStatus::NotFound => "  S:create/start",
                 })
                 .unwrap_or("");
             format!(
-                "←→:section  Enter:launch{direct_action_hints}{docker_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+                "←→:section  Enter:launch{direct_action_hints}{docker_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
             )
         }
-        3 => format!(
-            "↑↓:session  ←→:section  Enter:focus{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+        2 => format!(
+            "↑↓:session  ←→:section  Enter:focus  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
         _ => format!(
-            "←→:section  Enter:launch{direct_action_hints}{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+            "←→:section  Enter:launch{direct_action_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
         ),
     }
 }
@@ -6375,6 +9849,11 @@ fn render_overlays(model: &Model, frame: &mut Frame, size: Rect) {
     // Service selection overlay
     if let Some(ref svc) = model.service_select {
         screens::service_select::render(svc, frame, size);
+    }
+
+    // Discussion resume proposal overlay
+    if let Some(ref discussion_resume) = model.discussion_resume {
+        screens::discussion_resume::render(discussion_resume, frame, size);
     }
 
     // Port selection overlay
@@ -6404,60 +9883,48 @@ fn render_grid_sessions(model: &Model, frame: &mut Frame, area: Rect) {
     if count == 0 {
         return;
     }
+
     let terminal_focused = model.active_focus == FocusPane::Terminal;
-
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
-
-    for (row_idx, row_area) in row_chunks.iter().enumerate() {
-        let start = row_idx * cols;
-        let end = (start + cols).min(count);
-        let n = end - start;
-
-        let col_constraints: Vec<Constraint> =
-            (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-
-        let col_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints)
-            .split(*row_area);
-
-        for (col_idx, col_area) in col_chunks.iter().enumerate() {
-            let session_idx = start + col_idx;
-            if let Some(session) = model.sessions.get(session_idx) {
-                let is_active = session_idx == model.active_session;
-                let border_style = if is_active {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(grid_session_title(session_idx, session));
-                let inner = block.inner(*col_area);
-                frame.render_widget(block, *col_area);
-                render_session_surface(session, frame, inner, terminal_focused && is_active);
-            }
-        }
+    for session_idx in 0..count {
+        let Some(session) = model.sessions.get(session_idx) else {
+            continue;
+        };
+        let Some(pane_area) = grid_session_pane_area(area, count, session_idx) else {
+            continue;
+        };
+        let is_active = session_idx == model.active_session;
+        let block = grid_session_block(session_idx, session, is_active && terminal_focused);
+        let inner = block.inner(pane_area);
+        frame.render_widget(block, pane_area);
+        render_session_surface(session, frame, inner, is_active && terminal_focused);
     }
 }
 
+fn grid_session_block(
+    session_idx: usize,
+    session: &crate::model::SessionTab,
+    is_active: bool,
+) -> Block<'static> {
+    pane_block(
+        Line::from(grid_session_title(session_idx, session)),
+        is_active,
+    )
+}
+
 fn grid_session_title(session_idx: usize, session: &crate::model::SessionTab) -> String {
+    grid_session_title_with(session_idx, session, &gwt_sessions_dir())
+}
+
+fn grid_session_title_with(
+    session_idx: usize,
+    session: &crate::model::SessionTab,
+    sessions_dir: &Path,
+) -> String {
     format!(
         " {}: {} {} ",
         session_idx.saturating_add(1),
         session.tab_type.icon(),
-        session.name
+        session_title_label(session, sessions_dir)
     )
 }
 
@@ -6490,6 +9957,7 @@ mod tests {
 
     static VERSION_CACHE_SCHEDULER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static INPUT_TRACE_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn disable_global_custom_agents_for_tests() {
         static ONCE: Once = Once::new();
@@ -6501,6 +9969,94 @@ mod tests {
     fn test_model() -> Model {
         disable_global_custom_agents_for_tests();
         Model::new(PathBuf::from("/tmp/test"))
+    }
+
+    struct HomeEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("HOME", previous);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn with_temp_home<T>(run: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = HOME_ENV_TEST_LOCK.lock().expect("lock HOME env");
+        let home = tempfile::tempdir().expect("temp home dir");
+        let _env = HomeEnvGuard::set(home.path());
+        run(home.path())
+    }
+
+    fn wait_for_startup_version_cache_refresh_slot() {
+        for _ in 0..100 {
+            if !STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    type StartupVersionRefreshTask = Box<dyn FnOnce() + Send>;
+    type ScheduledStartupVersionRefresh =
+        std::sync::Arc<std::sync::Mutex<Option<(PathBuf, Vec<AgentId>)>>>;
+
+    fn capture_startup_version_cache_refresh_task(
+        cache_path: PathBuf,
+        detect_agents: std::sync::Arc<dyn Fn() -> Vec<DetectedAgent> + Send + Sync>,
+    ) -> (StartupVersionRefreshTask, ScheduledStartupVersionRefresh) {
+        for _ in 0..5 {
+            let spawned = std::cell::RefCell::new(None::<StartupVersionRefreshTask>);
+            let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let scheduled_capture = scheduled.clone();
+            let detect_agents = detect_agents.clone();
+
+            schedule_startup_version_cache_refresh_with(
+                cache_path.clone(),
+                move || detect_agents.as_ref()(),
+                |task| {
+                    *spawned.borrow_mut() = Some(task);
+                },
+                move |path, targets| {
+                    *scheduled_capture.lock().unwrap() = Some((path, targets));
+                },
+            );
+
+            if let Some(task) = spawned.borrow_mut().take() {
+                return (task, scheduled);
+            }
+
+            wait_for_startup_version_cache_refresh_slot();
+        }
+
+        panic!("failed to capture startup version cache refresh task");
+    }
+
+    #[test]
+    fn tick_redraw_required_stays_true_while_cleanup_progress_is_visible() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.cleanup_progress.show(1, false);
+
+        update(&mut model, Message::Tick);
+
+        assert!(
+            tick_redraw_required(&model),
+            "cleanup progress should keep tick-driven redraws alive until the modal reflects updates"
+        );
     }
 
     #[derive(Debug)]
@@ -6803,17 +10359,21 @@ mod tests {
         session.save(dir).expect("persist session");
     }
 
-    fn docker_container(
-        id: &str,
+    fn docker_service(
+        project_root: &std::path::Path,
         name: &str,
-        status: gwt_docker::ContainerStatus,
-    ) -> gwt_docker::ContainerInfo {
-        gwt_docker::ContainerInfo {
-            id: id.to_string(),
+        status: gwt_docker::ComposeServiceStatus,
+    ) -> screens::branches::DockerServiceInfo {
+        screens::branches::DockerServiceInfo {
+            project_root: project_root.to_path_buf(),
+            compose_file: project_root.join("docker-compose.yml"),
             name: name.to_string(),
             status,
-            image: "nginx:latest".to_string(),
-            ports: "0.0.0.0:8080->80/tcp".to_string(),
+            ports: if name == "db" {
+                "5432:5432".to_string()
+            } else {
+                "8080:80".to_string()
+            },
         }
     }
 
@@ -6851,6 +10411,40 @@ mod tests {
         }
 
         result
+    }
+
+    fn with_docker_bin_override<R>(path: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::DOCKER_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", path);
+
+        let result = f();
+
+        match previous {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        result
+    }
+
+    fn write_docker_launch_compose_fixture(worktree: &std::path::Path) -> PathBuf {
+        let compose_path = worktree.join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  gwt:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose fixture");
+        compose_path
     }
 
     #[cfg(unix)]
@@ -6894,7 +10488,7 @@ mod tests {
     }
 
     fn drive_docker_worker_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
-        for _ in 0..40 {
+        for _ in 0..120 {
             update(model, Message::Tick);
             if done(model) {
                 return;
@@ -6906,7 +10500,7 @@ mod tests {
     }
 
     fn drive_ticks_until(model: &mut Model, done: impl Fn(&Model) -> bool, context: &str) {
-        for _ in 0..80 {
+        for _ in 0..200 {
             update(model, Message::Tick);
             if done(model) {
                 return;
@@ -7025,23 +10619,25 @@ mod tests {
     }
 
     #[test]
-    fn pane_block_uses_cyan_border_when_focused() {
+    fn pane_block_uses_yellow_double_border_when_focused() {
         let area = Rect::new(0, 0, 12, 3);
         let mut buffer = Buffer::empty(area);
 
         pane_block(Line::from("Focused"), true).render(area, &mut buffer);
 
-        assert_eq!(buffer[(0, 0)].fg, Color::Cyan);
+        assert_eq!(buffer[(0, 0)].fg, Color::Yellow);
+        assert_eq!(buffer[(0, 0)].symbol(), "╔");
     }
 
     #[test]
-    fn pane_block_uses_gray_border_when_unfocused() {
+    fn pane_block_uses_gray_rounded_border_when_unfocused() {
         let area = Rect::new(0, 0, 12, 3);
         let mut buffer = Buffer::empty(area);
 
         pane_block(Line::from("Unfocused"), false).render(area, &mut buffer);
 
         assert_eq!(buffer[(0, 0)].fg, Color::Gray);
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
     }
 
     #[test]
@@ -7191,6 +10787,65 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_session_tab_switches_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions.push(crate::model::SessionTab {
+            id: "agent-0".to_string(),
+            name: "Claude Code".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "claude".to_string(),
+                color: crate::model::AgentColor::Green,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.active_session = 0;
+        update(&mut model, Message::Resize(80, 24));
+
+        // The session pane spans the full width in Main layer.
+        let session_area = visible_session_area(&model).expect("session area");
+        let title = build_session_title(&model, session_area.width);
+
+        // Find the x position that falls within the second tab label.
+        let mut x = session_area.x.saturating_add(1);
+        let mut target_x = None;
+        let mut session_idx = 0;
+        for span in &title.spans {
+            let content = span.content.as_ref();
+            let width = content.chars().count() as u16;
+            if content.trim() == "│" {
+                x = x.saturating_add(width);
+                continue;
+            }
+            if session_idx == 1 {
+                target_x = Some(x + 1);
+                break;
+            }
+            x = x.saturating_add(width);
+            session_idx += 1;
+        }
+        let click_x = target_x.expect("second session tab label should exist in the title");
+
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_x,
+                row: session_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_session, 1,
+            "clicking the second session tab should switch to it"
+        );
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
     fn mouse_click_branch_list_row_selects_branch_and_focuses_list() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
@@ -7206,6 +10861,7 @@ mod tests {
                     is_local: true,
                     category: screens::branches::BranchCategory::Feature,
                     worktree_path: None,
+                    upstream: None,
                 },
                 screens::branches::BranchItem {
                     name: "feature/two".to_string(),
@@ -7213,6 +10869,7 @@ mod tests {
                     is_local: true,
                     category: screens::branches::BranchCategory::Feature,
                     worktree_path: None,
+                    upstream: None,
                 },
             ]),
         );
@@ -7254,6 +10911,7 @@ mod tests {
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             }]),
         );
 
@@ -7303,6 +10961,133 @@ mod tests {
 
         assert_eq!(model.active_session, 1);
         assert_eq!(model.active_focus, FocusPane::Terminal);
+    }
+
+    #[test]
+    fn render_model_text_grid_sessions_render_live_terminal_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+            shell_tab("shell-2", "Shell: feature/three"),
+        ];
+
+        update(&mut model, Message::Resize(120, 30));
+        append_session_line(&mut model, "shell-0", "grid-line-one");
+        append_session_line(&mut model, "shell-1", "grid-line-two");
+        append_session_line(&mut model, "shell-2", "grid-line-three");
+
+        let rendered = render_model_text(&model, 120, 30);
+
+        assert!(
+            rendered.contains("grid-line-one"),
+            "grid mode should render the first session's live surface, not just its pane title"
+        );
+        assert!(
+            rendered.contains("grid-line-two"),
+            "grid mode should render the second session's live surface, not just its pane title"
+        );
+        assert!(
+            rendered.contains("grid-line-three"),
+            "grid mode should render the third session's live surface, not just its pane title"
+        );
+    }
+
+    #[test]
+    fn grid_session_area_stacks_two_sessions_vertically_in_tall_layout() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+        ];
+
+        update(&mut model, Message::Resize(40, 80));
+
+        let session_area = test_main_area(&model);
+        let first = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("first grid session");
+        let second = grid_session_pane_area(session_area, model.sessions.len(), 1)
+            .expect("second grid session");
+
+        assert_eq!(
+            first.x, second.x,
+            "tall layouts should transpose the two-session grid into a vertical stack"
+        );
+        assert!(
+            second.y > first.y,
+            "the second session should appear below the first in a tall layout"
+        );
+        assert_eq!(
+            first.width, second.width,
+            "transposed two-session layouts should preserve equal widths"
+        );
+    }
+
+    #[test]
+    fn resize_grid_syncs_each_session_to_its_own_cell_size() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+            shell_tab("shell-2", "Shell: feature/three"),
+        ];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(120, 30));
+
+        let top_cols = model.sessions[0].vt.cols();
+        let bottom_cols = model.sessions[2].vt.cols();
+
+        assert!(
+            bottom_cols > top_cols,
+            "three-session grid layouts should resize the bottom full-width session wider than the top-row sessions"
+        );
+    }
+
+    #[test]
+    fn wheel_over_inactive_grid_session_scrolls_it_without_changing_active_session() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/one"),
+            shell_tab("shell-1", "Shell: feature/two"),
+        ];
+        model.active_session = 0;
+        update(&mut model, Message::Resize(120, 30));
+
+        for i in 0..40 {
+            append_session_line(&mut model, "shell-1", &format!("two-line-{i}"));
+        }
+
+        let second_area = grid_session_pane_area(test_main_area(&model), model.sessions.len(), 1)
+            .expect("second grid session area");
+        update(
+            &mut model,
+            Message::MouseInput(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: second_area.x + 2,
+                row: second_area.y + 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(
+            model.active_session, 0,
+            "wheel scrolling another grid session should not steal active input ownership"
+        );
+        assert!(
+            model.sessions[1].vt.viewing_history(),
+            "wheel scrolling over an inactive grid session should scroll that session's local viewport"
+        );
     }
 
     #[test]
@@ -7529,77 +11314,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_click_focuses_terminal_without_starting_selection() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Management;
-        model.management_tab = ManagementTab::Branches;
-        model.active_focus = FocusPane::TabContent;
-        update(&mut model, Message::Resize(24, 8));
-        append_session_line(&mut model, "shell-0", "alpha beta");
-
-        let area = active_session_text_area(&model).expect("active session text area");
-        update(
-            &mut model,
-            Message::MouseInput(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: area.x,
-                row: area.y,
-                modifiers: KeyModifiers::NONE,
-            }),
-        );
-
-        assert_eq!(model.active_focus, FocusPane::Terminal);
-        assert!(
-            model
-                .active_session_tab()
-                .expect("active session")
-                .vt
-                .selection()
-                .is_none(),
-            "focus click should not begin drag selection"
-        );
-    }
-
-    #[test]
-    fn mouse_focus_switch_clears_existing_terminal_selection() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Management;
-        model.management_tab = ManagementTab::Branches;
-        model.active_focus = FocusPane::Terminal;
-        update(&mut model, Message::Resize(120, 30));
-        if let Some(session) = model.active_session_tab_mut() {
-            session.vt.begin_selection(TerminalCell { row: 0, col: 0 });
-            session.vt.update_selection(TerminalCell { row: 0, col: 4 });
-        }
-
-        let (top, _, _) = branches_management_areas(&model);
-        let title = management_tab_title(&model, top.width);
-        let issues_x = title_label_click_x(&title, top.x, "Issues");
-
-        update(
-            &mut model,
-            Message::MouseInput(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: issues_x,
-                row: top.y,
-                modifiers: KeyModifiers::NONE,
-            }),
-        );
-
-        assert_eq!(model.management_tab, ManagementTab::Issues);
-        assert!(
-            model
-                .active_session_tab()
-                .expect("active session")
-                .vt
-                .selection()
-                .is_none(),
-            "focus click should clear the previous terminal selection"
-        );
-    }
-
-    #[test]
-    fn selection_copy_shortcut_uses_scrollback_viewport_coordinates() {
+    fn selection_copy_uses_scrollback_viewport_coordinates() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -7663,29 +11378,7 @@ mod tests {
         )
         .expect("selection up succeeds");
 
-        assert_eq!(copied, None, "mouse up should no longer auto-copy");
-
-        forward_key_to_active_session_with_clipboard(
-            &mut model,
-            key(KeyCode::Char('c'), KeyModifiers::SUPER),
-            CopyShortcutPlatform::MacOs,
-            |text| {
-                copied = Some(text.to_string());
-                Ok(())
-            },
-        )
-        .expect("copy shortcut succeeds");
-
         assert_eq!(copied.as_deref(), Some("line-7"));
-        assert!(
-            model
-                .active_session_tab()
-                .expect("active session")
-                .vt
-                .selection()
-                .is_none(),
-            "copy shortcut should clear the consumed selection"
-        );
     }
 
     #[test]
@@ -7956,8 +11649,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_copy_shortcut_uses_snapshot_viewport_surface_when_viewing_past_full_screen_frame()
-    {
+    fn selection_copy_uses_snapshot_viewport_surface_when_viewing_past_full_screen_frame() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -8025,23 +11717,10 @@ mod tests {
         )
         .expect("selection up succeeds");
 
-        assert_eq!(copied, None, "mouse up should no longer auto-copy");
-
-        forward_key_to_active_session_with_clipboard(
-            &mut model,
-            key(KeyCode::Char('c'), KeyModifiers::SUPER),
-            CopyShortcutPlatform::MacOs,
-            |text| {
-                copied = Some(text.to_string());
-                Ok(())
-            },
-        )
-        .expect("copy shortcut succeeds");
-
         assert_eq!(
             copied.as_deref(),
             Some("line-1"),
-            "copy shortcut should read from the visible snapshot surface instead of the live frame"
+            "selection copy should read from the visible snapshot surface instead of the live frame"
         );
     }
 
@@ -8365,6 +12044,245 @@ mod tests {
         );
     }
 
+    /// Helper that spins up a single Claude-Code-like agent session with SGR
+    /// mouse reporting (DECSET 1000+1006) already negotiated.  Used by the
+    /// left-click forwarding tests below to avoid copy-pasting fixture setup.
+    fn model_with_agent_mouse_reporting_enabled() -> Model {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput(
+                "agent-0".to_string(),
+                b"\x1b[?1000h\x1b[?1006hframe-1".to_vec(),
+            ),
+        );
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::PtyMouse,
+            "fixture precondition: agent should be in PTY mouse routing",
+        );
+        model
+    }
+
+    #[test]
+    fn agent_left_click_down_forwards_sgr_press_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(forwarded.bytes, b"\x1b[<0;1;1M".to_vec());
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "PTY-forwarded clicks must not also start a local text selection",
+        );
+    }
+
+    #[test]
+    fn agent_left_click_up_forwards_sgr_release_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left up should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[<0;1;1m".to_vec(),
+            "release must terminate with lowercase 'm' per SGR 1006",
+        );
+    }
+
+    #[test]
+    fn agent_left_drag_forwards_sgr_motion_event_to_pty() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left down should succeed");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x.saturating_add(2),
+                row: area.y.saturating_add(1),
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("left drag should succeed");
+
+        assert!(handled);
+        let forwarded = model
+            .pending_pty_inputs()
+            .back()
+            .expect("queued mouse input");
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert_eq!(
+            forwarded.bytes,
+            b"\x1b[<32;3;2M".to_vec(),
+            "drag encodes base button 0 plus the motion flag 32",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "drag forwarding must not silently update the local selection either",
+        );
+    }
+
+    #[test]
+    fn shift_left_click_bypasses_pty_forwarding_and_starts_local_selection() {
+        let mut model = model_with_agent_mouse_reporting_enabled();
+        let area = active_session_text_area(&model).expect("active session text area");
+
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::SHIFT,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "Shift+click should act as a local selection bypass, never touching the PTY",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "Shift+click must start a local text selection for copy UX",
+        );
+    }
+
+    #[test]
+    fn agent_left_click_without_mouse_reporting_still_starts_local_selection() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        // No DECSET 1000/1006 → session_scroll_routing must stay LocalViewport.
+        assert_eq!(
+            active_session_scroll_routing(&model),
+            ScrollInputRouting::LocalViewport,
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let handled = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+        )
+        .expect("mouse input should succeed");
+
+        assert!(handled);
+        assert!(
+            model.pending_pty_inputs().is_empty(),
+            "agents without mouse reporting should keep click handling on the local selection path",
+        );
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "local-mode left click must begin a text selection as before",
+        );
+    }
+
     #[test]
     fn agent_sessions_keep_full_terminal_width_without_scrollbar_overlay() {
         let mut model = test_model();
@@ -8583,6 +12501,189 @@ mod tests {
             session.vt.viewing_history(),
             "wheel input should move the local viewport into history rather than injecting arrow keys into the PTY"
         );
+    }
+
+    #[test]
+    fn render_model_text_codex_collapses_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 1);
+        assert_eq!(text.matches("  └ Search alpha").count(), 1);
+    }
+
+    #[test]
+    fn render_model_text_codex_keeps_distinct_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• cache summary updated",
+                "",
+                "• Explored",
+                "  └ Read spec.mdsh",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert!(text.contains("  └ Search alpha"));
+        assert!(text.contains("  └ Read spec.mdsh"));
+    }
+
+    #[test]
+    fn render_model_text_non_codex_keeps_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Claude Code",
+            "claude",
+            crate::model::AgentColor::Green,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert_eq!(text.matches("  └ Search alpha").count(), 2);
+    }
+
+    #[test]
+    fn render_model_text_codex_with_selection_keeps_identical_progress_blocks() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(60, 14));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "• Working",
+            ],
+        );
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 5 });
+
+        let text = render_model_text(&model, 80, 20);
+        assert_eq!(text.matches("• Explored").count(), 2);
+        assert_eq!(text.matches("  └ Search alpha").count(), 2);
+    }
+
+    #[test]
+    fn normalized_codex_progress_parser_preserves_cursor_state() {
+        let mut parser = vt100::Parser::new(14, 60, 0);
+        parser.process(
+            concat!(
+                "• contract swapped\r\n",
+                "\r\n",
+                "• Explored\r\n",
+                "  └ Search alpha\r\n",
+                "\r\n",
+                "────────────────────────────────────────\r\n",
+                "• contract swapped\r\n",
+                "\r\n",
+                "• Explored\r\n",
+                "  └ Search alpha\r\n",
+                "\r\n",
+                "• Working\r\n",
+            )
+            .as_bytes(),
+        );
+        parser.process(b"\x1b[12;5H\x1b[?25l");
+
+        let normalized = normalized_codex_progress_parser(parser.screen()).expect("normalized");
+        assert_eq!(normalized.screen().cursor_position(), (5, 4));
+        assert!(normalized.screen().hide_cursor());
     }
 
     #[test]
@@ -8810,6 +12911,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             },
         )
@@ -8879,12 +12981,26 @@ mod tests {
         model.active_layer = ActiveLayer::Management;
         model.management_tab = ManagementTab::Profiles;
         model.active_focus = FocusPane::TabContent;
-        model.profiles.mode = screens::profiles::ProfileMode::Create;
+        model.profiles.mode = screens::profiles::ProfileMode::CreateProfile;
 
         let rendered = render_model_text(&model, 220, 24);
 
         assert!(rendered.contains("Esc:cancel"));
         assert!(!rendered.contains("Esc:term"));
+    }
+
+    #[test]
+    fn render_model_text_profiles_list_hints_prefer_tab_for_pane_navigation() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+
+        let rendered = render_model_text(&model, 220, 24);
+
+        assert!(rendered.contains("Tab:next pane"));
+        assert!(rendered.contains("Shift+Tab:prev pane"));
+        assert!(!rendered.contains("Ctrl+←→"));
     }
 
     #[test]
@@ -8980,6 +13096,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-banner")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 120, 16);
@@ -9002,6 +13119,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/demo/project-repo-feature-top-row")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 120, 16);
@@ -9122,13 +13240,12 @@ mod tests {
         model.management_tab = ManagementTab::Issues;
         model.active_focus = FocusPane::TabContent;
 
-        let rendered = render_model_text(&model, 220, 24);
+        let rendered = render_model_text(&model, 260, 24);
         let first_line = rendered.lines().next().unwrap_or_default();
 
         assert!(first_line.contains("Branches"));
         assert!(first_line.contains("Issues"));
-        // SPEC-12 Phase 9: the Specs tab is now a top-level peer, so the
-        // extra-wide tab strip should include it.
+        assert!(first_line.contains("Board"));
         assert!(first_line.contains("Specs"));
     }
 
@@ -9348,6 +13465,8 @@ mod tests {
         let mut model = test_model();
         model.sessions = vec![claude, codex, gemini];
         model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
 
         let title = build_session_title_with(&model, 220, sessions_dir.path());
         let claude_span = title
@@ -9380,6 +13499,47 @@ mod tests {
         let _ = fs::remove_file(claude_path);
         let _ = fs::remove_file(codex_path);
         let _ = fs::remove_file(gemini_path);
+    }
+
+    #[test]
+    fn build_session_title_management_unfocused_dims_active_session_identity() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let (claude, claude_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/claude-active",
+            AgentId::ClaudeCode,
+            crate::model::AgentColor::Yellow,
+        );
+        let (codex, codex_path) = persist_agent_tab(
+            sessions_dir.path(),
+            "feature/codex-idle",
+            AgentId::Codex,
+            crate::model::AgentColor::Cyan,
+        );
+
+        let mut model = test_model();
+        model.sessions = vec![claude, codex];
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        let title = build_session_title_with(&model, 220, sessions_dir.path());
+        let claude_span = title
+            .spans
+            .iter()
+            .find(|span| span.content.contains("feature/claude-active"))
+            .expect("claude span");
+
+        assert_eq!(claude_span.style.fg, Some(Color::Yellow));
+        assert!(claude_span.style.add_modifier.contains(Modifier::DIM));
+        assert!(!claude_span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!claude_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+
+        let _ = fs::remove_file(claude_path);
+        let _ = fs::remove_file(codex_path);
     }
 
     #[test]
@@ -9416,28 +13576,145 @@ mod tests {
     }
 
     #[test]
-    fn render_model_text_grid_sessions_render_surface_contents() {
+    fn render_model_buffer_grid_active_session_uses_unfocused_border_when_management_has_focus() {
         let mut model = test_model();
-        model.active_layer = ActiveLayer::Main;
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.session_layout = SessionLayout::Grid;
+        model.sessions = vec![
+            shell_tab("shell-0", "Shell: feature/session-one"),
+            shell_tab("shell-1", "Shell: feature/session-two"),
+        ];
+        model.active_session = 0;
+
+        let size = Rect::new(0, 0, 120, 24);
+        let [_, session_area] = management_split(size);
+        let pane_area = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("active grid pane area");
+
+        let buffer = render_model_buffer(&model, size.width, size.height);
+
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].symbol(), "╭");
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].fg, Color::Gray);
+    }
+
+    #[test]
+    fn render_model_buffer_grid_active_session_keeps_focused_border_when_terminal_has_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
         model.active_focus = FocusPane::Terminal;
         model.session_layout = SessionLayout::Grid;
         model.sessions = vec![
             shell_tab("shell-0", "Shell: feature/session-one"),
-            agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan),
+            shell_tab("shell-1", "Shell: feature/session-two"),
         ];
         model.active_session = 0;
 
-        append_session_line(&mut model, "shell-0", "grid shell ready");
+        let size = Rect::new(0, 0, 120, 24);
+        let [_, session_area] = management_split(size);
+        let pane_area = grid_session_pane_area(session_area, model.sessions.len(), 0)
+            .expect("active grid pane area");
 
-        let rendered = render_model_text(&model, 120, 24);
+        let buffer = render_model_buffer(&model, size.width, size.height);
+
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].symbol(), "╔");
+        assert_eq!(buffer[(pane_area.x, pane_area.y)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn branch_live_session_rendering_highlights_the_active_agent_indicator() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
+        }];
+
+        let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
+        running.save(dir.path()).expect("persist running session");
+        SessionRuntimeState::from_hook_event("PostToolUse")
+            .expect("running runtime")
+            .save(&runtime_state_path(dir.path(), &running.id))
+            .expect("persist running runtime");
+
+        model.sessions = vec![crate::model::SessionTab {
+            id: running.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+
+        let rendered = render_model_buffer(&model, 80, 8);
+        let active_indicator = rendered
+            .content
+            .iter()
+            .find(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .expect("active agent indicator");
 
         assert!(
-            rendered.contains("grid shell ready"),
-            "grid layout should render shell VT contents instead of empty titled frames"
+            active_indicator.modifier.contains(Modifier::REVERSED),
+            "the active agent's branch-row indicator should be visually highlighted"
         );
+    }
+
+    #[test]
+    fn branch_live_session_rendering_adds_a_shell_indicator_for_the_active_branch_shell() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let repo_path = dir.path().join("repo");
+        let selected_worktree = repo_path.join("wt-feature-test");
+        fs::create_dir_all(&selected_worktree).expect("create selected worktree");
+
+        let mut model = Model::new(repo_path.clone());
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
+        }];
+        model.sessions = vec![crate::model::SessionTab {
+            id: "shell-0".to_string(),
+            name: "Shell: feature/test".to_string(),
+            tab_type: SessionTabType::Shell,
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+        model.branches.live_session_summaries =
+            branch_live_session_summaries_with(&model, dir.path());
+
+        let rendered = render_model_buffer(&model, 80, 8);
+        let shell_indicator = rendered
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "▸")
+            .expect("active shell indicator");
+
         assert!(
-            rendered.contains("Waiting for agent output"),
-            "grid layout should render the agent placeholder while the PTY is still quiet"
+            shell_indicator.modifier.contains(Modifier::REVERSED),
+            "the active shell branch indicator should use the same highlighted treatment as the active agent indicator"
         );
     }
 
@@ -9512,6 +13789,7 @@ mod tests {
             worktree_path: Some(PathBuf::from(
                 "/tmp/demo/project-repo-feature-compact-detail",
             )),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 80, 24);
@@ -9547,6 +13825,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-title-context")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 160, 24);
@@ -9602,6 +13881,75 @@ mod tests {
         .into_iter()
         .find(|region| region.url == expected_url)
         .expect("url region");
+
+        let mut opened = None;
+        let opened_result = handle_mouse_input_with(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + region.start_col,
+                row: area.y + region.row,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            |url| {
+                opened = Some(url.to_string());
+                Ok(())
+            },
+        )
+        .expect("mouse handler succeeds");
+
+        assert!(opened_result);
+        assert_eq!(opened.as_deref(), Some(expected_url));
+    }
+
+    #[test]
+    fn ctrl_click_on_codex_url_uses_normalized_hit_testing() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+        let expected_url = "https://example.com/docs";
+
+        update(&mut model, Message::Resize(80, 20));
+        enter_alt_screen_with_lines(
+            &mut model,
+            "agent-0",
+            &[
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                "────────────────────────────────────────",
+                "• contract swapped",
+                "",
+                "• Explored",
+                "  └ Search alpha",
+                "",
+                expected_url,
+            ],
+        );
+
+        let area = active_session_text_area(&model).expect("active session area");
+        let region = model
+            .active_session_tab()
+            .expect("active session")
+            .vt
+            .with_visible_screen(|screen| {
+                let normalized = normalized_codex_progress_parser(screen).expect("normalized");
+                crate::renderer::collect_url_regions(
+                    normalized.screen(),
+                    Rect::new(0, 0, area.width, area.height),
+                )
+                .into_iter()
+                .find(|region| region.url == expected_url)
+                .expect("url region")
+            });
 
         let mut opened = None;
         let opened_result = handle_mouse_input_with(
@@ -9767,6 +14115,29 @@ mod tests {
         );
     }
 
+    fn git_resolved_exclude_path(path: &std::path::Path) -> PathBuf {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", "info/exclude"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse --git-path info/exclude");
+        assert!(
+            output.status.success(),
+            "git rev-parse --git-path info/exclude failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let resolved = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("utf8 git-path")
+                .trim(),
+        );
+        if resolved.is_absolute() {
+            resolved
+        } else {
+            path.join(resolved)
+        }
+    }
+
     fn git_checkout_branch_or_create(path: &std::path::Path, name: &str) {
         let checkout = std::process::Command::new("git")
             .args(["checkout", name])
@@ -9809,7 +14180,7 @@ mod tests {
     }
 
     #[test]
-    fn update_toggle_layer_shows_management_without_stealing_terminal_focus() {
+    fn update_toggle_layer_shows_management_and_focuses_management_content() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -9817,7 +14188,7 @@ mod tests {
         update(&mut model, Message::ToggleLayer);
 
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
     }
 
     #[test]
@@ -9853,6 +14224,22 @@ mod tests {
         );
         assert_eq!(model.management_tab, ManagementTab::Settings);
         assert_eq!(model.active_layer, ActiveLayer::Management);
+    }
+
+    #[test]
+    fn update_switch_management_tab_from_main_focuses_management_content() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        update(
+            &mut model,
+            Message::SwitchManagementTab(ManagementTab::Issues),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Issues);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
     }
 
     #[test]
@@ -9900,6 +14287,49 @@ mod tests {
 
         update(&mut model, Message::ToggleSessionLayout);
         assert_eq!(model.session_layout, SessionLayout::Tab);
+    }
+
+    #[test]
+    fn update_move_grid_session_switches_to_adjacent_wide_layout_cells() {
+        let mut model = test_model();
+        update(&mut model, Message::NewShell);
+        update(&mut model, Message::NewShell);
+        model.active_session = 0;
+        model.session_layout = SessionLayout::Grid;
+        update(&mut model, Message::Resize(120, 30));
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Right),
+        );
+        assert_eq!(model.active_session, 1);
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Down),
+        );
+        assert_eq!(model.active_session, 2);
+    }
+
+    #[test]
+    fn update_move_grid_session_switches_to_adjacent_tall_layout_cells() {
+        let mut model = test_model();
+        update(&mut model, Message::NewShell);
+        model.active_session = 0;
+        model.session_layout = SessionLayout::Grid;
+        update(&mut model, Message::Resize(40, 80));
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Down),
+        );
+        assert_eq!(model.active_session, 1);
+
+        update(
+            &mut model,
+            Message::MoveGridSession(crate::message::GridSessionDirection::Up),
+        );
+        assert_eq!(model.active_session, 0);
     }
 
     #[test]
@@ -9963,6 +14393,7 @@ mod tests {
 
         let mut model = Model::new(dir.path().to_path_buf());
         load_initial_data(&mut model);
+        load_initial_data(&mut model);
 
         assert!(
             model
@@ -10015,12 +14446,13 @@ mod tests {
         git_commit_allow_empty(dir.path(), "initial commit");
 
         let mut model = Model::new(dir.path().to_path_buf());
-        model.set_branch_detail_docker_snapshotter(|| {
+        let project_root = dir.path().to_path_buf();
+        model.set_branch_detail_docker_snapshotter(move || {
             thread::sleep(std::time::Duration::from_millis(250));
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &project_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
 
@@ -10033,17 +14465,13 @@ mod tests {
             "initial data load should not block on branch detail preload: {elapsed:?}"
         );
         assert!(
-            model.branches.docker_containers.is_empty(),
+            model.branches.docker_services.is_empty(),
             "branch detail docker data should arrive asynchronously"
         );
-
-        drive_ticks_until(
-            &mut model,
-            |model| !model.branches.docker_containers.is_empty(),
-            "branch detail preload",
+        assert!(
+            model.branch_detail_worker.is_some(),
+            "branch detail preload should run in the background"
         );
-
-        assert_eq!(model.branches.docker_containers[0].name, "web");
     }
 
     #[cfg(unix)]
@@ -10104,20 +14532,22 @@ mod tests {
         let docker_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let docker_calls_for_worker = docker_calls.clone();
         let mut model = Model::new(dir.path().to_path_buf());
+        let project_root = dir.path().to_path_buf();
         model.set_branch_detail_docker_snapshotter(move || {
             docker_calls_for_worker.fetch_add(1, Ordering::SeqCst);
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &project_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
         load_initial_data(&mut model);
 
+        let docker_calls_for_assert = docker_calls.clone();
         drive_ticks_until(
             &mut model,
-            |model| !model.branches.docker_containers.is_empty(),
-            "branch detail preload docker snapshot",
+            |_| docker_calls_for_assert.load(Ordering::SeqCst) == 1,
+            "branch detail preload docker snapshotter call",
         );
 
         let docker_calls = docker_calls.load(Ordering::SeqCst);
@@ -10181,6 +14611,243 @@ mod tests {
         assert!(
             unrelated_stale.exists(),
             "startup sweep should not touch non-worktree directories"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_refreshes_managed_assets_for_repo_and_active_worktrees() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let tracked_command = dir.path().join(".claude/commands/gwt-discussion.md");
+        fs::create_dir_all(tracked_command.parent().expect("tracked command parent"))
+            .expect("create tracked command dir");
+        fs::write(&tracked_command, "tracked discussion command")
+            .expect("write tracked discussion command");
+        let add_tracked_command = std::process::Command::new("git")
+            .args(["add", ".claude/commands/gwt-discussion.md"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add tracked discussion command");
+        assert!(
+            add_tracked_command.status.success(),
+            "git add tracked discussion command failed: {}",
+            String::from_utf8_lossy(&add_tracked_command.stderr)
+        );
+        fs::remove_file(&tracked_command).expect("delete tracked discussion command");
+
+        let worktree = dir.path().join("wt-feature-sync");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/sync",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+
+        let legacy_hooks = serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state SessionStart",
+                        "type": "command"
+                    }]
+                }],
+                "UserPromptSubmit": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state UserPromptSubmit",
+                        "type": "command"
+                    }]
+                }],
+                "PreToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [{
+                            "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state PreToolUse",
+                            "type": "command"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-git-branch-ops",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-cd-command",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-file-ops",
+                                "type": "command"
+                            },
+                            {
+                                "command": "'/tmp/gwt-tui' hook block-git-dir-override",
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ],
+                "PostToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state PostToolUse",
+                        "type": "command"
+                    }]
+                }],
+                "Stop": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "command": "GWT_MANAGED_HOOK=runtime-state '/tmp/gwt-tui' hook runtime-state Stop",
+                        "type": "command"
+                    }]
+                }]
+            }
+        }))
+        .expect("serialize legacy hooks");
+
+        let codex_hooks = worktree.join(".codex/hooks.json");
+        let claude_settings = worktree.join(".claude/settings.local.json");
+        fs::create_dir_all(codex_hooks.parent().expect("codex hooks parent"))
+            .expect("create codex dir");
+        fs::create_dir_all(claude_settings.parent().expect("claude settings parent"))
+            .expect("create claude dir");
+        fs::write(&codex_hooks, &legacy_hooks).expect("write legacy codex hooks");
+        fs::write(&claude_settings, &legacy_hooks).expect("write legacy claude settings");
+
+        let add_codex_hooks = std::process::Command::new("git")
+            .args(["add", ".codex/hooks.json"])
+            .current_dir(&worktree)
+            .output()
+            .expect("git add codex hooks");
+        assert!(
+            add_codex_hooks.status.success(),
+            "git add codex hooks failed: {}",
+            String::from_utf8_lossy(&add_codex_hooks.stderr)
+        );
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        let tracked_command_content =
+            fs::read_to_string(&tracked_command).expect("tracked discussion command restored");
+        assert!(
+            tracked_command_content.contains("gwt Discussion Command"),
+            "startup refresh should restore missing tracked bundled commands"
+        );
+
+        let codex_content = fs::read_to_string(&codex_hooks).expect("read migrated codex hooks");
+        assert!(
+            codex_content.contains("workflow-policy"),
+            "startup refresh should consolidate workflow policy hooks"
+        );
+        assert!(
+            !codex_content.contains("GWT_MANAGED_HOOK=runtime-state"),
+            "startup refresh should remove the legacy runtime marker"
+        );
+        assert!(
+            !codex_content.contains("block-git-branch-ops"),
+            "startup refresh should replace split bash blockers"
+        );
+
+        let claude_content =
+            fs::read_to_string(&claude_settings).expect("read migrated claude settings");
+        assert!(
+            claude_content.contains("workflow-policy"),
+            "startup refresh should regenerate Claude settings too"
+        );
+        assert!(
+            !claude_content.contains("GWT_MANAGED_HOOK=runtime-state"),
+            "startup refresh should remove the legacy runtime marker from Claude settings"
+        );
+    }
+
+    #[test]
+    fn load_initial_data_self_heals_pristine_git_repo_and_linked_worktree_without_materializing_bundles(
+    ) {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        git_commit_allow_empty(dir.path(), "initial commit");
+
+        let worktree = dir.path().join("wt-feature-pristine");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/pristine",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "linked worktree should expose .git as a file"
+        );
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        load_initial_data(&mut model);
+
+        for path in [dir.path(), worktree.as_path()] {
+            assert!(
+                path.join(".claude/settings.local.json").exists(),
+                "startup self-heal should generate Claude settings for {}",
+                path.display()
+            );
+            assert!(
+                path.join(".codex/hooks.json").exists(),
+                "startup self-heal should generate Codex hooks for {}",
+                path.display()
+            );
+            assert!(
+                !path.join(".claude/skills/gwt-pr/SKILL.md").exists(),
+                "pristine startup should not materialize bundled skills for {}",
+                path.display()
+            );
+            assert!(
+                !path
+                    .join(".claude/commands/gwt-spec-brainstorm.md")
+                    .exists(),
+                "pristine startup should not materialize bundled commands for {}",
+                path.display()
+            );
+
+            let exclude_path = git_resolved_exclude_path(path);
+            let exclude = fs::read_to_string(&exclude_path).expect("read git exclude");
+            assert!(
+                exclude.contains("# gwt-managed-begin"),
+                "startup self-heal should update git exclude for {}",
+                path.display()
+            );
+            assert!(
+                exclude.contains(".codex/hooks.json"),
+                "startup self-heal should exclude managed hooks for {}",
+                path.display()
+            );
+        }
+
+        assert!(
+            !worktree.join(".git/info/exclude").exists(),
+            "linked worktree startup self-heal should not treat .git as a directory"
         );
     }
 
@@ -10257,7 +14924,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_management_tab_pr_dashboard_loads_prs_without_stealing_terminal_focus() {
+    fn switch_management_tab_pr_dashboard_loads_prs_and_focuses_management_content() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
         model.active_focus = FocusPane::Terminal;
@@ -10281,13 +14948,156 @@ mod tests {
 
         assert_eq!(model.management_tab, ManagementTab::PrDashboard);
         assert_eq!(model.active_layer, ActiveLayer::Management);
-        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.active_focus, FocusPane::TabContent);
         assert_eq!(model.pr_dashboard.prs.len(), 1);
         assert_eq!(model.pr_dashboard.prs[0].number, 42);
         assert_eq!(model.pr_dashboard.prs[0].title, "Wire PR dashboard");
         assert_eq!(model.pr_dashboard.prs[0].ci_status, "success");
         assert_eq!(model.pr_dashboard.prs[0].review_status, "approved");
         assert!(model.pr_dashboard.prs[0].mergeable);
+    }
+
+    #[test]
+    fn switch_management_tab_board_loads_coordination_snapshot() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Need coordination",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::Board,
+            |_repo_path| panic!("PR loader should not run for Board"),
+            |_repo_path, _number| panic!("detail loader should not run for Board"),
+        );
+
+        assert_eq!(model.management_tab, ManagementTab::Board);
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(
+            model.board.snapshot.board.entries[0].body,
+            "Need coordination"
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_enter_posts_entry() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(model.board.composer_open);
+        assert_eq!(model.board.composer_text, "");
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "hi");
+        assert_eq!(
+            model.board.snapshot.board.entries[0].author_kind,
+            gwt_core::coordination::AuthorKind::User
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_j_inserts_newline_before_submit() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        route_key_to_management(&mut model, key(KeyCode::Char('i'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "h\ni");
+    }
+
+    #[test]
+    fn route_key_to_management_board_plain_k_starts_input_without_i() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('k'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "k");
+        assert_eq!(
+            model.board.snapshot.board.entries[0].kind,
+            gwt_core::coordination::BoardEntryKind::Request
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_k_cycles_kind_before_post() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(
+            model.board.snapshot.board.entries[0].kind,
+            gwt_core::coordination::BoardEntryKind::Status
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_board_ctrl_r_reloads_snapshot() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Board;
+
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Reloaded",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+        assert_eq!(model.board.snapshot.board.entries[0].body, "Reloaded");
     }
 
     #[test]
@@ -10685,6 +15495,7 @@ mod tests {
 
     #[test]
     fn prepare_wizard_startup_prefills_spec_context_and_versions() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let mut cache = VersionCache::new();
         cache.entries.insert(
             "claude-code".into(),
@@ -10701,6 +15512,7 @@ mod tests {
         ];
 
         let (wizard, refresh_targets) = prepare_wizard_startup(
+            project_root.path(),
             Some(screens::wizard::SpecContext::new(
                 "SPEC-42",
                 "My Feature",
@@ -10752,16 +15564,154 @@ mod tests {
                 .iter()
                 .map(|option| option.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Installed (v1.0.55)", "latest", "1.0.54", "1.0.53"]
+            vec!["Installed", "latest", "1.0.54", "1.0.53"]
         );
+        assert_eq!(wizard.version, "latest");
         assert_eq!(refresh_targets, vec![AgentId::Codex, AgentId::Gemini]);
+    }
+
+    fn write_issue_cache_meta(
+        root: &std::path::Path,
+        number: u64,
+        title: &str,
+        state: &str,
+        labels: &[&str],
+    ) {
+        let dir = root.join(number.to_string());
+        fs::create_dir_all(&dir).expect("create issue cache dir");
+        fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({
+                "number": number,
+                "title": title,
+                "labels": labels,
+                "state": state,
+                "updated_at": "2026-04-09T00:00:00Z",
+                "comment_ids": []
+            })
+            .to_string(),
+        )
+        .expect("write issue cache meta");
+    }
+
+    fn write_issue_cache_body(root: &std::path::Path, number: u64, body: &str) {
+        let dir = root.join(number.to_string());
+        fs::create_dir_all(&dir).expect("create issue cache dir for body");
+        fs::write(dir.join("body.md"), body).expect("write issue cache body");
+    }
+
+    fn write_cached_spec(
+        root: &std::path::Path,
+        number: u64,
+        title: &str,
+        state: gwt_github::IssueState,
+        labels: &[&str],
+    ) {
+        gwt_github::Cache::new(root.to_path_buf())
+            .write_snapshot(&gwt_github::client::IssueSnapshot {
+                number: gwt_github::IssueNumber(number),
+                title: title.to_string(),
+                body: format!(
+                    "<!-- gwt-spec id={number} version=1 -->\n<!-- sections:\nspec=body\n-->\n<!-- artifact:spec BEGIN -->\nbody\n<!-- artifact:spec END -->\n"
+                ),
+                labels: labels.iter().map(|label| label.to_string()).collect(),
+                state,
+                updated_at: gwt_github::UpdatedAt::new("2026-04-12T00:00:00Z"),
+                comments: vec![],
+            })
+            .expect("write cached spec");
+    }
+
+    #[test]
+    fn prepare_wizard_startup_loads_cached_issues_and_prefills_selected_issue() {
+        let cache = VersionCache::new();
+        let issue_cache = tempfile::tempdir().expect("issue cache tempdir");
+        write_issue_cache_meta(
+            issue_cache.path(),
+            42,
+            "Fix login bug",
+            "open",
+            &["bug", "auth"],
+        );
+        write_issue_cache_meta(
+            issue_cache.path(),
+            1776,
+            "Launch Agent issue linkage",
+            "closed",
+            &["ux"],
+        );
+
+        let (wizard, _) = prepare_wizard_startup_with_issue_cache_root(
+            issue_cache.path(),
+            None,
+            Some(1776),
+            vec![],
+            &cache,
+            issue_cache.path().to_path_buf(),
+        );
+
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.issue_id, "1776");
+        assert_eq!(
+            wizard.current_options_for_step(screens::wizard::WizardStep::IssueSelect),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+                "#42 Fix login bug (open) [bug, auth]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_cached_issues_with_linkage_merges_issue_cache_and_local_branch_store() {
+        let issue_cache = tempfile::tempdir().expect("issue cache tempdir");
+        write_issue_cache_meta(issue_cache.path(), 42, "Fix login bug", "open", &["bug"]);
+        write_issue_cache_body(issue_cache.path(), 42, "Login fails on Safari.");
+        write_issue_cache_meta(
+            issue_cache.path(),
+            1776,
+            "Launch Agent issue linkage",
+            "closed",
+            &["ux"],
+        );
+
+        let linkage_path = issue_cache.path().join("issue-links.json");
+        persist_issue_linkage_at_path(&linkage_path, 42, "feature/login-api")
+            .expect("persist linkage");
+        persist_issue_linkage_at_path(&linkage_path, 42, "feature/login-ui")
+            .expect("persist linkage");
+        persist_issue_linkage_at_path(&linkage_path, 1776, "feature/issue-link")
+            .expect("persist linkage");
+
+        let (issues, load_error) =
+            load_cached_issues_with_linkage(issue_cache.path(), Some(linkage_path.as_path()));
+
+        assert!(load_error.is_none());
+        assert_eq!(
+            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
+            vec![1776, 42]
+        );
+        assert_eq!(
+            issues[0].linked_branches,
+            vec!["feature/issue-link".to_string()]
+        );
+        assert_eq!(
+            issues[1].linked_branches,
+            vec![
+                "feature/login-api".to_string(),
+                "feature/login-ui".to_string()
+            ]
+        );
+        assert_eq!(issues[1].body, "Login fails on Safari.");
     }
 
     #[test]
     fn prepare_wizard_startup_starts_spec_prefill_at_branch_type_select() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let cache = VersionCache::new();
 
         let (wizard, _) = prepare_wizard_startup(
+            project_root.path(),
             Some(screens::wizard::SpecContext::new(
                 "SPEC-42",
                 "My Feature",
@@ -10777,9 +15727,11 @@ mod tests {
 
     #[test]
     fn prepare_wizard_startup_disables_ai_branch_suggestions_by_default() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let cache = VersionCache::new();
 
         let (wizard, _) = prepare_wizard_startup(
+            project_root.path(),
             Some(screens::wizard::SpecContext::new(
                 "SPEC-99",
                 "AI-disabled flow",
@@ -10794,10 +15746,12 @@ mod tests {
 
     #[test]
     fn prepare_wizard_startup_uses_detected_version_when_cache_is_missing() {
+        let project_root = tempfile::tempdir().expect("temp project root");
         let cache = VersionCache::new();
         let detected = vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))];
 
-        let (wizard, refresh_targets) = prepare_wizard_startup(None, detected, &cache);
+        let (wizard, refresh_targets) =
+            prepare_wizard_startup(project_root.path(), None, detected, &cache);
 
         assert!(wizard.spec_context.is_none());
         assert!(wizard.branch_name.is_empty());
@@ -10815,8 +15769,9 @@ mod tests {
                 .iter()
                 .map(|option| option.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Installed (v1.0.55)", "latest"]
+            vec!["Installed", "latest"]
         );
+        assert_eq!(wizard.version, "latest");
         assert!(wizard.detected_agents[0].cache_outdated);
         assert!(!wizard.detected_agents[1].available); // Codex not installed
         assert!(!wizard.detected_agents[2].available); // Gemini not installed
@@ -10825,6 +15780,95 @@ mod tests {
         assert!(refresh_targets.contains(&AgentId::ClaudeCode));
         assert!(refresh_targets.contains(&AgentId::Codex));
         assert!(refresh_targets.contains(&AgentId::Gemini));
+    }
+
+    #[test]
+    fn prepare_wizard_startup_detects_compose_workflow_and_defaults_to_docker() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+  db:
+    image: postgres:16
+"#,
+        )
+        .expect("write compose");
+        fs::create_dir_all(project_root.path().join(".devcontainer"))
+            .expect("create .devcontainer");
+        fs::write(
+            project_root.path().join(".devcontainer/devcontainer.json"),
+            r#"{
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "web",
+  "workspaceFolder": "/workspace"
+}"#,
+        )
+        .expect("write devcontainer");
+        let cache = VersionCache::new();
+
+        let (wizard, _) = prepare_wizard_startup(project_root.path(), None, vec![], &cache);
+
+        let docker_context = wizard.docker_context.as_ref().expect("docker context");
+        assert_eq!(wizard.runtime_target, LaunchRuntimeTarget::Docker);
+        assert_eq!(wizard.docker_service.as_deref(), Some("web"));
+        assert_eq!(docker_context.suggested_service.as_deref(), Some("web"));
+        assert!(docker_context
+            .services
+            .iter()
+            .any(|service| service == "web"));
+        assert!(docker_context
+            .services
+            .iter()
+            .any(|service| service == "db"));
+    }
+
+    #[test]
+    fn resolve_docker_launch_plan_prefers_devcontainer_compose_target() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            r#"
+services:
+  root:
+    image: node:22
+    working_dir: /root-workspace
+"#,
+        )
+        .expect("write root compose");
+        fs::create_dir_all(project_root.path().join(".devcontainer"))
+            .expect("create .devcontainer");
+        let dev_compose = project_root
+            .path()
+            .join(".devcontainer/docker-compose.dev.yml");
+        fs::write(
+            &dev_compose,
+            r#"
+services:
+  app:
+    image: node:22
+    working_dir: /workspace
+"#,
+        )
+        .expect("write devcontainer compose");
+        fs::write(
+            project_root.path().join(".devcontainer/devcontainer.json"),
+            r#"{
+  "dockerComposeFile": "docker-compose.dev.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace"
+}"#,
+        )
+        .expect("write devcontainer");
+
+        let plan = resolve_docker_launch_plan(project_root.path(), None).expect("launch plan");
+
+        assert_eq!(plan.compose_file, dev_compose);
+        assert_eq!(plan.service, "app");
+        assert_eq!(plan.container_cwd, "/workspace");
     }
 
     #[test]
@@ -10852,19 +15896,22 @@ mod tests {
             false,
             false,
         );
-        persist_agent_session(
-            dir.path(),
-            repo_path.to_str().unwrap(),
-            branch,
-            AgentId::Codex,
-            now - Duration::minutes(1),
-            Some("gpt-5.3-codex"),
-            Some("high"),
-            Some("latest"),
-            Some("sess-new"),
-            true,
-            true,
-        );
+        let mut latest_codex =
+            AgentSession::new(repo_path.to_str().unwrap(), branch, AgentId::Codex);
+        latest_codex.model = Some("gpt-5.3-codex".to_string());
+        latest_codex.reasoning_level = Some("high".to_string());
+        latest_codex.tool_version = Some("latest".to_string());
+        latest_codex.agent_session_id = Some("sess-new".to_string());
+        latest_codex.skip_permissions = true;
+        latest_codex.codex_fast_mode = true;
+        latest_codex.runtime_target = LaunchRuntimeTarget::Docker;
+        latest_codex.docker_service = Some("web".to_string());
+        latest_codex.updated_at = now - Duration::minutes(1);
+        latest_codex.created_at = latest_codex.updated_at;
+        latest_codex.last_activity_at = latest_codex.updated_at;
+        latest_codex
+            .save(dir.path())
+            .expect("persist latest codex session");
         persist_agent_session(
             dir.path(),
             repo_path.to_str().unwrap(),
@@ -10892,8 +15939,15 @@ mod tests {
             false,
         );
 
-        let (mut wizard, _) = prepare_wizard_startup(None, detected, &cache);
-        configure_existing_branch_wizard_with_sessions(&mut wizard, &repo_path, dir.path(), branch);
+        let (mut wizard, _) = prepare_wizard_startup(repo_path.as_path(), None, detected, &cache);
+        let model = test_model();
+        configure_existing_branch_wizard_with_sessions(
+            &mut wizard,
+            &model,
+            &repo_path,
+            dir.path(),
+            branch,
+        );
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::QuickStart);
         assert!(wizard.has_quick_start);
@@ -10910,8 +15964,116 @@ mod tests {
         );
         assert!(wizard.quick_start_entries[0].skip_permissions);
         assert!(wizard.quick_start_entries[0].codex_fast_mode);
+        assert_eq!(
+            wizard.quick_start_entries[0].runtime_target,
+            LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(
+            wizard.quick_start_entries[0].docker_service.as_deref(),
+            Some("web")
+        );
         assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
         assert!(!wizard.quick_start_entries[1].codex_fast_mode);
+    }
+
+    #[test]
+    fn configure_existing_branch_wizard_with_sessions_loads_branch_live_sessions() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let cache = VersionCache::new();
+        let repo_path = PathBuf::from("/tmp/repo");
+        let worktree_path = repo_path.join("wt-feature-test");
+        let branch = "feature/test";
+        let now = Utc::now();
+
+        let mut persisted =
+            AgentSession::new(worktree_path.to_str().unwrap(), branch, AgentId::Codex);
+        persisted.id = "agent-1".to_string();
+        persisted.model = Some("gpt-5.3-codex".to_string());
+        persisted.reasoning_level = Some("high".to_string());
+        persisted.tool_version = Some("latest".to_string());
+        persisted.agent_session_id = Some("sess-live".to_string());
+        persisted.skip_permissions = true;
+        persisted.codex_fast_mode = true;
+        persisted.updated_at = now;
+        persisted.created_at = now;
+        persisted.last_activity_at = now;
+        persisted.save(dir.path()).expect("persist live session");
+
+        let detected = vec![detected_agent(AgentId::Codex, Some("0.5.1"))];
+        let (mut wizard, _) = prepare_wizard_startup(repo_path.as_path(), None, detected, &cache);
+        let mut model = test_model();
+        model.sessions = vec![crate::model::SessionTab {
+            id: "agent-1".to_string(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Cyan,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        configure_existing_branch_wizard_with_sessions(
+            &mut wizard,
+            &model,
+            &worktree_path,
+            dir.path(),
+            branch,
+        );
+
+        assert_eq!(wizard.live_session_entries.len(), 1);
+        assert_eq!(wizard.live_session_entries[0].session_id, "agent-1");
+        assert_eq!(wizard.live_session_entries[0].name, "Codex");
+    }
+
+    #[test]
+    fn wizard_select_focus_existing_session_switches_active_session_without_launching() {
+        let mut model = test_model();
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: "shell-0".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+            crate::model::SessionTab {
+                id: "agent-1".to_string(),
+                name: "Codex".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "codex".to_string(),
+                    color: crate::model::AgentColor::Cyan,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+        ];
+        model.active_session = 0;
+        model.active_focus = FocusPane::BranchDetail;
+        model.active_layer = ActiveLayer::Management;
+        model.wizard = Some(screens::wizard::WizardState {
+            step: screens::wizard::WizardStep::FocusExistingSession,
+            live_session_entries: vec![screens::wizard::LiveSessionEntry {
+                session_id: "agent-1".to_string(),
+                kind: "Agent".to_string(),
+                name: "Codex".to_string(),
+                detail: Some("gpt-5.3-codex · high".to_string()),
+                active: false,
+            }],
+            ..screens::wizard::WizardState::default()
+        });
+
+        update(
+            &mut model,
+            Message::Wizard(screens::wizard::WizardMessage::Select),
+        );
+
+        assert!(model.wizard.is_none());
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_session, 1);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert!(model.pending_launch_config.is_none());
     }
 
     #[test]
@@ -10930,11 +16092,25 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let mut matching = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
         matching.model = Some("gpt-5.3-codex".to_string());
         matching.reasoning_level = Some("high".to_string());
+        matching.tool_version = Some("latest".to_string());
+        matching.agent_session_id = Some("sess-abc".to_string());
+        matching.skip_permissions = true;
+        matching.runtime_target = LaunchRuntimeTarget::Docker;
+        matching.docker_service = Some("web".to_string());
+        matching.launch_command = "codex".to_string();
+        matching.launch_args = vec![
+            "--no-alt-screen".to_string(),
+            "--model=gpt-5.3-codex".to_string(),
+            "resume".to_string(),
+            "sess-abc".to_string(),
+            "--yolo".to_string(),
+        ];
         matching.display_name = "Codex".to_string();
         matching.save(dir.path()).expect("persist matching session");
 
@@ -11001,12 +16177,27 @@ mod tests {
                     name: "Codex".to_string(),
                     detail: Some("gpt-5.3-codex · high".to_string()),
                     active: true,
+                    launch_summary: vec![
+                        "Model: gpt-5.3-codex".to_string(),
+                        "Reasoning: high".to_string(),
+                        "Version: latest".to_string(),
+                        "Resume session: sess-abc".to_string(),
+                        "Permissions: Skip confirmations".to_string(),
+                        "Runtime: Docker".to_string(),
+                        "Docker service: web".to_string(),
+                    ],
+                    launch_command_line: Some(
+                        "codex --no-alt-screen --model=gpt-5.3-codex resume sess-abc --yolo"
+                            .to_string(),
+                    ),
                 },
                 screens::branches::DetailSessionSummary {
                     kind: "Shell",
                     name: "Shell: feature/test".to_string(),
                     detail: None,
                     active: false,
+                    launch_summary: Vec::new(),
+                    launch_command_line: None,
                 },
             ]
         );
@@ -11026,6 +16217,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -11064,6 +16256,7 @@ mod tests {
                 created_at: std::time::Instant::now(),
             },
         ];
+        model.active_session = 1;
 
         let summaries = branch_live_session_summaries_with(&model, dir.path());
         let summary = summaries.get("feature/test").expect("branch live summary");
@@ -11097,10 +16290,15 @@ mod tests {
             .chars()
             .filter(|ch| matches!(ch, '◐' | '◓' | '◑' | '◒'))
             .count();
+        let waiting_count = rendered.chars().filter(|ch| *ch == '●').count();
 
         assert_eq!(
-            spinner_count, 2,
-            "one live branch row should keep one spinner per live agent session"
+            spinner_count, 1,
+            "one live branch row should animate only the running agent session"
+        );
+        assert_eq!(
+            waiting_count, 1,
+            "one live branch row should keep the waiting agent visible with a static dot"
         );
         assert!(
             !rendered.contains("run ") && !rendered.contains("wait "),
@@ -11109,7 +16307,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_live_session_rendering_uses_agent_colors_for_each_spinner() {
+    fn branch_live_session_rendering_uses_agent_colors_for_running_and_waiting_indicators() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let repo_path = dir.path().join("repo");
         let selected_worktree = repo_path.join("wt-feature-test");
@@ -11122,6 +16320,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Codex);
@@ -11160,6 +16359,7 @@ mod tests {
                 created_at: std::time::Instant::now(),
             },
         ];
+        model.active_session = 1;
 
         model.branches.live_session_summaries =
             branch_live_session_summaries_with(&model, dir.path());
@@ -11173,19 +16373,204 @@ mod tests {
             })
             .expect("draw branches");
 
-        let spinner_colors: Vec<Color> = terminal
+        let indicator_colors: Vec<Color> = terminal
             .backend()
             .buffer()
             .content
             .iter()
-            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒"))
+            .filter(|cell| matches!(cell.symbol(), "◐" | "◓" | "◑" | "◒" | "●"))
             .map(|cell| cell.fg)
             .collect();
 
         assert_eq!(
-            spinner_colors,
+            indicator_colors,
             vec![Color::Cyan, Color::Yellow],
-            "spinner indicators should keep per-agent colors so multiple agents remain distinguishable"
+            "running and waiting indicators should keep per-agent colors so multiple agents remain distinguishable"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_terminal_focus_animating_for_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            tick_redraw_required(&model),
+            "Branches should keep redrawing while a running live-session indicator is visible, even when terminal focus owns input"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_keeps_waiting_branch_indicators_static_under_terminal_focus() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Yellow,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "waiting-only live-session indicators should stay static and must not re-enable idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_filtered_out_running_branch_indicators() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.view_mode = screens::branches::ViewMode::All;
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/visible".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-visible")),
+                upstream: None,
+            },
+            screens::branches::BranchItem {
+                name: "feature/hidden".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: Some(PathBuf::from("/tmp/wt-feature-hidden")),
+                upstream: None,
+            },
+        ];
+        model.branches.search_query = "visible".to_string();
+        model.branches.live_session_summaries.insert(
+            "feature/hidden".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Blue,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators on filtered-out rows must not force idle redraws under terminal focus"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_required_ignores_running_branch_indicators_without_visible_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.terminal_size = (24, 8);
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/this-branch-name-is-too-wide".to_string(),
+            is_head: true,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-wide")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/this-branch-name-is-too-wide".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            !tick_redraw_required(&model),
+            "running indicators with no visible summary strip must not re-enable idle redraws"
+        );
+    }
+
+    #[test]
+    fn should_render_after_tick_repaints_visible_branch_indicator_state_changes() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+        model.management_tab = ManagementTab::Branches;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/wt-feature-test")),
+            upstream: None,
+        }];
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::Running,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+        let before = visible_branch_live_indicator_signature(&model);
+        model.branches.live_session_summaries.insert(
+            "feature/test".to_string(),
+            screens::branches::BranchLiveSessionSummary {
+                indicators: vec![screens::branches::BranchLiveSessionIndicator {
+                    kind: screens::branches::BranchLiveSessionIndicatorKind::Agent,
+                    status: gwt_agent::AgentStatus::WaitingInput,
+                    color: crate::model::AgentColor::Cyan,
+                    active: false,
+                }],
+            },
+        );
+
+        assert!(
+            should_render_after_tick_with_visible_branch_signature(before, &model),
+            "a visible running spinner must repaint once when it transitions to a static waiting dot"
         );
     }
 
@@ -11203,6 +16588,7 @@ mod tests {
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(selected_worktree.clone()),
+            upstream: None,
         }];
 
         let running = AgentSession::new(&selected_worktree, "feature/test", AgentId::Gemini);
@@ -11449,6 +16835,38 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_preserves_installed_version_mode() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            version: "installed".to_string(),
+            branch_name: "feature/spec-42".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.agent_id, AgentId::ClaudeCode);
+        assert_eq!(config.tool_version.as_deref(), Some("installed"));
+        assert_eq!(config.command, "claude");
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_carries_selected_issue_number() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            branch_name: "feature/issue-link".to_string(),
+            issue_id: "1776".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.linked_issue_number, Some(1776));
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_uses_resume_session_id_for_quick_start_resume() {
         let wizard = screens::wizard::WizardState {
             agent_id: "claude".to_string(),
@@ -11534,6 +16952,1049 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn build_launch_config_from_wizard_carries_docker_runtime_and_service_selection() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(
+            config.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(config.docker_service.as_deref(), Some("web"));
+        assert_eq!(
+            config.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+    }
+
+    #[test]
+    fn resolve_docker_launch_plan_accepts_pwd_workspace_mount() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            r#"
+services:
+  web:
+    image: node:22
+    volumes:
+      - ${PWD}:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let plan =
+            resolve_docker_launch_plan(project_root.path(), Some("web")).expect("launch plan");
+
+        assert_eq!(plan.service, "web");
+        assert_eq!(plan.container_cwd, "/workspace");
+    }
+
+    #[test]
+    fn resolve_docker_launch_plan_accepts_absolute_project_root_workspace_mount() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let mount = format!("{}:/workspace", project_root.path().display());
+        fs::write(
+            project_root.path().join("docker-compose.yml"),
+            format!(
+                r#"
+services:
+  web:
+    image: node:22
+    volumes:
+      - {mount}
+"#
+            ),
+        )
+        .expect("write compose");
+
+        let plan =
+            resolve_docker_launch_plan(project_root.path(), Some("web")).expect("launch plan");
+
+        assert_eq!(plan.service, "web");
+        assert_eq!(plan.container_cwd, "/workspace");
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_wraps_command_for_selected_service() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nexit 0\n",
+            || {
+            let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
+            apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                .expect("apply docker runtime");
+
+            assert_eq!(config.command, expected_docker);
+            assert_eq!(
+                config.args,
+                vec![
+                    "compose".to_string(),
+                    "-f".to_string(),
+                    compose_path.display().to_string(),
+                    "exec".to_string(),
+                    "-w".to_string(),
+                    "/workspace".to_string(),
+                    "web".to_string(),
+                    "claude".to_string(),
+                    "--print".to_string(),
+                ]
+            );
+            assert_eq!(
+                config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
+                Some("/workspace")
+            );
+            assert_eq!(config.docker_service.as_deref(), Some("web"));
+        },
+        );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_forwards_valid_env_vars_into_exec_args() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "high".to_string());
+        env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
+        env_vars.insert("INVALID-KEY".to_string(), "ignored".to_string());
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars,
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: Some("high".to_string()),
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert_eq!(
+                    config.args,
+                    vec![
+                        "compose".to_string(),
+                        "-f".to_string(),
+                        compose_path.display().to_string(),
+                        "exec".to_string(),
+                        "-w".to_string(),
+                        "/workspace".to_string(),
+                        "-e".to_string(),
+                        "CLAUDE_CODE_EFFORT_LEVEL=high".to_string(),
+                        "-e".to_string(),
+                        "TERM=xterm-256color".to_string(),
+                        "web".to_string(),
+                        "claude".to_string(),
+                        "--print".to_string(),
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_adds_is_sandbox_for_root_claude_skip_permissions() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: true,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ] && [ \"$8\" = \"-lc\" ] && [ \"$9\" = \"id -u\" ]; then\n  printf '0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert!(config.args.contains(&"-e".to_string()));
+                assert!(config.args.contains(&"IS_SANDBOX=1".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_omits_is_sandbox_for_non_root_claude() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: vec!["--print".to_string()],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: true,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ] && [ \"$8\" = \"-lc\" ] && [ \"$9\" = \"id -u\" ]; then\n  printf '1000\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert!(!config.args.iter().any(|arg| arg == "IS_SANDBOX=1"));
+            },
+        );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_normalizes_package_runner_for_container_exec() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "/opt/homebrew/bin/bunx".to_string(),
+            args: vec![
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("latest".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        };
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"web\" ] && [ \"$9\" = \"bunx\" ] && [ \"${10}\" = \"@anthropic-ai/claude-code@latest\" ] && [ \"${11}\" = \"--version\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
+                apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                    .expect("apply docker runtime");
+
+                assert_eq!(config.command, expected_docker);
+                assert_eq!(
+                    config.args,
+                    vec![
+                        "compose".to_string(),
+                        "-f".to_string(),
+                        compose_path.display().to_string(),
+                        "exec".to_string(),
+                        "-w".to_string(),
+                        "/workspace".to_string(),
+                        "web".to_string(),
+                        "bunx".to_string(),
+                        "@anthropic-ai/claude-code@latest".to_string(),
+                        "--print".to_string(),
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn apply_docker_runtime_to_launch_config_falls_back_to_npx_when_bunx_package_exec_fails() {
+        let project_root = tempfile::tempdir().expect("temp project root");
+        let compose_path = project_root.path().join("docker-compose.yml");
+        let log_path = project_root.path().join("docker-args.log");
+        fs::write(
+            &compose_path,
+            r#"
+services:
+  web:
+    image: node:22
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+"#,
+        )
+        .expect("write compose");
+
+        let mut config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "/opt/homebrew/bin/bunx".to_string(),
+            args: vec![
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(project_root.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("latest".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        };
+
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"web\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"web\" ] && [ \"$9\" = \"bunx\" ] && [ \"${{10}}\" = \"@anthropic-ai/claude-code@latest\" ] && [ \"${{11}}\" = \"--version\" ]; then\n  printf 'could not determine executable to run for package @anthropic-ai/claude-code\\n' >&2\n  exit 1\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"web\" ] && [ \"$9\" = \"npx\" ] && [ \"${{10}}\" = \"--yes\" ] && [ \"${{11}}\" = \"@anthropic-ai/claude-code@latest\" ] && [ \"${{12}}\" = \"--version\" ]; then\n  printf '2.1.100 (Claude Code)\\n'\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display()
+        );
+
+        with_fake_docker(&script, || {
+            let expected_docker = std::env::var("GWT_DOCKER_BIN").expect("fake docker path");
+            apply_docker_runtime_to_launch_config(project_root.path(), &mut config)
+                .expect("apply docker runtime");
+
+            let log = fs::read_to_string(&log_path).expect("read invocation log");
+            assert!(log.contains(" bunx @anthropic-ai/claude-code@latest --version"));
+            assert!(log.contains(" npx --yes @anthropic-ai/claude-code@latest --version"));
+            assert_eq!(config.command, expected_docker);
+            assert_eq!(
+                config.args,
+                vec![
+                    "compose".to_string(),
+                    "-f".to_string(),
+                    compose_path.display().to_string(),
+                    "exec".to_string(),
+                    "-w".to_string(),
+                    "/workspace".to_string(),
+                    "web".to_string(),
+                    "npx".to_string(),
+                    "--yes".to_string(),
+                    "@anthropic-ai/claude-code@latest".to_string(),
+                    "--print".to_string(),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_missing_docker_routes_visible_error_without_session() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        with_docker_bin_override(&worktree.path().join("missing-docker"), || {
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+        });
+
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.error_queue.len(), 1);
+        let notification = model.error_queue.front().expect("error notification");
+        assert_eq!(notification.source, "docker");
+        assert_eq!(notification.message, "Docker launch failed");
+        assert!(notification
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Docker is not installed or not available on PATH"));
+        assert!(
+            fs::read_dir(sessions_dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "failing Docker launch must not persist a session entry"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_missing_docker_runtime_command_routes_visible_error_without_session(
+    ) {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("installed".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                materialize_pending_launch_with(&mut model, sessions_dir.path())
+                    .expect("materialize launch");
+            },
+        );
+
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.error_queue.len(), 1);
+        let notification = model.error_queue.front().expect("error notification");
+        assert_eq!(notification.source, "docker");
+        assert_eq!(notification.message, "Docker launch failed");
+        assert!(notification
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Command 'claude' is not available in Docker service 'gwt'"));
+        assert!(
+            fs::read_dir(sessions_dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "launch must not persist a session when the Docker runtime command is missing"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_missing_docker_package_runner_routes_visible_error_without_session(
+    ) {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "/opt/homebrew/bin/bunx".to_string(),
+            args: vec![
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("latest".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: true,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        with_fake_docker(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ] && [ \"$7\" = \"sh\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$9\" = \"bunx\" ]; then\n  printf 'could not determine executable to run for package @anthropic-ai/claude-code\\n' >&2\n  exit 1\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$9\" = \"npx\" ]; then\n  printf 'npm ERR! missing executable\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            || {
+                materialize_pending_launch_with(&mut model, sessions_dir.path())
+                    .expect("materialize launch");
+            },
+        );
+
+        assert_eq!(model.session_count(), 1);
+        assert_eq!(model.error_queue.len(), 1);
+        let notification = model.error_queue.front().expect("error notification");
+        assert_eq!(notification.source, "docker");
+        assert_eq!(notification.message, "Docker launch failed");
+        let detail = notification.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("@anthropic-ai/claude-code@latest"));
+        assert!(detail.contains("bunx"));
+        assert!(detail.contains("npx"));
+        assert!(
+            fs::read_dir(sessions_dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "launch must not persist a session when no Docker package runner can start the agent"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_async_docker_launch_shows_progress_and_hides_overlay_on_failure()
+    {
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+        let release_flag = worktree.path().join("release-compose-up");
+        let running_flag = worktree.path().join("service-running");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("installed".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ -f '{}' ]; then\n    printf 'gwt\\n'\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  while [ ! -f '{}' ]; do\n    sleep 0.01\n  done\n  : > '{}'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            running_flag.display(),
+            release_flag.display(),
+            running_flag.display(),
+        );
+
+        with_fake_docker(&script, || {
+            materialize_pending_launch(&mut model);
+
+            assert!(model.docker_progress_events.is_some());
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert!(docker_progress.visible);
+            assert_eq!(
+                docker_progress.stage,
+                screens::docker_progress::DockerStage::DetectingFiles
+            );
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| {
+                    model.docker_progress.as_ref().is_some_and(|progress| {
+                        progress.stage == screens::docker_progress::DockerStage::BuildingImage
+                    })
+                },
+                "docker build progress stage",
+            );
+
+            let docker_progress = model.docker_progress.as_ref().expect("docker progress");
+            assert!(docker_progress
+                .message
+                .contains("Building image and starting Docker service gwt"));
+
+            fs::write(&release_flag, "").expect("release compose up");
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| model.docker_progress_events.is_none() && !model.error_queue.is_empty(),
+                "docker launch failure",
+            );
+
+            assert!(model.docker_progress.is_none());
+            assert_eq!(model.session_count(), 1);
+            let notification = model.error_queue.front().expect("error notification");
+            assert_eq!(notification.source, "docker");
+            assert_eq!(notification.message, "Docker launch failed");
+            assert!(notification
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Command 'claude' is not available in Docker service 'gwt'"));
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_async_docker_launch_streams_compose_output_into_logs() {
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+        let release_flag = worktree.path().join("release-compose-up");
+        let running_flag = worktree.path().join("service-running");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.path().to_path_buf()),
+            branch: Some("develop".to_string()),
+            base_branch: None,
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: Some("installed".to_string()),
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ -f '{}' ]; then\n    printf 'gwt\\n'\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  printf 'build step 1\\n'\n  printf 'build warning\\n' >&2\n  while [ ! -f '{}' ]; do\n    sleep 0.01\n  done\n  : > '{}'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            running_flag.display(),
+            release_flag.display(),
+            running_flag.display(),
+        );
+
+        with_fake_docker(&script, || {
+            materialize_pending_launch(&mut model);
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| {
+                    model.logs.entries.iter().any(|entry| {
+                        entry.source == "docker"
+                            && entry.message.contains("[gwt][stdout] build step 1")
+                    }) && model.logs.entries.iter().any(|entry| {
+                        entry.source == "docker"
+                            && entry.message.contains("[gwt][stderr] build warning")
+                    })
+                },
+                "docker compose output in logs",
+            );
+
+            assert!(model.current_notification.is_none());
+            assert!(model.error_queue.is_empty());
+
+            fs::write(&release_flag, "").expect("release compose up");
+
+            drive_docker_worker_until(
+                &mut model,
+                |model| model.docker_progress_events.is_none() && !model.error_queue.is_empty(),
+                "docker launch failure after logs",
+            );
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_stopped_docker_service_starts_it_before_exec() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        let compose_path = write_docker_launch_compose_fixture(worktree.path());
+        let log_path = worktree.path().join("docker-args.log");
+        let running_flag = worktree.path().join("service-running");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ -f '{}' ]; then\n    printf 'gwt\\n'\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  : > '{}'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display(),
+            running_flag.display(),
+            running_flag.display(),
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "/bin/echo".to_string(),
+                args: vec!["agent-test".to_string()],
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Start,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            let mut log = String::new();
+            for _ in 0..50 {
+                log = fs::read_to_string(&log_path).unwrap_or_default();
+                if log.contains("compose -f")
+                    && log.contains(" up -d gwt")
+                    && log.contains(" exec -w /workspace gwt /bin/echo agent-test")
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            assert!(log.contains(&format!(
+                "compose -f {} ps --all --format",
+                compose_path.display()
+            )));
+            assert!(log.contains(&format!("compose -f {} up -d gwt", compose_path.display())));
+            assert!(log.contains(&format!(
+                "compose -f {} exec -w /workspace gwt /bin/echo agent-test",
+                compose_path.display()
+            )));
+            assert_eq!(model.session_count(), 2);
+            assert!(model.error_queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_running_docker_service_restarts_before_exec() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        let compose_path = write_docker_launch_compose_fixture(worktree.path());
+        let log_path = worktree.path().join("docker-args.log");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"restart\" ] && [ \"$5\" = \"gwt\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display(),
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "/bin/echo".to_string(),
+                args: vec!["agent-test".to_string()],
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            let mut log = String::new();
+            for _ in 0..50 {
+                log = fs::read_to_string(&log_path).unwrap_or_default();
+                if log.contains(" compose -f ")
+                    && log.contains(" restart gwt")
+                    && log.contains(" exec -w /workspace gwt /bin/echo agent-test")
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            assert!(log.contains(&format!(
+                "compose -f {} ps --all --format",
+                compose_path.display()
+            )));
+            assert!(log.contains(&format!(
+                "compose -f {} restart gwt",
+                compose_path.display()
+            )));
+            assert!(log.contains(&format!(
+                "compose -f {} exec -w /workspace gwt /bin/echo agent-test",
+                compose_path.display()
+            )));
+            assert_eq!(model.session_count(), 2);
+            assert!(model.error_queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_running_docker_service_recreates_before_exec() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        let compose_path = write_docker_launch_compose_fixture(worktree.path());
+        let log_path = worktree.path().join("docker-args.log");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'gwt\\trunning\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"--force-recreate\" ] && [ \"$7\" = \"gwt\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            log_path.display(),
+        );
+
+        with_fake_docker(&script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "/bin/echo".to_string(),
+                args: vec!["agent-test".to_string()],
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Recreate,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            let mut log = String::new();
+            for _ in 0..50 {
+                log = fs::read_to_string(&log_path).unwrap_or_default();
+                if log.contains(" up -d --force-recreate gwt")
+                    && log.contains(" exec -w /workspace gwt /bin/echo agent-test")
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            assert!(log.contains(&format!(
+                "compose -f {} up -d --force-recreate gwt",
+                compose_path.display()
+            )));
+            assert!(log.contains(&format!(
+                "compose -f {} exec -w /workspace gwt /bin/echo agent-test",
+                compose_path.display()
+            )));
+            assert_eq!(model.session_count(), 2);
+            assert!(model.error_queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_service_that_never_starts_routes_error_without_session() {
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = tempfile::tempdir().expect("temp worktree");
+        write_docker_launch_compose_fixture(worktree.path());
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 27.0.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"info\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then\n  printf 'Docker Compose version v2.27.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ] && [ \"$5\" = \"-d\" ] && [ \"$6\" = \"gwt\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"logs\" ]; then\n  printf 'boot failed\\n'\n  exit 0\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n";
+
+        with_fake_docker(script, || {
+            let mut model = test_model();
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::ClaudeCode,
+                command: "claude".to_string(),
+                args: Vec::new(),
+                env_vars: HashMap::new(),
+                working_dir: Some(worktree.path().to_path_buf()),
+                branch: Some("develop".to_string()),
+                base_branch: None,
+                display_name: "Claude Code".to_string(),
+                color: AgentId::ClaudeCode.default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: None,
+            });
+
+            materialize_pending_launch_with(&mut model, sessions_dir.path())
+                .expect("materialize launch");
+
+            assert_eq!(model.session_count(), 1);
+            assert_eq!(model.error_queue.len(), 1);
+            let notification = model.error_queue.front().expect("error notification");
+            assert_eq!(notification.source, "docker");
+            assert_eq!(notification.message, "Docker launch failed");
+            assert!(notification
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("docker compose service 'gwt' is not running after startup."));
+            assert!(
+                fs::read_dir(sessions_dir.path())
+                    .expect("read sessions dir")
+                    .next()
+                    .is_none(),
+                "launch must not persist a session when Docker service never becomes ready"
+            );
+        });
+    }
+
+    #[test]
     fn build_launch_config_from_wizard_codex_skip_permissions_does_not_imply_fast_mode() {
         let wizard = screens::wizard::WizardState {
             agent_id: "codex".to_string(),
@@ -11581,6 +18042,122 @@ CUSTOM_ENV = "enabled"
         assert!(!config
             .args
             .contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn link_selected_issue_to_branch_with_builds_gh_issue_develop_command() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let config = LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/issue-link".to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            linked_issue_number: Some(1776),
+        };
+
+        let mut observed_cwd = None;
+        let mut observed_args = Vec::new();
+        link_selected_issue_to_branch_with(repo.path(), &config, |cwd, args| {
+            observed_cwd = Some(cwd.to_path_buf());
+            observed_args.extend(args.iter().cloned());
+            Ok(())
+        })
+        .expect("link issue");
+
+        assert_eq!(observed_cwd.as_deref(), Some(repo.path()));
+        assert_eq!(
+            observed_args,
+            [
+                "issue",
+                "develop",
+                "1776",
+                "--name",
+                "feature/issue-link",
+                "--base",
+                "develop",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_auto_persists_without_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "auto".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("auto"));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_medium_exports_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "sonnet".to_string(),
+            reasoning: "medium".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("medium"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"medium".to_string())
+        );
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_effort_high_exports_env() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "opus".to_string(),
+            reasoning: "high".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"high".to_string())
+        );
+    }
+
+    #[test]
+    fn build_launch_config_from_wizard_claude_haiku_ignores_effort_selection() {
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            model: "haiku".to_string(),
+            reasoning: "high".to_string(),
+            ..Default::default()
+        };
+
+        let config = build_launch_config_from_wizard(&wizard);
+
+        assert!(config.reasoning_level.is_none());
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
     }
 
     // SPEC-6 Phase 5: `append_agent_launch_log_with` and its redaction
@@ -11633,6 +18210,111 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_issue_link_failure_stops_before_session_creation() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::ClaudeCode,
+            command: "claude".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: None,
+            branch: Some("feature/issue-link".to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Claude Code".to_string(),
+            color: AgentId::ClaudeCode.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: Some(1776),
+        });
+
+        let result = materialize_pending_launch_with_hooks(
+            &mut model,
+            dir.path(),
+            |_repo_path, _config| Err("gh issue develop failed".to_string()),
+            |_repo_path, _config| {
+                panic!("resolve_launch_worktree should not run after link failure")
+            },
+        );
+
+        assert_eq!(result, Err("gh issue develop failed".to_string()));
+        assert_eq!(
+            model.sessions.len(),
+            1,
+            "launch should stop before creating a new tab"
+        );
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("read sessions dir")
+                .next()
+                .is_none(),
+            "failed link should not persist a session"
+        );
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_issue_link_persists_local_linkage_store() {
+        with_temp_home(|_home| {
+            let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+            let repo_path = workspace_dir.path().join("repo");
+            fs::create_dir_all(&repo_path).expect("create repo path");
+            init_git_repo(&repo_path);
+            let remote_path = workspace_dir.path().join("origin.git");
+            init_bare_git_repo(&remote_path);
+            git_add_remote(&repo_path, "origin", &remote_path);
+
+            let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+            let mut model = Model::new(repo_path.clone());
+            model.pending_launch_config = Some(LaunchConfig {
+                agent_id: AgentId::Custom("my-agent".to_string()),
+                command: "gwt-missing-custom-agent-command".to_string(),
+                args: Vec::new(),
+                env_vars: HashMap::new(),
+                working_dir: Some(repo_path.clone()),
+                branch: Some("feature/issue-link".to_string()),
+                base_branch: Some("develop".to_string()),
+                display_name: "My Agent".to_string(),
+                color: AgentId::Custom("my-agent".to_string()).default_color(),
+                model: None,
+                tool_version: None,
+                reasoning_level: None,
+                session_mode: SessionMode::Normal,
+                resume_session_id: None,
+                runtime_target: LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                linked_issue_number: Some(1776),
+            });
+
+            materialize_pending_launch_with_hooks(
+                &mut model,
+                sessions_dir.path(),
+                |_repo_path, _config| Ok(()),
+                |_repo_path, _config| Ok(()),
+            )
+            .expect("materialize launch");
+
+            let linkage_store_path =
+                default_issue_linkage_store_path(&repo_path).expect("repo hash-backed store path");
+            let issue_branches = load_issue_linkage_map(Some(linkage_store_path.as_path()));
+            assert_eq!(
+                issue_branches.get(&1776),
+                Some(&vec!["feature/issue-link".to_string()])
+            );
+        });
+    }
+
+    #[test]
     fn materialize_pending_launch_with_generates_claude_settings_local_hooks() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-feature-spec-42");
@@ -11654,8 +18336,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11667,11 +18353,12 @@ CUSTOM_ENV = "enabled"
         let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
             .as_str()
             .expect("hook command");
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state UserPromptSubmit"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
-            serde_json::Value::String("Bash".to_string())
+            serde_json::Value::String("*".to_string())
         );
     }
 
@@ -11697,8 +18384,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11710,8 +18401,75 @@ CUSTOM_ENV = "enabled"
             .as_str()
             .expect("hook command");
 
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state SessionStart"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_updates_git_resolved_exclude_for_linked_worktree() {
+        let dir = tempfile::tempdir().expect("temp repo dir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        git_commit_allow_empty(&repo, "initial commit");
+
+        let worktree = dir.path().join("wt-feature-spec-42");
+        let add_worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/spec-42",
+                worktree.to_str().expect("worktree path"),
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add_worktree.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_worktree.stderr)
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "linked worktree should expose .git as a file"
+        );
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: "gwt-missing-custom-agent-command".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: None,
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Normal,
+            resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let exclude_path = git_resolved_exclude_path(&worktree);
+        let exclude = fs::read_to_string(&exclude_path).expect("read git exclude");
+        assert!(exclude.contains("# gwt-managed-begin"));
+        assert!(exclude.contains(".codex/hooks.json"));
+        assert!(
+            !worktree.join(".git/info/exclude").exists(),
+            "agent launch should not treat linked worktree .git as a directory"
+        );
     }
 
     #[test]
@@ -11770,8 +18528,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11784,7 +18546,8 @@ CUSTOM_ENV = "enabled"
             .as_str()
             .expect("hook command");
 
-        assert!(command.contains("GWT_MANAGED_HOOK"));
+        assert!(command.contains(" hook runtime-state SessionStart"));
+        assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!content.contains("gwt-forward-hook.mjs"));
         assert!(!command.contains("node"));
     }
@@ -11817,8 +18580,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11865,8 +18632,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11892,7 +18663,7 @@ CUSTOM_ENV = "enabled"
         fs::create_dir_all(worktree.join(".claude/commands")).expect("create claude commands");
         fs::create_dir_all(worktree.join(".codex/skills/gwt-agent-read"))
             .expect("create stale codex skill");
-        fs::create_dir_all(worktree.join(".claude/skills/gwt-pr/references"))
+        fs::create_dir_all(worktree.join(".claude/skills/gwt-manage-pr/references"))
             .expect("create stale nested claude skill path");
         fs::write(
             worktree.join(".claude/commands/gwt-issue-search.md"),
@@ -11905,7 +18676,7 @@ CUSTOM_ENV = "enabled"
         )
         .expect("write stale skill");
         fs::write(
-            worktree.join(".claude/skills/gwt-pr/references/legacy.md"),
+            worktree.join(".claude/skills/gwt-manage-pr/references/legacy.md"),
             "legacy nested skill file",
         )
         .expect("write stale nested skill file");
@@ -11917,7 +18688,7 @@ CUSTOM_ENV = "enabled"
             command: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ] && [ ! -e .claude/skills/gwt-pr/references/legacy.md ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
+                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ] && [ ! -e .claude/skills/gwt-manage-pr/references/legacy.md ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
                 "sh".to_string(),
                 marker.to_string_lossy().into_owned(),
             ],
@@ -11932,8 +18703,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -11962,14 +18737,14 @@ CUSTOM_ENV = "enabled"
         );
         assert!(
             !worktree
-                .join(".claude/skills/gwt-pr/references/legacy.md")
+                .join(".claude/skills/gwt-manage-pr/references/legacy.md")
                 .exists(),
             "stale nested skill file should be removed before spawn"
         );
     }
 
     #[test]
-    fn materialize_pending_launch_with_bootstraps_running_runtime_sidecar_after_spawn() {
+    fn materialize_pending_launch_with_bootstraps_waiting_runtime_sidecar_after_spawn() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-develop");
         fs::create_dir_all(&worktree).expect("create worktree");
@@ -11990,8 +18765,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12004,7 +18783,7 @@ CUSTOM_ENV = "enabled"
             .clone();
         let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session_id))
             .expect("bootstrap runtime state");
-        assert_eq!(runtime.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(runtime.status, gwt_agent::AgentStatus::WaitingInput);
         assert_eq!(runtime.source_event.as_deref(), Some("LaunchBootstrap"));
     }
 
@@ -12030,8 +18809,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12089,8 +18872,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         };
 
         augment_agent_hook_runtime_launch_config(&mut config, dir.path(), "session-123");
@@ -12144,6 +18931,297 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn maybe_surface_pending_discussion_resume_with_opens_on_session_start() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should SessionStart surface the proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let pending = crate::discussion_resume::load_pending_resume(&worktree)
+            .expect("load pending discussion")
+            .expect("pending discussion");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let mut runtime =
+            SessionRuntimeState::from_hook_event("SessionStart").expect("session start runtime");
+        runtime.pending_discussion = Some(pending);
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+
+        let overlay = model
+            .discussion_resume
+            .as_ref()
+            .expect("discussion resume overlay");
+        assert_eq!(overlay.session_id, persisted.id);
+        assert_eq!(overlay.pending.proposal_label, "Proposal A");
+        assert_eq!(overlay.pending.proposal_title, "Hook-driven resume");
+    }
+
+    #[test]
+    fn maybe_surface_pending_discussion_resume_with_uses_user_prompt_submit_fallback() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should Stop surface the fallback proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let pending = crate::discussion_resume::load_pending_resume(&worktree)
+            .expect("load pending discussion")
+            .expect("pending discussion");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let mut runtime =
+            SessionRuntimeState::from_hook_event("UserPromptSubmit").expect("user prompt runtime");
+        runtime.pending_discussion = Some(pending.clone());
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save running runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_none());
+
+        let mut stopped = SessionRuntimeState::from_hook_event("Stop").expect("stop runtime");
+        stopped.pending_discussion = Some(pending);
+        stopped
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save waiting runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_some());
+    }
+
+    #[test]
+    fn handle_discussion_resume_message_with_resume_queues_prompt_input() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+
+        let mut model = test_model();
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+        model.discussion_resume = Some(
+            screens::discussion_resume::DiscussionResumeState::with_pending(
+                "agent-0",
+                PendingDiscussionResume {
+                    proposal_label: "Proposal A".to_string(),
+                    proposal_title: "Hook-driven resume".to_string(),
+                    next_question: Some("Should SessionStart surface the proposal?".to_string()),
+                },
+            ),
+        );
+
+        handle_discussion_resume_message_with(
+            &mut model,
+            screens::discussion_resume::DiscussionResumeMessage::Select,
+            dir.path(),
+        );
+
+        assert!(model.discussion_resume.is_none());
+        let forwarded = model.pending_pty_inputs().back().expect("queued prompt");
+        let prompt = String::from_utf8_lossy(&forwarded.bytes);
+        assert_eq!(forwarded.session_id, "agent-0");
+        assert!(prompt.contains("gwt-discussion"));
+        assert!(prompt.contains(".gwt/discussion.md"));
+    }
+
+    #[test]
+    fn handle_discussion_resume_message_with_park_updates_discussion_file() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should SessionStart surface the proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.discussion_resume = Some(
+            screens::discussion_resume::DiscussionResumeState::with_pending(
+                persisted.id.clone(),
+                PendingDiscussionResume {
+                    proposal_label: "Proposal A".to_string(),
+                    proposal_title: "Hook-driven resume".to_string(),
+                    next_question: Some("Should SessionStart surface the proposal?".to_string()),
+                },
+            ),
+        );
+        if let Some(state) = model.discussion_resume.as_mut() {
+            state.selected = 1;
+        }
+
+        handle_discussion_resume_message_with(
+            &mut model,
+            screens::discussion_resume::DiscussionResumeMessage::Select,
+            dir.path(),
+        );
+
+        let discussion =
+            fs::read_to_string(worktree.join(".gwt/discussion.md")).expect("read discussion file");
+        assert!(discussion.contains("### Proposal A - Hook-driven resume [parked]"));
+        assert!(model.discussion_resume.is_none());
+    }
+
+    #[test]
+    fn dismiss_discussion_resume_suppresses_prompt_for_current_session() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        fs::write(
+            worktree.join(".gwt/discussion.md"),
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Should SessionStart surface the proposal?
+- Promotable Changes:
+"#,
+        )
+        .expect("write discussion");
+
+        let pending = crate::discussion_resume::load_pending_resume(&worktree)
+            .expect("load pending discussion")
+            .expect("pending discussion");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+
+        let mut runtime =
+            SessionRuntimeState::from_hook_event("SessionStart").expect("session start runtime");
+        runtime.pending_discussion = Some(pending);
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_some());
+
+        handle_discussion_resume_message_with(
+            &mut model,
+            screens::discussion_resume::DiscussionResumeMessage::Cancel,
+            dir.path(),
+        );
+        assert!(model.discussion_resume.is_none());
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+        assert!(model.discussion_resume.is_none());
+    }
+
+    #[test]
+    fn different_pending_discussion_can_surface_after_dismiss_in_same_session() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-discussion");
+        fs::create_dir_all(worktree.join(".gwt")).expect("create discussion dir");
+        let persisted = AgentSession::new(&worktree, "feature/discussion", AgentId::Codex);
+        persisted.save(dir.path()).expect("persist agent session");
+
+        let mut model = test_model();
+        let mut tab = agent_session_tab("Codex", "codex", crate::model::AgentColor::Cyan);
+        tab.id = persisted.id.clone();
+        model.sessions = vec![tab];
+        model.active_session = 0;
+        model.discussion_resume_sessions.insert(
+            persisted.id.clone(),
+            crate::discussion_resume::ResumePromptSessionState {
+                prompt_pending: true,
+                last_handled_proposal: Some("Proposal A::Hook-driven resume".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let mut runtime = SessionRuntimeState::from_hook_event("Stop").expect("stop runtime");
+        runtime.pending_discussion = Some(PendingDiscussionResume {
+            proposal_label: "Proposal B".to_string(),
+            proposal_title: "Owner linkage".to_string(),
+            next_question: Some("Link a new SPEC owner?".to_string()),
+        });
+        runtime
+            .save(&runtime_state_path(dir.path(), &persisted.id))
+            .expect("save runtime");
+
+        maybe_surface_pending_discussion_resume_with(&mut model, dir.path());
+
+        let overlay = model
+            .discussion_resume
+            .as_ref()
+            .expect("discussion resume overlay");
+        assert_eq!(overlay.pending.proposal_label, "Proposal B");
+        assert_eq!(overlay.pending.proposal_title, "Owner linkage");
+    }
+
+    #[test]
     fn check_pty_exits_with_marks_agent_session_stopped() {
         let dir = tempfile::tempdir().expect("temp sessions dir");
         let worktree = dir.path().join("wt-feature-test");
@@ -12174,6 +19252,7 @@ CUSTOM_ENV = "enabled"
                 cols: 80,
                 rows: 24,
                 env: HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
             },
         )
@@ -12197,6 +19276,107 @@ CUSTOM_ENV = "enabled"
         let persisted = AgentSession::load(&dir.path().join(format!("{}.toml", persisted.id)))
             .expect("load stopped agent session");
         assert_eq!(persisted.status, gwt_agent::AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn refresh_active_session_branches_with_ignores_stopped_agent_sessions() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.update_status(gwt_agent::AgentStatus::Stopped);
+        persisted
+            .save(dir.path())
+            .expect("persist stopped agent session");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(worktree.clone()),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/test",
+            screens::branches::MergeState::Cleanable(gwt_git::MergeTarget::Develop),
+        );
+
+        refresh_active_session_branches_with(&mut model, dir.path());
+
+        assert!(
+            !model
+                .branches
+                .active_session_branches
+                .contains("feature/test"),
+            "stopped agent sessions must not block cleanup selection"
+        );
+        assert_eq!(
+            model.branches.toggle_cleanup_selection("feature/test"),
+            screens::branches::CleanupSelectionToggle::Selected
+        );
+    }
+
+    #[test]
+    fn refresh_active_session_branches_with_keeps_running_agent_sessions_blocked() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-test");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut persisted = AgentSession::new(&worktree, "feature/test", AgentId::Codex);
+        persisted.update_status(gwt_agent::AgentStatus::Running);
+        persisted
+            .save(dir.path())
+            .expect("persist running agent session");
+
+        let mut model = test_model();
+        model.sessions.push(crate::model::SessionTab {
+            id: persisted.id.clone(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Blue,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        });
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/test".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(worktree),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/test",
+            screens::branches::MergeState::Cleanable(gwt_git::MergeTarget::Develop),
+        );
+
+        refresh_active_session_branches_with(&mut model, dir.path());
+
+        assert!(model
+            .branches
+            .active_session_branches
+            .contains("feature/test"));
+        assert_eq!(
+            model.branches.toggle_cleanup_selection("feature/test"),
+            screens::branches::CleanupSelectionToggle::Blocked(
+                screens::branches::CleanupSelectionBlockedReason::ActiveSession
+            )
+        );
     }
 
     #[test]
@@ -12229,6 +19409,50 @@ CUSTOM_ENV = "enabled"
         assert!(persisted.skip_permissions);
         assert!(persisted.codex_fast_mode);
         assert_eq!(persisted.agent_session_id.as_deref(), Some("sess-abc"));
+        assert!(
+            persisted.launch_command.ends_with("bunx") || persisted.launch_command.ends_with("npx"),
+            "latest tool versions should persist the resolved runner command"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .first()
+                .is_some_and(|arg| arg == "@openai/codex@latest" || arg == "--yes"),
+            "runner-prefixed argv should persist the package launcher prefix"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--no-alt-screen"),
+            "launch args should persist the finalized argv"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "@openai/codex@latest"),
+            "package version selection should be persisted in the final argv"
+        );
+        assert!(
+            persisted
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--model=gpt-5.3-codex"),
+            "model override should be reflected in the persisted argv"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "resume"),
+            "resume subcommand should be persisted"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "sess-abc"),
+            "resume target should be persisted"
+        );
+        assert!(
+            persisted.launch_args.iter().any(|arg| arg == "--yolo"),
+            "skip permissions flag should be reflected in persisted argv"
+        );
     }
 
     #[test]
@@ -12261,8 +19485,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, sessions_dir.path())
@@ -12639,6 +19867,76 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn materialize_pending_launch_with_occupied_preferred_worktree_path_uses_suffixed_fallback() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        let sessions_dir = tempfile::tempdir().expect("temp sessions dir");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        git_checkout_branch_or_create(&repo_path, "main");
+        git_push_branch(&repo_path, "main");
+        git_checkout_branch_or_create(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
+        git_checkout_branch_or_create(&repo_path, "main");
+
+        let occupied_path = workspace_dir.path().join("develop");
+        let occupied_output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "dependabot/npm_and_yarn/test",
+                occupied_path.to_str().expect("occupied worktree path"),
+                "develop",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree add occupied path");
+        assert!(
+            occupied_output.status.success(),
+            "git worktree add occupied path failed: {}",
+            String::from_utf8_lossy(&occupied_output.stderr)
+        );
+
+        let wizard = screens::wizard::WizardState {
+            agent_id: "claude".to_string(),
+            is_new_branch: true,
+            base_branch_name: Some("develop".to_string()),
+            branch_name: "develop".to_string(),
+            worktree_path: Some(repo_path.clone()),
+            ..Default::default()
+        };
+
+        let mut model = Model::new(repo_path);
+        model.pending_launch_config = Some(build_launch_config_from_wizard(&wizard));
+
+        materialize_pending_launch_with(&mut model, sessions_dir.path())
+            .expect("materialize launch with occupied preferred path");
+
+        let expected_worktree = workspace_dir.path().join("develop-2");
+        let expected_worktree =
+            std::fs::canonicalize(&expected_worktree).expect("canonicalize fallback worktree");
+        assert!(
+            expected_worktree.exists(),
+            "launch should create a suffixed fallback path when the canonical branch path is occupied by another worktree"
+        );
+
+        let session_entry = std::fs::read_dir(sessions_dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("session entry");
+        let persisted = AgentSession::load(&session_entry).expect("load persisted session");
+        assert_eq!(persisted.branch, "develop");
+        assert_eq!(persisted.worktree_path, expected_worktree);
+    }
+
+    #[test]
     fn materialize_pending_launch_with_missing_remote_base_branch_returns_error() {
         let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
         let repo_path = workspace_dir.path().join("gwt");
@@ -12696,8 +19994,12 @@ CUSTOM_ENV = "enabled"
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             skip_permissions: false,
             codex_fast_mode: false,
+            linked_issue_number: None,
         });
 
         materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
@@ -12726,27 +20028,16 @@ CUSTOM_ENV = "enabled"
             .insert("codex".into(), version_entry(&["0.5.0"], 60));
         cache.save(&cache_path).unwrap();
 
-        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
-        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let scheduled_capture = scheduled.clone();
-        schedule_startup_version_cache_refresh_with(
+        let (task, scheduled) = capture_startup_version_cache_refresh_task(
             cache_path.clone(),
-            || {
+            std::sync::Arc::new(|| {
                 vec![
                     detected_agent(AgentId::ClaudeCode, Some("1.0.55")),
                     detected_agent(AgentId::Codex, Some("0.5.1")),
                     detected_agent(AgentId::OpenCode, Some("0.2.0")),
                 ]
-            },
-            |task| {
-                *spawned.borrow_mut() = Some(task);
-            },
-            move |path, targets| {
-                *scheduled_capture.lock().unwrap() = Some((path, targets));
-            },
+            }),
         );
-
-        let task = spawned.borrow_mut().take().unwrap();
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
@@ -12764,27 +20055,15 @@ CUSTOM_ENV = "enabled"
 
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("agent-versions.json");
-        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
-        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let scheduled_capture = scheduled.clone();
-
-        schedule_startup_version_cache_refresh_with(
+        let (task, scheduled) = capture_startup_version_cache_refresh_task(
             cache_path.clone(),
-            || {
+            std::sync::Arc::new(|| {
                 vec![
                     detected_agent(AgentId::Gemini, Some("0.2.0")),
                     detected_agent(AgentId::OpenCode, Some("0.4.0")),
                 ]
-            },
-            |task| {
-                *spawned.borrow_mut() = Some(task);
-            },
-            move |path, targets| {
-                *scheduled_capture.lock().unwrap() = Some((path, targets));
-            },
+            }),
         );
-
-        let task = spawned.borrow_mut().take().unwrap();
         task();
         let (scheduled_path, targets) = scheduled.lock().unwrap().take().unwrap();
         assert_eq!(scheduled_path, cache_path);
@@ -12801,32 +20080,19 @@ CUSTOM_ENV = "enabled"
         STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
 
         let cache_path = PathBuf::from("/tmp/agent-versions.json");
-        let spawned = std::cell::RefCell::new(None::<Box<dyn FnOnce() + Send>>);
         let detected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let detected_flag = detected.clone();
-        let scheduled = std::sync::Arc::new(std::sync::Mutex::new(None::<(PathBuf, Vec<AgentId>)>));
-        let scheduled_capture = scheduled.clone();
-
-        schedule_startup_version_cache_refresh_with(
+        let (task, scheduled) = capture_startup_version_cache_refresh_task(
             cache_path.clone(),
-            move || {
+            std::sync::Arc::new(move || {
                 detected_flag.store(true, Ordering::Release);
                 vec![detected_agent(AgentId::ClaudeCode, Some("1.0.55"))]
-            },
-            |task| {
-                *spawned.borrow_mut() = Some(task);
-            },
-            move |path, targets| {
-                *scheduled_capture.lock().unwrap() = Some((path, targets));
-            },
+            }),
         );
 
         assert!(!detected.load(Ordering::Acquire));
         assert!(scheduled.lock().unwrap().is_none());
-        assert!(spawned.borrow().is_some());
         assert!(STARTUP_VERSION_CACHE_REFRESH_DISPATCH_IN_FLIGHT.load(Ordering::Acquire));
-
-        let task = spawned.borrow_mut().take().unwrap();
         task();
 
         assert!(detected.load(Ordering::Acquire));
@@ -13231,71 +20497,6 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
-    fn forward_key_to_active_session_copies_selection_with_non_macos_shortcut() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Main;
-        model.active_focus = FocusPane::Terminal;
-        update(&mut model, Message::Resize(24, 8));
-        append_session_line(&mut model, "shell-0", "copy me");
-        if let Some(session) = model.active_session_tab_mut() {
-            session.vt.begin_selection(TerminalCell { row: 0, col: 0 });
-            session.vt.update_selection(TerminalCell { row: 0, col: 6 });
-        }
-
-        let mut copied = None;
-        let handled = forward_key_to_active_session_with_clipboard(
-            &mut model,
-            key(
-                KeyCode::Char('c'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ),
-            CopyShortcutPlatform::NonMacOs,
-            |text| {
-                copied = Some(text.to_string());
-                Ok(())
-            },
-        )
-        .expect("copy shortcut succeeds");
-
-        assert!(handled, "copy shortcut should be consumed by gwt");
-        assert_eq!(copied.as_deref(), Some("copy me"));
-        assert!(
-            model.pending_pty_inputs().is_empty(),
-            "copy shortcut should not forward bytes to the PTY when selection exists"
-        );
-    }
-
-    #[test]
-    fn forward_key_to_active_session_forwards_copy_shortcut_when_no_selection_exists() {
-        let mut model = test_model();
-        model.active_layer = ActiveLayer::Main;
-        model.active_focus = FocusPane::Terminal;
-
-        let mut copied = None;
-        let handled = forward_key_to_active_session_with_clipboard(
-            &mut model,
-            key(
-                KeyCode::Char('c'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ),
-            CopyShortcutPlatform::NonMacOs,
-            |text| {
-                copied = Some(text.to_string());
-                Ok(())
-            },
-        )
-        .expect("shortcut fallback succeeds");
-
-        assert!(
-            !handled,
-            "copy shortcut should fall through to PTY forwarding when no selection exists"
-        );
-        assert_eq!(copied, None);
-        let forwarded = model.pending_pty_inputs().back().expect("queued PTY input");
-        assert_eq!(forwarded.bytes, vec![0x03]);
-    }
-
-    #[test]
     fn key_event_to_bytes_maps_backtab_to_escape_sequence() {
         let bytes = key_event_to_bytes(key(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(bytes, Some(b"\x1b[Z".to_vec()));
@@ -13457,13 +20658,13 @@ CUSTOM_ENV = "enabled"
     #[test]
     fn vt_state_reports_bracketed_paste_when_requested_by_session() {
         let mut vt = crate::model::VtState::new(24, 80);
-        assert!(!vt_requests_bracketed_paste(&vt));
+        assert!(!screen_requests_bracketed_paste(vt.screen()));
 
         vt.process(b"\x1b[?2004h");
-        assert!(vt_requests_bracketed_paste(&vt));
+        assert!(screen_requests_bracketed_paste(vt.screen()));
 
         vt.process(b"\x1b[?2004l");
-        assert!(!vt_requests_bracketed_paste(&vt));
+        assert!(!screen_requests_bracketed_paste(vt.screen()));
     }
 
     #[test]
@@ -13857,7 +21058,7 @@ CUSTOM_ENV = "enabled"
         let mut model = test_model();
         model.management_tab = ManagementTab::Profiles;
         model.active_focus = FocusPane::TabContent;
-        model.profiles.mode = screens::profiles::ProfileMode::Create;
+        model.profiles.mode = screens::profiles::ProfileMode::CreateProfile;
         model.profiles.input_name = "demo".into();
 
         route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
@@ -13865,6 +21066,389 @@ CUSTOM_ENV = "enabled"
         assert_eq!(model.active_focus, FocusPane::TabContent);
         assert_eq!(model.profiles.mode, screens::profiles::ProfileMode::List);
         assert!(model.profiles.input_name.is_empty());
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_enter_persists_active_profile_and_updates_status_bar() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .unwrap();
+            settings.profiles.switch("default").unwrap();
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            assert_eq!(model.profiles.profiles.len(), 2);
+            model.profiles.selected = 1;
+
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            assert_eq!(reloaded.profiles.active.as_deref(), Some("dev"));
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(rendered.contains("profile: dev"), "{rendered}");
+        });
+    }
+
+    #[test]
+    fn refresh_active_profile_state_renders_default_fallback_when_active_is_invalid() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .unwrap();
+            settings.profiles.active = Some("missing".to_string());
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            refresh_active_profile_state(&mut model);
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(
+                rendered.contains("profile: default (fallback)"),
+                "{rendered}"
+            );
+        });
+    }
+
+    #[test]
+    fn spawn_env_with_active_profile_overrides_and_removes_inherited_keys() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev").with_env("API_URL", "https://example.test"))
+                .expect("add profile");
+            settings
+                .profiles
+                .update_disabled_env("dev", "MISSING", "HOME")
+                .expect("disable home");
+            settings.profiles.switch("dev").expect("switch active");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut explicit_env = HashMap::new();
+            explicit_env.insert("HOME".to_string(), "/tmp/override-home".to_string());
+            explicit_env.insert("GWT_KEEP".to_string(), "1".to_string());
+            let (env, remove_env) = spawn_env_with_active_profile(explicit_env);
+
+            assert_eq!(
+                env.get("API_URL").map(String::as_str),
+                Some("https://example.test")
+            );
+            assert_eq!(
+                env.get("HOME").map(String::as_str),
+                Some("/tmp/override-home")
+            );
+            assert!(remove_env.is_empty());
+
+            let (env, remove_env) = spawn_env_with_active_profile(HashMap::new());
+            assert_eq!(
+                env.get("API_URL").map(String::as_str),
+                Some("https://example.test")
+            );
+            assert!(remove_env.contains(&"HOME".to_string()));
+        });
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_create_profile_persists_metadata() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+            gwt_config::Settings::default()
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+
+            route_key_to_management(&mut model, key(KeyCode::Char('n'), KeyModifiers::NONE));
+            for ch in "dev".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+            for ch in "Dev profile".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            let dev = reloaded.profiles.get("dev").expect("dev profile");
+            assert_eq!(dev.description, "Dev profile");
+        });
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_tab_cycles_internal_focus() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+
+        route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            model.profiles.focus,
+            screens::profiles::ProfilesFocus::Environment
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            model.profiles.focus,
+            screens::profiles::ProfilesFocus::ProfileList
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(
+            model.profiles.focus,
+            screens::profiles::ProfilesFocus::Environment
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_ctrl_arrow_is_noop() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Profiles;
+        model.active_focus = FocusPane::TabContent;
+
+        route_key_to_management(&mut model, key(KeyCode::Right, KeyModifiers::CONTROL));
+
+        assert_eq!(
+            model.profiles.focus,
+            screens::profiles::ProfilesFocus::ProfileList
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_add_env_var_persists_and_renders_preview() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .expect("add profile");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            model.profiles.selected = 1;
+
+            route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+            route_key_to_management(&mut model, key(KeyCode::Char('n'), KeyModifiers::NONE));
+            for ch in "API_URL".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Tab, KeyModifiers::NONE));
+            for ch in "https://example.test".chars() {
+                route_key_to_management(&mut model, key(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            let dev = reloaded.profiles.get("dev").expect("dev profile");
+            assert_eq!(
+                dev.env_vars.get("API_URL").map(String::as_str),
+                Some("https://example.test")
+            );
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(rendered.contains("API_URL"), "{rendered}");
+            assert!(rendered.contains("https://example.test"), "{rendered}");
+        });
+    }
+
+    #[test]
+    fn profiles_mouse_click_selects_profile_row_and_focuses_env_pane() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev").with_env("API_URL", "https://example.test"))
+                .expect("add profile");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            update(&mut model, Message::Resize(80, 24));
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            model.active_focus = FocusPane::TabContent;
+
+            let management = visible_management_area(&model).expect("management area");
+            let outer = pane_block(management_tab_title(&model, management.width), false);
+            let inner = outer.inner(management);
+            let layout = screens::profiles::layout_areas(inner);
+
+            let handled = handle_mouse_input_with(
+                &mut model,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: layout.list_content.x,
+                    row: layout.list_content.y.saturating_add(1),
+                    modifiers: KeyModifiers::NONE,
+                },
+                |_| Ok(()),
+            )
+            .expect("profile click succeeds");
+            assert!(handled);
+            assert_eq!(
+                model.profiles.focus,
+                screens::profiles::ProfilesFocus::ProfileList
+            );
+            assert_eq!(
+                model
+                    .profiles
+                    .selected_profile()
+                    .map(|profile| profile.name.as_str()),
+                Some("dev")
+            );
+            let expected_env_key = model
+                .profiles
+                .selected_profile()
+                .expect("selected profile")
+                .env_rows
+                .first()
+                .expect("first env row")
+                .key
+                .clone();
+
+            let handled = handle_mouse_input_with(
+                &mut model,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: layout.env_content.x,
+                    row: layout.env_content.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                |_| Ok(()),
+            )
+            .expect("env click succeeds");
+            assert!(handled);
+            assert_eq!(
+                model.profiles.focus,
+                screens::profiles::ProfilesFocus::Environment
+            );
+            assert_eq!(
+                model
+                    .profiles
+                    .selected_env_row()
+                    .map(|env| env.key.as_str()),
+                Some(expected_env_key.as_str())
+            );
+        });
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_delete_base_row_toggles_disabled_env() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let base_key = "GWT_PROFILE_DELETE_ME";
+            let previous = std::env::var_os(base_key);
+            std::env::set_var(base_key, "from-os");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .expect("add profile");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            model.profiles.selected = 1;
+            model.profiles.focus = screens::profiles::ProfilesFocus::Environment;
+            model.profiles.env_selected = model.profiles.profiles[1]
+                .env_rows
+                .iter()
+                .position(|row| row.key == base_key)
+                .expect("base env row");
+
+            route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            assert_eq!(
+                reloaded.profiles.get("dev").unwrap().disabled_env,
+                vec![base_key.to_string()]
+            );
+
+            route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
+
+            let restored = gwt_config::Settings::load().expect("reload settings again");
+            assert!(restored
+                .profiles
+                .get("dev")
+                .unwrap()
+                .disabled_env
+                .is_empty());
+
+            if let Some(previous) = previous {
+                std::env::set_var(base_key, previous);
+            } else {
+                std::env::remove_var(base_key);
+            }
+        });
+    }
+
+    #[test]
+    fn route_key_to_management_profiles_delete_active_profile_switches_to_default() {
+        with_temp_home(|home| {
+            let config_dir = home.join(".gwt");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+            let mut settings = gwt_config::Settings::default();
+            settings
+                .profiles
+                .add(gwt_config::Profile::new("dev"))
+                .expect("add profile");
+            settings.profiles.switch("dev").expect("switch active");
+            settings
+                .save(&config_dir.join("config.toml"))
+                .expect("save settings");
+
+            let mut model = test_model();
+            switch_management_tab(&mut model, ManagementTab::Profiles);
+            model.profiles.selected = 1;
+
+            route_key_to_management(&mut model, key(KeyCode::Char('d'), KeyModifiers::NONE));
+            route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+            let reloaded = gwt_config::Settings::load().expect("reload settings");
+            assert!(reloaded.profiles.get("dev").is_none());
+            assert_eq!(reloaded.profiles.active.as_deref(), Some("default"));
+
+            let rendered = render_model_text(&model, 220, 24);
+            assert!(rendered.contains("profile: default"), "{rendered}");
+        });
     }
 
     #[test]
@@ -13895,6 +21479,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             })
             .collect();
 
@@ -13955,6 +21540,7 @@ CUSTOM_ENV = "enabled"
                 state: "open".into(),
                 labels: vec!["ux".into()],
                 body: "First body".into(),
+                linked_branches: vec![],
             },
             screens::issues::IssueItem {
                 number: 2,
@@ -13962,6 +21548,7 @@ CUSTOM_ENV = "enabled"
                 state: "open".into(),
                 labels: vec!["bug".into()],
                 body: "Second body".into(),
+                linked_branches: vec![],
             },
         ];
         model.issues.selected = 1;
@@ -13975,6 +21562,61 @@ CUSTOM_ENV = "enabled"
             model.issues.selected_issue().map(|issue| issue.number),
             Some(2)
         );
+    }
+
+    #[test]
+    fn route_key_to_management_issues_shift_enter_opens_wizard_with_prefilled_issue() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        model.management_tab = ManagementTab::Issues;
+        model.issues.issues = vec![screens::issues::IssueItem {
+            number: 1776,
+            title: "Launch Agent issue linkage".into(),
+            state: "open".into(),
+            labels: vec!["ux".into()],
+            body: "Wizard should link a selected issue".into(),
+            linked_branches: vec![],
+        }];
+        model.issues.detail_view = true;
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        let wizard = model.wizard.expect("wizard should open from issue detail");
+        assert_eq!(wizard.step, screens::wizard::WizardStep::BranchTypeSelect);
+        assert_eq!(wizard.issue_id, "1776");
+    }
+
+    #[test]
+    fn route_key_to_management_issues_refresh_reloads_issue_cache() {
+        with_temp_home(|home| {
+            let repo_url = "https://github.com/example/repo.git";
+            let issue_cache_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(gwt_core::repo_hash::compute_repo_hash(repo_url).as_str());
+            write_issue_cache_meta(&issue_cache_root, 42, "Fix login bug", "open", &["bug"]);
+
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let mut model = Model::new(dir.path().to_path_buf());
+            model.management_tab = ManagementTab::Issues;
+            model.issues.last_error = Some("stale".to_string());
+
+            route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
+
+            assert_eq!(model.issues.issues.len(), 1);
+            assert_eq!(model.issues.issues[0].number, 42);
+            assert!(model.issues.last_error.is_none());
+        });
     }
 
     #[test]
@@ -14005,6 +21647,132 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn load_initial_data_populates_issues_from_issue_cache() {
+        with_temp_home(|home| {
+            let repo_url = "https://github.com/example/repo.git";
+            let repo_hash = gwt_core::repo_hash::compute_repo_hash(repo_url);
+            let issue_cache_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(repo_hash.as_str());
+            let other_cache_root = home.join(".gwt").join("cache").join("issues").join(
+                gwt_core::repo_hash::compute_repo_hash("https://github.com/example/other.git")
+                    .as_str(),
+            );
+            write_issue_cache_meta(
+                &issue_cache_root,
+                1776,
+                "Launch Agent issue linkage",
+                "open",
+                &["ux"],
+            );
+            write_issue_cache_meta(&other_cache_root, 42, "Other repo issue", "open", &["bug"]);
+
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let mut model = Model::new(dir.path().to_path_buf());
+            load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
+
+            assert_eq!(model.issues.issues.len(), 1);
+            assert_eq!(model.issues.issues[0].number, 1776);
+            assert!(model.issues.last_error.is_none());
+        });
+    }
+
+    #[test]
+    fn load_initial_data_syncs_repo_scoped_issue_cache_when_missing() {
+        with_temp_home(|_home| {
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/example/repo.git",
+                ])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let script = r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  printf '[{"number":1776,"title":"Launch Agent issue linkage","body":"Body from startup sync","labels":[{"name":"ux"}],"state":"OPEN","url":"https://github.com/example/repo/issues/1776","updatedAt":"2026-04-13T00:00:00Z"}]'
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#;
+
+            with_fake_gh(script, || {
+                let mut model = Model::new(dir.path().to_path_buf());
+                load_initial_data_with(&mut model, |_| Ok(None), |_| Ok(vec![]));
+
+                assert_eq!(model.issues.issues.len(), 1);
+                assert_eq!(model.issues.issues[0].number, 1776);
+                assert_eq!(model.issues.issues[0].title, "Launch Agent issue linkage");
+                assert_eq!(model.issues.issues[0].body, "Body from startup sync");
+            });
+        });
+    }
+
+    #[test]
+    fn model_new_loads_specs_from_repo_scoped_cache_only() {
+        with_temp_home(|home| {
+            let repo_url = "https://github.com/example/specs.git";
+            let repo_hash = gwt_core::repo_hash::compute_repo_hash(repo_url);
+            let relevant_root = home
+                .join(".gwt")
+                .join("cache")
+                .join("issues")
+                .join(repo_hash.as_str());
+            let other_root = home.join(".gwt").join("cache").join("issues").join(
+                gwt_core::repo_hash::compute_repo_hash(
+                    "https://github.com/example/other-specs.git",
+                )
+                .as_str(),
+            );
+            write_cached_spec(
+                &relevant_root,
+                1776,
+                "Current repo spec",
+                gwt_github::IssueState::Open,
+                &["gwt-spec", "phase/draft"],
+            );
+            write_cached_spec(
+                &other_root,
+                42,
+                "Other repo spec",
+                gwt_github::IssueState::Open,
+                &["gwt-spec", "phase/draft"],
+            );
+
+            let dir = tempfile::tempdir().expect("temp repo");
+            init_git_repo(dir.path());
+            let add_remote = std::process::Command::new("git")
+                .args(["remote", "add", "origin", repo_url])
+                .current_dir(dir.path())
+                .output()
+                .expect("add github remote");
+            assert!(add_remote.status.success(), "git remote add failed");
+
+            let model = Model::new(dir.path().to_path_buf());
+            assert_eq!(model.specs.items.len(), 1);
+            assert_eq!(model.specs.items[0].number, 1776);
+            assert_eq!(model.specs.items[0].title, "Current repo spec");
+        });
+    }
+
+    #[test]
     fn route_key_to_management_branches_refresh_does_not_block_on_detail_reload() {
         let dir = tempfile::tempdir().expect("temp repo");
         init_git_repo(dir.path());
@@ -14012,12 +21780,13 @@ CUSTOM_ENV = "enabled"
 
         let mut model = Model::new(dir.path().to_path_buf());
         model.management_tab = ManagementTab::Branches;
-        model.set_branch_detail_docker_snapshotter(|| {
+        let project_root = dir.path().to_path_buf();
+        model.set_branch_detail_docker_snapshotter(move || {
             thread::sleep(std::time::Duration::from_millis(250));
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &project_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
 
@@ -14025,22 +21794,23 @@ CUSTOM_ENV = "enabled"
         route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
         let elapsed = start.elapsed();
 
+        // Tight enough to still prove non-blocking behavior (the mock
+        // snapshotter sleeps 250ms, so anything under that disproves "waited
+        // for it"), loose enough to survive CPU contention when the full test
+        // suite runs in parallel — the previous 150ms bound flaked whenever
+        // nearby tests were added.
         assert!(
-            elapsed < std::time::Duration::from_millis(150),
+            elapsed < std::time::Duration::from_millis(230),
             "Branches refresh should not block on branch detail reload: {elapsed:?}"
         );
         assert!(
-            model.branches.docker_containers.is_empty(),
+            model.branches.docker_services.is_empty(),
             "detail refresh should update docker data asynchronously"
         );
-
-        drive_ticks_until(
-            &mut model,
-            |model| !model.branches.docker_containers.is_empty(),
-            "branch detail refresh",
+        assert!(
+            model.branch_detail_worker.is_some(),
+            "branch detail refresh should run in the background"
         );
-
-        assert_eq!(model.branches.docker_containers[0].name, "web");
     }
 
     #[test]
@@ -14181,9 +21951,17 @@ CUSTOM_ENV = "enabled"
     fn route_key_to_branch_detail_overview_moves_docker_selection() {
         let mut model = test_model();
         model.branches.detail_section = 0;
-        model.branches.docker_containers = vec![
-            docker_container("abc123", "web", gwt_docker::ContainerStatus::Running),
-            docker_container("def456", "db", gwt_docker::ContainerStatus::Stopped),
+        model.branches.docker_services = vec![
+            docker_service(
+                std::path::Path::new("/tmp/test"),
+                "web",
+                gwt_docker::ComposeServiceStatus::Running,
+            ),
+            docker_service(
+                std::path::Path::new("/tmp/test"),
+                "db",
+                gwt_docker::ComposeServiceStatus::Stopped,
+            ),
         ];
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Down, KeyModifiers::NONE));
@@ -14200,12 +21978,13 @@ CUSTOM_ENV = "enabled"
         let mut model = test_model();
         model.management_tab = ManagementTab::Branches;
         model.active_focus = FocusPane::TabContent;
-        model.set_branch_detail_docker_snapshotter(|| {
+        let snapshot_root = wt_b.path().to_path_buf();
+        model.set_branch_detail_docker_snapshotter(move || {
             thread::sleep(std::time::Duration::from_millis(250));
-            vec![docker_container(
-                "abc123",
+            vec![docker_service(
+                &snapshot_root,
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )]
         });
         model.branches.branches = vec![
@@ -14215,6 +21994,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(wt_a.path().to_path_buf()),
+                upstream: None,
             },
             screens::branches::BranchItem {
                 name: "feature/b".to_string(),
@@ -14222,6 +22002,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(wt_b.path().to_path_buf()),
+                upstream: None,
             },
         ];
 
@@ -14249,6 +22030,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
             screens::branches::BranchItem {
                 name: "feature/b".to_string(),
@@ -14256,6 +22038,7 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: None,
+                upstream: None,
             },
         ];
 
@@ -14302,8 +22085,9 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
 
         model.sessions = vec![
             crate::model::SessionTab {
@@ -14338,8 +22122,9 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.active_focus = FocusPane::BranchDetail;
 
         model.sessions = vec![
@@ -14375,8 +22160,9 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-test")),
+            upstream: None,
         }];
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.active_focus = FocusPane::BranchDetail;
 
         model.sessions = vec![
@@ -14413,6 +22199,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -14445,6 +22232,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -14463,6 +22251,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -14485,6 +22274,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: None,
+            upstream: None,
         }];
         model.branches.detail_section = 0;
         model.active_focus = FocusPane::BranchDetail;
@@ -14503,6 +22293,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
         model.branches.detail_section = 2;
@@ -14522,16 +22313,17 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.branches.detail_session_selected = 4;
         model.active_focus = FocusPane::BranchDetail;
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
 
         assert_eq!(model.branches.selected, 0);
-        assert_eq!(model.branches.detail_section, 3);
+        assert_eq!(model.branches.detail_section, 2);
         assert_eq!(model.branches.detail_session_selected, 4);
         assert_eq!(
             model
@@ -14551,9 +22343,10 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.branches.selected = 0;
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         model.branches.detail_session_selected = 4;
         model.active_focus = FocusPane::BranchDetail;
         update(
@@ -14566,7 +22359,7 @@ CUSTOM_ENV = "enabled"
         assert_eq!(model.active_focus, FocusPane::TabContent);
         assert!(model.current_notification.is_some());
         assert_eq!(model.branches.selected, 0);
-        assert_eq!(model.branches.detail_section, 3);
+        assert_eq!(model.branches.detail_section, 2);
         assert_eq!(model.branches.detail_session_selected, 4);
     }
 
@@ -14580,6 +22373,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-esc-back")),
+            upstream: None,
         }];
         model.active_focus = FocusPane::BranchDetail;
         update(
@@ -14603,6 +22397,7 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-view-mode")),
+            upstream: None,
         }];
         model.active_focus = FocusPane::BranchDetail;
         model.branches.detail_section = 0;
@@ -14665,12 +22460,13 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-direct-actions")),
+            upstream: None,
         }];
         model.branches.detail_section = 0;
-        model.branches.docker_containers = vec![docker_container(
-            "abc123",
+        model.branches.docker_services = vec![docker_service(
+            std::path::Path::new("/tmp/test/wt-feature-direct-actions"),
             "web",
-            gwt_docker::ContainerStatus::Running,
+            gwt_docker::ComposeServiceStatus::Running,
         )];
 
         let overview = render_model_text(&model, 200, 24);
@@ -14687,7 +22483,7 @@ CUSTOM_ENV = "enabled"
         assert!(!no_worktree.contains("Ctrl+C:delete"));
         assert!(no_worktree.contains("Enter:launch"));
 
-        model.branches.detail_section = 3;
+        model.branches.detail_section = 2;
         let sessions = render_model_text(&model, 200, 24);
         assert!(sessions.contains("↑↓:session"));
         assert!(sessions.contains("Enter:focus"));
@@ -14705,9 +22501,11 @@ CUSTOM_ENV = "enabled"
             is_local: true,
             category: screens::branches::BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-mnemonics")),
+            upstream: None,
         }];
 
         let rendered = render_model_text(&model, 220, 24);
+        assert!(rendered.contains("Space:select"));
         assert!(rendered.contains("m:view"));
         assert!(rendered.contains("v:git"));
         assert!(rendered.contains("f:search"));
@@ -14725,6 +22523,294 @@ CUSTOM_ENV = "enabled"
     }
 
     #[test]
+    fn route_key_to_management_branches_space_on_unmerged_branch_selects_without_toast() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::TabContent);
+        assert!(model.branches.is_cleanup_selected("feature/not-merged"));
+        assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn route_key_to_branch_detail_space_on_unmerged_branch_selects_without_toast() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::BranchDetail;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-not-merged")),
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(model.active_focus, FocusPane::BranchDetail);
+        assert!(model.branches.is_cleanup_selected("feature/not-merged"));
+        assert!(model.current_notification.is_none());
+    }
+
+    #[test]
+    fn render_model_text_branches_blocked_cleanup_toast_is_visible_at_standard_width() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/computing".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+
+        let rendered = render_model_text(&model, 80, 24);
+        assert!(
+            rendered.contains("Cannot select: merge check running"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn route_key_input_shift_c_on_unmerged_selection_opens_confirm_with_warning() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Management;
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/not-merged".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        }];
+        model.branches.set_merge_state(
+            "feature/not-merged",
+            screens::branches::MergeState::NotMerged,
+        );
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+        );
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char('C'), KeyModifiers::SHIFT)),
+        );
+
+        assert!(model.cleanup_confirm.visible);
+        assert_eq!(model.cleanup_confirm.rows.len(), 1);
+        assert_eq!(
+            model.cleanup_confirm.rows[0].risks,
+            vec![screens::branches::CleanupSelectionRisk::Unmerged]
+        );
+    }
+
+    #[test]
+    fn update_key_input_cleanup_confirm_r_then_enter_deletes_remote_branch() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_create_branch(&repo_path, "feature/cleanup-remote");
+        git_push_branch(&repo_path, "feature/cleanup-remote");
+
+        let mut model = Model::new(repo_path.clone());
+        model.cleanup_confirm.show(
+            vec![screens::cleanup_confirm::CleanupConfirmRow {
+                branch: "feature/cleanup-remote".to_string(),
+                target: Some(gwt_git::MergeTarget::Main),
+                execution_branch: "feature/cleanup-remote".to_string(),
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+                risks: Vec::new(),
+            }],
+            false,
+        );
+        model.branches.branches = vec![screens::branches::BranchItem {
+            name: "feature/cleanup-remote".to_string(),
+            is_head: false,
+            is_local: true,
+            category: screens::branches::BranchCategory::Feature,
+            worktree_path: None,
+            upstream: Some("origin/feature/cleanup-remote".to_string()),
+        }];
+        model.branches.current_head_branch = Some("master".to_string());
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Char('r'), KeyModifiers::NONE)),
+        );
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| {
+                model
+                    .cleanup_progress
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.phase == screens::branches::CleanupRunPhase::Done)
+            },
+            "cleanup progress completion",
+        );
+
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            !remote_output.status.success(),
+            "remote branch should be deleted: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
+    }
+
+    #[test]
+    fn update_key_input_cleanup_confirm_enter_on_remote_tracking_row_deletes_local_only() {
+        let workspace_dir = tempfile::tempdir().expect("temp workspace dir");
+        let repo_path = workspace_dir.path().join("gwt");
+        let remote_path = workspace_dir.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_create_branch(&repo_path, "feature/cleanup-remote");
+        git_push_branch(&repo_path, "feature/cleanup-remote");
+
+        let mut model = Model::new(repo_path.clone());
+        model.cleanup_confirm.show(
+            vec![screens::cleanup_confirm::CleanupConfirmRow {
+                branch: "origin/feature/cleanup-remote".to_string(),
+                target: Some(gwt_git::MergeTarget::Main),
+                execution_branch: "feature/cleanup-remote".to_string(),
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+                risks: vec![screens::branches::CleanupSelectionRisk::RemoteTracking],
+            }],
+            false,
+        );
+        model.branches.branches = vec![
+            screens::branches::BranchItem {
+                name: "feature/cleanup-remote".to_string(),
+                is_head: false,
+                is_local: true,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+                upstream: Some("origin/feature/cleanup-remote".to_string()),
+            },
+            screens::branches::BranchItem {
+                name: "origin/feature/cleanup-remote".to_string(),
+                is_head: false,
+                is_local: false,
+                category: screens::branches::BranchCategory::Feature,
+                worktree_path: None,
+                upstream: None,
+            },
+        ];
+        model.branches.current_head_branch = Some("master".to_string());
+
+        update(
+            &mut model,
+            Message::KeyInput(key(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        drive_ticks_until(
+            &mut model,
+            |model| {
+                model
+                    .cleanup_progress
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.phase == screens::branches::CleanupRunPhase::Done)
+            },
+            "cleanup progress completion",
+        );
+
+        let local_output = std::process::Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read local branch");
+        assert!(
+            !local_output.status.success(),
+            "local branch should be deleted"
+        );
+
+        let remote_output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "feature/cleanup-remote",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("read remote branch");
+        assert!(
+            remote_output.status.success(),
+            "remote branch should remain when delete_remote is off: {}",
+            String::from_utf8_lossy(&remote_output.stderr)
+        );
+    }
+
+    #[test]
     fn update_branches_docker_stop_executes_and_refreshes_detail() {
         let tmp = tempfile::tempdir().expect("temp worktree");
         fs::write(
@@ -14733,7 +22819,7 @@ CUSTOM_ENV = "enabled"
         )
         .expect("compose");
 
-        let script = "#!/bin/sh\nif [ \"$1\" = \"stop\" ]; then\n  sleep 0.1\n  exit 0\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\texited\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"stop\" ] && [ \"$5\" = \"web\" ]; then\n  sleep 0.1\n  exit 0\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\texited\\n'\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, || {
             let mut model = test_model();
@@ -14743,16 +22829,17 @@ CUSTOM_ENV = "enabled"
                 is_local: true,
                 category: screens::branches::BranchCategory::Feature,
                 worktree_path: Some(tmp.path().to_path_buf()),
+                upstream: None,
             }];
-            model.branches.docker_containers = vec![docker_container(
-                "abc123",
+            model.branches.docker_services = vec![docker_service(
+                tmp.path(),
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )];
 
             update(
                 &mut model,
-                Message::Branches(screens::branches::BranchesMessage::DockerContainerStop),
+                Message::Branches(screens::branches::BranchesMessage::DockerServiceStop),
             );
 
             assert!(model.branches.pending_docker_action.is_none());
@@ -14763,10 +22850,10 @@ CUSTOM_ENV = "enabled"
                 docker_progress.stage,
                 screens::docker_progress::DockerStage::StartingContainer
             );
-            assert_eq!(docker_progress.message, "Stopping container web");
+            assert_eq!(docker_progress.message, "Stopping service web");
             assert_eq!(
-                model.branches.docker_containers[0].status,
-                gwt_docker::ContainerStatus::Running
+                model.branches.docker_services[0].status,
+                gwt_docker::ComposeServiceStatus::Running
             );
 
             drive_docker_worker_until(
@@ -14782,52 +22869,52 @@ CUSTOM_ENV = "enabled"
                 |model| {
                     model
                         .branches
-                        .docker_containers
+                        .docker_services
                         .first()
-                        .is_some_and(|container| {
-                            container.status == gwt_docker::ContainerStatus::Exited
+                        .is_some_and(|service| {
+                            service.status == gwt_docker::ComposeServiceStatus::Exited
                         })
                 },
                 "branch detail refresh after docker stop",
             );
 
-            assert_eq!(model.branches.docker_containers.len(), 1);
+            assert_eq!(model.branches.docker_services.len(), 1);
             assert_eq!(
-                model.branches.docker_containers[0].status,
-                gwt_docker::ContainerStatus::Exited
+                model.branches.docker_services[0].status,
+                gwt_docker::ComposeServiceStatus::Exited
             );
             let docker_progress = model.docker_progress.as_ref().expect("docker progress");
             assert_eq!(
                 docker_progress.stage,
                 screens::docker_progress::DockerStage::Ready
             );
-            assert_eq!(docker_progress.message, "Stopped container web");
+            assert_eq!(docker_progress.message, "Stopped service web");
             assert!(docker_progress.error.is_none());
             let notification = model
                 .current_notification
                 .as_ref()
                 .expect("status notification");
             assert_eq!(notification.source, "docker");
-            assert_eq!(notification.message, "Stopped container web");
+            assert_eq!(notification.message, "Stopped service web");
             assert!(model.error_queue.is_empty());
         });
     }
 
     #[test]
     fn update_branches_docker_restart_failure_routes_error_notification() {
-        let script = "#!/bin/sh\nif [ \"$1\" = \"restart\" ]; then\n  sleep 0.1\n  printf 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"ps\" ]; then\n  printf 'abc123\tweb\trunning\tnginx:latest\t0.0.0.0:8080->80/tcp\\n'\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"restart\" ] && [ \"$5\" = \"web\" ]; then\n  sleep 0.1\n  printf 'permission denied' >&2\n  exit 1\nfi\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'web\trunning\\n'\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, || {
             let mut model = test_model();
-            model.branches.docker_containers = vec![docker_container(
-                "abc123",
+            model.branches.docker_services = vec![docker_service(
+                std::path::Path::new("/tmp/test"),
                 "web",
-                gwt_docker::ContainerStatus::Running,
+                gwt_docker::ComposeServiceStatus::Running,
             )];
 
             update(
                 &mut model,
-                Message::Branches(screens::branches::BranchesMessage::DockerContainerRestart),
+                Message::Branches(screens::branches::BranchesMessage::DockerServiceRestart),
             );
 
             assert!(model.docker_progress_events.is_some());
@@ -14837,7 +22924,7 @@ CUSTOM_ENV = "enabled"
                 docker_progress.stage,
                 screens::docker_progress::DockerStage::StartingContainer
             );
-            assert_eq!(docker_progress.message, "Restarting container web");
+            assert_eq!(docker_progress.message, "Restarting service web");
 
             drive_docker_worker_until(
                 &mut model,
@@ -14857,10 +22944,10 @@ CUSTOM_ENV = "enabled"
                 .error
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Failed to restart container web"));
+                .contains("Failed to restart service web"));
             let notification = model.error_queue.front().unwrap();
             assert_eq!(notification.source, "docker");
-            assert_eq!(notification.message, "Failed to restart container web");
+            assert_eq!(notification.message, "Failed to restart service web");
             assert!(notification
                 .detail
                 .as_deref()

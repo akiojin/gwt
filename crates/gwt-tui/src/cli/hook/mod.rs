@@ -19,6 +19,7 @@ pub mod block_git_dir_override;
 pub mod forward;
 pub mod runtime_state;
 pub mod segments;
+pub mod workflow_policy;
 pub mod worktree;
 
 use std::io::{self, Read};
@@ -33,10 +34,7 @@ use serde::{Deserialize, Serialize};
 pub enum HookKind {
     RuntimeState,
     BlockBashPolicy,
-    BlockGitBranchOps,
-    BlockCdCommand,
-    BlockFileOps,
-    BlockGitDirOverride,
+    WorkflowPolicy,
     Forward,
 }
 
@@ -49,10 +47,7 @@ impl HookKind {
         match name {
             "runtime-state" => Some(Self::RuntimeState),
             "block-bash-policy" => Some(Self::BlockBashPolicy),
-            "block-git-branch-ops" => Some(Self::BlockGitBranchOps),
-            "block-cd-command" => Some(Self::BlockCdCommand),
-            "block-file-ops" => Some(Self::BlockFileOps),
-            "block-git-dir-override" => Some(Self::BlockGitDirOverride),
+            "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
             _ => None,
         }

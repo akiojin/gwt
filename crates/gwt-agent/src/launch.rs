@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
-use crate::types::{AgentColor, AgentId, SessionMode};
+use crate::types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode};
 
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.
@@ -132,6 +132,10 @@ pub struct LaunchConfig {
     pub resume_session_id: Option<String>,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub runtime_target: LaunchRuntimeTarget,
+    pub docker_service: Option<String>,
+    pub docker_lifecycle_intent: DockerLifecycleIntent,
+    pub linked_issue_number: Option<u64>,
 }
 
 /// Permission mode for agent launch.
@@ -162,6 +166,9 @@ pub struct AgentLaunchBuilder {
     permission_mode: Option<PermissionMode>,
     env_overrides: HashMap<String, String>,
     extra_args: Vec<String>,
+    runtime_target: LaunchRuntimeTarget,
+    docker_service: Option<String>,
+    docker_lifecycle_intent: DockerLifecycleIntent,
 }
 
 impl AgentLaunchBuilder {
@@ -181,6 +188,9 @@ impl AgentLaunchBuilder {
             permission_mode: None,
             env_overrides: HashMap::new(),
             extra_args: Vec::new(),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
         }
     }
 
@@ -247,6 +257,21 @@ impl AgentLaunchBuilder {
 
     pub fn extra_arg(mut self, arg: impl Into<String>) -> Self {
         self.extra_args.push(arg.into());
+        self
+    }
+
+    pub fn runtime_target(mut self, target: LaunchRuntimeTarget) -> Self {
+        self.runtime_target = target;
+        self
+    }
+
+    pub fn docker_service(mut self, service: impl Into<String>) -> Self {
+        self.docker_service = Some(service.into());
+        self
+    }
+
+    pub fn docker_lifecycle_intent(mut self, intent: DockerLifecycleIntent) -> Self {
+        self.docker_lifecycle_intent = intent;
         self
     }
 
@@ -341,6 +366,10 @@ impl AgentLaunchBuilder {
             resume_session_id,
             skip_permissions,
             codex_fast_mode,
+            runtime_target: self.runtime_target,
+            docker_service: self.docker_service,
+            docker_lifecycle_intent: self.docker_lifecycle_intent,
+            linked_issue_number: None,
         }
     }
 
@@ -394,6 +423,12 @@ impl AgentLaunchBuilder {
         if let Some(ref model) = self.model {
             args.push("--model".to_string());
             args.push(model.clone());
+        }
+
+        if let Some(ref level) = self.reasoning_level {
+            if level != "auto" {
+                env_vars.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), level.clone());
+            }
         }
     }
 
@@ -594,6 +629,31 @@ mod tests {
         assert!(config
             .args
             .contains(&"claude-sonnet-4-20250514".to_string()));
+    }
+
+    #[test]
+    fn build_claude_with_auto_reasoning_does_not_export_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("auto")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("auto"));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+        assert!(!config.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn build_claude_with_reasoning_level_exports_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("high")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"high".to_string())
+        );
+        assert!(!config.args.contains(&"--effort".to_string()));
     }
 
     #[test]

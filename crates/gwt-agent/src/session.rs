@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::{AgentId, AgentStatus};
+use crate::types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget};
 
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
@@ -36,10 +36,31 @@ pub struct Session {
     pub skip_permissions: bool,
     #[serde(default)]
     pub codex_fast_mode: bool,
+    #[serde(default)]
+    pub runtime_target: LaunchRuntimeTarget,
+    #[serde(default)]
+    pub docker_service: Option<String>,
+    #[serde(default)]
+    pub docker_lifecycle_intent: DockerLifecycleIntent,
+    #[serde(default)]
+    pub linked_issue_number: Option<u64>,
+    #[serde(default)]
+    pub launch_command: String,
+    #[serde(default)]
+    pub launch_args: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub display_name: String,
+}
+
+/// Lightweight runtime state updated by hook events while the PTY is alive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingDiscussionResume {
+    pub proposal_label: String,
+    pub proposal_title: String,
+    #[serde(default)]
+    pub next_question: Option<String>,
 }
 
 /// Lightweight runtime state updated by hook events while the PTY is alive.
@@ -50,6 +71,8 @@ pub struct SessionRuntimeState {
     pub last_activity_at: DateTime<Utc>,
     #[serde(default)]
     pub source_event: Option<String>,
+    #[serde(default)]
+    pub pending_discussion: Option<PendingDiscussionResume>,
 }
 
 impl Session {
@@ -73,6 +96,12 @@ impl Session {
             reasoning_level: None,
             skip_permissions: false,
             codex_fast_mode: false,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            linked_issue_number: None,
+            launch_command: String::new(),
+            launch_args: Vec::new(),
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -128,6 +157,7 @@ impl SessionRuntimeState {
             updated_at: now,
             last_activity_at: now,
             source_event: None,
+            pending_discussion: None,
         }
     }
 
@@ -224,10 +254,8 @@ pub fn persist_session_status(
 
 fn hook_event_status(event: &str) -> Option<AgentStatus> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
-            Some(AgentStatus::Running)
-        }
-        "Stop" => Some(AgentStatus::WaitingInput),
+        "SessionStart" | "Stop" => Some(AgentStatus::WaitingInput),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentStatus::Running),
         _ => None,
     }
 }
@@ -257,6 +285,12 @@ mod tests {
         assert!(session.reasoning_level.is_none());
         assert!(!session.skip_permissions);
         assert!(!session.codex_fast_mode);
+        assert_eq!(session.runtime_target, LaunchRuntimeTarget::Host);
+        assert!(session.docker_service.is_none());
+        assert_eq!(
+            session.docker_lifecycle_intent,
+            DockerLifecycleIntent::Connect
+        );
     }
 
     #[test]
@@ -301,6 +335,16 @@ mod tests {
         session.reasoning_level = Some("high".into());
         session.skip_permissions = true;
         session.codex_fast_mode = true;
+        session.runtime_target = LaunchRuntimeTarget::Docker;
+        session.docker_service = Some("web".into());
+        session.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
+        session.launch_command = "codex".into();
+        session.launch_args = vec![
+            "--no-alt-screen".into(),
+            "--model=gpt-5.4".into(),
+            "resume".into(),
+            "--last".into(),
+        ];
 
         session.save(dir.path()).unwrap();
 
@@ -317,7 +361,82 @@ mod tests {
         assert_eq!(loaded.reasoning_level, Some("high".into()));
         assert!(loaded.skip_permissions);
         assert!(loaded.codex_fast_mode);
+        assert_eq!(loaded.runtime_target, LaunchRuntimeTarget::Docker);
+        assert_eq!(loaded.docker_service, Some("web".into()));
+        assert_eq!(
+            loaded.docker_lifecycle_intent,
+            DockerLifecycleIntent::Restart
+        );
+        assert_eq!(loaded.launch_command, "codex");
+        assert_eq!(
+            loaded.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "--last".to_string()
+            ]
+        );
         assert_eq!(loaded.display_name, "Gemini CLI");
+    }
+
+    #[test]
+    fn load_legacy_toml_without_runtime_fields_uses_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.toml");
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
+        let mut legacy = toml::map::Map::new();
+        legacy.insert("id".into(), toml::Value::String(session.id.clone()));
+        legacy.insert(
+            "worktree_path".into(),
+            toml::Value::String(session.worktree_path.display().to_string()),
+        );
+        legacy.insert("branch".into(), toml::Value::String(session.branch.clone()));
+        legacy.insert(
+            "agent_id".into(),
+            toml::Value::try_from(session.agent_id.clone()).unwrap(),
+        );
+        legacy.insert(
+            "agent_session_id".into(),
+            toml::Value::String("agent-legacy".into()),
+        );
+        legacy.insert(
+            "status".into(),
+            toml::Value::try_from(session.status).unwrap(),
+        );
+        legacy.insert("tool_version".into(), toml::Value::String("1.2.3".into()));
+        legacy.insert("model".into(), toml::Value::String("gemini-pro".into()));
+        legacy.insert("reasoning_level".into(), toml::Value::String("high".into()));
+        legacy.insert("skip_permissions".into(), toml::Value::Boolean(true));
+        legacy.insert("codex_fast_mode".into(), toml::Value::Boolean(false));
+        legacy.insert(
+            "created_at".into(),
+            toml::Value::try_from(session.created_at).unwrap(),
+        );
+        legacy.insert(
+            "updated_at".into(),
+            toml::Value::try_from(session.updated_at).unwrap(),
+        );
+        legacy.insert(
+            "last_activity_at".into(),
+            toml::Value::try_from(session.last_activity_at).unwrap(),
+        );
+        legacy.insert(
+            "display_name".into(),
+            toml::Value::String(session.display_name.clone()),
+        );
+
+        std::fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+
+        let loaded = Session::load(&path).unwrap();
+        assert_eq!(loaded.runtime_target, LaunchRuntimeTarget::Host);
+        assert!(loaded.docker_service.is_none());
+        assert_eq!(
+            loaded.docker_lifecycle_intent,
+            DockerLifecycleIntent::Connect
+        );
+        assert!(loaded.launch_command.is_empty());
+        assert!(loaded.launch_args.is_empty());
     }
 
     #[test]
@@ -337,16 +456,16 @@ mod tests {
 
     #[test]
     fn hook_runtime_state_maps_running_and_waiting_events() {
-        for event in [
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-        ] {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse"] {
             let runtime = SessionRuntimeState::from_hook_event(event).expect("running event");
             assert_eq!(runtime.status, AgentStatus::Running, "{event}");
             assert_eq!(runtime.source_event.as_deref(), Some(event));
         }
+
+        let session_start =
+            SessionRuntimeState::from_hook_event("SessionStart").expect("session start event");
+        assert_eq!(session_start.status, AgentStatus::WaitingInput);
+        assert_eq!(session_start.source_event.as_deref(), Some("SessionStart"));
 
         let waiting = SessionRuntimeState::from_hook_event("Stop").expect("waiting event");
         assert_eq!(waiting.status, AgentStatus::WaitingInput);

@@ -46,7 +46,8 @@ pub fn render_with_notification_and_hints(
         .map(|s| session_type_label(&s.tab_type))
         .unwrap_or_else(|| "None".to_string());
     let branch_context = derive_branch_context(model).unwrap_or_else(|| "n/a".to_string());
-    let compact_footer = notification.is_none() && hints.is_some() && area.width <= 80;
+    let compact_footer = hints.is_some() && area.width <= 80;
+    let profile_context = profile_status_label(model, compact_footer);
 
     let layout_icon = match model.session_layout {
         SessionLayout::Tab => theme::icon::LAYOUT_TAB,
@@ -63,24 +64,16 @@ pub fn render_with_notification_and_hints(
         vec![
             Span::styled(
                 format!(
-                    " {layout_icon} {} ",
-                    compact_session_type_label(&session_type)
-                ),
-                Style::default().fg(theme::color::TEXT_PRIMARY),
-            ),
-            theme::status_separator(),
-            Span::styled(
-                format!(
                     " {}{} ",
                     theme::icon::GIT_BRANCH,
-                    compact_branch_context(&branch_context, 8)
+                    compact_branch_context(&branch_context, 6)
                 ),
                 Style::default().fg(theme::color::SUCCESS),
             ),
             theme::status_separator(),
             Span::styled(
-                format!(" [{}] ", compact_layer_label(layer)),
-                theme::style::layer_badge(),
+                format!(" {} ", profile_context),
+                Style::default().fg(theme::color::FOCUS),
             ),
         ]
     } else {
@@ -93,6 +86,11 @@ pub fn render_with_notification_and_hints(
             Span::styled(
                 format!(" {} {branch_context} ", theme::icon::GIT_BRANCH),
                 Style::default().fg(theme::color::SUCCESS),
+            ),
+            theme::status_separator(),
+            Span::styled(
+                format!(" {profile_context} "),
+                Style::default().fg(theme::color::FOCUS),
             ),
             theme::status_separator(),
             Span::styled(
@@ -117,28 +115,38 @@ pub fn render_with_notification_and_hints(
 
     if let Some(notification) = notification {
         spans.push(theme::status_separator());
-        spans.push(notification_span(notification));
+        spans.push(notification_span(notification, compact_footer));
     }
 
-    if !compact_footer {
-        spans.push(theme::status_separator());
-        spans.push(Span::styled(
-            format!(" {} ", model.repo_path.display()),
-            Style::default().fg(theme::color::SURFACE),
-        ));
-    }
-    spans.push(theme::status_separator());
-    if let Some(hints) = hints.filter(|value| !value.is_empty()) {
-        spans.push(Span::styled(
+    let hint_span = if let Some(hints) = hints.filter(|value| !value.is_empty()) {
+        Span::styled(
             format!(" {hints} "),
             Style::default().fg(theme::color::SURFACE),
-        ));
+        )
     } else {
-        spans.push(Span::styled(
+        Span::styled(
             " Ctrl+G,? Help ",
             Style::default().fg(theme::color::SURFACE),
-        ));
+        )
+    };
+
+    if !compact_footer {
+        let repo_span = Span::styled(
+            format!(" {} ", model.repo_path.display()),
+            Style::default().fg(theme::color::SURFACE),
+        );
+        let projected_width = spans_width(&spans)
+            + span_width(&theme::status_separator())
+            + span_width(&repo_span)
+            + span_width(&theme::status_separator())
+            + span_width(&hint_span);
+        if projected_width <= area.width as usize {
+            spans.push(theme::status_separator());
+            spans.push(repo_span);
+        }
     }
+    spans.push(theme::status_separator());
+    spans.push(hint_span);
 
     let status = Line::from(spans);
 
@@ -157,24 +165,12 @@ fn compact_branch_context(branch_context: &str, max_chars: usize) -> String {
     format!("{truncated}…")
 }
 
-fn compact_session_type_label(session_type: &str) -> &str {
-    match session_type {
-        "Shell" => "Sh",
-        "Claude" => "Cl",
-        "Codex" => "Cx",
-        "Gemini CLI" => "Gm",
-        "OpenCode" => "Op",
-        _ => session_type,
-    }
+fn span_width(span: &Span<'_>) -> usize {
+    span.content.chars().count()
 }
 
-fn compact_layer_label(layer: &str) -> &str {
-    match layer {
-        "Main" => "M",
-        "Mgmt" => "G",
-        "Init" => "I",
-        _ => layer,
-    }
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(span_width).sum()
 }
 
 fn derive_branch_context(model: &Model) -> Option<String> {
@@ -190,6 +186,26 @@ fn derive_branch_context(model: &Model) -> Option<String> {
         .map(|branch| branch.name.clone())
 }
 
+fn profile_status_label(model: &Model, compact: bool) -> String {
+    if compact {
+        if model.active_profile.fallback {
+            format!(
+                "P:{}!",
+                compact_branch_context(&model.active_profile.name, 12)
+            )
+        } else {
+            format!(
+                "P:{}",
+                compact_branch_context(&model.active_profile.name, 12)
+            )
+        }
+    } else if model.active_profile.fallback {
+        format!("profile: {} (fallback)", model.active_profile.name)
+    } else {
+        format!("profile: {}", model.active_profile.name)
+    }
+}
+
 fn session_type_label(tab_type: &SessionTabType) -> String {
     match tab_type {
         SessionTabType::Shell => "Shell".to_string(),
@@ -203,7 +219,7 @@ fn session_type_label(tab_type: &SessionTabType) -> String {
     }
 }
 
-fn notification_span(notification: &Notification) -> Span<'static> {
+fn notification_span(notification: &Notification, compact: bool) -> Span<'static> {
     let style = match notification.severity {
         Severity::Debug => Style::default().fg(theme::color::SURFACE),
         Severity::Info => theme::style::success_text(),
@@ -211,15 +227,24 @@ fn notification_span(notification: &Notification) -> Span<'static> {
         Severity::Error => theme::style::error_text(),
     };
 
-    let summary = match notification.detail.as_deref() {
-        Some(detail) if !detail.is_empty() => format!(
-            " {} {}: {} - {} ",
-            notification.severity, notification.source, notification.message, detail
-        ),
-        _ => format!(
-            " {} {}: {} ",
-            notification.severity, notification.source, notification.message
-        ),
+    let summary = if compact {
+        match notification.detail.as_deref() {
+            Some(detail) if !detail.is_empty() => {
+                format!(" {} - {} ", notification.message, detail)
+            }
+            _ => format!(" {} ", notification.message),
+        }
+    } else {
+        match notification.detail.as_deref() {
+            Some(detail) if !detail.is_empty() => format!(
+                " {} {}: {} - {} ",
+                notification.severity, notification.source, notification.message, detail
+            ),
+            _ => format!(
+                " {} {}: {} ",
+                notification.severity, notification.source, notification.message
+            ),
+        }
     };
 
     Span::styled(summary, style)
@@ -318,6 +343,33 @@ mod tests {
     }
 
     #[test]
+    fn render_with_info_notification_on_narrow_width_prioritizes_notification_summary() {
+        let mut model = Model::new(PathBuf::from("/tmp/test"));
+        model.active_layer = ActiveLayer::Management;
+        let notification =
+            Notification::new(Severity::Info, "cleanup", "Cannot select: not merged");
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_with_notification_and_hints(
+                    &model,
+                    Some(&notification),
+                    Some("↑↓ mv  ←→ tab  ↵ wiz  Sp sel  ⇧C clean  a all"),
+                    f,
+                    area,
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("Cannot select: not merged"), "{text}");
+    }
+
+    #[test]
     fn render_status_bar_shell_session_shows_branch_and_shell_type() {
         let mut model = Model::new(PathBuf::from("/tmp/test"));
         model.active_layer = ActiveLayer::Main;
@@ -344,6 +396,7 @@ mod tests {
             .collect();
         assert!(text.contains("feature/status-bar"));
         assert!(text.contains("type: Shell"));
+        assert!(text.contains("profile: default"));
     }
 
     #[test]
@@ -366,6 +419,7 @@ mod tests {
             is_local: true,
             category: BranchCategory::Feature,
             worktree_path: Some(PathBuf::from("/tmp/test/wt-feature-agent-context")),
+            upstream: None,
         }];
         model.branches.selected = 0;
 
@@ -384,5 +438,33 @@ mod tests {
             .collect();
         assert!(text.contains("feature/agent-context"));
         assert!(text.contains("type: Codex"));
+        assert!(text.contains("profile: default"));
+    }
+
+    #[test]
+    fn render_compact_status_bar_shows_compact_profile_label() {
+        let mut model = Model::new(PathBuf::from("/tmp/test"));
+        model.active_layer = ActiveLayer::Management;
+
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_with_notification_and_hints(
+                    &model,
+                    None,
+                    Some("↑↓ mv  ←→ tab  ↵ wiz  Sp sel  ⇧C clean  a all"),
+                    f,
+                    area,
+                );
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(text.contains("P:default"), "{text}");
     }
 }

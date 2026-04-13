@@ -1,8 +1,17 @@
 //! Shared test utilities for gwt-terminal.
 
 use std::io::Read;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
+
+static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub fn lock_pty_test() -> MutexGuard<'static, ()> {
+    PTY_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("pty test lock poisoned")
+}
 
 /// Read from a PTY reader in a separate thread with timeout.
 ///

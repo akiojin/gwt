@@ -136,7 +136,7 @@ shell output are not delayed until the next keypress.
   (15-minute TTL) at startup. The first search after a fresh install downloads the
   `intfloat/multilingual-e5-base` embedding model (~440 MB) into `~/.cache/huggingface/`.
   SPECs live as GitHub Issues labeled `gwt-spec` and are cached locally at
-  `~/.gwt/cache/issues/`; use `gwt issue spec <n>` to read and `gwt issue spec <n> --edit <section> -f <file>` to write.
+  `~/.gwt/cache/issues/<repo-hash>/`; use `gwt issue spec <n>` to read and `gwt issue spec <n> --edit <section> -f <file>` to write.
 
 ### GitHub Token (PAT) requirements
 

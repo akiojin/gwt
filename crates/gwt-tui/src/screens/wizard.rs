@@ -8,12 +8,13 @@ use ratatui::{
     Frame,
 };
 
-use crate::theme;
+use crate::{screens::issues::IssueItem, theme};
 
 /// Which step of the wizard is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WizardStep {
     QuickStart,
+    FocusExistingSession,
     #[default]
     BranchAction,
     AgentSelect,
@@ -21,6 +22,9 @@ pub enum WizardStep {
     ReasoningLevel,
     VersionSelect,
     ExecutionMode,
+    RuntimeTarget,
+    DockerServiceSelect,
+    DockerLifecycle,
     ConvertAgentSelect,
     ConvertSessionSelect,
     BranchTypeSelect,
@@ -36,12 +40,16 @@ impl WizardStep {
     pub fn title(self) -> &'static str {
         match self {
             Self::QuickStart => "Quick Start",
+            Self::FocusExistingSession => "Focus Existing Session",
             Self::BranchAction => "Branch Action",
             Self::AgentSelect => "Select Coding Agent",
             Self::ModelSelect => "Select Model",
             Self::ReasoningLevel => "Reasoning Level",
             Self::VersionSelect => "Select Version",
             Self::ExecutionMode => "Execution Mode",
+            Self::RuntimeTarget => "Runtime Target",
+            Self::DockerServiceSelect => "Docker Service",
+            Self::DockerLifecycle => "Docker Lifecycle",
             Self::ConvertAgentSelect => "Convert From Agent",
             Self::ConvertSessionSelect => "Select Session",
             Self::BranchTypeSelect => "Branch Type",
@@ -54,6 +62,20 @@ impl WizardStep {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeModelFamily {
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningStepKind {
+    None,
+    Codex,
+    ClaudeEffort { max_available: bool },
+}
+
 /// Determine the next step based on current step and wizard context.
 ///
 /// Restores the old branch-first flow:
@@ -63,10 +85,12 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
         WizardStep::QuickStart => match state.selected_quick_start_action() {
             QuickStartAction::ChooseDifferent => Some(WizardStep::BranchAction),
+            QuickStartAction::FocusExistingSession => Some(WizardStep::FocusExistingSession),
             QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious => {
                 Some(WizardStep::SkipPermissions)
             }
         },
+        WizardStep::FocusExistingSession => None,
         WizardStep::BranchAction => {
             if state.selected == 1 {
                 Some(WizardStep::BranchTypeSelect)
@@ -77,6 +101,8 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::AgentSelect => {
             if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
@@ -84,8 +110,10 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::ModelSelect => {
-            if state.agent_is_codex() {
+            if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
             } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
@@ -93,7 +121,9 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::ReasoningLevel => {
-            if state.agent_has_npm_package() {
+            if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
+            } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
             } else {
                 Some(WizardStep::ExecutionMode)
@@ -105,6 +135,27 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
                 Some(WizardStep::ConvertAgentSelect)
             } else {
                 Some(WizardStep::SkipPermissions)
+            }
+        }
+        WizardStep::RuntimeTarget => {
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+                && state.docker_service_prompt_required()
+            {
+                Some(WizardStep::DockerServiceSelect)
+            } else if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                Some(WizardStep::DockerLifecycle)
+            } else if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
+            } else {
+                Some(WizardStep::ExecutionMode)
+            }
+        }
+        WizardStep::DockerServiceSelect => Some(WizardStep::DockerLifecycle),
+        WizardStep::DockerLifecycle => {
+            if state.agent_has_npm_package() {
+                Some(WizardStep::VersionSelect)
+            } else {
+                Some(WizardStep::ExecutionMode)
             }
         }
         WizardStep::ConvertAgentSelect => Some(WizardStep::ConvertSessionSelect),
@@ -142,8 +193,9 @@ fn next_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
 fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
     match current {
         WizardStep::QuickStart => None,
+        WizardStep::FocusExistingSession => Some(WizardStep::QuickStart),
         WizardStep::BranchAction => {
-            if state.has_quick_start && !state.quick_start_entries.is_empty() {
+            if state.has_quick_start && state.has_quick_start_actions() {
                 Some(WizardStep::QuickStart)
             } else {
                 None
@@ -159,7 +211,11 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
         WizardStep::ModelSelect => Some(WizardStep::AgentSelect),
         WizardStep::ReasoningLevel => Some(WizardStep::ModelSelect),
         WizardStep::VersionSelect => {
-            if state.agent_is_codex() {
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                Some(WizardStep::DockerLifecycle)
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
+            } else if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
@@ -168,14 +224,35 @@ fn prev_step(current: WizardStep, state: &WizardState) -> Option<WizardStep> {
             }
         }
         WizardStep::ExecutionMode => {
-            if state.agent_has_npm_package() {
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                Some(WizardStep::DockerLifecycle)
+            } else if state.agent_has_npm_package() {
                 Some(WizardStep::VersionSelect)
-            } else if state.agent_is_codex() {
+            } else if state.has_docker_workflow() {
+                Some(WizardStep::RuntimeTarget)
+            } else if state.agent_uses_reasoning_step() {
                 Some(WizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
                 Some(WizardStep::ModelSelect)
             } else {
                 Some(WizardStep::AgentSelect)
+            }
+        }
+        WizardStep::RuntimeTarget => {
+            if state.agent_uses_reasoning_step() {
+                Some(WizardStep::ReasoningLevel)
+            } else if state.agent_has_models() {
+                Some(WizardStep::ModelSelect)
+            } else {
+                Some(WizardStep::AgentSelect)
+            }
+        }
+        WizardStep::DockerServiceSelect => Some(WizardStep::RuntimeTarget),
+        WizardStep::DockerLifecycle => {
+            if state.docker_service_prompt_required() {
+                Some(WizardStep::DockerServiceSelect)
+            } else {
+                Some(WizardStep::RuntimeTarget)
             }
         }
         WizardStep::ConvertAgentSelect => Some(WizardStep::ExecutionMode),
@@ -226,6 +303,7 @@ pub struct BranchSuggestionOption {
 
 const AI_SUGGEST_TIMEOUT_TICKS: usize = 12;
 const MANUAL_INPUT_LABEL: &str = "Manual input";
+const RELATED_TO_NONE_LABEL: &str = "Related to none";
 
 #[derive(Debug, Clone, Default)]
 pub struct AISuggestState {
@@ -239,6 +317,36 @@ pub struct AISuggestState {
     pub error: Option<String>,
     /// Tick counter for spinner animation (incremented on WizardMessage::Tick).
     pub tick_counter: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssuePickerState {
+    pub issues: Vec<IssueItem>,
+    pub search_query: String,
+    pub search_active: bool,
+    pub load_error: Option<String>,
+}
+
+impl IssuePickerState {
+    pub fn filtered_issues(&self) -> Vec<&IssueItem> {
+        let query = self.search_query.trim().to_lowercase();
+        let mut issues = self
+            .issues
+            .iter()
+            .filter(|issue| {
+                query.is_empty()
+                    || issue.number.to_string().contains(&query)
+                    || issue.title.to_lowercase().contains(&query)
+                    || issue.state.to_lowercase().contains(&query)
+                    || issue
+                        .labels
+                        .iter()
+                        .any(|label| label.to_lowercase().contains(&query))
+            })
+            .collect::<Vec<_>>();
+        issues.sort_by(|left, right| right.number.cmp(&left.number));
+        issues
+    }
 }
 
 /// An agent option discovered on the system.
@@ -266,6 +374,7 @@ impl AgentOption {
 enum QuickStartAction {
     ResumeWithPrevious,
     StartNewWithPrevious,
+    FocusExistingSession,
     ChooseDifferent,
 }
 
@@ -280,6 +389,24 @@ pub struct QuickStartEntry {
     pub resume_session_id: Option<String>,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub docker_service: Option<String>,
+    pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveSessionEntry {
+    pub session_id: String,
+    pub kind: String,
+    pub name: String,
+    pub detail: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DockerWizardContext {
+    pub services: Vec<String>,
+    pub suggested_service: Option<String>,
 }
 
 /// SPEC context for prefilling the wizard.
@@ -327,6 +454,7 @@ pub struct WizardState {
     pub selected: usize,
     pub has_quick_start: bool,
     pub quick_start_entries: Vec<QuickStartEntry>,
+    pub live_session_entries: Vec<LiveSessionEntry>,
     pub is_new_branch: bool,
     pub base_branch_name: Option<String>,
     pub gh_cli_available: bool,
@@ -339,8 +467,15 @@ pub struct WizardState {
     pub version_options: Vec<VersionOption>,
     pub mode: String,
     pub resume_session_id: Option<String>,
+    pub focus_session_id: Option<String>,
     pub branch_name: String,
     pub issue_id: String,
+    pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub docker_service: Option<String>,
+    pub docker_context: Option<DockerWizardContext>,
+    pub docker_service_status: gwt_docker::ComposeServiceStatus,
+    pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    pub issue_picker: IssuePickerState,
     pub skip_perms: bool,
     pub codex_fast_mode: bool,
     pub convert_source_agents: Vec<String>,
@@ -365,19 +500,27 @@ impl Default for WizardState {
             selected: 0,
             has_quick_start: false,
             quick_start_entries: Vec::new(),
+            live_session_entries: Vec::new(),
             is_new_branch: false,
             base_branch_name: None,
             gh_cli_available: true,
             ai_enabled: false,
             agent_id: String::new(),
             model: String::new(),
-            reasoning: "medium".to_string(),
+            reasoning: String::new(),
             version: String::new(),
             version_options: Vec::new(),
             mode: "normal".to_string(),
             resume_session_id: None,
+            focus_session_id: None,
             branch_name: String::new(),
             issue_id: String::new(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            issue_picker: IssuePickerState::default(),
             skip_perms: false,
             codex_fast_mode: false,
             convert_source_agents: Vec::new(),
@@ -395,45 +538,137 @@ impl WizardState {
     fn flow_start_step(&self) -> WizardStep {
         if self.is_new_branch {
             WizardStep::BranchTypeSelect
-        } else if self.has_quick_start && !self.quick_start_entries.is_empty() {
+        } else if self.has_quick_start && self.has_quick_start_actions() {
             WizardStep::QuickStart
         } else {
             WizardStep::BranchAction
         }
     }
 
+    fn has_quick_start_actions(&self) -> bool {
+        !self.quick_start_entries.is_empty() || !self.live_session_entries.is_empty()
+    }
+
+    fn has_live_session_focus_option(&self) -> bool {
+        !self.live_session_entries.is_empty()
+    }
+
     fn quick_start_option_count(&self) -> usize {
-        if self.quick_start_entries.is_empty() {
+        if !self.has_quick_start_actions() {
             0
         } else {
-            self.quick_start_entries.len() * 2 + 1
+            self.quick_start_entries.len() * 2
+                + usize::from(self.has_live_session_focus_option())
+                + 1
         }
     }
 
+    fn quick_start_focus_existing_index(&self) -> Option<usize> {
+        self.has_live_session_focus_option()
+            .then_some(self.quick_start_entries.len() * 2)
+    }
+
+    fn quick_start_choose_different_index(&self) -> Option<usize> {
+        self.has_quick_start_actions().then_some(
+            self.quick_start_entries.len() * 2 + usize::from(self.has_live_session_focus_option()),
+        )
+    }
+
+    fn issue_picker_option_count(&self) -> usize {
+        self.issue_picker.filtered_issues().len() + 1
+    }
+
+    fn issue_picker_selected_issue(&self) -> Option<&IssueItem> {
+        if self.selected == 0 {
+            return None;
+        }
+        self.issue_picker
+            .filtered_issues()
+            .get(self.selected.saturating_sub(1))
+            .copied()
+    }
+
+    fn issue_picker_default_selection(&self) -> usize {
+        let Ok(selected_issue) = self.issue_id.parse::<u32>() else {
+            return 0;
+        };
+        self.issue_picker
+            .filtered_issues()
+            .iter()
+            .position(|issue| issue.number == selected_issue)
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    fn issue_picker_labels(&self) -> Vec<String> {
+        let mut labels = Vec::with_capacity(self.issue_picker_option_count());
+        labels.push(RELATED_TO_NONE_LABEL.to_string());
+        labels.extend(
+            self.issue_picker
+                .filtered_issues()
+                .into_iter()
+                .map(|issue| {
+                    let labels = if issue.labels.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", issue.labels.join(", "))
+                    };
+                    format!(
+                        "#{} {} ({}){}",
+                        issue.number, issue.title, issue.state, labels
+                    )
+                }),
+        );
+        labels
+    }
+
     fn selected_quick_start_action(&self) -> QuickStartAction {
-        let choose_different_index = self.quick_start_entries.len() * 2;
-        if self.quick_start_entries.is_empty() || self.selected >= choose_different_index {
+        let choose_different_index = match self.quick_start_choose_different_index() {
+            Some(index) => index,
+            None => return QuickStartAction::ChooseDifferent,
+        };
+        if self.selected >= choose_different_index {
             QuickStartAction::ChooseDifferent
-        } else if self.selected.is_multiple_of(2) {
+        } else if self.selected < self.quick_start_entries.len() * 2
+            && self.selected.is_multiple_of(2)
+        {
             QuickStartAction::ResumeWithPrevious
-        } else {
+        } else if self.selected < self.quick_start_entries.len() * 2 {
             QuickStartAction::StartNewWithPrevious
+        } else {
+            QuickStartAction::FocusExistingSession
         }
     }
 
     fn selected_quick_start_entry(&self) -> Option<&QuickStartEntry> {
-        if self.quick_start_entries.is_empty() {
+        if self.quick_start_entries.is_empty()
+            || self.selected >= self.quick_start_entries.len() * 2
+        {
             None
         } else {
             self.quick_start_entries.get(self.selected / 2)
         }
     }
 
+    fn selected_live_session_entry(&self) -> Option<&LiveSessionEntry> {
+        self.live_session_entries.get(self.selected)
+    }
+
     fn apply_quick_start_selection(&mut self) {
         let action = self.selected_quick_start_action();
+        if matches!(
+            action,
+            QuickStartAction::ChooseDifferent | QuickStartAction::FocusExistingSession
+        ) {
+            self.mode = "normal".to_string();
+            self.resume_session_id = None;
+            self.focus_session_id = None;
+            return;
+        }
         let Some(entry) = self.selected_quick_start_entry().cloned() else {
             self.mode = "normal".to_string();
             self.resume_session_id = None;
+            self.focus_session_id = None;
             return;
         };
 
@@ -452,33 +687,46 @@ impl WizardState {
         }
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
+        } else if entry.agent_id == "claude" {
+            self.reasoning = "auto".to_string();
         }
         if let Some(version) = entry.version {
             self.version = version;
+        } else if self.agent_has_npm_package() {
+            self.version = "installed".to_string();
         }
         self.skip_perms = entry.skip_permissions;
         self.codex_fast_mode = entry.codex_fast_mode;
+        self.runtime_target = entry.runtime_target;
+        self.docker_service = entry.docker_service.clone();
+        self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
         if !self.agent_is_codex() {
             self.codex_fast_mode = false;
         }
+        self.sync_reasoning_state();
 
         match action {
             QuickStartAction::ResumeWithPrevious => {
                 if let Some(session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(session_id);
+                    self.focus_session_id = None;
                 } else {
                     self.mode = "continue".to_string();
                     self.resume_session_id = None;
+                    self.focus_session_id = None;
                 }
             }
             QuickStartAction::StartNewWithPrevious => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
+                self.focus_session_id = None;
             }
+            QuickStartAction::FocusExistingSession => unreachable!(),
             QuickStartAction::ChooseDifferent => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
+                self.focus_session_id = None;
             }
         }
     }
@@ -497,6 +745,30 @@ impl WizardState {
     /// Whether the selected agent is Codex (needs ReasoningLevel step).
     fn agent_is_codex(&self) -> bool {
         self.effective_agent_id() == "codex"
+    }
+
+    fn reasoning_step_kind(&self) -> ReasoningStepKind {
+        if self.agent_is_codex() {
+            return ReasoningStepKind::Codex;
+        }
+
+        if self.effective_agent_id() != "claude" {
+            return ReasoningStepKind::None;
+        }
+
+        match claude_model_family(&self.model) {
+            Some(ClaudeModelFamily::Opus) => ReasoningStepKind::ClaudeEffort {
+                max_available: true,
+            },
+            Some(ClaudeModelFamily::Sonnet) => ReasoningStepKind::ClaudeEffort {
+                max_available: false,
+            },
+            _ => ReasoningStepKind::None,
+        }
+    }
+
+    pub fn agent_uses_reasoning_step(&self) -> bool {
+        !matches!(self.reasoning_step_kind(), ReasoningStepKind::None)
     }
 
     /// Whether the selected agent is distributed via npm.
@@ -570,21 +842,148 @@ impl WizardState {
             &agent.versions,
         );
 
-        if let Some(first_version) = self.version_options.first() {
+        if self.version_options.is_empty() {
+            self.version.clear();
+        } else {
+            let default_value = if self.agent_has_npm_package() {
+                "latest"
+            } else {
+                "installed"
+            };
             if self.version.is_empty()
                 || !self
                     .version_options
                     .iter()
                     .any(|option| option.value == self.version)
             {
-                self.version = first_version.value.clone();
+                self.version = self
+                    .version_options
+                    .iter()
+                    .find(|option| option.value == default_value)
+                    .or_else(|| self.version_options.first())
+                    .map(|option| option.value.clone())
+                    .unwrap_or_default();
             }
-        } else {
-            self.version.clear();
         }
 
         if !self.agent_is_codex() {
             self.codex_fast_mode = false;
+        }
+        self.sync_reasoning_state();
+    }
+
+    fn has_docker_workflow(&self) -> bool {
+        self.docker_context.is_some()
+    }
+
+    fn docker_service_prompt_required(&self) -> bool {
+        self.docker_context
+            .as_ref()
+            .is_some_and(|context| context.services.len() > 1)
+    }
+
+    fn docker_service_options(&self) -> Vec<String> {
+        self.docker_context
+            .as_ref()
+            .map(|context| context.services.clone())
+            .unwrap_or_default()
+    }
+
+    fn preferred_docker_service(&self) -> Option<&str> {
+        self.docker_service.as_deref().or_else(|| {
+            self.docker_context
+                .as_ref()
+                .and_then(|context| context.suggested_service.as_deref())
+        })
+    }
+
+    fn docker_lifecycle_options(&self) -> &'static [(&'static str, &'static str)] {
+        match self.docker_service_status {
+            gwt_docker::ComposeServiceStatus::Running => &[
+                ("Connect only", "Reuse the running Docker service"),
+                (
+                    "Restart then launch",
+                    "Restart the service before launching",
+                ),
+                (
+                    "Recreate then launch",
+                    "Force-recreate the service before launching",
+                ),
+            ],
+            gwt_docker::ComposeServiceStatus::Stopped
+            | gwt_docker::ComposeServiceStatus::Exited => &[
+                ("Start then launch", "Start the existing Docker service"),
+                (
+                    "Recreate then launch",
+                    "Force-recreate the service before launching",
+                ),
+            ],
+            gwt_docker::ComposeServiceStatus::NotFound => &[(
+                "Create and start then launch",
+                "Create the Docker service and launch into it",
+            )],
+        }
+    }
+
+    fn docker_lifecycle_default_intent(&self) -> gwt_agent::DockerLifecycleIntent {
+        match self.docker_service_status {
+            gwt_docker::ComposeServiceStatus::Running => gwt_agent::DockerLifecycleIntent::Connect,
+            gwt_docker::ComposeServiceStatus::Stopped
+            | gwt_docker::ComposeServiceStatus::Exited => gwt_agent::DockerLifecycleIntent::Start,
+            gwt_docker::ComposeServiceStatus::NotFound => {
+                gwt_agent::DockerLifecycleIntent::CreateAndStart
+            }
+        }
+    }
+
+    fn sync_docker_lifecycle_default(&mut self) {
+        let supported = self
+            .docker_lifecycle_options()
+            .iter()
+            .any(|(label, _)| *label == docker_lifecycle_label(self.docker_lifecycle_intent));
+        if !supported {
+            self.docker_lifecycle_intent = self.docker_lifecycle_default_intent();
+        }
+    }
+
+    fn current_reasoning_options(&self) -> &'static [ReasoningDisplayOption] {
+        match self.reasoning_step_kind() {
+            ReasoningStepKind::Codex => &CODEX_REASONING_DISPLAY_OPTIONS,
+            ReasoningStepKind::ClaudeEffort {
+                max_available: true,
+            } => &CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS,
+            ReasoningStepKind::ClaudeEffort {
+                max_available: false,
+            } => &CLAUDE_SONNET_EFFORT_DISPLAY_OPTIONS,
+            ReasoningStepKind::None => &[],
+        }
+    }
+
+    fn current_reasoning_value(&self) -> Option<&str> {
+        let value = self.reasoning.as_str();
+        if value.is_empty() {
+            return None;
+        }
+        self.current_reasoning_options()
+            .iter()
+            .find(|option| option.stored_value == value)
+            .map(|option| option.stored_value)
+    }
+
+    fn sync_reasoning_state(&mut self) {
+        if self.current_reasoning_value().is_none() {
+            self.reasoning.clear();
+        }
+    }
+
+    fn reasoning_title(&self) -> String {
+        let model = reasoning_title_model(self);
+        match self.reasoning_step_kind() {
+            ReasoningStepKind::Codex => format!("Select Reasoning Level for {model}"),
+            ReasoningStepKind::ClaudeEffort { .. } => {
+                format!("Select Effort Level for {model}")
+            }
+            ReasoningStepKind::None => WizardStep::ReasoningLevel.title().to_string(),
         }
     }
 
@@ -592,12 +991,16 @@ impl WizardState {
     pub fn option_count(&self) -> usize {
         match self.step {
             WizardStep::QuickStart => self.quick_start_option_count(),
+            WizardStep::FocusExistingSession => self.live_session_entries.len().max(1),
             WizardStep::BranchAction => 2, // existing branch / create new branch
             WizardStep::AgentSelect => self.detected_agents.len().max(1),
             WizardStep::ModelSelect => self.current_model_options().len(),
-            WizardStep::ReasoningLevel => 4, // low, medium, high, xhigh
+            WizardStep::ReasoningLevel => self.current_reasoning_options().len(),
             WizardStep::VersionSelect => self.version_options.len().max(1),
             WizardStep::ExecutionMode => 4, // normal, continue, resume, convert
+            WizardStep::RuntimeTarget => 2, // host, docker
+            WizardStep::DockerServiceSelect => self.docker_service_options().len().max(1),
+            WizardStep::DockerLifecycle => self.docker_lifecycle_options().len().max(1),
             WizardStep::ConvertAgentSelect => self.convert_source_agents.len().max(1),
             WizardStep::ConvertSessionSelect => self.convert_sessions.len().max(1),
             WizardStep::BranchTypeSelect => 4, // feature, bugfix, hotfix, release
@@ -611,18 +1014,29 @@ impl WizardState {
                     self.ai_suggest.suggestions.len().max(1)
                 }
             }
-            WizardStep::IssueSelect => 0,     // text input
+            WizardStep::IssueSelect => self.issue_picker_option_count(),
             WizardStep::SkipPermissions => 2, // yes / no
             WizardStep::CodexFastMode => 2,   // on / off
         }
+    }
+
+    pub fn current_options_for_step(&self, step: WizardStep) -> Vec<String> {
+        let mut state = self.clone();
+        state.step = step;
+        state.current_options()
     }
 
     /// Static option labels for the current step.
     pub fn current_static_options(&self) -> Vec<&'static str> {
         match self.step {
             WizardStep::BranchAction => vec!["Use selected branch", "Create new from selected"],
-            WizardStep::ReasoningLevel => vec!["Low", "Medium", "High", "XHigh"],
+            WizardStep::ReasoningLevel => self
+                .current_reasoning_options()
+                .iter()
+                .map(|option| option.label)
+                .collect(),
             WizardStep::ExecutionMode => vec!["Normal", "Continue", "Resume", "Convert"],
+            WizardStep::RuntimeTarget => vec!["Host", "Docker"],
             WizardStep::BranchTypeSelect => vec!["feature/", "bugfix/", "hotfix/", "release/"],
             WizardStep::SkipPermissions => vec!["Yes", "No"],
             WizardStep::CodexFastMode => vec!["On", "Off"],
@@ -647,10 +1061,23 @@ impl WizardState {
                     ));
                     options.push(quick_start_action_label(entry, "Start new", false, false));
                 }
-                if !self.quick_start_entries.is_empty() {
+                if self.has_live_session_focus_option() {
+                    options.push("Focus existing session".to_string());
+                }
+                if self.has_quick_start_actions() {
                     options.push("Choose different".to_string());
                 }
                 options
+            }
+            WizardStep::FocusExistingSession => {
+                if self.live_session_entries.is_empty() {
+                    vec!["(no live sessions available)".to_string()]
+                } else {
+                    self.live_session_entries
+                        .iter()
+                        .map(live_session_option_label)
+                        .collect()
+                }
             }
             WizardStep::AgentSelect => {
                 if self.detected_agents.is_empty() {
@@ -687,6 +1114,19 @@ impl WizardState {
                     self.convert_sessions.clone()
                 }
             }
+            WizardStep::DockerServiceSelect => {
+                let options = self.docker_service_options();
+                if options.is_empty() {
+                    vec!["(no docker services detected)".to_string()]
+                } else {
+                    options
+                }
+            }
+            WizardStep::DockerLifecycle => self
+                .docker_lifecycle_options()
+                .iter()
+                .map(|(label, _)| (*label).to_string())
+                .collect(),
             WizardStep::AIBranchSuggest => {
                 if self.ai_suggest.loading || self.ai_suggest.error.is_some() {
                     vec![]
@@ -707,7 +1147,8 @@ impl WizardState {
                     labels
                 }
             }
-            WizardStep::BranchNameInput | WizardStep::IssueSelect => vec![],
+            WizardStep::IssueSelect => self.issue_picker_labels(),
+            WizardStep::BranchNameInput => vec![],
             _ => self
                 .current_static_options()
                 .into_iter()
@@ -817,6 +1258,12 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
             }
         }
         WizardMessage::Back => {
+            if state.step == WizardStep::IssueSelect && state.issue_picker.search_active {
+                state.issue_picker.search_active = false;
+                state.issue_picker.search_query.clear();
+                state.selected = state.issue_picker_default_selection();
+                return;
+            }
             if let Some(prev) = prev_step(state.step, state) {
                 state.step = prev;
                 state.selected = step_default_selection(prev, state);
@@ -833,7 +1280,15 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 state.branch_name.push(ch);
             }
             WizardStep::IssueSelect => {
-                state.issue_id.push(ch);
+                if state.issue_picker.search_active {
+                    state.issue_picker.search_query.push(ch);
+                    let option_count = state.option_count();
+                    super::clamp_index(&mut state.selected, option_count);
+                } else if ch == '/' {
+                    state.issue_picker.search_active = true;
+                    state.issue_picker.search_query.clear();
+                    state.selected = state.issue_picker_default_selection();
+                }
             }
             _ => {}
         },
@@ -842,7 +1297,11 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
                 state.branch_name.pop();
             }
             WizardStep::IssueSelect => {
-                state.issue_id.pop();
+                if state.issue_picker.search_active {
+                    state.issue_picker.search_query.pop();
+                    let option_count = state.option_count();
+                    super::clamp_index(&mut state.selected, option_count);
+                }
             }
             _ => {}
         },
@@ -906,6 +1365,30 @@ pub fn update(state: &mut WizardState, msg: WizardMessage) {
 
 fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
     match step {
+        WizardStep::IssueSelect => state.issue_picker_default_selection(),
+        WizardStep::ReasoningLevel => reasoning_default_selection(state),
+        WizardStep::VersionSelect => state
+            .version_options
+            .iter()
+            .position(|option| option.value == state.version)
+            .unwrap_or(0),
+        WizardStep::RuntimeTarget => {
+            usize::from(state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
+        }
+        WizardStep::DockerServiceSelect => state
+            .preferred_docker_service()
+            .and_then(|service| {
+                state
+                    .docker_service_options()
+                    .iter()
+                    .position(|option| option == service)
+            })
+            .unwrap_or(0),
+        WizardStep::DockerLifecycle => state
+            .docker_lifecycle_options()
+            .iter()
+            .position(|(label, _)| *label == docker_lifecycle_label(state.docker_lifecycle_intent))
+            .unwrap_or(0),
         WizardStep::SkipPermissions => usize::from(!state.skip_perms),
         WizardStep::CodexFastMode => usize::from(!state.codex_fast_mode),
         _ => 0,
@@ -916,13 +1399,21 @@ fn step_default_selection(step: WizardStep, state: &WizardState) -> usize {
 fn apply_selection(state: &mut WizardState) {
     let options = state.current_options();
     match state.step {
-        WizardStep::QuickStart => {
-            if !matches!(
-                state.selected_quick_start_action(),
-                QuickStartAction::ChooseDifferent
-            ) {
+        WizardStep::QuickStart => match state.selected_quick_start_action() {
+            QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious => {
                 state.apply_quick_start_selection();
+                state.sync_docker_lifecycle_default();
             }
+            QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => {
+                state.focus_session_id = None;
+            }
+        },
+        WizardStep::FocusExistingSession => {
+            state.focus_session_id = state
+                .selected_live_session_entry()
+                .map(|entry| entry.session_id.clone());
+            state.resume_session_id = None;
+            state.mode = "normal".to_string();
         }
         WizardStep::BranchAction => {
             if state.selected == 0 {
@@ -963,8 +1454,8 @@ fn apply_selection(state: &mut WizardState) {
             state.sync_selected_agent_options();
         }
         WizardStep::ReasoningLevel => {
-            if let Some(opt) = options.get(state.selected) {
-                state.reasoning = opt.to_lowercase();
+            if let Some(opt) = state.current_reasoning_options().get(state.selected) {
+                state.reasoning = opt.stored_value.to_string();
             }
         }
         WizardStep::VersionSelect => {
@@ -975,6 +1466,37 @@ fn apply_selection(state: &mut WizardState) {
         WizardStep::ExecutionMode => {
             if let Some(opt) = options.get(state.selected) {
                 state.mode = opt.to_lowercase();
+            }
+        }
+        WizardStep::RuntimeTarget => {
+            state.runtime_target = if state.selected == 0 {
+                gwt_agent::LaunchRuntimeTarget::Host
+            } else {
+                gwt_agent::LaunchRuntimeTarget::Docker
+            };
+            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                state.docker_service = None;
+            } else if state.docker_service.is_none() {
+                state.docker_service = state.preferred_docker_service().map(str::to_string);
+            }
+            state.sync_docker_lifecycle_default();
+        }
+        WizardStep::DockerServiceSelect => {
+            if let Some(opt) = options.get(state.selected) {
+                state.docker_service = Some(opt.clone());
+            }
+            state.sync_docker_lifecycle_default();
+        }
+        WizardStep::DockerLifecycle => {
+            if let Some(opt) = options.get(state.selected) {
+                state.docker_lifecycle_intent = docker_lifecycle_intent_for_label(opt);
+            }
+        }
+        WizardStep::IssueSelect => {
+            if let Some(issue) = state.issue_picker_selected_issue() {
+                state.issue_id = issue.number.to_string();
+            } else {
+                state.issue_id.clear();
             }
         }
         WizardStep::ConvertAgentSelect => {}
@@ -1122,7 +1644,7 @@ const CLAUDE_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 4] = [
         description: "Most capable for complex work",
     },
     ModelDisplayOption {
-        label: "Sonnet 4.5",
+        label: "Sonnet 4.6",
         description: "Best for everyday tasks",
     },
     ModelDisplayOption {
@@ -1197,11 +1719,79 @@ const GEMINI_MODEL_DISPLAY_OPTIONS: [ModelDisplayOption; 6] = [
     },
 ];
 
-const REASONING_DISPLAY_OPTIONS: [(&str, &str); 4] = [
-    ("Low", "Faster, less thorough"),
-    ("Medium", "Balanced"),
-    ("High", "Slower, more thorough"),
-    ("XHigh", "Extended high reasoning"),
+#[derive(Clone, Copy)]
+struct ReasoningDisplayOption {
+    label: &'static str,
+    stored_value: &'static str,
+    description: &'static str,
+    is_default: bool,
+}
+
+const CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS: [ReasoningDisplayOption; 5] = [
+    ReasoningDisplayOption {
+        label: "Auto",
+        stored_value: "auto",
+        description: "Let the model decide how deeply to think",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Low",
+        stored_value: "low",
+        description: "Fast, cheap responses for simple renames, greps, and quick questions",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Medium",
+        stored_value: "medium",
+        description: "Balanced reasoning for everyday agentic coding and tool-heavy work",
+        is_default: true,
+    },
+    ReasoningDisplayOption {
+        label: "High",
+        stored_value: "high",
+        description: "Deeper reasoning for complex problems",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Max",
+        stored_value: "max",
+        description: "Deepest reasoning with no token-spending constraint",
+        is_default: false,
+    },
+];
+
+const CLAUDE_SONNET_EFFORT_DISPLAY_OPTIONS: [ReasoningDisplayOption; 4] = [
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[0],
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[1],
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[2],
+    CLAUDE_OPUS_EFFORT_DISPLAY_OPTIONS[3],
+];
+
+const CODEX_REASONING_DISPLAY_OPTIONS: [ReasoningDisplayOption; 4] = [
+    ReasoningDisplayOption {
+        label: "Low",
+        stored_value: "low",
+        description: "Fast responses with lighter reasoning",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Medium",
+        stored_value: "medium",
+        description: "Balances speed and reasoning depth for everyday tasks",
+        is_default: true,
+    },
+    ReasoningDisplayOption {
+        label: "High",
+        stored_value: "high",
+        description: "Greater reasoning depth for complex problems",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Extra high",
+        stored_value: "xhigh",
+        description: "Extra high reasoning depth for complex problems",
+        is_default: false,
+    },
 ];
 
 const EXECUTION_MODE_DISPLAY_OPTIONS: [(&str, &str); 4] = [
@@ -1209,6 +1799,11 @@ const EXECUTION_MODE_DISPLAY_OPTIONS: [(&str, &str); 4] = [
     ("Continue", "Continue from last session"),
     ("Resume", "Resume a specific session"),
     ("Convert", "Convert session from another agent"),
+];
+
+const RUNTIME_TARGET_DISPLAY_OPTIONS: [(&str, &str); 2] = [
+    ("Host", "Run directly on the host"),
+    ("Docker", "Run inside the detected container"),
 ];
 
 const SKIP_PERMISSION_DISPLAY_OPTIONS: [(&str, &str); 2] = [
@@ -1227,6 +1822,76 @@ fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOption] {
         "codex" => &CODEX_MODEL_DISPLAY_OPTIONS,
         "gemini" => &GEMINI_MODEL_DISPLAY_OPTIONS,
         _ => &[],
+    }
+}
+
+fn claude_model_family(model: &str) -> Option<ClaudeModelFamily> {
+    match model {
+        "Default (Opus 4.6)" | "opus" => Some(ClaudeModelFamily::Opus),
+        "sonnet" => Some(ClaudeModelFamily::Sonnet),
+        "haiku" => Some(ClaudeModelFamily::Haiku),
+        _ => None,
+    }
+}
+
+fn reasoning_title_model(state: &WizardState) -> &str {
+    match claude_model_family(&state.model) {
+        Some(ClaudeModelFamily::Opus) => "opus",
+        Some(ClaudeModelFamily::Sonnet) => "sonnet",
+        Some(ClaudeModelFamily::Haiku) => "haiku",
+        None if state.model.is_empty() => "model",
+        None => state.model.as_str(),
+    }
+}
+
+fn reasoning_label(option: &ReasoningDisplayOption, is_current: bool) -> String {
+    let mut label = option.label.to_string();
+    if option.is_default {
+        label.push_str(" (default)");
+    }
+    if is_current {
+        label.push_str(" (current)");
+    }
+    label
+}
+fn reasoning_default_selection(state: &WizardState) -> usize {
+    if let Some(value) = state.current_reasoning_value() {
+        return state
+            .current_reasoning_options()
+            .iter()
+            .position(|option| option.stored_value == value)
+            .unwrap_or(0);
+    }
+
+    state
+        .current_reasoning_options()
+        .iter()
+        .position(|option| match state.reasoning_step_kind() {
+            ReasoningStepKind::Codex => option.stored_value == "medium",
+            ReasoningStepKind::ClaudeEffort { .. } => option.stored_value == "low",
+            ReasoningStepKind::None => false,
+        })
+        .unwrap_or(0)
+}
+
+fn docker_lifecycle_label(intent: gwt_agent::DockerLifecycleIntent) -> &'static str {
+    match intent {
+        gwt_agent::DockerLifecycleIntent::Connect => "Connect only",
+        gwt_agent::DockerLifecycleIntent::Start => "Start then launch",
+        gwt_agent::DockerLifecycleIntent::Restart => "Restart then launch",
+        gwt_agent::DockerLifecycleIntent::Recreate => "Recreate then launch",
+        gwt_agent::DockerLifecycleIntent::CreateAndStart => "Create and start then launch",
+    }
+}
+
+fn docker_lifecycle_intent_for_label(label: &str) -> gwt_agent::DockerLifecycleIntent {
+    match label {
+        "Connect only" => gwt_agent::DockerLifecycleIntent::Connect,
+        "Start then launch" => gwt_agent::DockerLifecycleIntent::Start,
+        "Restart then launch" => gwt_agent::DockerLifecycleIntent::Restart,
+        "Recreate then launch" => gwt_agent::DockerLifecycleIntent::Recreate,
+        "Create and start then launch" => gwt_agent::DockerLifecycleIntent::CreateAndStart,
+        _ => gwt_agent::DockerLifecycleIntent::Connect,
     }
 }
 
@@ -1315,7 +1980,7 @@ fn wizard_row_style_with_fg(is_selected: bool, fg: Color) -> Style {
 
 fn version_option_description(option: &VersionOption) -> &'static str {
     match option.value.as_str() {
-        "installed" => "Use installed version",
+        "installed" => "Use direct command",
         "latest" => "Always use the latest version",
         _ => "Use cached version",
     }
@@ -1360,12 +2025,30 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
 fn render_reasoning_level_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let available_width = area.width as usize;
-    let items = REASONING_DISPLAY_OPTIONS
+    let label_width = state
+        .current_reasoning_options()
         .iter()
         .enumerate()
-        .map(|(idx, (label, description))| {
+        .map(|(idx, option)| {
+            reasoning_label(option, idx == state.selected)
+                .chars()
+                .count()
+        })
+        .max()
+        .unwrap_or(10);
+    let items = state
+        .current_reasoning_options()
+        .iter()
+        .enumerate()
+        .map(|(idx, option)| {
             let marker = if idx == state.selected { "> " } else { "  " };
-            let text = format_fixed_width_line(marker, label, description, 10, available_width);
+            let text = format_fixed_width_line(
+                marker,
+                &reasoning_label(option, idx == state.selected),
+                option.description,
+                label_width,
+                available_width,
+            );
             ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
@@ -1380,6 +2063,36 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
         .map(|(idx, (label, description))| {
             let marker = if idx == state.selected { "> " } else { "  " };
             let text = format_fixed_width_line(marker, label, description, 12, available_width);
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
+        })
+        .collect();
+    render_list_content(frame, area, items);
+}
+
+fn render_runtime_target_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width as usize;
+    let items = RUNTIME_TARGET_DISPLAY_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text = format_fixed_width_line(marker, label, description, 8, available_width);
+            ListItem::new(text).style(wizard_row_style(idx == state.selected))
+        })
+        .collect();
+    render_list_content(frame, area, items);
+}
+
+fn render_docker_lifecycle_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let available_width = area.width as usize;
+    let items = state
+        .docker_lifecycle_options()
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, description))| {
+            let marker = if idx == state.selected { "> " } else { "  " };
+            let text =
+                format_label_description_line(marker, label, description, available_width, 24);
             ListItem::new(text).style(wizard_row_style(idx == state.selected))
         })
         .collect();
@@ -1540,6 +2253,20 @@ fn quick_start_start_new_marker(is_selected: bool, single_entry: bool) -> &'stat
     }
 }
 
+fn live_session_option_label(entry: &LiveSessionEntry) -> String {
+    let mut label = format!(
+        "{}  {} ({})",
+        entry.kind,
+        entry.name,
+        &entry.session_id[..entry.session_id.len().min(8)]
+    );
+    if let Some(detail) = entry.detail.as_deref() {
+        label.push_str(" · ");
+        label.push_str(detail);
+    }
+    label
+}
+
 /// Compute popup width based on actual content (title + options + hints).
 ///
 /// Mirrors old-TUI `wizard_popup_width`: measure the widest content line,
@@ -1563,9 +2290,23 @@ fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
                 max_line = max_line.max(2 + 12.max(label.len()) + 1 + desc.len());
             }
         }
+        WizardStep::DockerLifecycle => {
+            for &(label, desc) in state.docker_lifecycle_options() {
+                max_line = max_line.max(2 + label.len() + 3 + desc.len());
+            }
+        }
         WizardStep::ReasoningLevel => {
-            for &(label, desc) in &REASONING_DISPLAY_OPTIONS {
-                max_line = max_line.max(2 + 10.max(label.len()) + 1 + desc.len());
+            let label_width = state
+                .current_reasoning_options()
+                .iter()
+                .enumerate()
+                .map(|(idx, option)| reasoning_label(option, idx == state.selected).len())
+                .max()
+                .unwrap_or(10);
+            for (idx, option) in state.current_reasoning_options().iter().enumerate() {
+                let label = reasoning_label(option, idx == state.selected);
+                max_line =
+                    max_line.max(2 + label_width.max(label.len()) + 1 + option.description.len());
             }
         }
         WizardStep::SkipPermissions => {
@@ -1616,6 +2357,8 @@ fn popup_title(state: &WizardState) -> String {
             state.step.title(),
             quick_start_title_summary(&state.quick_start_entries[0])
         )
+    } else if state.step == WizardStep::ReasoningLevel {
+        state.reasoning_title()
     } else {
         state.step.title().to_string()
     }
@@ -1690,7 +2433,24 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         );
     }
 
-    let choose_index = state.quick_start_entries.len() * 2;
+    let choose_index = state
+        .quick_start_choose_different_index()
+        .unwrap_or_default();
+    if let Some(focus_index) = state.quick_start_focus_existing_index() {
+        let focus_marker = if state.selected == focus_index {
+            "> "
+        } else {
+            "  "
+        };
+        let focus_text = format!("{focus_marker}Focus existing session");
+        items.push(
+            ListItem::new(truncate_with_ellipsis(
+                &focus_text,
+                list_area.width as usize,
+            ))
+            .style(wizard_row_style(state.selected == focus_index)),
+        );
+    }
     let choose_marker = if state.selected >= choose_index {
         "> "
     } else {
@@ -1706,6 +2466,36 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     );
 
     frame.render_widget(List::new(items), list_area);
+}
+
+fn render_focus_existing_session_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(truncate_with_ellipsis(
+            &state.branch_name,
+            area.width as usize,
+        ))
+        .style(theme::style::header()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    if area.height <= 1 {
+        return;
+    }
+
+    render_option_list(
+        state,
+        frame,
+        Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        ),
+    );
 }
 
 fn render_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) {
@@ -1805,7 +2595,11 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
         1,
     );
     let hint = match state.step {
-        WizardStep::BranchNameInput | WizardStep::IssueSelect => "[Enter] Confirm  [Esc] Back",
+        WizardStep::BranchNameInput => "[Enter] Confirm  [Esc] Back",
+        WizardStep::IssueSelect if state.issue_picker.search_active => {
+            "[Enter] Select  [Esc] Clear search  [/]:search  [Up/Down] Navigate"
+        }
+        WizardStep::IssueSelect => "[Enter] Select  [Esc] Back  [/]:search  [Up/Down] Navigate",
         WizardStep::AIBranchSuggest if state.ai_suggest.loading => "[Esc] Cancel",
         WizardStep::AIBranchSuggest if state.ai_suggest.error.is_some() => {
             "[Enter] Manual input  [Esc] Retry"
@@ -1828,12 +2622,13 @@ pub fn render(state: &WizardState, frame: &mut Frame, area: Rect) {
 fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
     match state.step {
         WizardStep::QuickStart => render_quick_start_step(state, frame, area),
+        WizardStep::FocusExistingSession => render_focus_existing_session_step(state, frame, area),
         WizardStep::AgentSelect => render_agent_select_step(state, frame, area),
         WizardStep::BranchNameInput => {
             render_input_step(state, frame, area, "Branch Name:", &state.branch_name);
         }
         WizardStep::IssueSelect => {
-            render_input_step(state, frame, area, "Issue ID (optional):", &state.issue_id);
+            render_issue_picker(state, frame, area);
         }
         WizardStep::AIBranchSuggest => {
             render_ai_suggest(state, frame, area);
@@ -1842,6 +2637,8 @@ fn render_step_content(state: &WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::ReasoningLevel => render_reasoning_level_step(state, frame, area),
         WizardStep::VersionSelect => render_version_step(state, frame, area),
         WizardStep::ExecutionMode => render_execution_mode_step(state, frame, area),
+        WizardStep::RuntimeTarget => render_runtime_target_step(state, frame, area),
+        WizardStep::DockerLifecycle => render_docker_lifecycle_step(state, frame, area),
         WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, area),
         WizardStep::CodexFastMode => render_codex_fast_mode_step(state, frame, area),
         _ => {
@@ -1873,6 +2670,48 @@ fn render_input_step(
     frame.render_widget(
         Paragraph::new(format!("{value}_")).style(Style::default().fg(theme::color::ACTIVE)),
         Rect::new(area.x, area.y + 1, area.width, 1),
+    );
+}
+
+fn render_issue_picker(state: &WizardState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let search_text = if state.issue_picker.search_active {
+        format!("Search: {}_", state.issue_picker.search_query)
+    } else if state.issue_picker.search_query.is_empty() {
+        "Search: press / to filter cached issues".to_string()
+    } else {
+        format!("Search: {}", state.issue_picker.search_query)
+    };
+    frame.render_widget(
+        Paragraph::new(search_text).style(theme::style::header()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    let mut list_y = area.y + 1;
+    let mut list_height = area.height.saturating_sub(1);
+    if let Some(error) = state.issue_picker.load_error.as_ref() {
+        if list_height > 0 {
+            frame.render_widget(
+                Paragraph::new(format!("Cache unavailable: {error}"))
+                    .style(Style::default().fg(theme::color::ERROR)),
+                Rect::new(area.x, list_y, area.width, 1),
+            );
+            list_y = list_y.saturating_add(1);
+            list_height = list_height.saturating_sub(1);
+        }
+    }
+
+    if list_height == 0 {
+        return;
+    }
+
+    render_option_list(
+        state,
+        frame,
+        Rect::new(area.x, list_y, area.width, list_height),
     );
 }
 
@@ -2022,6 +2861,9 @@ mod tests {
                 resume_session_id: Some("sess-12345678".to_string()),
                 skip_permissions: true,
                 codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -2032,6 +2874,28 @@ mod tests {
                 resume_session_id: None,
                 skip_permissions: false,
                 codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            },
+        ]
+    }
+
+    fn sample_live_session_entries() -> Vec<LiveSessionEntry> {
+        vec![
+            LiveSessionEntry {
+                session_id: "agent-1".to_string(),
+                kind: "Agent".to_string(),
+                name: "Codex".to_string(),
+                detail: Some("gpt-5.3-codex · high".to_string()),
+                active: false,
+            },
+            LiveSessionEntry {
+                session_id: "shell-2".to_string(),
+                kind: "Shell".to_string(),
+                name: "Shell: feature/test".to_string(),
+                detail: None,
+                active: true,
             },
         ]
     }
@@ -2076,6 +2940,27 @@ mod tests {
         None
     }
 
+    fn sample_issue_picker_issues() -> Vec<crate::screens::issues::IssueItem> {
+        vec![
+            crate::screens::issues::IssueItem {
+                number: 42,
+                title: "Fix login bug".to_string(),
+                state: "open".to_string(),
+                labels: vec!["bug".to_string(), "auth".to_string()],
+                body: "Login fails on Safari".to_string(),
+                linked_branches: vec![],
+            },
+            crate::screens::issues::IssueItem {
+                number: 1776,
+                title: "Launch Agent issue linkage".to_string(),
+                state: "closed".to_string(),
+                labels: vec!["ux".to_string()],
+                body: "Wizard should link branches to issues".to_string(),
+                linked_branches: vec![],
+            },
+        ]
+    }
+
     #[test]
     fn default_state() {
         let state = WizardState::default();
@@ -2104,6 +2989,33 @@ mod tests {
         assert_eq!(
             prev_step(WizardStep::AgentSelect, &state),
             Some(WizardStep::BranchAction)
+        );
+    }
+
+    #[test]
+    fn step_navigation_prev_keeps_runtime_target_for_host_docker_flow() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+        state.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+
+        assert_eq!(
+            prev_step(WizardStep::VersionSelect, &state),
+            Some(WizardStep::RuntimeTarget)
+        );
+        assert_eq!(
+            prev_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::VersionSelect)
+        );
+
+        state.agent_id = "opencode".to_string();
+        assert_eq!(
+            prev_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::RuntimeTarget)
         );
     }
 
@@ -2152,21 +3064,120 @@ mod tests {
     }
 
     #[test]
-    fn step_transitions_claude_skips_reasoning() {
+    fn step_transitions_docker_enabled_inserts_runtime_and_service_steps() {
         let mut state = WizardState::default();
         state.agent_id = "claude".to_string();
-        // Claude: AgentSelect → ModelSelect → VersionSelect → ExecutionMode
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string(), "db".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+
+        assert_eq!(
+            next_step(WizardStep::ModelSelect, &state),
+            Some(WizardStep::RuntimeTarget)
+        );
+
+        state.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        assert_eq!(
+            next_step(WizardStep::RuntimeTarget, &state),
+            Some(WizardStep::DockerServiceSelect)
+        );
+
+        state.docker_service = Some("web".to_string());
+        assert_eq!(
+            next_step(WizardStep::DockerServiceSelect, &state),
+            Some(WizardStep::DockerLifecycle)
+        );
+        assert_eq!(
+            next_step(WizardStep::DockerLifecycle, &state),
+            Some(WizardStep::VersionSelect)
+        );
+        assert_eq!(
+            next_step(WizardStep::VersionSelect, &state),
+            Some(WizardStep::ExecutionMode)
+        );
+        assert_eq!(
+            next_step(WizardStep::ExecutionMode, &state),
+            Some(WizardStep::SkipPermissions)
+        );
+    }
+
+    #[test]
+    fn step_transitions_claude_opus_includes_reasoning() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.model = "opus".to_string();
         assert_eq!(
             next_step(WizardStep::AgentSelect, &state),
             Some(WizardStep::ModelSelect)
         );
         assert_eq!(
             next_step(WizardStep::ModelSelect, &state),
+            Some(WizardStep::ReasoningLevel)
+        );
+        assert_eq!(
+            next_step(WizardStep::ReasoningLevel, &state),
             Some(WizardStep::VersionSelect)
         );
         assert_eq!(
             next_step(WizardStep::VersionSelect, &state),
             Some(WizardStep::ExecutionMode)
+        );
+    }
+
+    #[test]
+    fn step_transitions_claude_haiku_skips_reasoning() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.model = "haiku".to_string();
+
+        assert_eq!(
+            next_step(WizardStep::ModelSelect, &state),
+            Some(WizardStep::VersionSelect)
+        );
+    }
+
+    #[test]
+    fn docker_lifecycle_options_follow_service_state() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::DockerLifecycle;
+
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Connect only".to_string(),
+                "Restart then launch".to_string(),
+                "Recreate then launch".to_string(),
+            ]
+        );
+
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Exited;
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Start then launch".to_string(),
+                "Recreate then launch".to_string(),
+            ]
+        );
+
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
+        assert_eq!(
+            state.current_options(),
+            vec!["Create and start then launch".to_string()]
+        );
+    }
+
+    #[test]
+    fn docker_lifecycle_step_defaults_to_connect_for_running_service() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::DockerLifecycle;
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        state.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Connect;
+
+        assert_eq!(
+            step_default_selection(WizardStep::DockerLifecycle, &state),
+            0
         );
     }
 
@@ -2271,7 +3282,7 @@ mod tests {
         let mut state = WizardState::default();
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -2282,7 +3293,7 @@ mod tests {
         state.step = WizardStep::VersionSelect;
         assert_eq!(state.option_count(), 2);
         let opts = state.current_options();
-        assert_eq!(opts[0], "Installed (v1.0.0)");
+        assert_eq!(opts[0], "Installed");
         assert_eq!(opts[1], "latest");
     }
 
@@ -2293,7 +3304,7 @@ mod tests {
         state.step = WizardStep::VersionSelect;
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -2375,21 +3386,68 @@ mod tests {
     }
 
     #[test]
-    fn input_char_issue_id() {
+    fn issue_select_current_options_include_none_and_cached_issues() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        update(&mut state, WizardMessage::InputChar('1'));
-        update(&mut state, WizardMessage::InputChar('2'));
-        assert_eq!(state.issue_id, "12");
+        state.issue_picker.issues = sample_issue_picker_issues();
+
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+                "#42 Fix login bug (open) [bug, auth]".to_string(),
+            ]
+        );
+        assert_eq!(state.option_count(), 3);
     }
 
     #[test]
-    fn backspace_issue_id() {
+    fn issue_select_search_filters_by_number_title_label_and_state() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        state.issue_id = "42".to_string();
-        update(&mut state, WizardMessage::Backspace);
-        assert_eq!(state.issue_id, "4");
+        state.issue_picker.issues = sample_issue_picker_issues();
+
+        update(&mut state, WizardMessage::InputChar('/'));
+        update(&mut state, WizardMessage::InputChar('c'));
+        update(&mut state, WizardMessage::InputChar('l'));
+
+        assert!(state.issue_picker.search_active);
+        assert_eq!(state.issue_picker.search_query, "cl");
+        assert_eq!(
+            state.current_options(),
+            vec![
+                "Related to none".to_string(),
+                "#1776 Launch Agent issue linkage (closed) [ux]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_on_issue_step_stores_selected_issue_number() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::IssueSelect;
+        state.issue_picker.issues = sample_issue_picker_issues();
+        state.selected = 2;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.issue_id, "42");
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+    }
+
+    #[test]
+    fn select_on_issue_step_can_choose_related_to_none() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::IssueSelect;
+        state.issue_picker.issues = sample_issue_picker_issues();
+        state.issue_id = "1776".to_string();
+        state.selected = 0;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert!(state.issue_id.is_empty());
+        assert_eq!(state.step, WizardStep::BranchNameInput);
     }
 
     #[test]
@@ -2487,6 +3545,7 @@ mod tests {
         state.agent_id = "claude".to_string();
         state.detected_agents = sample_agents();
         state.step = WizardStep::ModelSelect;
+        state.selected = 3;
 
         update(&mut state, WizardMessage::Select);
 
@@ -2494,11 +3553,46 @@ mod tests {
         assert_eq!(
             state.current_options(),
             vec![
-                "Installed (v1.0.54)".to_string(),
+                "Installed".to_string(),
                 "latest".to_string(),
+                "1.0.54".to_string(),
                 "1.0.53".to_string()
             ]
         );
+        assert_eq!(state.version, "latest");
+    }
+
+    #[test]
+    fn select_on_model_step_with_docker_context_routes_to_runtime_target_before_version() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.step = WizardStep::ModelSelect;
+        state.selected = 3;
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::RuntimeTarget);
+    }
+
+    #[test]
+    fn selecting_claude_haiku_clears_staged_effort() {
+        let mut state = WizardState::default();
+        state.agent_id = "claude".to_string();
+        state.detected_agents = sample_agents();
+        state.step = WizardStep::ModelSelect;
+        state.reasoning = "high".to_string();
+        state.selected = 3;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.model, "haiku");
+        assert!(state.reasoning.is_empty());
+        assert_eq!(state.step, WizardStep::VersionSelect);
     }
 
     #[test]
@@ -2572,7 +3666,8 @@ mod tests {
         assert_eq!(state.option_count(), 0); // text input
 
         state.step = WizardStep::IssueSelect;
-        assert_eq!(state.option_count(), 0); // text input
+        state.issue_picker.issues = sample_issue_picker_issues();
+        assert_eq!(state.option_count(), 3);
     }
 
     #[test]
@@ -2581,8 +3676,9 @@ mod tests {
         state.step = WizardStep::QuickStart;
         state.has_quick_start = true;
         state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
 
-        assert_eq!(state.option_count(), 5);
+        assert_eq!(state.option_count(), 6);
     }
 
     #[test]
@@ -2605,6 +3701,87 @@ mod tests {
         assert_eq!(state.resume_session_id.as_deref(), Some("sess-12345678"));
         assert!(state.skip_perms);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn select_on_quick_start_focus_existing_session_moves_to_live_session_selector() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
+        state.selected = 4;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.step, WizardStep::FocusExistingSession);
+        assert_eq!(state.selected, 0);
+        assert!(state.focus_session_id.is_none());
+        assert!(!state.completed);
+    }
+
+    #[test]
+    fn select_on_live_session_selector_marks_focus_target_and_completes() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::FocusExistingSession;
+        state.live_session_entries = sample_live_session_entries();
+        state.selected = 1;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert!(state.completed);
+        assert_eq!(state.focus_session_id.as_deref(), Some("shell-2"));
+    }
+
+    #[test]
+    fn select_on_quick_start_restores_docker_lifecycle_intent() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.detected_agents = sample_agents();
+        state.docker_context = Some(DockerWizardContext {
+            services: vec!["web".to_string()],
+            suggested_service: Some("web".to_string()),
+        });
+        state.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        state.quick_start_entries = vec![QuickStartEntry {
+            agent_id: "claude".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("think".to_string()),
+            version: Some("latest".to_string()),
+            resume_session_id: None,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            docker_service: Some("web".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+        }];
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+        assert_eq!(state.docker_service.as_deref(), Some("web"));
+        assert_eq!(
+            state.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+    }
+
+    #[test]
+    fn select_on_quick_start_without_reasoning_treats_legacy_claude_entry_as_auto() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.detected_agents = sample_agents();
+        state.selected = 2;
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.agent_id, "claude");
+        assert_eq!(state.model, "sonnet");
+        assert_eq!(state.reasoning, "auto");
     }
 
     #[test]
@@ -2641,6 +3818,9 @@ mod tests {
             resume_session_id: Some("sess-claude".to_string()),
             skip_permissions: true,
             codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         }];
 
         update(&mut state, WizardMessage::Select);
@@ -2654,11 +3834,49 @@ mod tests {
     }
 
     #[test]
+    fn select_on_quick_start_legacy_installed_version_restores_installed_mode() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::QuickStart;
+        state.has_quick_start = true;
+        state.detected_agents = sample_agents();
+        state.quick_start_entries = vec![QuickStartEntry {
+            agent_id: "claude".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: None,
+            version: None,
+            resume_session_id: Some("sess-legacy".to_string()),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        }];
+
+        update(&mut state, WizardMessage::Select);
+
+        assert_eq!(state.version, "installed");
+    }
+
+    #[test]
     fn back_from_branch_action_returns_to_quick_start_when_history_exists() {
         let mut state = WizardState::default();
         state.step = WizardStep::BranchAction;
         state.has_quick_start = true;
         state.quick_start_entries = sample_quick_start_entries();
+
+        update(&mut state, WizardMessage::Back);
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+    }
+
+    #[test]
+    fn back_from_live_session_selector_returns_to_quick_start() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::FocusExistingSession;
+        state.has_quick_start = true;
+        state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
 
         update(&mut state, WizardMessage::Back);
 
@@ -2752,26 +3970,16 @@ mod tests {
     }
 
     #[test]
-    fn render_issue_input_uses_old_tui_two_row_layout() {
+    fn render_issue_picker_shows_related_none_and_cached_issues() {
         let mut state = WizardState::default();
         state.step = WizardStep::IssueSelect;
-        state.issue_id = "1234".to_string();
+        state.issue_picker.issues = sample_issue_picker_issues();
 
         let buf = render_buffer(&state, 90, 24);
         let text = buffer_text(&buf);
-        let (_, prompt_y) = find_text_position(&buf, "Issue ID (optional):").expect("prompt line");
-        let (_, value_y) = find_text_position(&buf, "1234_").expect("value line");
-
-        assert!(text.contains("Issue ID (optional):"));
-        assert!(text.contains("1234_"));
-        assert!(
-            value_y > prompt_y,
-            "input value should render on a row below the prompt"
-        );
-        assert!(
-            text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1,
-            "issue input should use the same inline prompt style instead of adding another boxed title"
-        );
+        assert!(text.contains("Related to none"));
+        assert!(text.contains("Fix login bug"));
+        assert!(text.contains("Launch Agent issue linkage"));
     }
 
     #[test]
@@ -2797,6 +4005,7 @@ mod tests {
         state.has_quick_start = true;
         state.branch_name = "feature/test".to_string();
         state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
 
         let text = render_text(&state, 100, 24);
 
@@ -2806,8 +4015,24 @@ mod tests {
         assert!(text.contains("> Codex Resume (sess-123...)"));
         assert!(text.contains("  Start new"));
         assert!(text.contains("  Claude Code Resume"));
+        assert!(text.contains("Focus existing session"));
         assert!(!text.contains("  Claude Code Start new"));
         assert!(text.contains("Choose different"));
+    }
+
+    #[test]
+    fn render_focus_existing_session_step_lists_live_sessions_for_branch() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::FocusExistingSession;
+        state.branch_name = "feature/test".to_string();
+        state.live_session_entries = sample_live_session_entries();
+
+        let text = render_text(&state, 100, 24);
+
+        assert!(text.contains("Focus Existing Session"));
+        assert!(text.contains("feature/test"));
+        assert!(text.contains("Codex (agent-1)"));
+        assert!(text.contains("Shell: feature/test (shell-2)"));
     }
 
     #[test]
@@ -2844,6 +4069,9 @@ mod tests {
             resume_session_id: Some("sess-12345678".to_string()),
             skip_permissions: true,
             codex_fast_mode: true,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         }];
 
         let text = render_text(&state, 100, 24);
@@ -2919,6 +4147,9 @@ mod tests {
                 resume_session_id: Some("sess-12345678".to_string()),
                 skip_permissions: true,
                 codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             },
             QuickStartEntry {
                 agent_id: "claude".to_string(),
@@ -2929,6 +4160,9 @@ mod tests {
                 resume_session_id: Some("sess-abcdefgh".to_string()),
                 skip_permissions: false,
                 codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             },
         ];
         state.selected = 0;
@@ -3046,6 +4280,7 @@ mod tests {
         state.has_quick_start = true;
         state.branch_name = "feature/test".to_string();
         state.quick_start_entries = sample_quick_start_entries();
+        state.live_session_entries = sample_live_session_entries();
         state.selected = 0;
 
         let options = state.current_options();
@@ -3054,7 +4289,8 @@ mod tests {
         assert_eq!(options[1], "Start new");
         assert_eq!(options[2], "Claude Code Resume");
         assert_eq!(options[3], "Start new");
-        assert_eq!(options[4], "Choose different");
+        assert_eq!(options[4], "Focus existing session");
+        assert_eq!(options[5], "Choose different");
     }
 
     #[test]
@@ -3269,7 +4505,7 @@ mod tests {
         assert!(text.contains("Select Model"));
         assert!(text.contains("Default (recommended) - Opus 4.6 - Most capable for complex work"));
         assert!(text.contains("> Opus 4.6 - Most capable for complex work"));
-        assert!(text.contains("  Sonnet 4.5 - Best for everyday tasks"));
+        assert!(text.contains("  Sonnet 4.6 - Best for everyday tasks"));
         assert!(text.contains("  Haiku 4.5 - Fastest for quick answers"));
         assert!(text.contains("[Enter] Select  [Esc] Back  [Up/Down] Navigate"));
     }
@@ -3382,19 +4618,53 @@ mod tests {
     }
 
     #[test]
-    fn render_reasoning_step_shows_fixed_width_old_tui_layout() {
+    fn render_codex_reasoning_step_shows_model_title_and_refreshed_labels() {
         let mut state = WizardState::default();
         state.step = WizardStep::ReasoningLevel;
         state.agent_id = "codex".to_string();
+        state.model = "gpt-5.4".to_string();
         state.selected = 2;
 
         let text = render_text(&state, 90, 24);
 
-        assert!(text.contains("Reasoning Level"));
-        assert!(text.contains("  Low        Faster, less thorough"));
-        assert!(text.contains("  Medium     Balanced"));
-        assert!(text.contains("> High       Slower, more thorough"));
-        assert!(text.contains("  XHigh      Extended high reasoning"));
+        assert!(text.contains("Select Reasoning Level for gpt-5.4"));
+        assert!(text.contains("Low"));
+        assert!(text.contains("Fast responses with lighter reasoning"));
+        assert!(text.contains("Medium (default)"));
+        assert!(text.contains("> High"));
+        assert!(text.contains("Extra high"));
+    }
+
+    #[test]
+    fn render_claude_effort_step_uses_effort_title_and_opus_rows() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ReasoningLevel;
+        state.agent_id = "claude".to_string();
+        state.model = "opus".to_string();
+        state.selected = 1;
+
+        let text = render_text(&state, 120, 24);
+
+        assert!(text.contains("Select Effort Level for opus"));
+        assert!(text.contains("Auto"));
+        assert!(text.contains("> Low"));
+        assert!(text.contains("Medium (default)"));
+        assert!(text.contains("High"));
+        assert!(text.contains("Max"));
+    }
+
+    #[test]
+    fn render_claude_effort_step_hides_max_for_sonnet() {
+        let mut state = WizardState::default();
+        state.step = WizardStep::ReasoningLevel;
+        state.agent_id = "claude".to_string();
+        state.model = "sonnet".to_string();
+        state.selected = 1;
+
+        let text = render_text(&state, 120, 24);
+
+        assert!(text.contains("Select Effort Level for sonnet"));
+        assert!(!text.contains("Max"));
     }
 
     #[test]
@@ -3461,7 +4731,7 @@ mod tests {
         state.selected = 4;
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -3517,7 +4787,7 @@ mod tests {
         state.step = WizardStep::VersionSelect;
         state.version_options = vec![
             VersionOption {
-                label: "Installed (v1.0.0)".to_string(),
+                label: "Installed".to_string(),
                 value: "installed".to_string(),
             },
             VersionOption {
@@ -3528,7 +4798,8 @@ mod tests {
 
         let text = render_text(&state, 90, 24);
 
-        assert!(text.contains("Installed (v1.0.0) - Use installed version"));
+        assert!(text.contains("Installed"));
+        assert!(text.contains("Use direct command"));
         assert!(text.chars().filter(|c| "╭╔┌┏".contains(*c)).count() == 1);
     }
 

@@ -1,6 +1,6 @@
 ---
 name: gwt-issue-search
-description: "Semantic search over all GitHub Issues using vector embeddings. Use when searching for existing issues, finding related issues, checking for duplicate issues, or determining which issue owns a scope. Mandatory preflight before gwt-spec-register, gwt-spec-ops, gwt-issue-register, and gwt-issue-resolve. Use when user says 'search issues', 'find related issues', 'check for duplicates', or asks which issue owns a scope."
+description: "Semantic search over all GitHub Issues using vector embeddings. Use when searching for existing issues, finding related issues, checking for duplicate issues, or determining which issue owns a scope. Mandatory preflight before gwt-register-issue, gwt-fix-issue, and visible SPEC routing decisions. Use when user says 'search issues', 'find related issues', 'check for duplicates', or asks which issue owns a scope."
 ---
 
 # Issue Search
@@ -9,7 +9,7 @@ gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (
 
 ## Issues search first
 
-When the user asks any of the following, use GitHub Issues search **before** manual `gh issue list`,
+When the user asks any of the following, use GitHub Issues search before manual `gwt issue view`,
 title grep, or file search:
 
 - "既存 Issue を探して"
@@ -50,7 +50,8 @@ When the gwt TUI launches an agent pane, the following env vars are exported aut
   --n-results 10
 ```
 
-If the Issue index does not yet exist, the runner builds it inline (full mode) by calling `gh issue list` and embedding the results, then performs the search.
+If the Issue index does not yet exist, the runner builds it inline (full mode) by refreshing
+issue data and embedding the results, then performs the search.
 
 To force a refresh ignoring TTL:
 
@@ -83,5 +84,5 @@ Add `--respect-ttl` to skip when the previous refresh is younger than 15 minutes
 - The TUI refreshes the Issue index automatically at startup (TTL 15 min). Non-TUI sessions trigger an inline build on the first search.
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
-- For SPEC search, use `gwt-spec-search` instead (SPECs are now local files)
+- For SPEC search, use `gwt-spec-search` instead (SPECs are GitHub Issues cached at `~/.gwt/cache/issues/`)
 - For file search, use `gwt-project-search` instead

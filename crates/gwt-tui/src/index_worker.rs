@@ -168,8 +168,10 @@ type ScopeMask = u8;
 
 const SCOPE_FILES: ScopeMask = 1 << 0;
 const SCOPE_FILES_DOCS: ScopeMask = 1 << 1;
-const SCOPE_SPECS: ScopeMask = 1 << 2;
-const SCOPE_ALL: ScopeMask = SCOPE_FILES | SCOPE_FILES_DOCS | SCOPE_SPECS;
+// SPEC-12: SCOPE_SPECS removed. SPECs are now GitHub Issues cached at
+// ~/.gwt/cache/issues/<repo-hash>/ and indexed through the Issue search
+// scope, not the local specs/ directory watcher.
+const SCOPE_ALL: ScopeMask = SCOPE_FILES | SCOPE_FILES_DOCS;
 
 const DOC_FILE_EXTENSIONS: &[&str] = &["md", "mdx", "rst", "adoc", "txt"];
 const SKIP_FILE_EXTENSIONS: &[&str] = &["snap"];
@@ -179,7 +181,6 @@ const SCOPE_SKIP_PREFIXES: &[&str] = &[
     ".codex",
     ".gemini",
     ".gwt",
-    "specs-archive",
     "tasks",
     "target",
     "node_modules",
@@ -196,9 +197,6 @@ fn scope_names_from_mask(mask: ScopeMask) -> Vec<&'static str> {
     }
     if mask & SCOPE_FILES_DOCS != 0 {
         scopes.push("files-docs");
-    }
-    if mask & SCOPE_SPECS != 0 {
-        scopes.push("specs");
     }
     scopes
 }
@@ -220,10 +218,9 @@ fn scope_for_changed_path(project_root: &Path, path: &Path) -> ScopeMask {
         .next()
         .and_then(|component| component.as_os_str().to_str());
     if let Some(name) = first {
-        if name == "specs" {
-            return SCOPE_SPECS;
-        }
-        if SCOPE_SKIP_PREFIXES.contains(&name) {
+        // SPEC-12: specs/ is no longer a local directory. Treat it as
+        // a skip prefix if it somehow reappears.
+        if SCOPE_SKIP_PREFIXES.contains(&name) || name == "specs" {
             return 0;
         }
         if name == "docs" {
@@ -581,11 +578,7 @@ async fn run_scopes(
     scopes: ScopeMask,
 ) {
     for scope in scope_names_from_mask(scopes) {
-        let action = if scope == "specs" {
-            "index-specs"
-        } else {
-            "index-files"
-        };
+        let action = "index-files";
         let log_file = open_runner_log_file(&format!("{action}-{scope}-incremental"));
 
         let permit = match runner_semaphore().acquire().await {
@@ -735,8 +728,10 @@ mod tests {
         assert_eq!(scope_names_from_mask(mask), vec!["files"]);
     }
 
+    // SPEC-12: specs/ is no longer indexed locally. Changes under
+    // specs/ are now skipped (treated like .git or node_modules).
     #[test]
-    fn changed_paths_classify_docs_and_specs_separately() {
+    fn changed_paths_classify_docs_and_skip_specs() {
         let root = Path::new("/repo");
         let mask = scopes_for_changed_paths(
             root,
@@ -747,7 +742,15 @@ mod tests {
             ],
         );
 
-        assert_eq!(scope_names_from_mask(mask), vec!["files-docs", "specs"]);
+        assert_eq!(scope_names_from_mask(mask), vec!["files-docs"]);
+    }
+
+    #[test]
+    fn changed_paths_do_not_skip_removed_specs_archive_prefix() {
+        let root = Path::new("/repo");
+        let mask = scopes_for_changed_paths(root, &[root.join("specs-archive/SPEC-10/spec.md")]);
+
+        assert_eq!(scope_names_from_mask(mask), vec!["files-docs"]);
     }
 
     #[test]

@@ -1,3 +1,0 @@
-- Canonical open AI spec destination: #1550
-- AI settings persistence は #1550 で具体化し、本 issue は file layout / ownership / persistence boundary の canonical source とする
-- runtime/state/cache を TOML-only へ広げるかは別 issue で扱う

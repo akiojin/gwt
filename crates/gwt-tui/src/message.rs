@@ -5,6 +5,7 @@ use gwt_core::logging::LogEvent;
 
 use crate::input::voice::VoiceInputMessage;
 use crate::model::ManagementTab;
+use crate::screens::board::BoardMessage;
 use crate::screens::branches::BranchesMessage;
 use crate::screens::cleanup_confirm::CleanupConfirmMessage;
 use crate::screens::cleanup_progress::CleanupProgressMessage;
@@ -22,11 +23,22 @@ use crate::screens::settings::SettingsMessage;
 use crate::screens::versions::VersionsMessage;
 use crate::screens::wizard::{SpecContext, WizardMessage};
 
+/// Direction for moving the active session inside grid layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridSessionDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// Every possible action in the TUI.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Quit the application.
     Quit,
+    /// Controlling terminal lost (revoked fd, SIGHUP, hung-up master).
+    TerminalLost,
     /// Toggle between Main (sessions) and Management layers.
     ToggleLayer,
     /// Move focus to the next logical pane.
@@ -41,6 +53,8 @@ pub enum Message {
     PrevSession,
     /// Switch to session by index (0-based).
     SwitchSession(usize),
+    /// Move the active session selection within grid layout.
+    MoveGridSession(GridSessionDirection),
     /// Toggle session layout between Tab and Grid.
     ToggleSessionLayout,
     /// Create a new shell session.
@@ -73,6 +87,8 @@ pub enum Message {
     DismissError,
     /// Branches screen message.
     Branches(BranchesMessage),
+    /// Board screen message.
+    Board(BoardMessage),
     /// Profiles screen message.
     Profiles(ProfilesMessage),
     /// Issues screen message.
@@ -93,6 +109,8 @@ pub enum Message {
     DockerProgress(DockerProgressMessage),
     /// Service selection overlay message.
     ServiceSelect(ServiceSelectMessage),
+    /// Discussion resume overlay message.
+    DiscussionResume(crate::screens::discussion_resume::DiscussionResumeMessage),
     /// Port selection overlay message.
     PortSelect(PortSelectMessage),
     /// Confirmation dialog message.
@@ -111,6 +129,8 @@ pub enum Message {
     ToggleHelp,
     /// Open the wizard overlay with SPEC context for prefilling.
     OpenWizardWithSpec(SpecContext),
+    /// Open the wizard overlay with an Issue preselected for linking.
+    OpenWizardWithIssue(u64),
     /// Close the wizard overlay.
     CloseWizard,
 }
@@ -129,6 +149,7 @@ mod tests {
         let _ = Message::NextSession;
         let _ = Message::PrevSession;
         let _ = Message::SwitchSession(0);
+        let _ = Message::MoveGridSession(GridSessionDirection::Left);
         let _ = Message::ToggleSessionLayout;
         let _ = Message::NewShell;
         let _ = Message::CloseSession;
@@ -156,6 +177,7 @@ mod tests {
         let _ = Message::PtyOutput("id".into(), vec![0x41]);
         let _ = Message::PasteInput("git status".into());
         let _ = Message::Branches(BranchesMessage::MoveUp);
+        let _ = Message::Board(BoardMessage::MoveUp);
         let _ = Message::Profiles(ProfilesMessage::MoveUp);
         let _ = Message::Issues(IssuesMessage::MoveUp);
         let _ = Message::GitView(GitViewMessage::MoveUp);
@@ -166,12 +188,16 @@ mod tests {
         let _ = Message::Wizard(WizardMessage::MoveUp);
         let _ = Message::DockerProgress(DockerProgressMessage::Advance);
         let _ = Message::ServiceSelect(ServiceSelectMessage::MoveUp);
+        let _ = Message::DiscussionResume(
+            crate::screens::discussion_resume::DiscussionResumeMessage::MoveUp,
+        );
         let _ = Message::PortSelect(PortSelectMessage::MoveUp);
         let _ = Message::Confirm(ConfirmMessage::Toggle);
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
         let _ = Message::Initialization(InitializationMessage::Exit);
         let _ = Message::OpenSessionConversion;
         let _ = Message::OpenWizardWithSpec(SpecContext::new("SPEC-1", "Title", ""));
+        let _ = Message::OpenWizardWithIssue(1776);
         let _ = Message::CloseWizard;
     }
 }

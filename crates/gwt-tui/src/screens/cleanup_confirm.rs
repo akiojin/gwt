@@ -1,9 +1,9 @@
 //! Branch Cleanup confirmation modal (FR-018e).
 //!
 //! Listed branches come from the Branches list selection. The modal lets the
-//! user toggle the `delete_remote` setting with `r`, confirm with `Enter`,
-//! and cancel with `Esc`. All other input is ignored so the modal owns the
-//! keyboard while it is visible.
+//! user toggle the run-wide `delete_remote` setting with `r`, confirm with
+//! `Enter`, and cancel with `Esc`. All other input is ignored so the modal
+//! owns the keyboard while it is visible.
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -15,32 +15,32 @@ use ratatui::{
 
 use gwt_git::MergeTarget;
 
+use super::branches::CleanupSelectionRisk;
 use crate::theme;
 
 /// One row in the confirm modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupConfirmRow {
     pub branch: String,
-    pub target: MergeTarget,
+    pub target: Option<MergeTarget>,
+    pub execution_branch: String,
+    pub upstream: Option<String>,
+    pub risks: Vec<CleanupSelectionRisk>,
 }
 
 /// State of the Branch Cleanup confirm modal.
-///
-/// The `delete_remote` toggle that the old GUI `CleanupModal` exposed is
-/// deliberately absent from this port: the current `gwt-git` API has no
-/// `delete_remote_branch` helper, so wiring a toggle that only updates UI
-/// state would mislead the user. A follow-up can add the toggle once the
-/// remote-delete plumbing lands in `gwt-git`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CleanupConfirmState {
     pub visible: bool,
     pub rows: Vec<CleanupConfirmRow>,
+    pub delete_remote: bool,
 }
 
 impl CleanupConfirmState {
     /// Open the modal with the given selection.
-    pub fn show(&mut self, rows: Vec<CleanupConfirmRow>) {
+    pub fn show(&mut self, rows: Vec<CleanupConfirmRow>, delete_remote: bool) {
         self.rows = rows;
+        self.delete_remote = delete_remote;
         self.visible = true;
     }
 
@@ -53,11 +53,17 @@ impl CleanupConfirmState {
     pub fn count(&self) -> usize {
         self.rows.len()
     }
+
+    fn has_risky_rows(&self) -> bool {
+        self.rows.iter().any(|row| !row.risks.is_empty())
+    }
 }
 
 /// Messages for the confirm modal.
 #[derive(Debug, Clone)]
 pub enum CleanupConfirmMessage {
+    /// `r` pressed — caller should flip the run-wide remote-delete toggle.
+    ToggleRemote,
     /// `Enter` pressed — caller should start the cleanup run.
     Confirm,
     /// `Esc` pressed — caller should drop the modal.
@@ -81,6 +87,10 @@ pub fn update(
     msg: CleanupConfirmMessage,
 ) -> CleanupConfirmOutcome {
     match msg {
+        CleanupConfirmMessage::ToggleRemote => {
+            state.delete_remote = !state.delete_remote;
+            CleanupConfirmOutcome::Pending
+        }
         CleanupConfirmMessage::Confirm => {
             state.hide();
             CleanupConfirmOutcome::Confirmed
@@ -99,8 +109,10 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
     }
 
     let width = 60_u16.min(area.width);
-    let body_height = (state.rows.len() as u16).saturating_add(7).min(area.height);
-    let height = body_height.max(8);
+    let body_height = (state.rows.len() as u16)
+        .saturating_add(if state.has_risky_rows() { 9 } else { 8 })
+        .min(area.height);
+    let height = body_height.max(9);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let dialog = Rect::new(x, y, width, height);
@@ -124,7 +136,9 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             Constraint::Length(2),
+            Constraint::Length(if state.has_risky_rows() { 1 } else { 0 }),
             Constraint::Min(1),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -151,32 +165,72 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
     ]));
     frame.render_widget(header, layout[0]);
 
+    if state.has_risky_rows() {
+        let warning = Paragraph::new(Line::from(vec![Span::styled(
+            "  Warning: includes unmerged / remote-tracking branches.",
+            Style::default().fg(theme::color::WARNING),
+        )]));
+        frame.render_widget(warning, layout[1]);
+    }
+
     let body_lines: Vec<Line> = state
         .rows
         .iter()
         .map(|row| {
-            Line::from(vec![
+            let status = row
+                .target
+                .map(|target| target.label().to_string())
+                .unwrap_or_else(|| "not merged".to_string());
+            let mut risk_labels = row
+                .risks
+                .iter()
+                .map(|risk| risk.label())
+                .collect::<Vec<_>>();
+            risk_labels.sort_unstable();
+
+            let mut spans = vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     row.branch.clone(),
                     Style::default().fg(theme::color::TEXT_PRIMARY),
                 ),
                 Span::styled("    ", Style::default()),
-                Span::styled(
-                    row.target.label().to_string(),
-                    Style::default().fg(theme::color::TEXT_SECONDARY),
-                ),
-            ])
+                Span::styled(status, Style::default().fg(theme::color::TEXT_SECONDARY)),
+            ];
+            if !risk_labels.is_empty() {
+                spans.push(Span::styled("    ", Style::default()));
+                spans.push(Span::styled(
+                    risk_labels.join(", "),
+                    Style::default().fg(theme::color::WARNING),
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
     let body = Paragraph::new(body_lines);
-    frame.render_widget(body, layout[1]);
+    frame.render_widget(body, layout[2]);
+
+    let toggle = Paragraph::new(Line::from(vec![
+        Span::styled(
+            if state.delete_remote {
+                "  [x] "
+            } else {
+                "  [ ] "
+            },
+            Style::default().fg(theme::color::ACTIVE),
+        ),
+        Span::styled(
+            "Also delete remote (r)",
+            Style::default().fg(theme::color::TEXT_SECONDARY),
+        ),
+    ]));
+    frame.render_widget(toggle, layout[3]);
 
     let hint = Paragraph::new(Line::from(vec![Span::styled(
-        "  [Enter] Confirm   [Esc] Cancel",
+        "  [r] Toggle remote   [Enter] Confirm   [Esc] Cancel",
         Style::default().fg(theme::color::TEXT_SECONDARY),
     )]));
-    frame.render_widget(hint, layout[2]);
+    frame.render_widget(hint, layout[4]);
 }
 
 #[cfg(test)]
@@ -189,15 +243,24 @@ mod tests {
         vec![
             CleanupConfirmRow {
                 branch: "feature/foo".to_string(),
-                target: MergeTarget::Main,
+                target: Some(MergeTarget::Main),
+                execution_branch: "feature/foo".to_string(),
+                upstream: Some("origin/feature/foo".to_string()),
+                risks: Vec::new(),
             },
             CleanupConfirmRow {
                 branch: "feature/bar".to_string(),
-                target: MergeTarget::Develop,
+                target: Some(MergeTarget::Develop),
+                execution_branch: "feature/bar".to_string(),
+                upstream: Some("origin/feature/bar".to_string()),
+                risks: Vec::new(),
             },
             CleanupConfirmRow {
                 branch: "feature/abandoned".to_string(),
-                target: MergeTarget::Gone,
+                target: Some(MergeTarget::Gone),
+                execution_branch: "feature/abandoned".to_string(),
+                upstream: Some("origin/feature/abandoned".to_string()),
+                risks: Vec::new(),
             },
         ]
     }
@@ -220,7 +283,7 @@ mod tests {
     #[test]
     fn show_makes_modal_visible_with_rows() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         assert!(state.visible);
         assert_eq!(state.count(), 3);
     }
@@ -228,7 +291,7 @@ mod tests {
     #[test]
     fn confirm_returns_confirmed_outcome() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let outcome = update(&mut state, CleanupConfirmMessage::Confirm);
         assert_eq!(outcome, CleanupConfirmOutcome::Confirmed);
         assert!(!state.visible);
@@ -237,16 +300,28 @@ mod tests {
     #[test]
     fn cancel_hides_modal() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let outcome = update(&mut state, CleanupConfirmMessage::Cancel);
         assert_eq!(outcome, CleanupConfirmOutcome::Cancelled);
         assert!(!state.visible);
     }
 
     #[test]
+    fn toggle_remote_flips_delete_remote_and_stays_pending() {
+        let mut state = CleanupConfirmState::default();
+        state.show(rows(), false);
+
+        let outcome = update(&mut state, CleanupConfirmMessage::ToggleRemote);
+
+        assert_eq!(outcome, CleanupConfirmOutcome::Pending);
+        assert!(state.visible);
+        assert!(state.delete_remote);
+    }
+
+    #[test]
     fn render_lists_each_branch_with_its_target_label() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let text = render_text(&state);
         assert!(text.contains("Confirm Cleanup"), "{text}");
         assert!(text.contains("Delete 3"), "{text}");
@@ -261,14 +336,41 @@ mod tests {
     }
 
     #[test]
-    fn render_does_not_advertise_delete_remote_toggle() {
-        // FR-018f follow-up: the `Also delete remote` toggle is removed
-        // until gwt-git gains a remote-delete helper.
+    fn render_advertises_delete_remote_toggle() {
         let mut state = CleanupConfirmState::default();
-        state.show(rows());
+        state.show(rows(), false);
         let text = render_text(&state);
-        assert!(!text.contains("Also delete remote"), "{text}");
-        assert!(!text.contains("Toggle remote"), "{text}");
+        assert!(text.contains("Also delete remote"), "{text}");
+    }
+
+    #[test]
+    fn render_shows_warning_summary_for_risky_rows() {
+        let mut state = CleanupConfirmState::default();
+        state.show(
+            vec![
+                CleanupConfirmRow {
+                    branch: "feature/unmerged".to_string(),
+                    target: None,
+                    execution_branch: "feature/unmerged".to_string(),
+                    upstream: None,
+                    risks: vec![CleanupSelectionRisk::Unmerged],
+                },
+                CleanupConfirmRow {
+                    branch: "origin/feature/foo".to_string(),
+                    target: Some(MergeTarget::Main),
+                    execution_branch: "feature/foo".to_string(),
+                    upstream: Some("origin/feature/foo".to_string()),
+                    risks: vec![CleanupSelectionRisk::RemoteTracking],
+                },
+            ],
+            false,
+        );
+        let text = render_text(&state);
+        assert!(text.contains("unmerged / remote-tracking"), "{text}");
+        assert!(text.contains("feature/unmerged"), "{text}");
+        assert!(text.contains("not merged"), "{text}");
+        assert!(text.contains("origin/feature/foo"), "{text}");
+        assert!(text.contains("remote-tracking"), "{text}");
     }
 
     #[test]
