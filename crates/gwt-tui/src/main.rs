@@ -423,10 +423,10 @@ fn run_app(
 ) -> io::Result<()> {
     // Detect repo type and create appropriate model
     let mut model = match gwt_git::detect_repo_type(&repo_path) {
-        RepoType::Normal(root) => Model::new(root),
+        RepoType::Normal(root) => Model::new_startup(root),
         RepoType::Bare {
             develop_worktree: Some(wt),
-        } => Model::new(wt),
+        } => Model::new_startup(wt),
         RepoType::Bare {
             develop_worktree: None,
         } => Model::new_initialization(repo_path, true),
@@ -811,6 +811,17 @@ session_count = 0
         assert_eq!(restored.session_count(), 0);
         assert!(restored.active_session_tab().is_none());
         assert!(!should_spawn_default_shell(&restored));
+    }
+
+    #[test]
+    fn startup_welcome_skips_default_shell_spawn() {
+        let model = Model::new_startup(PathBuf::from("/tmp/repo"));
+
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.session_count(), 0);
+        assert!(model.active_session_tab().is_none());
+        assert!(!should_spawn_default_shell(&model));
     }
 
     #[test]

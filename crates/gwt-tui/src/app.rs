@@ -52,7 +52,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 use crate::{
     custom_agents::load_custom_agents,
     discussion_resume::{build_resume_prompt, park_pending_resume},
-    input::voice::VoiceInputMessage,
+    input::{keybind::KeybindRegistry, voice::VoiceInputMessage},
     input_trace,
     message::{GridSessionDirection, Message},
     model::{
@@ -9468,7 +9468,7 @@ fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let lines = welcome_session_lines(inner.width <= 56 || inner.height <= 8);
+    let lines = welcome_session_lines();
     let content_height = (lines.len() as u16).min(inner.height);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -9483,47 +9483,28 @@ fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, chunks[1]);
 }
 
-fn welcome_session_lines(compact: bool) -> Vec<Line<'static>> {
+fn welcome_session_lines() -> Vec<Line<'static>> {
     let command_style = Style::default()
         .fg(theme::color::ACTIVE)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
 
-    if compact {
-        vec![
-            Line::from(Span::styled("Welcome", theme::style::header())),
-            Line::from(""),
-            Line::from(Span::styled("No terminal windows are open.", body_style)),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Ctrl+G, c", command_style),
-                Span::styled("  New shell", body_style),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl+G, g", command_style),
-                Span::styled("  Management", body_style),
-            ]),
-        ]
-    } else {
-        vec![
-            Line::from(Span::styled("Welcome", theme::style::header())),
-            Line::from(""),
-            Line::from(Span::styled("No terminal windows are open.", body_style)),
-            Line::from(Span::styled(
-                "Open a shell or return to the management panel.",
-                body_style,
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Ctrl+G, c", command_style),
-                Span::styled("  New shell session", body_style),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl+G, g", command_style),
-                Span::styled("  Open management panel", body_style),
-            ]),
-        ]
+    let mut lines = vec![
+        Line::from(Span::styled("Welcome", theme::style::header())),
+        Line::from(""),
+        Line::from(Span::styled("No terminal windows are open.", body_style)),
+        Line::from(""),
+    ];
+
+    for binding in KeybindRegistry::new().all_bindings() {
+        lines.push(Line::from(vec![
+            Span::styled(binding.keys.clone(), command_style),
+            Span::styled("  ", body_style),
+            Span::styled(binding.description.clone(), body_style),
+        ]));
     }
+
+    lines
 }
 
 /// Build session tab title line (same pattern as management tabs in Block title).
@@ -22020,6 +22001,33 @@ exit 1
             assert!(
                 text.contains(&binding.description),
                 "expected help overlay to contain description {}",
+                binding.description
+            );
+        }
+    }
+
+    #[test]
+    fn render_welcome_session_lists_all_registered_keybindings() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let text = render_model_text(&model, 80, 24);
+        let registry = crate::input::keybind::KeybindRegistry::new();
+
+        assert!(text.contains("Welcome"));
+        assert!(text.contains("No terminal windows are open."));
+        for binding in registry.all_bindings() {
+            assert!(
+                text.contains(&binding.keys),
+                "expected welcome screen to contain binding {}",
+                binding.keys
+            );
+            assert!(
+                text.contains(&binding.description),
+                "expected welcome screen to contain description {}",
                 binding.description
             );
         }

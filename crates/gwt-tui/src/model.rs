@@ -2055,6 +2055,16 @@ impl Model {
         }
     }
 
+    /// Create the startup model shown before any terminal window exists.
+    pub fn new_startup(repo_path: PathBuf) -> Self {
+        let mut model = Self::new(repo_path);
+        model.sessions.clear();
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model
+    }
+
     /// Attach a logs-watcher receiver produced by
     /// [`crate::logs_watcher::spawn`]. Called exactly once from `main`.
     pub fn set_logs_watcher_rx(
@@ -2473,6 +2483,17 @@ mod tests {
                 "queued",
             ))
             .is_ok());
+    }
+
+    #[test]
+    fn model_new_startup_defaults_to_welcome_without_sessions() {
+        let model = Model::new_startup(PathBuf::from("/tmp/repo"));
+
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert_eq!(model.session_count(), 0);
+        assert_eq!(model.active_session, 0);
+        assert!(model.active_session_tab().is_none());
     }
 
     #[test]
