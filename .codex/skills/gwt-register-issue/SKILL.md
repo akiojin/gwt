@@ -24,13 +24,35 @@ Do not use this for an existing Issue. Use `gwt-fix-issue` instead.
 
 ## Workflow
 
-1. Load `.claude/skills/gwt-issue/SKILL.md` and follow **Register Mode** only.
-2. Run duplicate search before creating anything.
-3. If the request is a narrow bug/docs/chore/investigation item, create the plain Issue through `gwt issue create`.
-4. If the request needs new behavior definition, create or deepen the owner SPEC through `gwt-discussion`.
-5. Return the chosen owner and next step without exposing internal routing names.
+1. Verify that `gwt issue ...` can access GitHub. If auth fails, stop and ask the user to refresh GitHub authentication.
+2. Normalize the request into summary, background, expected outcome, and constraints.
+3. Run duplicate search before creating anything. Search both open Issues and existing SPEC owners.
+4. When the request is a narrow bug, docs, chore, or investigation item, create a plain Issue with `gwt issue create --title ... -f ...`.
+5. When the request needs new behavior definition or broader design work, hand off to `gwt-discussion`.
+6. Return the chosen owner and next step in the current user's language.
 
-## Compatibility
+## Guardrails
 
-- Public replacement for `gwt-issue` register mode
-- `gwt-issue` remains available as a compatibility alias for older prompts and commands
+- Agent-facing Issue workflow must use `gwt issue ...` as the canonical CLI surface.
+- Direct `gh issue ...` commands are not part of the normal path.
+- Do not create both a plain Issue and a SPEC for the same request.
+
+## Required Plain Issue Body Structure
+
+```markdown
+## Summary
+
+(one-paragraph request summary)
+
+## Background
+
+(source context, problem, or motivation)
+
+## Expected Outcome
+
+(expected result or completion condition)
+
+## Notes
+
+(links, examples, constraints, or open observations)
+```

@@ -1,6 +1,6 @@
 # SDD (Software Design Document) Methodology
 
-Reference for Phase 2 of `gwt-spec-plan`. Describes how to produce architecture design
+Reference for Phase 2 of `gwt-plan-spec`. Describes how to produce architecture design
 artifacts using SDD methodology.
 
 ## Purpose

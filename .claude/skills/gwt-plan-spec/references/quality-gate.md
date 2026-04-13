@@ -1,6 +1,6 @@
 # Quality Gate
 
-Reference for Phase 4 of `gwt-spec-plan`. Defines the pre-implementation readiness checks,
+Reference for Phase 4 of `gwt-plan-spec`. Defines the pre-implementation readiness checks,
 three-way verdict, and auto-fix behavior.
 
 ## Purpose

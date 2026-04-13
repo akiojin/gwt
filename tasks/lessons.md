@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-13 — docs/skills: 公開 surface を切り替えたら alias を残す前提を置かない
+
+### 事象
+
+`gwt-discussion` / `gwt-plan-spec` / `gwt-build-spec` / `gwt-manage-pr` を公開入口に
+切り替えたあとも、`gwt-issue` / `gwt-pr` / `gwt-spec-*` を compatibility alias として
+残す前提で skill asset / AGENTS / SPEC を更新してしまい、ユーザーから
+「重複して見えるので不要」と指摘を受けた。
+
+### 原因
+
+- 「後方互換を残すほうが安全」という一般論を優先し、この repo の公開 UX では
+  重複 surface 自体がコストになることを軽視した。
+- skill 本体だけでなく、distribution test、lint script、SPEC 正本まで含めて
+  alias 削除の影響範囲を最初に洗い出していなかった。
+
+### 再発防止策
+
+1. 公開 task entry point を新設したら、まず「alias を残す必要が本当にあるか」を
+   user-facing UX で判断する。
+2. alias を削除する場合は、skill/command asset、distribution test、
+   lint script、AGENTS、SPEC を同じ変更セットで更新する。
+3. `git ls-files` を使う検証スクリプトは、削除済み tracked file を拾って
+   途中状態で壊れないか確認する。
+
 ## 2026-04-13 — spec: shared board を intake 専用に狭めず、通信 + タスク管理 + agent presence を分けて設計する
 
 ### 事象

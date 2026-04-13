@@ -1,5 +1,5 @@
 <!-- ============================================================
-PR Body Template — gwt-pr skill
+PR Body Template — gwt-manage-pr skill
 
 Rules:
 - REQUIRED sections: Summary, Changes, Testing, Closing Issues, Related Issues, Checklist

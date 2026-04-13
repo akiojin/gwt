@@ -24,13 +24,15 @@ Do not use this for new work intake. Use `gwt-register-issue` instead.
 
 ## Workflow
 
-1. Load `.claude/skills/gwt-issue/SKILL.md` and follow **Resolve Mode** only.
-2. Use `gwt issue view`, `gwt issue comments`, and `inspect_issue.py` to inspect the issue.
-3. If the change is a clear direct fix, continue through `gwt-build-spec` in standalone mode and finish verification.
-4. If the issue needs behavior design or wider scope definition, hand off to `gwt-discussion` with the issue context.
+1. Verify that `gwt issue view` and `gwt issue comments` can access the target issue.
+2. Gather facts with `gwt issue view`, `gwt issue comments`, linked PR inspection, and `python3 ".codex/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number or URL>"`.
+3. Decide direct-fix vs spec-needed. Prefer direct fix for clear corrective work; prefer `gwt-discussion` when behavior design or broader scope definition is required.
+4. If the change is a clear direct fix, continue through `gwt-build-spec` and finish verification.
 5. Post progress and closure comments through `gwt issue comment`.
+6. Return the result in the current user's language.
 
-## Compatibility
+## Guardrails
 
-- Public replacement for `gwt-issue` resolve mode
-- `gwt-issue` remains available as a compatibility alias for older prompts and commands
+- Agent-facing Issue workflow must use `gwt issue ...` as the canonical CLI surface.
+- Direct `gh issue ...` commands are not part of the normal path.
+- Do not treat the issue body as the source of truth for SPEC artifacts once a SPEC owner exists.

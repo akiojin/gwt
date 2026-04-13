@@ -17568,7 +17568,7 @@ services:
         fs::create_dir_all(worktree.join(".claude/commands")).expect("create claude commands");
         fs::create_dir_all(worktree.join(".codex/skills/gwt-agent-read"))
             .expect("create stale codex skill");
-        fs::create_dir_all(worktree.join(".claude/skills/gwt-pr/references"))
+        fs::create_dir_all(worktree.join(".claude/skills/gwt-manage-pr/references"))
             .expect("create stale nested claude skill path");
         fs::write(
             worktree.join(".claude/commands/gwt-issue-search.md"),
@@ -17581,7 +17581,7 @@ services:
         )
         .expect("write stale skill");
         fs::write(
-            worktree.join(".claude/skills/gwt-pr/references/legacy.md"),
+            worktree.join(".claude/skills/gwt-manage-pr/references/legacy.md"),
             "legacy nested skill file",
         )
         .expect("write stale nested skill file");
@@ -17593,7 +17593,7 @@ services:
             command: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ] && [ ! -e .claude/skills/gwt-pr/references/legacy.md ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
+                "if [ ! -e .claude/commands/gwt-issue-search.md ] && [ ! -e .codex/skills/gwt-agent-read ] && [ ! -e .claude/skills/gwt-manage-pr/references/legacy.md ]; then printf pruned > \"$1\"; else printf stale > \"$1\"; fi".to_string(),
                 "sh".to_string(),
                 marker.to_string_lossy().into_owned(),
             ],
@@ -17642,7 +17642,7 @@ services:
         );
         assert!(
             !worktree
-                .join(".claude/skills/gwt-pr/references/legacy.md")
+                .join(".claude/skills/gwt-manage-pr/references/legacy.md")
                 .exists(),
             "stale nested skill file should be removed before spawn"
         );

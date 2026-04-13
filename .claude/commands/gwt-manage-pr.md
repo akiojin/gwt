@@ -20,8 +20,10 @@ Steps
 -----
 
 1. Load `.claude/skills/gwt-manage-pr/SKILL.md` and follow the workflow.
-2. Use the current branch and PR state to choose create, status, or unblock actions.
-3. Keep PR work behind this visible entrypoint.
+2. `gwt pr current` should succeed before acting so auth and current-branch PR state are known.
+3. Use the current branch and PR state to choose create, status, or unblock actions.
+4. If the PR is conflicting or behind, route directly into the fix flow.
+5. Keep PR work behind this visible entrypoint.
 
 Examples
 --------

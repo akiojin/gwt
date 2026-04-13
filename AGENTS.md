@@ -280,16 +280,6 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal user interfaces with ratatui, crossterm, and xterm.js. |
 
-### Compatibility Aliases
-
-| Skill | Command | Preferred Visible Entry Point |
-|-------|---------|-------------------------------|
-| gwt-issue | `/gwt:gwt-issue` | `gwt-register-issue` / `gwt-fix-issue` |
-| gwt-spec-design | `/gwt:gwt-spec-design` | `gwt-discussion` |
-| gwt-spec-plan | `/gwt:gwt-spec-plan` | `gwt-plan-spec` |
-| gwt-spec-build | `/gwt:gwt-spec-build` | `gwt-build-spec` |
-| gwt-pr | `/gwt:gwt-pr` | `gwt-manage-pr` |
-
 ### Recommended Workflow
 
 ```text

@@ -175,25 +175,18 @@ Blocking items: <N>
 - Combining multiple independent problems into a single item.
 - Omitting file paths or line numbers when the script output contains them.
 
-## Bundled Script Reference
+## Canonical Command Reference
 
 ```bash
-# Inspect all (CI, conflicts, reviews)
-python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>"
+# Inspect current PR status
+gwt pr current
+gwt pr checks "<number>"
+gwt pr reviews "<number>"
+gwt pr review-threads "<number>"
 
-# CI checks only
-python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode checks
-
-# Reviews only
-python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode reviews
-
-# Reply and resolve all threads
-python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --reply-and-resolve '[
-  {"threadId":"PRRT_xxx123","body":"Fixed: refactored as suggested."}
-]'
-
-# Notify reviewers
-python3 ".claude/skills/gwt-pr-fix/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --add-comment "Fixed all issues. Please re-review."
+# Reply, resolve, and notify
+gwt pr review-threads reply-and-resolve "<number>" -f /tmp/replies.json
+gwt pr comment "<number>" -f /tmp/pr-comment.md
 ```
 
 ## Output Examples

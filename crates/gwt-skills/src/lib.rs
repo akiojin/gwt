@@ -486,7 +486,6 @@ mod tests {
                     .unwrap_or("")
             })
             .collect();
-        assert!(dirs.contains(&"gwt-pr"), "missing gwt-pr skill dir");
         assert!(
             dirs.contains(&"gwt-fix-issue"),
             "missing gwt-fix-issue skill dir"
@@ -511,14 +510,18 @@ mod tests {
             dirs.contains(&"gwt-manage-pr"),
             "missing gwt-manage-pr skill dir"
         );
-        assert!(
-            dirs.contains(&"gwt-spec-design"),
-            "missing gwt-spec-design skill dir"
-        );
-        assert!(
-            dirs.contains(&"gwt-spec-build"),
-            "missing gwt-spec-build skill dir"
-        );
+        for retired in [
+            "gwt-issue",
+            "gwt-pr",
+            "gwt-spec-design",
+            "gwt-spec-plan",
+            "gwt-spec-build",
+        ] {
+            assert!(
+                !dirs.contains(&retired),
+                "unexpected retired skill dir {retired}"
+            );
+        }
     }
 
     #[test]
@@ -534,7 +537,6 @@ mod tests {
                     .unwrap_or("")
             })
             .collect();
-        assert!(files.contains(&"gwt-pr.md"), "missing gwt-pr.md command");
         assert!(
             files.contains(&"gwt-fix-issue.md"),
             "missing gwt-fix-issue.md command"
@@ -559,10 +561,18 @@ mod tests {
             files.contains(&"gwt-manage-pr.md"),
             "missing gwt-manage-pr.md command"
         );
-        assert!(
-            files.contains(&"gwt-spec-design.md"),
-            "missing gwt-spec-design.md command"
-        );
+        for retired in [
+            "gwt-issue.md",
+            "gwt-pr.md",
+            "gwt-spec-design.md",
+            "gwt-spec-plan.md",
+            "gwt-spec-build.md",
+        ] {
+            assert!(
+                !files.contains(&retired),
+                "unexpected retired command {retired}"
+            );
+        }
     }
 
     #[test]
@@ -667,8 +677,8 @@ mod tests {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
 
         for relative in [
-            ".claude/skills/gwt-issue/SKILL.md",
-            ".codex/skills/gwt-issue/SKILL.md",
+            ".claude/skills/gwt-register-issue/SKILL.md",
+            ".codex/skills/gwt-register-issue/SKILL.md",
         ] {
             let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -677,31 +687,57 @@ mod tests {
                 "expected canonical gwt issue create guidance in {relative}"
             );
             assert!(
-                issue_skill.contains("gwt issue comment"),
-                "expected canonical gwt issue comment guidance in {relative}"
-            );
-            assert!(
                 issue_skill
                     .contains("Direct `gh issue ...` commands are not part of the normal path."),
                 "expected skill to forbid direct gh issue usage in the normal path: {relative}"
             );
             assert!(
-                !issue_skill.contains("Plain Issue: create directly with `gh issue create`."),
-                "unexpected direct gh issue create guidance in {relative}"
+                issue_skill.contains("gwt-discussion"),
+                "expected visible discussion handoff guidance in {relative}"
             );
             assert!(
-                !issue_skill.contains("Before posting with `gh issue comment`"),
-                "unexpected direct gh issue comment guidance in {relative}"
+                issue_skill.contains("current user's language"),
+                "expected language contract in {relative}"
             );
             assert!(
-                issue_skill.contains("gwt-register-issue")
-                    && issue_skill.contains("gwt-fix-issue")
-                    && issue_skill.contains("gwt-discussion"),
-                "expected visible task entrypoint guidance in {relative}"
+                !issue_skill.contains("Load `.claude/skills/gwt-issue/SKILL.md`"),
+                "unexpected retired gwt-issue dependency in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-fix-issue/SKILL.md",
+            ".codex/skills/gwt-fix-issue/SKILL.md",
+        ] {
+            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_skill.contains("gwt issue view"),
+                "expected canonical gwt issue view guidance in {relative}"
             );
             assert!(
-                !issue_skill.contains("gwt-spec-ops") && !issue_skill.contains("gwt-spec-register"),
-                "unexpected stale internal SPEC routing name in {relative}"
+                issue_skill.contains("gwt issue comments"),
+                "expected canonical gwt issue comments guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("gwt issue comment"),
+                "expected canonical gwt issue comment guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("inspect_issue.py"),
+                "expected inspect_issue helper guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("gwt-build-spec") && issue_skill.contains("gwt-discussion"),
+                "expected visible build/discussion handoff guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("current user's language"),
+                "expected language contract in {relative}"
+            );
+            assert!(
+                !issue_skill.contains("Load `.claude/skills/gwt-issue/SKILL.md`"),
+                "unexpected retired gwt-issue dependency in {relative}"
             );
         }
 
@@ -819,8 +855,8 @@ mod tests {
         }
 
         for relative in [
-            ".claude/skills/gwt-pr/SKILL.md",
-            ".codex/skills/gwt-pr/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
             let pr_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -854,8 +890,8 @@ mod tests {
                 "expected canonical gwt actions log guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("Visible owner: `gwt-manage-pr`"),
-                "expected visible PR owner note in {relative}"
+                pr_skill.contains("current user's language"),
+                "expected language contract in {relative}"
             );
             assert!(
                 !pr_skill.contains("Fallback: `gh pr create"),
@@ -871,10 +907,14 @@ mod tests {
                 ),
                 "unexpected raw gh pull lookup guidance in {relative}"
             );
+            assert!(
+                !pr_skill.contains("legacy prompt or internal handoff refers to gwt-pr"),
+                "unexpected retired alias guidance in {relative}"
+            );
         }
 
         {
-            let relative = ".claude/skills/gwt-pr/references/check-flow.md";
+            let relative = ".claude/skills/gwt-manage-pr/references/check-flow.md";
             let check_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
@@ -903,7 +943,7 @@ mod tests {
         }
 
         {
-            let relative = ".claude/skills/gwt-pr/references/create-flow.md";
+            let relative = ".claude/skills/gwt-manage-pr/references/create-flow.md";
             let create_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
@@ -938,7 +978,7 @@ mod tests {
         }
 
         {
-            let relative = ".claude/skills/gwt-pr/references/fix-flow.md";
+            let relative = ".claude/skills/gwt-manage-pr/references/fix-flow.md";
             let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
@@ -981,19 +1021,19 @@ mod tests {
             "unexpected direct gh issue comment guidance"
         );
 
-        let pr_command = include_str!("../../../.claude/commands/gwt-pr.md");
+        let pr_command = include_str!("../../../.claude/commands/gwt-manage-pr.md");
         assert!(
             pr_command.contains("`gwt pr current` should succeed"),
-            "expected gwt-pr command wrapper to point to canonical gwt auth check"
+            "expected gwt-manage-pr command wrapper to point to canonical gwt auth check"
         );
         assert!(
             pr_command.contains("conflicting") || pr_command.contains("behind"),
-            "expected gwt-pr command wrapper to mention conflict/behind fix routing"
+            "expected gwt-manage-pr command wrapper to mention conflict/behind fix routing"
         );
 
         for relative in [
-            ".claude/skills/gwt-issue/scripts/inspect_issue.py",
-            ".codex/skills/gwt-issue/scripts/inspect_issue.py",
+            ".claude/skills/gwt-fix-issue/scripts/inspect_issue.py",
+            ".codex/skills/gwt-fix-issue/scripts/inspect_issue.py",
         ] {
             let inspect_issue_script = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -1017,26 +1057,23 @@ mod tests {
             "gwt-plan-spec",
             "gwt-build-spec",
             "gwt-manage-pr",
-            "Compatibility Aliases",
         ] {
             assert!(
                 agents.contains(needle),
                 "expected AGENTS.md to document {needle}"
             );
         }
-
-        for relative in [
-            ".claude/commands/gwt-issue.md",
-            ".claude/commands/gwt-spec-design.md",
-            ".claude/commands/gwt-spec-plan.md",
-            ".claude/commands/gwt-spec-build.md",
-            ".claude/commands/gwt-pr.md",
+        for retired in [
+            "Compatibility Aliases",
+            "gwt-issue",
+            "gwt-spec-design",
+            "gwt-spec-plan",
+            "gwt-spec-build",
+            "gwt-pr",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
-                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                content.contains("Compatibility Alias"),
-                "expected compatibility alias note in {relative}"
+                !agents.contains(retired),
+                "unexpected retired public documentation entry {retired}"
             );
         }
     }
@@ -1049,11 +1086,12 @@ mod tests {
             ".claude/skills/gwt-discussion/SKILL.md",
             ".codex/skills/gwt-discussion/SKILL.md",
             ".claude/skills/gwt-discussion/references/registration.md",
-            ".claude/skills/gwt-spec-plan/SKILL.md",
-            ".claude/skills/gwt-spec-build/SKILL.md",
-            ".codex/skills/gwt-spec-build/SKILL.md",
-            ".claude/skills/gwt-spec-build/references/completion-gate.md",
-            ".claude/skills/gwt-spec-plan/references/quality-gate.md",
+            ".claude/skills/gwt-plan-spec/SKILL.md",
+            ".codex/skills/gwt-plan-spec/SKILL.md",
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-build-spec/references/completion-gate.md",
+            ".claude/skills/gwt-plan-spec/references/quality-gate.md",
         ] {
             let content = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -1109,13 +1147,26 @@ mod tests {
         assert!(wt.join(".codex/hooks.json").exists());
 
         // Verify all distribution targets exist
-        assert!(wt.join(".claude/skills/gwt-pr/SKILL.md").exists());
+        assert!(wt.join(".claude/skills/gwt-manage-pr/SKILL.md").exists());
         assert!(wt.join(".claude/skills/gwt-fix-issue/SKILL.md").exists());
-        assert!(wt.join(".codex/skills/gwt-pr/SKILL.md").exists());
+        assert!(wt.join(".codex/skills/gwt-manage-pr/SKILL.md").exists());
         assert!(wt.join(".codex/skills/gwt-fix-issue/SKILL.md").exists());
-        assert!(!wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
-        assert!(wt.join(".claude/commands/gwt-pr.md").exists());
+        assert!(!wt.join(".agents/skills/gwt-manage-pr/SKILL.md").exists());
+        assert!(wt.join(".claude/commands/gwt-manage-pr.md").exists());
         assert!(wt.join(".claude/commands/gwt-fix-issue.md").exists());
+        for retired in [
+            ".claude/skills/gwt-pr/SKILL.md",
+            ".codex/skills/gwt-pr/SKILL.md",
+            ".claude/commands/gwt-pr.md",
+            ".claude/skills/gwt-spec-design/SKILL.md",
+            ".claude/skills/gwt-spec-plan/SKILL.md",
+            ".claude/skills/gwt-spec-build/SKILL.md",
+        ] {
+            assert!(
+                !wt.join(retired).exists(),
+                "unexpected retired distributed asset {retired}"
+            );
+        }
         assert!(
             !wt.join(".claude/hooks/scripts/gwt-forward-hook.mjs")
                 .exists(),
