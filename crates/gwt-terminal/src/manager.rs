@@ -138,6 +138,7 @@ impl PaneManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::lock_pty_test;
 
     #[test]
     fn test_new_manager_is_empty() {
@@ -148,6 +149,7 @@ mod tests {
 
     #[test]
     fn test_spawn_shell() {
+        let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
         let id = mgr
             .spawn_shell(std::env::temp_dir(), HashMap::new())
@@ -162,6 +164,7 @@ mod tests {
 
     #[test]
     fn test_launch_agent() {
+        let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
         let config = LaunchConfig {
             command: "/bin/echo".to_string(),
@@ -179,6 +182,7 @@ mod tests {
 
     #[test]
     fn test_close_pane() {
+        let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
         let id = mgr
             .spawn_shell(std::env::temp_dir(), HashMap::new())
@@ -199,6 +203,7 @@ mod tests {
 
     #[test]
     fn test_multiple_panes() {
+        let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
         let id1 = mgr
             .spawn_shell(std::env::temp_dir(), HashMap::new())
@@ -216,6 +221,7 @@ mod tests {
 
     #[test]
     fn test_get_pane_mut() {
+        let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
         let id = mgr
             .spawn_shell(std::env::temp_dir(), HashMap::new())
@@ -231,6 +237,7 @@ mod tests {
 
     #[test]
     fn test_resize_all() {
+        let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
         let id = mgr
             .spawn_shell(std::env::temp_dir(), HashMap::new())
@@ -247,6 +254,7 @@ mod tests {
 
     #[test]
     fn test_unique_pane_ids() {
+        let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
         let mut ids = Vec::new();
         for _ in 0..5 {

@@ -31,6 +31,9 @@ use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
 };
+use gwt_terminal::protocol::{
+    build_paste_input_bytes, key_event_to_bytes, screen_requests_bracketed_paste,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -7378,34 +7381,11 @@ fn run_wizard_version_cache_refresh(cache_path: PathBuf, refresh_targets: Vec<Ag
 fn handle_paste_input(model: &mut Model, text: String) {
     let bracketed_paste_enabled = model
         .active_session_tab()
-        .map(|session| vt_requests_bracketed_paste(&session.vt))
+        .map(|session| screen_requests_bracketed_paste(session.vt.screen()))
         .unwrap_or(false);
 
     if let Some(bytes) = build_paste_input_bytes(&text, bracketed_paste_enabled) {
         push_input_to_active_session(model, bytes);
-    }
-}
-
-fn vt_requests_bracketed_paste(vt: &crate::model::VtState) -> bool {
-    vt.screen()
-        .input_mode_formatted()
-        .windows(b"\x1b[?2004h".len())
-        .any(|window| window == b"\x1b[?2004h")
-}
-
-fn build_paste_input_bytes(text: &str, bracketed_paste_enabled: bool) -> Option<Vec<u8>> {
-    if text.is_empty() {
-        return None;
-    }
-
-    if bracketed_paste_enabled {
-        let mut bytes = Vec::with_capacity(text.len() + 12);
-        bytes.extend_from_slice(b"\x1b[200~");
-        bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(b"\x1b[201~");
-        Some(bytes)
-    } else {
-        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -7470,66 +7450,6 @@ fn agent_color_to_ratatui(color: crate::model::AgentColor) -> Color {
         crate::model::AgentColor::Yellow => Color::Yellow,
         crate::model::AgentColor::Magenta => Color::Magenta,
         crate::model::AgentColor::Gray => Color::Gray,
-    }
-}
-
-fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
-    match key.code {
-        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            control_char_bytes(ch)
-        }
-        KeyCode::Char(ch) => Some(ch.to_string().into_bytes()),
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
-        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
-        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
-        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
-        KeyCode::F(n) => f_key_to_bytes(n),
-        _ => None,
-    }
-}
-
-fn f_key_to_bytes(n: u8) -> Option<Vec<u8>> {
-    match n {
-        // F1-F4: SS3 sequences (xterm PC-style default)
-        1 => Some(b"\x1bOP".to_vec()),
-        2 => Some(b"\x1bOQ".to_vec()),
-        3 => Some(b"\x1bOR".to_vec()),
-        4 => Some(b"\x1bOS".to_vec()),
-        // F5-F12: CSI sequences
-        5 => Some(b"\x1b[15~".to_vec()),
-        6 => Some(b"\x1b[17~".to_vec()),
-        7 => Some(b"\x1b[18~".to_vec()),
-        8 => Some(b"\x1b[19~".to_vec()),
-        9 => Some(b"\x1b[20~".to_vec()),
-        10 => Some(b"\x1b[21~".to_vec()),
-        11 => Some(b"\x1b[23~".to_vec()),
-        12 => Some(b"\x1b[24~".to_vec()),
-        _ => None,
-    }
-}
-
-fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
-    let ch = ch.to_ascii_lowercase();
-    match ch {
-        '@' | ' ' => Some(vec![0x00]),
-        'a'..='z' => Some(vec![(ch as u8) & 0x1f]),
-        '[' => Some(vec![0x1b]),
-        '\\' => Some(vec![0x1c]),
-        ']' => Some(vec![0x1d]),
-        '^' => Some(vec![0x1e]),
-        '_' => Some(vec![0x1f]),
-        _ => None,
     }
 }
 
@@ -19837,13 +19757,13 @@ services:
     #[test]
     fn vt_state_reports_bracketed_paste_when_requested_by_session() {
         let mut vt = crate::model::VtState::new(24, 80);
-        assert!(!vt_requests_bracketed_paste(&vt));
+        assert!(!screen_requests_bracketed_paste(vt.screen()));
 
         vt.process(b"\x1b[?2004h");
-        assert!(vt_requests_bracketed_paste(&vt));
+        assert!(screen_requests_bracketed_paste(vt.screen()));
 
         vt.process(b"\x1b[?2004l");
-        assert!(!vt_requests_bracketed_paste(&vt));
+        assert!(!screen_requests_bracketed_paste(vt.screen()));
     }
 
     #[test]

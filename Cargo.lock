@@ -817,6 +817,7 @@ version = "8.17.2"
 dependencies = [
  "crossterm",
  "gwt-core",
+ "libc",
  "portable-pty",
  "tempfile",
  "thiserror 2.0.18",
