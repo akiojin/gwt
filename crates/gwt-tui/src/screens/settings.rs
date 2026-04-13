@@ -28,7 +28,6 @@ pub enum SettingsCategory {
     Worktree,
     Agent,
     CustomAgents,
-    Environment,
     Ai,
     Skills,
     Voice,
@@ -36,12 +35,11 @@ pub enum SettingsCategory {
 
 impl SettingsCategory {
     /// All categories in display order.
-    pub const ALL: [SettingsCategory; 8] = [
+    pub const ALL: [SettingsCategory; 7] = [
         SettingsCategory::General,
         SettingsCategory::Worktree,
         SettingsCategory::Agent,
         SettingsCategory::CustomAgents,
-        SettingsCategory::Environment,
         SettingsCategory::Ai,
         SettingsCategory::Skills,
         SettingsCategory::Voice,
@@ -54,7 +52,6 @@ impl SettingsCategory {
             Self::Worktree => "Worktree",
             Self::Agent => "Agent",
             Self::CustomAgents => "Custom Agents",
-            Self::Environment => "Environment",
             Self::Ai => "AI",
             Self::Skills => "Skills",
             Self::Voice => "Voice",
@@ -274,23 +271,6 @@ pub fn fields_for_category_with_settings(
                 label: CUSTOM_AGENT_ADD_LABEL.to_string(),
                 value: "Create new custom agent".to_string(),
                 field_type: FieldType::Action,
-            },
-        ],
-        SettingsCategory::Environment => vec![
-            SettingField {
-                label: "Shell".to_string(),
-                value: "/bin/zsh".to_string(),
-                field_type: FieldType::Path,
-            },
-            SettingField {
-                label: "PATH prefix".to_string(),
-                value: String::new(),
-                field_type: FieldType::Text,
-            },
-            SettingField {
-                label: "Inherit env".to_string(),
-                value: "true".to_string(),
-                field_type: FieldType::Bool,
             },
         ],
         SettingsCategory::Ai => vec![
@@ -1246,6 +1226,16 @@ mod tests {
     }
 
     #[test]
+    fn settings_categories_exclude_environment() {
+        let labels: Vec<_> = SettingsCategory::ALL
+            .iter()
+            .map(|category| category.label())
+            .collect();
+
+        assert!(!labels.contains(&"Environment"));
+    }
+
+    #[test]
     fn voice_category_has_expected_fields() {
         let fields = fields_for_category(SettingsCategory::Voice);
         let labels: Vec<_> = fields.iter().map(|field| field.label.as_str()).collect();
@@ -1309,7 +1299,7 @@ mod tests {
     #[test]
     fn category_cycle_full_round() {
         let mut cat = SettingsCategory::General;
-        for _ in 0..8 {
+        for _ in 0..SettingsCategory::ALL.len() {
             cat = cat.next();
         }
         assert_eq!(cat, SettingsCategory::General); // full cycle
@@ -1317,15 +1307,15 @@ mod tests {
 
     #[test]
     fn voice_and_skills_categories_are_last_in_sidebar_order() {
-        assert_eq!(SettingsCategory::ALL.len(), 8);
-        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Skills);
-        assert_eq!(SettingsCategory::ALL[7], SettingsCategory::Voice);
+        assert_eq!(SettingsCategory::ALL.len(), 7);
+        assert_eq!(SettingsCategory::ALL[5], SettingsCategory::Skills);
+        assert_eq!(SettingsCategory::ALL[6], SettingsCategory::Voice);
     }
 
     #[test]
     fn category_prev_full_round() {
         let mut cat = SettingsCategory::General;
-        for _ in 0..8 {
+        for _ in 0..SettingsCategory::ALL.len() {
             cat = cat.prev();
         }
         assert_eq!(cat, SettingsCategory::General); // full cycle
