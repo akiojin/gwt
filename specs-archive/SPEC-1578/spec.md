@@ -1,4 +1,4 @@
-> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here.
+> **📜 HISTORICAL (SPEC-1776)**: This SPEC was written for the previous GUI stack (Tauri/Svelte/C#). It is retained as a historical reference. The gwt-tui migration (SPEC-1776) supersedes GUI-specific design decisions described here. Claude/Codex の旧 `hooks/scripts/gwt-*` runtime assets は廃止済みで、現行の hook 契約は `.claude/settings.local.json` と `.codex/hooks.json` を正本とする。
 
 # プロジェクトローカル資産管理
 

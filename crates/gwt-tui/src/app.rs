@@ -69,6 +69,8 @@ const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const MANAGED_ASSET_ROOTS: &[&str] = &[
     ".claude/skills",
     ".claude/commands",
+    // Retired root kept here so startup refresh can still detect and prune
+    // stale Claude gwt hook scripts left by older worktrees.
     ".claude/hooks/scripts",
     ".claude/settings.local.json",
     ".codex/skills",

@@ -11,7 +11,6 @@ const END_MARKER: &str = "# gwt-managed-end";
 const GWT_EXCLUDE_PATTERNS: &[&str] = &[
     ".claude/skills/gwt-*",
     ".claude/commands/gwt-*",
-    ".claude/hooks/scripts/gwt-*",
     ".claude/settings.local.json",
     ".codex/skills/gwt-*",
     ".codex/hooks.json",
