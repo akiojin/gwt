@@ -152,7 +152,7 @@ jobs:
       - name: Display artifacts
         run: find artifacts -type f | head -20
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.create-tag.outputs.tag_name }}
           files: artifacts/**/*
