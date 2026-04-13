@@ -116,6 +116,7 @@ pub fn parse_issue_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 /// point for every in-binary hook handler. The known hook names are:
 ///
 /// - `runtime-state <event>`
+/// - `block-bash-policy`
 /// - `block-git-branch-ops`
 /// - `block-cd-command`
 /// - `block-file-ops`
@@ -480,8 +481,8 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
 /// into `decision=block` to avoid false positives under partial outages.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, forward,
-        runtime_state, BlockDecision, HookKind,
+        block_bash_policy, block_cd_command, block_file_ops, block_git_branch_ops,
+        block_git_dir_override, forward, runtime_state, BlockDecision, HookKind,
     };
 
     let Some(kind) = HookKind::from_name(name) else {
@@ -528,6 +529,11 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
+        HookKind::BlockBashPolicy => match block_bash_policy::handle() {
+            Ok(None) => Ok(0),
+            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
         HookKind::BlockGitBranchOps => match block_git_branch_ops::handle() {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),

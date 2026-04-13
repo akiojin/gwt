@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: managed hook migration は互換 hook 名まで管理対象として扱う
+
+### 事象
+
+エージェント起動時に `.codex/hooks.json` へ残った `block-bash-policy` が現行
+`gwt-tui` では unknown hook になり、hook dispatch が exit 2 になった。
+
+### 原因
+
+- 現行 binary は split `block-*` hook だけを公開し、
+  `block-bash-policy` 互換 handler を持っていなかった。
+- settings generator の managed-command detection も
+  `block-bash-policy` suffix を知らず、tracked hooks.json 内の stale
+  `block-bash-policy` を user hook として保存していた。
+- そのため regenerate 後も古い absolute binary path / hook name が残留し、
+  agent launch が stale hook config を読む可能性があった。
+
+### 再発防止策
+
+1. public hook name を変更・分割・統合するときは、旧 hook name を
+   compatibility handler または managed migration target として残す。
+2. `HookKind::from_name` / `MANAGED_HOOK_SUBCMD_SUFFIXES` / generator test を
+   同じ change set で更新する。
+3. agent launch regression は `gwt hook <name> </dev/null` の exit code と
+   tracked hooks.json migration test の両方で固定する。
+
 ## 2026-04-14 — fix: hook migration では runtime generator と embedded asset bundle を同時に更新する
 
 ### 事象

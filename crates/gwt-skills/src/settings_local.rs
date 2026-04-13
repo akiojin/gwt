@@ -24,6 +24,7 @@ const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
 /// like `gwt_skills-abc123def` during unit tests.
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook runtime-state ",
+    " hook block-bash-policy",
     " hook block-git-branch-ops",
     " hook block-cd-command",
     " hook block-file-ops",
@@ -1407,6 +1408,61 @@ mod tests {
         assert!(
             content.contains("hook block-git-branch-ops"),
             "migrated file must still dispatch to block-git-branch-ops (via absolute path), got: {content}"
+        );
+    }
+
+    #[test]
+    fn tracked_legacy_block_bash_policy_triggers_migration() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "command": "'/Users/legacy/bin/gwt' hook block-bash-policy",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("block-bash-policy"),
+            "tracked legacy block-bash-policy must be replaced by current managed hooks, got: {content}"
+        );
+        assert!(
+            content.contains("hook block-git-branch-ops"),
+            "migrated file must contain the current managed bash blocker hooks, got: {content}"
         );
     }
 }

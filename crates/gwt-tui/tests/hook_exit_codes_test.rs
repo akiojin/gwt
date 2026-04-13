@@ -90,6 +90,7 @@ fn block_hooks_with_empty_stdin_exit_zero() {
     // "no event to evaluate" → allow → exit 0. This pins that none
     // of them accidentally panic or return 2 on a missing payload.
     let hooks = [
+        "block-bash-policy",
         "block-git-branch-ops",
         "block-cd-command",
         "block-file-ops",
