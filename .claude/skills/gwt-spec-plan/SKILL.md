@@ -40,6 +40,10 @@ All artifacts are written to the SPEC directory (`specs/SPEC-<id>/`):
 - `contracts/*` — interface or schema contracts (only when needed)
 - `tasks.md` — executable work items with test-first ordering
 
+Use the current user's language for generated artifact text, quality-gate
+reports, and any user-facing planning summaries unless the artifact already has
+an established language that must be preserved.
+
 ## Phase 1: Technical Context
 
 Establish the implementation landscape before designing.
@@ -145,7 +149,7 @@ it does not certify that implementation is complete.
 ### Verdict
 
 ```text
-## Analysis Report: SPEC-<id>
+## <Analysis Report in the current user's language>: SPEC-<id>
 
 Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION
 

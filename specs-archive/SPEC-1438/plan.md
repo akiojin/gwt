@@ -1,3 +1,5 @@
+> **Historical Note**: この plan は Codex hook support 初期導入時点の履歴である。旧 `.codex/hooks/scripts/gwt-*.mjs` runtime assets は廃止済みで、現行の Codex hook 契約は `.codex/hooks.json` のみを正本とする。
+
 # SPEC-1438 Codex Hooks 対応 — 実装計画
 
 ## 概要

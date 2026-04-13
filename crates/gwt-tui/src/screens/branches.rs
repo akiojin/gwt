@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -253,6 +253,8 @@ pub struct DetailSessionSummary {
     pub name: String,
     pub detail: Option<String>,
     pub active: bool,
+    pub launch_summary: Vec<String>,
+    pub launch_command_line: Option<String>,
 }
 
 /// Lightweight live session summary rendered directly in the branch list.
@@ -284,19 +286,31 @@ pub(crate) struct VisibleBranchLiveIndicatorRow {
     pub(crate) indicators: Vec<BranchLiveSessionIndicator>,
 }
 
-/// Lifecycle action requested for a Docker container.
+/// Lifecycle action requested for a Docker compose service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockerLifecycleAction {
     Start,
     Stop,
     Restart,
+    Recreate,
 }
 
 /// Pending Docker action selected in the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDockerAction {
-    pub container_id: String,
+    pub compose_file: std::path::PathBuf,
+    pub service: String,
     pub action: DockerLifecycleAction,
+}
+
+/// Service-level Docker status shown in Branch Detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerServiceInfo {
+    pub project_root: std::path::PathBuf,
+    pub compose_file: std::path::PathBuf,
+    pub name: String,
+    pub status: gwt_docker::ComposeServiceStatus,
+    pub ports: String,
 }
 
 /// Cached detail payload for a branch.
@@ -304,7 +318,7 @@ pub struct PendingDockerAction {
 pub struct BranchDetailData {
     pub files: Vec<String>,
     pub commits: Vec<String>,
-    pub docker_containers: Vec<gwt_docker::ContainerInfo>,
+    pub docker_services: Vec<DockerServiceInfo>,
 }
 
 /// Background detail-load result for a single branch.
@@ -376,9 +390,9 @@ pub struct BranchesState {
     pub(crate) detail_files: Vec<String>,
     /// Recent commits for the selected branch worktree.
     pub(crate) detail_commits: Vec<String>,
-    /// Docker containers available for the selected branch context.
-    pub(crate) docker_containers: Vec<gwt_docker::ContainerInfo>,
-    /// Selected Docker container index in the overview area.
+    /// Docker compose services available for the selected branch context.
+    pub(crate) docker_services: Vec<DockerServiceInfo>,
+    /// Selected Docker service index in the overview area.
     pub(crate) docker_selected: usize,
     /// Pending Docker action intent to be handled by the caller.
     pub(crate) pending_docker_action: Option<PendingDockerAction>,
@@ -395,6 +409,15 @@ pub struct BranchesState {
 }
 
 impl BranchesState {
+    fn cleanup_policy(&self) -> crate::branch_cleanup::CleanupPolicy<'_> {
+        crate::branch_cleanup::CleanupPolicy::new(
+            &self.branches,
+            self.current_head_branch.as_deref(),
+            &self.active_session_branches,
+            &self.merged_state,
+        )
+    }
+
     /// Return branches filtered by current view mode and search query,
     /// then sorted according to the active `sort_mode`.
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
@@ -446,9 +469,9 @@ impl BranchesState {
         super::clamp_index(&mut self.selected, len);
     }
 
-    /// Clamp selected Docker container index to available containers.
+    /// Clamp selected Docker service index to available services.
     fn clamp_docker_selected(&mut self) {
-        let len = self.docker_containers.len();
+        let len = self.docker_services.len();
         super::clamp_index(&mut self.docker_selected, len);
     }
 
@@ -457,9 +480,9 @@ impl BranchesState {
         super::clamp_index(&mut self.detail_session_selected, len);
     }
 
-    /// Return the currently selected Docker container, if any.
-    fn selected_docker_container(&self) -> Option<&gwt_docker::ContainerInfo> {
-        self.docker_containers.get(self.docker_selected)
+    /// Return the currently selected Docker service, if any.
+    fn selected_docker_service(&self) -> Option<&DockerServiceInfo> {
+        self.docker_services.get(self.docker_selected)
     }
 
     fn selected_branch_name(&self) -> Option<String> {
@@ -469,7 +492,7 @@ impl BranchesState {
     fn apply_detail_data(&mut self, data: &BranchDetailData, reset_docker_selection: bool) {
         self.detail_files = data.files.clone();
         self.detail_commits = data.commits.clone();
-        self.docker_containers = data.docker_containers.clone();
+        self.docker_services = data.docker_services.clone();
         if reset_docker_selection {
             self.docker_selected = 0;
         }
@@ -480,7 +503,7 @@ impl BranchesState {
     fn clear_visible_detail(&mut self) {
         self.detail_files.clear();
         self.detail_commits.clear();
-        self.docker_containers.clear();
+        self.docker_services.clear();
         self.docker_selected = 0;
         self.pending_docker_action = None;
     }
@@ -609,26 +632,13 @@ impl BranchesState {
         self.branches.iter().find(|item| item.name == branch)
     }
 
-    fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
-        name.strip_prefix("refs/remotes/origin/")
-            .or_else(|| name.strip_prefix("origin/"))
-    }
-
     /// Resolve the local branch that a cleanup action should operate on.
     ///
     /// Local rows resolve to themselves. Remote-tracking rows resolve only
     /// when a matching local branch exists; otherwise they are not cleanup
     /// candidates.
     pub fn cleanup_execution_branch(&self, branch: &str) -> Option<String> {
-        let item = self.branch_item(branch)?;
-        if item.is_local {
-            return Some(item.name.clone());
-        }
-        let local_name = Self::local_branch_for_remote_ref(&item.name)?;
-        self.branches
-            .iter()
-            .find(|candidate| candidate.is_local && candidate.name == local_name)
-            .map(|candidate| candidate.name.clone())
+        self.cleanup_policy().execution_branch(branch)
     }
 
     /// Returns true when `branch` is allowed to participate in Branch Cleanup
@@ -650,55 +660,13 @@ impl BranchesState {
         &self,
         branch: &str,
     ) -> Option<CleanupSelectionBlockedReason> {
-        let item = self.branch_item(branch)?;
-        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
-            return if item.is_local {
-                Some(CleanupSelectionBlockedReason::Unknown)
-            } else {
-                Some(CleanupSelectionBlockedReason::RemoteTrackingWithoutLocal)
-            };
-        };
-        if gwt_git::is_protected_branch(&execution_branch) {
-            return Some(CleanupSelectionBlockedReason::ProtectedBranch);
-        }
-        if self
-            .current_head_branch
-            .as_deref()
-            .is_some_and(|head| head == execution_branch)
-        {
-            return Some(CleanupSelectionBlockedReason::CurrentHead);
-        }
-        if self.active_session_branches.contains(&execution_branch) {
-            return Some(CleanupSelectionBlockedReason::ActiveSession);
-        }
-        if matches!(self.merge_state(&execution_branch), MergeState::Computing) {
-            return Some(CleanupSelectionBlockedReason::MergeCheckRunning);
-        }
-        None
+        self.cleanup_policy().blocked_reason(branch)
     }
 
     /// Return the warning risks that should be surfaced in confirm modal for a
     /// selectable branch.
     pub fn cleanup_selection_risks(&self, branch: &str) -> Vec<CleanupSelectionRisk> {
-        if self.cleanup_selection_blocked_reason(branch).is_some() {
-            return Vec::new();
-        }
-
-        let Some(item) = self.branch_item(branch) else {
-            return Vec::new();
-        };
-        let Some(execution_branch) = self.cleanup_execution_branch(branch) else {
-            return Vec::new();
-        };
-
-        let mut risks = Vec::new();
-        if !item.is_local {
-            risks.push(CleanupSelectionRisk::RemoteTracking);
-        }
-        if matches!(self.merge_state(&execution_branch), MergeState::NotMerged) {
-            risks.push(CleanupSelectionRisk::Unmerged);
-        }
-        risks
+        self.cleanup_policy().risks(branch)
     }
 
     /// Returns true when the branch is both a protection-allowed candidate
@@ -751,11 +719,7 @@ impl BranchesState {
 
     /// Returns the merge target for a branch when it is cleanable.
     pub fn cleanup_target(&self, branch: &str) -> Option<gwt_git::MergeTarget> {
-        let execution_branch = self.cleanup_execution_branch(branch)?;
-        match self.merge_state(&execution_branch) {
-            MergeState::Cleanable(target) => Some(target),
-            _ => None,
-        }
+        self.cleanup_policy().target(branch)
     }
 
     /// Returns true when at least one branch is still being computed by
@@ -862,16 +826,18 @@ pub enum BranchesMessage {
     LaunchAgent,
     /// Open shell action.
     OpenShell,
-    /// Move to the next Docker container in the overview area.
-    DockerContainerDown,
-    /// Move to the previous Docker container in the overview area.
-    DockerContainerUp,
-    /// Request a start lifecycle action for the selected Docker container.
-    DockerContainerStart,
-    /// Request a stop lifecycle action for the selected Docker container.
-    DockerContainerStop,
-    /// Request a restart lifecycle action for the selected Docker container.
-    DockerContainerRestart,
+    /// Move to the next Docker service in the overview area.
+    DockerServiceDown,
+    /// Move to the previous Docker service in the overview area.
+    DockerServiceUp,
+    /// Request a start lifecycle action for the selected Docker service.
+    DockerServiceStart,
+    /// Request a stop lifecycle action for the selected Docker service.
+    DockerServiceStop,
+    /// Request a restart lifecycle action for the selected Docker service.
+    DockerServiceRestart,
+    /// Request a recreate lifecycle action for the selected Docker service.
+    DockerServiceRecreate,
 }
 
 /// Update branches state in response to a message.
@@ -963,37 +929,49 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
         BranchesMessage::OpenShell => {
             state.pending_open_shell = true;
         }
-        BranchesMessage::DockerContainerDown => {
-            if !state.docker_containers.is_empty() {
-                super::move_down(&mut state.docker_selected, state.docker_containers.len());
+        BranchesMessage::DockerServiceDown => {
+            if !state.docker_services.is_empty() {
+                super::move_down(&mut state.docker_selected, state.docker_services.len());
             }
         }
-        BranchesMessage::DockerContainerUp => {
-            if !state.docker_containers.is_empty() {
-                super::move_up(&mut state.docker_selected, state.docker_containers.len());
+        BranchesMessage::DockerServiceUp => {
+            if !state.docker_services.is_empty() {
+                super::move_up(&mut state.docker_selected, state.docker_services.len());
             }
         }
-        BranchesMessage::DockerContainerStart => {
-            if let Some(container) = state.selected_docker_container() {
+        BranchesMessage::DockerServiceStart => {
+            if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
-                    container_id: container.id.clone(),
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
                     action: DockerLifecycleAction::Start,
                 });
             }
         }
-        BranchesMessage::DockerContainerStop => {
-            if let Some(container) = state.selected_docker_container() {
+        BranchesMessage::DockerServiceStop => {
+            if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
-                    container_id: container.id.clone(),
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
                     action: DockerLifecycleAction::Stop,
                 });
             }
         }
-        BranchesMessage::DockerContainerRestart => {
-            if let Some(container) = state.selected_docker_container() {
+        BranchesMessage::DockerServiceRestart => {
+            if let Some(service) = state.selected_docker_service() {
                 state.pending_docker_action = Some(PendingDockerAction {
-                    container_id: container.id.clone(),
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
                     action: DockerLifecycleAction::Restart,
+                });
+            }
+        }
+        BranchesMessage::DockerServiceRecreate => {
+            if let Some(service) = state.selected_docker_service() {
+                state.pending_docker_action = Some(PendingDockerAction {
+                    compose_file: service.compose_file.clone(),
+                    service: service.name.clone(),
+                    action: DockerLifecycleAction::Recreate,
                 });
             }
         }
@@ -1008,10 +986,20 @@ pub fn update(state: &mut BranchesState, msg: BranchesMessage) {
 /// Best-effort: all errors are silently ignored.
 pub fn load_branch_detail(
     branch: &BranchItem,
-    docker_containers: &[gwt_docker::ContainerInfo],
+    docker_services: &[DockerServiceInfo],
 ) -> BranchDetailData {
     let mut detail = BranchDetailData {
-        docker_containers: docker_containers.to_vec(),
+        docker_services: branch
+            .worktree_path
+            .as_ref()
+            .map(|wt_path| {
+                docker_services
+                    .iter()
+                    .filter(|service| service.project_root == *wt_path)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
         ..BranchDetailData::default()
     };
 
@@ -1355,18 +1343,15 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
     lines.push(" Docker status".to_string());
     if state.selected_detail_loading() {
         lines.push(" Loading branch details...".to_string());
-    } else if state.docker_containers.is_empty() {
-        lines.push(" No containers found".to_string());
-    } else if let Some(container) = state.selected_docker_container() {
-        lines.push(format!(" Selected: {}", container.name));
-        lines.push(format!(
-            " Status: {}",
-            docker_status_label(container.status)
-        ));
-        lines.push(format!(" Ports: {}", docker_ports_label(&container.ports)));
+    } else if state.docker_services.is_empty() {
+        lines.push(" No Docker services found".to_string());
+    } else if let Some(service) = state.selected_docker_service() {
+        lines.push(format!(" Selected: {}", service.name));
+        lines.push(format!(" Status: {}", docker_status_label(service.status)));
+        lines.push(format!(" Ports: {}", docker_ports_label(&service.ports)));
         lines.push(format!(
             " Controls: {}",
-            docker_controls_hint(container.status)
+            docker_controls_hint(service.status)
         ));
     }
 
@@ -1375,13 +1360,12 @@ fn render_detail_overview(state: &BranchesState, frame: &mut Frame, area: Rect) 
     frame.render_widget(paragraph, area);
 }
 
-fn docker_status_label(status: gwt_docker::ContainerStatus) -> &'static str {
+fn docker_status_label(status: gwt_docker::ComposeServiceStatus) -> &'static str {
     match status {
-        gwt_docker::ContainerStatus::Created => "Created",
-        gwt_docker::ContainerStatus::Running => "Running",
-        gwt_docker::ContainerStatus::Paused => "Paused",
-        gwt_docker::ContainerStatus::Stopped => "Stopped",
-        gwt_docker::ContainerStatus::Exited => "Exited",
+        gwt_docker::ComposeServiceStatus::Running => "Running",
+        gwt_docker::ComposeServiceStatus::Stopped => "Stopped",
+        gwt_docker::ComposeServiceStatus::Exited => "Exited",
+        gwt_docker::ComposeServiceStatus::NotFound => "Not found",
     }
 }
 
@@ -1393,13 +1377,15 @@ fn docker_ports_label(ports: &str) -> &str {
     }
 }
 
-fn docker_controls_hint(status: gwt_docker::ContainerStatus) -> &'static str {
+fn docker_controls_hint(status: gwt_docker::ComposeServiceStatus) -> &'static str {
     match status {
-        gwt_docker::ContainerStatus::Running => "Up/Down select  T stop  R restart",
-        gwt_docker::ContainerStatus::Paused => "Up/Down select  S start  T stop  R restart",
-        gwt_docker::ContainerStatus::Created
-        | gwt_docker::ContainerStatus::Stopped
-        | gwt_docker::ContainerStatus::Exited => "Up/Down select  S start  R restart",
+        gwt_docker::ComposeServiceStatus::Running => {
+            "Up/Down select  T stop  R restart  C recreate"
+        }
+        gwt_docker::ComposeServiceStatus::Stopped | gwt_docker::ComposeServiceStatus::Exited => {
+            "Up/Down select  S start  C recreate"
+        }
+        gwt_docker::ComposeServiceStatus::NotFound => "Up/Down select  S create/start",
     }
 }
 
@@ -1487,8 +1473,8 @@ fn render_detail_sessions(
         return;
     }
 
-    let mut lines = Vec::new();
     let selected_session = selected_session.min(sessions.len().saturating_sub(1));
+    let mut lines = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
         let selected_marker = if index == selected_session {
             theme::icon::LEFT_ACCENT
@@ -1523,7 +1509,75 @@ fn render_detail_sessions(
         }
     }
 
+    let list_height = session_list_height(area.height, lines.len());
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(list_height), Constraint::Min(0)])
+        .split(area);
     let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, chunks[0]);
+
+    render_selected_session_detail(frame, chunks[1], &sessions[selected_session]);
+}
+
+fn session_list_height(total_height: u16, rendered_lines: usize) -> u16 {
+    let rendered_lines = rendered_lines as u16;
+    if total_height <= 6 {
+        rendered_lines.min(total_height)
+    } else {
+        rendered_lines.min(total_height.saturating_sub(5))
+    }
+}
+
+fn render_selected_session_detail(frame: &mut Frame, area: Rect, session: &DetailSessionSummary) {
+    if area.height == 0 {
+        return;
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " Selected Session",
+            Style::default()
+                .fg(theme::color::FOCUS)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("   Name: {}", session.name),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
+        )),
+    ];
+
+    if session.launch_summary.is_empty() && session.launch_command_line.is_none() {
+        lines.push(Line::from(Span::styled(
+            "   Launch parameters unavailable",
+            theme::style::muted_text(),
+        )));
+    } else {
+        for summary in &session.launch_summary {
+            lines.push(Line::from(Span::styled(
+                format!("   {summary}"),
+                Style::default().fg(theme::color::TEXT_PRIMARY),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "   Launch Command",
+            Style::default()
+                .fg(theme::color::TEXT_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        )));
+        match session.launch_command_line.as_deref() {
+            Some(command_line) => lines.push(Line::from(Span::styled(
+                format!("   {command_line}"),
+                Style::default().fg(theme::color::SURFACE),
+            ))),
+            None => lines.push(Line::from(Span::styled(
+                "   Launch parameters unavailable",
+                theme::style::muted_text(),
+            ))),
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -1617,21 +1671,22 @@ mod tests {
         ]
     }
 
-    fn sample_containers() -> Vec<gwt_docker::ContainerInfo> {
+    fn sample_services(project_root: &std::path::Path) -> Vec<DockerServiceInfo> {
+        let compose_file = project_root.join("docker-compose.yml");
         vec![
-            gwt_docker::ContainerInfo {
-                id: "abc123".to_string(),
+            DockerServiceInfo {
+                project_root: project_root.to_path_buf(),
+                compose_file: compose_file.clone(),
                 name: "web".to_string(),
-                status: gwt_docker::ContainerStatus::Running,
-                image: "nginx:latest".to_string(),
-                ports: "0.0.0.0:8080->80/tcp".to_string(),
+                status: gwt_docker::ComposeServiceStatus::Running,
+                ports: "8080:80".to_string(),
             },
-            gwt_docker::ContainerInfo {
-                id: "def456".to_string(),
+            DockerServiceInfo {
+                project_root: project_root.to_path_buf(),
+                compose_file,
                 name: "db".to_string(),
-                status: gwt_docker::ContainerStatus::Stopped,
-                image: "postgres:16".to_string(),
-                ports: String::new(),
+                status: gwt_docker::ComposeServiceStatus::Stopped,
+                ports: "5432:5432".to_string(),
             },
         ]
     }
@@ -2243,13 +2298,13 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("No containers found")),
-            "Detail panel should explain when there are no Docker containers"
+                .any(|line| line.contains("No Docker services found")),
+            "Detail panel should explain when there are no Docker services"
         );
     }
 
     #[test]
-    fn load_branch_detail_populates_docker_containers() {
+    fn load_branch_detail_populates_docker_services() {
         let tmp = tempfile::tempdir().expect("create temp worktree");
         let branch = BranchItem {
             name: "feature/docker".to_string(),
@@ -2260,42 +2315,74 @@ mod tests {
             upstream: None,
         };
 
-        let detail = load_branch_detail(&branch, &sample_containers());
+        let detail = load_branch_detail(&branch, &sample_services(tmp.path()));
 
-        assert_eq!(detail.docker_containers.len(), 2);
-        let container = &detail.docker_containers[0];
-        assert_eq!(container.id, "abc123");
-        assert_eq!(container.name, "web");
-        assert_eq!(container.status, gwt_docker::ContainerStatus::Running);
-        assert_eq!(container.ports, "0.0.0.0:8080->80/tcp");
+        assert_eq!(detail.docker_services.len(), 2);
+        let service = &detail.docker_services[0];
+        assert_eq!(service.name, "web");
+        assert_eq!(service.status, gwt_docker::ComposeServiceStatus::Running);
+        assert_eq!(service.ports, "8080:80");
+    }
+
+    #[test]
+    fn load_branch_detail_without_worktree_does_not_associate_docker_services() {
+        let branch = BranchItem {
+            name: "origin/feature/docker".to_string(),
+            is_head: false,
+            is_local: false,
+            category: BranchCategory::Feature,
+            worktree_path: None,
+            upstream: None,
+        };
+        let detail =
+            load_branch_detail(&branch, &sample_services(std::path::Path::new("/tmp/test")));
+
+        assert!(detail.docker_services.is_empty());
+
+        let mut state = BranchesState::default();
+        state.apply_detail_data(&detail, true);
+        update(&mut state, BranchesMessage::DockerServiceRestart);
+
+        assert!(state.pending_docker_action.is_none());
     }
 
     #[test]
     fn docker_selection_and_lifecycle_intent_update_state() {
         let mut state = BranchesState::default();
-        state.docker_containers = sample_containers();
+        state.docker_services = sample_services(std::path::Path::new("/tmp/test"));
 
-        update(&mut state, BranchesMessage::DockerContainerDown);
+        update(&mut state, BranchesMessage::DockerServiceDown);
         assert_eq!(state.docker_selected, 1);
 
-        update(&mut state, BranchesMessage::DockerContainerUp);
+        update(&mut state, BranchesMessage::DockerServiceUp);
         assert_eq!(state.docker_selected, 0);
 
-        update(&mut state, BranchesMessage::DockerContainerRestart);
+        update(&mut state, BranchesMessage::DockerServiceRestart);
         assert_eq!(
             state.pending_docker_action,
             Some(PendingDockerAction {
-                container_id: "abc123".to_string(),
+                compose_file: std::path::PathBuf::from("/tmp/test/docker-compose.yml"),
+                service: "web".to_string(),
                 action: DockerLifecycleAction::Restart,
+            })
+        );
+
+        update(&mut state, BranchesMessage::DockerServiceRecreate);
+        assert_eq!(
+            state.pending_docker_action,
+            Some(PendingDockerAction {
+                compose_file: std::path::PathBuf::from("/tmp/test/docker-compose.yml"),
+                service: "web".to_string(),
+                action: DockerLifecycleAction::Recreate,
             })
         );
     }
 
     #[test]
-    fn render_detail_overview_shows_selected_docker_container_details() {
+    fn render_detail_overview_shows_selected_docker_service_details() {
         let mut state = BranchesState::default();
         state.branches = sample_branches();
-        state.docker_containers = sample_containers();
+        state.docker_services = sample_services(std::path::Path::new("/tmp/test"));
         state.docker_selected = 1;
         state.detail_section = 0;
 
@@ -2311,22 +2398,20 @@ mod tests {
         let lines = buffer_to_lines(terminal.backend().buffer());
         assert!(
             lines.iter().any(|line| line.contains("Selected: db")),
-            "Detail panel should show the selected Docker container"
+            "Detail panel should show the selected Docker service"
         );
         assert!(
             lines.iter().any(|line| line.contains("Status: Stopped")),
             "Detail panel should show Docker status"
         );
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("Ports: No published ports")),
+            lines.iter().any(|line| line.contains("Ports: 5432:5432")),
             "Detail panel should show Docker ports"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Controls: Up/Down select  S start  R restart")),
+                .any(|line| line.contains("Controls: Up/Down select  S start  C recreate")),
             "Detail panel should show Docker control hints"
         );
     }
@@ -2342,12 +2427,24 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: Some("gpt-5.3-codex · high".to_string()),
                 active: true,
+                launch_summary: vec![
+                    "Model: gpt-5.3-codex".to_string(),
+                    "Reasoning: high".to_string(),
+                    "Version: latest".to_string(),
+                    "Permissions: Skip confirmations".to_string(),
+                    "Runtime: Host".to_string(),
+                ],
+                launch_command_line: Some(
+                    "codex --no-alt-screen --model=gpt-5.3-codex".to_string(),
+                ),
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2376,6 +2473,16 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("gpt-5.3-codex · high")),
             "Sessions pane should show session detail metadata when available"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Launch Command")),
+            "Sessions pane should show a launch detail section"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("codex --no-alt-screen --model=gpt-5.3-codex")),
+            "Sessions pane should show the persisted exact argv"
         );
     }
 
@@ -2413,12 +2520,16 @@ mod tests {
                 name: "Codex".to_string(),
                 detail: None,
                 active: false,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
             DetailSessionSummary {
                 kind: "Shell",
                 name: "Shell: develop".to_string(),
                 detail: None,
                 active: true,
+                launch_summary: Vec::new(),
+                launch_command_line: None,
             },
         ];
 
@@ -2437,6 +2548,38 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("\u{258E} \u{25CF} Shell  Shell: develop")),
             "Sessions pane should show the selected-row marker on the current row"
+        );
+    }
+
+    #[test]
+    fn render_detail_sessions_shows_unavailable_fallback_for_missing_launch_metadata() {
+        let mut state = BranchesState::default();
+        state.branches = sample_branches();
+        state.detail_section = 2;
+        let sessions = vec![DetailSessionSummary {
+            kind: "Agent",
+            name: "Codex".to_string(),
+            detail: Some("gpt-5.3-codex".to_string()),
+            active: true,
+            launch_summary: Vec::new(),
+            launch_command_line: None,
+        }];
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_detail_content(&state, f, area, &sessions);
+            })
+            .unwrap();
+
+        let lines = buffer_to_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Launch parameters unavailable")),
+            "Sessions pane should show a stable fallback when no launch metadata is saved"
         );
     }
 

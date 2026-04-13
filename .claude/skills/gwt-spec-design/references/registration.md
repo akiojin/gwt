@@ -22,17 +22,18 @@ Pick the next available number.
 All SPECs must use the `gwt-spec:` prefix:
 
 ```text
-gwt-spec: <concise English imperative description>
+gwt-spec: <concise description in the current user's language>
 ```
 
 - Always use `gwt-spec:` (not other prefixes).
-- Description should be a short imperative summary in English.
+- Description should be a short action-oriented summary in the current user's
+  language.
 
 ## Directory creation
 
 ```bash
 python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." --create --title "gwt-spec: <description>"
+  --repo "." --create --title "gwt-spec: <description in the current user's language>"
 ```
 
 This creates:
@@ -47,7 +48,7 @@ specs/SPEC-{id}/
 ```json
 {
   "id": "SPEC-{id}",
-  "title": "gwt-spec: <description>",
+  "title": "gwt-spec: <description in the current user's language>",
   "status": "open",
   "phase": "Specify",
   "created_at": "2024-01-01T00:00:00Z",
@@ -61,6 +62,9 @@ After directory creation, write spec.md populated from the intake memo and
 domain model summary.
 
 ### Template
+
+Use the current user's language for the actual artifact text. The headings below
+show structure, not a required output language.
 
 ```markdown
 # Feature Specification: <title>

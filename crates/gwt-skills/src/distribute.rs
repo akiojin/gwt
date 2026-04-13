@@ -1,6 +1,6 @@
 //! Distribute bundled skill assets to a target worktree.
 
-use crate::assets::{CLAUDE_COMMANDS, CLAUDE_HOOKS, CLAUDE_SKILLS, CODEX_HOOKS};
+use crate::assets::{CLAUDE_COMMANDS, CLAUDE_SKILLS};
 use include_dir::Dir;
 use std::collections::HashSet;
 use std::fs;
@@ -8,13 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const TRACKED_ROOTS: &[&str] = &[
-    ".claude/skills",
-    ".claude/commands",
-    ".claude/hooks/scripts",
-    ".codex/skills",
-    ".codex/hooks/scripts",
-];
+const TRACKED_ROOTS: &[&str] = &[".claude/skills", ".claude/commands", ".codex/skills"];
 
 /// Result of a distribution operation.
 #[derive(Debug, Default)]
@@ -38,9 +32,12 @@ enum RootEntryKind {
 /// Distribution targets:
 /// - `.claude/skills/gwt-*/`
 /// - `.claude/commands/gwt-*.md`
-/// - `.claude/hooks/scripts/gwt-*.mjs`
 /// - `.codex/skills/gwt-*/`  (same skill content)
-/// - `.codex/hooks/scripts/gwt-*.mjs`
+///
+/// Claude and Codex hook execution are now driven only by generated config
+/// (`.claude/settings.local.json` and `.codex/hooks.json`).
+/// Retired `hooks/scripts/gwt-*.mjs` files are pruned as stale managed
+/// assets instead of being redistributed.
 pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
@@ -62,26 +59,11 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
         &tracked_paths,
         &mut report,
     )?;
-    write_dir_assets(
-        &CLAUDE_HOOKS,
-        worktree,
-        &worktree.join(".claude/hooks/scripts"),
-        &tracked_paths,
-        &mut report,
-    )?;
-
     // Codex targets
     write_dir_assets(
         &CLAUDE_SKILLS,
         worktree,
         &worktree.join(".codex/skills"),
-        &tracked_paths,
-        &mut report,
-    )?;
-    write_dir_assets(
-        &CODEX_HOOKS,
-        worktree,
-        &worktree.join(".codex/hooks/scripts"),
         &tracked_paths,
         &mut report,
     )?;
@@ -120,14 +102,7 @@ fn prune_managed_asset_roots(
         tracked_paths,
         report,
     )?;
-    prune_dir_against_source(
-        &CLAUDE_HOOKS,
-        worktree,
-        &worktree.join(".claude/hooks/scripts"),
-        Some(RootEntryKind::Files),
-        tracked_paths,
-        report,
-    )?;
+    prune_retired_hook_scripts(&worktree.join(".claude/hooks/scripts"), report)?;
 
     // Codex targets use the same skill bundle as Claude.
     prune_dir_against_source(
@@ -138,14 +113,37 @@ fn prune_managed_asset_roots(
         tracked_paths,
         report,
     )?;
-    prune_dir_against_source(
-        &CODEX_HOOKS,
-        worktree,
-        &worktree.join(".codex/hooks/scripts"),
-        Some(RootEntryKind::Files),
-        tracked_paths,
-        report,
-    )?;
+    prune_retired_hook_scripts(&worktree.join(".codex/hooks/scripts"), report)?;
+
+    Ok(())
+}
+
+fn prune_retired_hook_scripts(dest: &Path, report: &mut DistributeReport) -> io::Result<()> {
+    if dest.exists() {
+        for entry in fs::read_dir(dest)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("gwt-") {
+                continue;
+            }
+            remove_path(&entry.path())?;
+            report.paths_removed += 1;
+        }
+
+        if fs::read_dir(dest)?.next().is_none() {
+            fs::remove_dir(dest)?;
+            report.paths_removed += 1;
+        }
+    }
+
+    let Some(parent) = dest.parent() else {
+        return Ok(());
+    };
+    if parent.exists() && fs::read_dir(parent)?.next().is_none() {
+        fs::remove_dir(parent)?;
+        report.paths_removed += 1;
+    }
 
     Ok(())
 }
@@ -359,11 +357,15 @@ mod tests {
     }
 
     #[test]
-    fn distribute_creates_codex_hooks() {
+    fn distribute_does_not_create_retired_codex_hook_scripts() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
         let hook = dir.path().join(".codex/hooks/scripts/gwt-forward-hook.mjs");
-        assert!(hook.exists(), "expected {}", hook.display());
+        assert!(!hook.exists(), "unexpected {}", hook.display());
+        assert!(
+            !dir.path().join(".codex/hooks").exists(),
+            "unexpected stale .codex/hooks directory"
+        );
     }
 
     #[test]
@@ -467,8 +469,8 @@ mod tests {
             tracked_command.display()
         );
         assert!(
-            tracked_hook.exists(),
-            "tracked gwt hook must be preserved: {}",
+            !tracked_hook.exists(),
+            "retired codex gwt hook must be removed even when tracked: {}",
             tracked_hook.display()
         );
     }
@@ -517,15 +519,20 @@ mod tests {
 
         let stale_command = dir.path().join(".claude/commands/gwt-issue-search.md");
         let stale_skill = dir.path().join(".codex/skills/gwt-agent-read/SKILL.md");
+        let stale_hook = dir
+            .path()
+            .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
 
         fs::create_dir_all(stale_command.parent().unwrap()).unwrap();
         fs::create_dir_all(stale_skill.parent().unwrap()).unwrap();
+        fs::create_dir_all(stale_hook.parent().unwrap()).unwrap();
         fs::write(&stale_command, "legacy command").unwrap();
         fs::write(&stale_skill, "legacy skill").unwrap();
+        fs::write(&stale_hook, "legacy hook").unwrap();
 
         let removed = prune_stale_gwt_assets(dir.path()).unwrap();
 
-        assert_eq!(removed, 2);
+        assert_eq!(removed, 5);
         assert!(
             !stale_command.exists(),
             "unexpected {}",
@@ -536,6 +543,11 @@ mod tests {
             "unexpected {}",
             stale_skill.display()
         );
+        assert!(!stale_hook.exists(), "unexpected {}", stale_hook.display());
+        assert!(
+            !dir.path().join(".claude/hooks").exists(),
+            "unexpected stale .claude/hooks directory"
+        );
         assert!(
             !dir.path().join(".claude/skills/gwt-pr/SKILL.md").exists(),
             "prune-only sweep must not materialize bundle assets"
@@ -543,13 +555,37 @@ mod tests {
     }
 
     #[test]
-    fn distribute_creates_claude_hooks() {
+    fn prune_stale_gwt_assets_removes_empty_retired_hook_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(dir.path().join(".claude/hooks")).unwrap();
+        fs::create_dir_all(dir.path().join(".codex/hooks")).unwrap();
+
+        let removed = prune_stale_gwt_assets(dir.path()).unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(
+            !dir.path().join(".claude/hooks").exists(),
+            "unexpected stale .claude/hooks directory"
+        );
+        assert!(
+            !dir.path().join(".codex/hooks").exists(),
+            "unexpected stale .codex/hooks directory"
+        );
+    }
+
+    #[test]
+    fn distribute_does_not_create_retired_claude_hook_scripts() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
         let hook = dir
             .path()
             .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
-        assert!(hook.exists(), "expected {}", hook.display());
+        assert!(!hook.exists(), "unexpected {}", hook.display());
+        assert!(
+            !dir.path().join(".claude/hooks").exists(),
+            "unexpected stale .claude/hooks directory"
+        );
     }
 
     #[test]
@@ -573,23 +609,17 @@ mod tests {
 
         let tracked_skill = dir.path().join(".claude/skills/gwt-pr/SKILL.md");
         let tracked_command = dir.path().join(".claude/commands/gwt-pr.md");
-        let tracked_hook = dir
-            .path()
-            .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
         let tracked_codex_skill = dir.path().join(".codex/skills/gwt-pr/SKILL.md");
 
         fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
-        fs::create_dir_all(tracked_hook.parent().unwrap()).unwrap();
         fs::create_dir_all(tracked_codex_skill.parent().unwrap()).unwrap();
         fs::write(&tracked_skill, "tracked skill").unwrap();
         fs::write(&tracked_command, "tracked command").unwrap();
-        fs::write(&tracked_hook, "tracked hook").unwrap();
         fs::write(&tracked_codex_skill, "tracked codex skill").unwrap();
 
         track_path(dir.path(), ".claude/skills/gwt-pr/SKILL.md");
         track_path(dir.path(), ".claude/commands/gwt-pr.md");
-        track_path(dir.path(), ".claude/hooks/scripts/gwt-forward-hook.mjs");
         track_path(dir.path(), ".codex/skills/gwt-pr/SKILL.md");
 
         distribute_to_worktree(dir.path()).unwrap();
@@ -599,7 +629,6 @@ mod tests {
             fs::read_to_string(&tracked_command).unwrap(),
             "tracked command"
         );
-        assert_eq!(fs::read_to_string(&tracked_hook).unwrap(), "tracked hook");
         assert_eq!(
             fs::read_to_string(&tracked_codex_skill).unwrap(),
             "tracked codex skill"

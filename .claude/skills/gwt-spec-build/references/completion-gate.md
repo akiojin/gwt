@@ -95,6 +95,9 @@ The source of truth is always: code + tests + verification output.
 
 ## Gate output
 
+Use the current user's language for the final gate summary and any user-facing
+completion text.
+
 After the gate passes, produce the exit report as specified in the main SKILL.md.
 If the gate fails, produce a diagnostic report indicating which checks failed and what
 action is needed.

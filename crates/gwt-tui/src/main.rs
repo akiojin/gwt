@@ -6,6 +6,10 @@ use std::{
     collections::VecDeque,
     io,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -528,6 +532,7 @@ fn run_app(
         } => Model::new_initialization(repo_path, true),
         RepoType::NonRepo => Model::new_initialization(repo_path, false),
     };
+    app::refresh_active_profile_state(&mut model);
     // SPEC-6 Phase 5: spawn the Logs-tab file watcher so the
     // `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL stream flows into
     // `LogsState.entries`. Keeping the handle alive for the lifetime
@@ -634,12 +639,15 @@ fn run_app(
         if let Some(s) = model.active_session_tab_mut() {
             s.vt.resize(rows, cols);
         }
+        let (env, remove_env) =
+            app::spawn_env_with_active_profile(std::collections::HashMap::new());
         let config = gwt_terminal::pty::SpawnConfig {
             command: shell,
             args: vec![],
             cols,
             rows,
-            env: std::collections::HashMap::new(),
+            env,
+            remove_env,
             cwd: Some(model.repo_path().to_path_buf()),
         };
         if let Err(e) = app::spawn_pty_for_session(&mut model, "shell-0", config) {
@@ -654,6 +662,12 @@ fn run_app(
         }
     }
 
+    // Register SIGHUP handler to detect terminal closure.
+    // Defence-in-depth: even if tcgetattr pre-check misses the condition,
+    // the signal flag will catch it on the next outer-loop iteration.
+    let sighup_flag = Arc::new(AtomicBool::new(false));
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&sighup_flag));
+
     let mut keybinds = KeybindRegistry::new();
     let mut input_normalizer = event::InputNormalizer::default();
     let mut pending_messages = VecDeque::new();
@@ -661,6 +675,12 @@ fn run_app(
     let mut last_draw_at = None;
 
     loop {
+        if sighup_flag.load(Ordering::Relaxed) {
+            tracing::warn!("SIGHUP received — shutting down gracefully");
+            model.quit = true;
+            break;
+        }
+
         drain_pty_output_and_request_render(&mut model, &mut needs_render);
 
         if needs_render {
@@ -953,6 +973,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: std::collections::HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             },
         )
@@ -994,6 +1015,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: std::collections::HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             },
         )

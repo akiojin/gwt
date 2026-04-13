@@ -36,6 +36,8 @@ pub enum GridSessionDirection {
 pub enum Message {
     /// Quit the application.
     Quit,
+    /// Controlling terminal lost (revoked fd, SIGHUP, hung-up master).
+    TerminalLost,
     /// Toggle between Main (sessions) and Management layers.
     ToggleLayer,
     /// Move focus to the next logical pane.
