@@ -9470,10 +9470,9 @@ fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
 
     let intro_lines = welcome_session_intro_lines();
     let command_lines = welcome_session_command_lines();
-    let content_height = (intro_lines.len() + command_lines.len())
-        .try_into()
-        .unwrap_or(u16::MAX);
-    let content_height = content_height.min(inner.height);
+    let content_height = (intro_lines.len() as u16)
+        .saturating_add(welcome_session_command_box_height(&command_lines))
+        .min(inner.height);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -9499,8 +9498,16 @@ fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
         frame.render_widget(intro, sections[0]);
     }
 
-    let commands = welcome_session_content_area(sections[1]);
-    if commands.width > 0 && commands.height > 0 {
+    let command_box_area = welcome_session_command_box_area(sections[1], &command_lines);
+    if command_box_area.width > 0 && command_box_area.height > 0 {
+        let command_block = welcome_session_command_block();
+        let commands = welcome_session_command_content_area(command_block.inner(command_box_area));
+        frame.render_widget(command_block, command_box_area);
+
+        if commands.width == 0 || commands.height == 0 {
+            return;
+        }
+
         let paragraph = Paragraph::new(command_lines);
         frame.render_widget(paragraph, commands);
     }
@@ -9511,9 +9518,7 @@ fn welcome_session_intro_lines() -> Vec<Line<'static>> {
 
     vec![
         Line::from(Span::styled("Welcome", theme::style::header())),
-        Line::from(""),
         Line::from(Span::styled("No terminal windows are open.", body_style)),
-        Line::from(""),
     ]
 }
 
@@ -9538,13 +9543,46 @@ fn welcome_session_command_lines() -> Vec<Line<'static>> {
     lines
 }
 
-fn welcome_session_content_area(inner: Rect) -> Rect {
-    let left_padding = if inner.width > 4 { 2 } else { 0 };
+fn welcome_session_command_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(theme::border::default())
+        .border_style(Style::default().fg(theme::color::BORDER_UNFOCUSED))
+        .title(Line::from(Span::styled(
+            " Commands ",
+            theme::style::header(),
+        )))
+}
+
+fn welcome_session_command_box_height(lines: &[Line<'_>]) -> u16 {
+    (lines.len() as u16).saturating_add(2)
+}
+
+fn welcome_session_command_box_area(area: Rect, lines: &[Line<'_>]) -> Rect {
+    let content_width = lines.iter().map(title_line_width).max().unwrap_or(0);
+    let desired_width = content_width.saturating_add(4).min(area.width as usize) as u16;
+    let height = welcome_session_command_box_height(lines).min(area.height);
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(desired_width) / 2);
 
     Rect {
-        x: inner.x.saturating_add(left_padding),
+        x,
+        y: area.y,
+        width: desired_width,
+        height,
+    }
+}
+
+fn welcome_session_command_content_area(inner: Rect) -> Rect {
+    let horizontal_padding = if inner.width > 2 { 1 } else { 0 };
+
+    Rect {
+        x: inner.x.saturating_add(horizontal_padding),
         y: inner.y,
-        width: inner.width.saturating_sub(left_padding),
+        width: inner
+            .width
+            .saturating_sub(horizontal_padding.saturating_mul(2)),
         height: inner.height,
     }
 }
@@ -13900,7 +13938,7 @@ services:
     }
 
     #[test]
-    fn render_model_text_zero_sessions_centers_intro_but_left_aligns_commands() {
+    fn render_model_text_zero_sessions_centers_intro_and_command_box() {
         let mut model = test_model();
         model.sessions.clear();
         model.active_layer = ActiveLayer::Main;
@@ -13910,8 +13948,9 @@ services:
 
         assert!(rendered.contains("║                                    Welcome"));
         assert!(rendered.contains("║                         No terminal windows are open."));
-        assert!(rendered.contains("║  Ctrl+G, g"));
-        assert!(rendered.contains("║  Ctrl+G, c"));
+        assert!(rendered.contains("║           ╭ Commands"));
+        assert!(rendered.contains("║           │ Ctrl+G, g"));
+        assert!(rendered.contains("║           │ Ctrl+G, c"));
     }
 
     #[test]
