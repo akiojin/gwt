@@ -49,18 +49,18 @@
 6. **No open unmerged PR; at least one merged** --> treat `git rev-list --count "origin/$base..HEAD"` as the source of truth for new work.
 7. **Only closed unmerged PRs** --> create a new PR.
 
-## Step 7: Ensure the head branch is pushed
+## Step 6: Ensure the head branch is pushed
 
 - If no upstream: `git push -u origin <head>`
 - Otherwise: `git push`
 
-## Step 8: Collect PR inputs
+## Step 7: Collect PR inputs
 
 - Title, Summary, Context, Changes, Testing, Risk/Impact, Deployment, Screenshots, Related Links, Notes
 - Optional: labels, reviewers, assignees, draft
 - Derive missing sections from the diff, linked Issues/SPECs, and executed tests before asking the user.
 
-## Step 9: Build PR body from template
+## Step 8: Build PR body from template
 
 - Template path: `.claude/skills/gwt-manage-pr/references/pr-body-template.md`
 - Fill all required placeholders.

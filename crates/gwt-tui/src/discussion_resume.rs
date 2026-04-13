@@ -11,7 +11,7 @@ pub struct ResumePromptSessionState {
     pub saw_session_start: bool,
     pub fallback_armed: bool,
     pub prompt_pending: bool,
-    pub handled_this_session: bool,
+    pub last_handled_proposal: Option<String>,
 }
 
 pub fn load_pending_resume(worktree: &Path) -> io::Result<Option<PendingDiscussionResume>> {

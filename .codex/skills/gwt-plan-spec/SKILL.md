@@ -14,7 +14,7 @@ behind the visible `gwt-plan-spec` entrypoint.
 
 ## Invocation
 
-- **With SPEC:** `gwt-plan SPEC-<id>` — full pipeline from spec.md to quality gate
+- **With SPEC:** `gwt-plan-spec SPEC-<id>` — full pipeline from spec.md to quality gate
 - **Lightweight:** `gwt-plan-spec` without a SPEC — produce a plan.md and tasks.md in the
   current working context (no spec.md required, skip traceability checks)
 - **Standalone:** works independently of the visible SPEC flow owner

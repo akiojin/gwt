@@ -13,8 +13,8 @@ use serde::Serialize;
 
 use gwt_agent::{PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
 use gwt_core::coordination::{
-    apply_agent_card_patch, post_entry, AgentCardContext, AgentCardPatch, AuthorKind, BoardEntry,
-    BoardEntryKind,
+    apply_agent_card_patch, load_snapshot, post_entry, AgentCardContext, AgentCardPatch,
+    AuthorKind, BoardEntry, BoardEntryKind,
 };
 
 use super::HookError;
@@ -117,6 +117,17 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
 fn sync_coordination_for_session(session: &Session, event: &str) -> Result<(), HookError> {
     let card_status = coordination_status_for_event(event)?;
     let worktree_root = &session.worktree_path;
+    let snapshot = load_snapshot(worktree_root).map_err(coordination_as_hook_error)?;
+    let current_status = snapshot
+        .cards
+        .cards
+        .iter()
+        .find(|card| card.session_id.as_deref() == Some(session.id.as_str()))
+        .and_then(|card| card.status.as_deref());
+
+    if current_status == Some(card_status) {
+        return Ok(());
+    }
 
     apply_agent_card_patch(
         worktree_root,
@@ -300,5 +311,22 @@ mod tests {
             snapshot.board.entries[0].body.contains("feature/demo"),
             "board entry should identify the active branch"
         );
+    }
+
+    #[test]
+    fn sync_coordination_for_session_skips_noop_status_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
+
+        sync_coordination_for_session(&session, "PreToolUse").unwrap();
+        sync_coordination_for_session(&session, "PostToolUse").unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.cards.cards.len(), 1);
+        assert_eq!(snapshot.cards.cards[0].status.as_deref(), Some("running"));
+
+        let events =
+            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
+        assert_eq!(events.lines().count(), 1);
     }
 }

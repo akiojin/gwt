@@ -262,12 +262,19 @@ fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
     let hooks = root.get("hooks");
     Ok(contains_legacy_runtime_forwarder(hooks)
         || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell())
+        || contains_legacy_block_bash_policy(hooks)
         || contains_legacy_node_bash_blockers(hooks)
         || contains_legacy_split_bash_blockers(hooks)
         || contains_inline_shell_runtime_hook(hooks)
         || contains_legacy_runtime_marker(hooks)
         || contains_pathless_gwt_hook_command(hooks)
         || contains_stale_binary_path(hooks))
+}
+
+fn contains_legacy_block_bash_policy(existing: Option<&Value>) -> bool {
+    any_managed_command(existing, |command| {
+        command.contains(" hook block-bash-policy")
+    })
 }
 
 /// SPEC #1942 amendment: detect tracked hook files where the embedded
@@ -545,12 +552,11 @@ fn workflow_policy_hook(_target: ManagedHookTarget) -> Value {
     // Dispatch the unified workflow gate through the absolute path of
     // this gwt binary so launched worktrees do not depend on `gwt`
     // being present on $PATH. `target` stays for call-site symmetry.
-    let bin = posix_shell_quote(&gwt_hook_bin_path());
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": format!("{bin} hook workflow-policy"),
+                "command": workflow_policy_hook_command(managed_hook_shell()),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -572,6 +578,13 @@ fn runtime_hook_command(event: &str, shell: HookShell) -> String {
     }
 }
 
+fn workflow_policy_hook_command(shell: HookShell) -> String {
+    match shell {
+        HookShell::Posix => posix_workflow_policy_hook_command(),
+        HookShell::PowerShell => powershell_workflow_policy_hook_command(),
+    }
+}
+
 /// Emit the POSIX-shell form of the runtime-state hook. The previous
 /// inline `sh -lc '...'` one-liner that wrote JSON directly is replaced
 /// by a single `gwt hook runtime-state <event>` dispatch, using the
@@ -582,6 +595,11 @@ fn posix_runtime_hook_command(event: &str) -> String {
     format!("{bin} hook runtime-state {event}")
 }
 
+fn posix_workflow_policy_hook_command() -> String {
+    let bin = posix_shell_quote(&gwt_hook_bin_path());
+    format!("{bin} hook workflow-policy")
+}
+
 /// Emit the PowerShell form of the runtime-state hook. Windows Claude
 /// Code runs the hook through `powershell -NoProfile -Command`, so we
 /// keep that wrapper, then invoke the gwt binary via `& '...'` call
@@ -589,6 +607,11 @@ fn posix_runtime_hook_command(event: &str) -> String {
 fn powershell_runtime_hook_command(event: &str) -> String {
     let bin = powershell_quote(&gwt_hook_bin_path());
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook runtime-state {event} }}\"")
+}
+
+fn powershell_workflow_policy_hook_command() -> String {
+    let bin = powershell_quote(&gwt_hook_bin_path());
+    format!("powershell -NoProfile -Command \"& {{ & {bin} hook workflow-policy }}\"")
 }
 
 fn path_is_git_tracked(worktree: &Path, relative_path: &Path) -> io::Result<bool> {
@@ -820,6 +843,61 @@ mod tests {
         assert!(
             content.contains("hook workflow-policy"),
             "tracked file must be migrated to the consolidated workflow-policy form, got: {content}"
+        );
+    }
+
+    #[test]
+    fn tracked_block_bash_policy_hook_triggers_migration() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "command": "'/tmp/gwt-tui' hook block-bash-policy",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("hook block-bash-policy"),
+            "tracked block-bash-policy hook must be migrated away, got: {content}"
+        );
+        assert!(
+            content.contains("hook workflow-policy"),
+            "tracked file must dispatch to workflow-policy after migration, got: {content}"
         );
     }
 
@@ -1335,6 +1413,20 @@ mod tests {
     fn powershell_quote_escapes_single_quotes() {
         assert_eq!(powershell_quote("simple"), "'simple'");
         assert_eq!(powershell_quote("a'b"), "'a''b'");
+    }
+
+    #[test]
+    fn workflow_policy_hook_command_matches_shell_shape() {
+        std::env::set_var(GWT_HOOK_BIN_ENV, "gwt");
+        assert_eq!(
+            workflow_policy_hook_command(HookShell::Posix),
+            "'gwt' hook workflow-policy"
+        );
+        assert_eq!(
+            workflow_policy_hook_command(HookShell::PowerShell),
+            "powershell -NoProfile -Command \"& { & 'gwt' hook workflow-policy }\""
+        );
+        std::env::remove_var(GWT_HOOK_BIN_ENV);
     }
 
     #[test]

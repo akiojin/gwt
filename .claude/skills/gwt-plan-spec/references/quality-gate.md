@@ -131,7 +131,7 @@ Status: CLEAR | AUTO-FIXABLE | NEEDS-DECISION
 
 ### Next
 
-- gwt-build (on CLEAR)
+- gwt-build-spec (on CLEAR)
 - self-repair and rerun (on AUTO-FIXABLE)
 - ask user for decision (on NEEDS-DECISION)
 ```
