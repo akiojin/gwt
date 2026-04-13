@@ -699,6 +699,21 @@ fn check_pty_exits(model: &mut Model) {
     check_pty_exits_with(model, &gwt_sessions_dir());
 }
 
+fn focus_session_by_id(model: &mut Model, session_id: &str) -> bool {
+    if let Some(index) = model
+        .sessions
+        .iter()
+        .position(|session| session.id == session_id)
+    {
+        model.active_layer = ActiveLayer::Main;
+        model.active_session = index;
+        model.active_focus = FocusPane::Terminal;
+        true
+    } else {
+        false
+    }
+}
+
 fn check_pty_exits_with(model: &mut Model, sessions_dir: &Path) {
     let exited: Vec<String> = model
         .pty_handles
@@ -1057,7 +1072,7 @@ pub fn update(model: &mut Model, msg: Message) {
             screens::versions::update(&mut model.versions, msg);
         }
         Message::Wizard(msg) => {
-            let launch_config = if let Some(ref mut wizard) = model.wizard {
+            let (launch_config, focus_session_id) = if let Some(ref mut wizard) = model.wizard {
                 screens::wizard::update(wizard, msg);
                 let project_root = wizard
                     .worktree_path
@@ -1066,7 +1081,12 @@ pub fn update(model: &mut Model, msg: Message) {
                 sync_wizard_docker_status(wizard, &project_root);
                 maybe_start_wizard_branch_suggestions(wizard);
                 let completed = wizard.completed;
-                let launch_config = if completed {
+                let focus_session_id = if completed {
+                    wizard.focus_session_id.clone()
+                } else {
+                    None
+                };
+                let launch_config = if completed && focus_session_id.is_none() {
                     Some(build_launch_config_from_wizard(wizard))
                 } else {
                     None
@@ -1074,11 +1094,22 @@ pub fn update(model: &mut Model, msg: Message) {
                 if wizard.completed || wizard.cancelled {
                     model.wizard = None;
                 }
-                launch_config
+                (launch_config, focus_session_id)
             } else {
-                None
+                (None, None)
             };
-            if let Some(config) = launch_config {
+            if let Some(session_id) = focus_session_id {
+                if !focus_session_by_id(model, &session_id) {
+                    apply_notification(
+                        model,
+                        Notification::new(
+                            Severity::Warn,
+                            "session",
+                            format!("Session {session_id} is no longer available"),
+                        ),
+                    );
+                }
+            } else if let Some(config) = launch_config {
                 model.pending_launch_config = Some(config);
                 materialize_pending_launch(model);
                 model.active_focus = FocusPane::Terminal;
@@ -3273,14 +3304,16 @@ fn check_branch_pending_actions(model: &mut Model) {
                 .clone()
                 .unwrap_or_else(|| model.repo_path.clone());
             open_wizard(model, None);
-            if let Some(ref mut wizard) = model.wizard {
+            if let Some(mut wizard) = model.wizard.take() {
                 wizard.worktree_path = worktree_path;
                 configure_existing_branch_wizard_with_sessions(
-                    wizard,
+                    &mut wizard,
+                    model,
                     &quick_start_root,
                     &gwt_sessions_dir(),
                     &branch_name,
                 );
+                model.wizard = Some(wizard);
             }
         }
     }
@@ -3482,8 +3515,20 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
         return Vec::new();
     };
 
-    let branch_name = branch.name.as_str();
-    let branch_worktree = branch.worktree_path.as_deref().unwrap_or(model.repo_path());
+    branch_session_matches_for(
+        model,
+        sessions_dir,
+        branch.name.as_str(),
+        branch.worktree_path.as_deref().unwrap_or(model.repo_path()),
+    )
+}
+
+fn branch_session_matches_for(
+    model: &Model,
+    sessions_dir: &Path,
+    branch_name: &str,
+    branch_worktree: &Path,
+) -> Vec<BranchSessionMatch> {
     let branch_shell_name = format!("Shell: {branch_name}");
 
     model
@@ -3537,6 +3582,24 @@ fn branch_session_matches_with(model: &Model, sessions_dir: &Path) -> Vec<Branch
                 })
             }
             _ => None,
+        })
+        .collect()
+}
+
+fn branch_live_session_entries_with(
+    model: &Model,
+    sessions_dir: &Path,
+    branch_name: &str,
+    branch_worktree: &Path,
+) -> Vec<screens::wizard::LiveSessionEntry> {
+    branch_session_matches_for(model, sessions_dir, branch_name, branch_worktree)
+        .into_iter()
+        .map(|entry| screens::wizard::LiveSessionEntry {
+            session_id: model.sessions[entry.session_index].id.clone(),
+            kind: entry.summary.kind.to_string(),
+            name: entry.summary.name,
+            detail: entry.summary.detail,
+            active: entry.summary.active,
         })
         .collect()
 }
@@ -6207,6 +6270,7 @@ fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, Stri
 
 fn configure_existing_branch_wizard_with_sessions(
     wizard: &mut screens::wizard::WizardState,
+    model: &Model,
     repo_path: &std::path::Path,
     sessions_dir: &std::path::Path,
     branch_name: &str,
@@ -6215,7 +6279,11 @@ fn configure_existing_branch_wizard_with_sessions(
     wizard.branch_name = branch_name.to_string();
     apply_wizard_docker_context(wizard, repo_path);
     wizard.quick_start_entries = load_quick_start_entries(repo_path, sessions_dir, branch_name);
-    wizard.has_quick_start = !wizard.quick_start_entries.is_empty();
+    wizard.live_session_entries =
+        branch_live_session_entries_with(model, sessions_dir, branch_name, repo_path);
+    wizard.has_quick_start =
+        !wizard.quick_start_entries.is_empty() || !wizard.live_session_entries.is_empty();
+    wizard.focus_session_id = None;
     wizard.step = if wizard.has_quick_start {
         screens::wizard::WizardStep::QuickStart
     } else {
@@ -14759,7 +14827,14 @@ services:
         );
 
         let (mut wizard, _) = prepare_wizard_startup(repo_path.as_path(), None, detected, &cache);
-        configure_existing_branch_wizard_with_sessions(&mut wizard, &repo_path, dir.path(), branch);
+        let model = test_model();
+        configure_existing_branch_wizard_with_sessions(
+            &mut wizard,
+            &model,
+            &repo_path,
+            dir.path(),
+            branch,
+        );
 
         assert_eq!(wizard.step, screens::wizard::WizardStep::QuickStart);
         assert!(wizard.has_quick_start);
@@ -14786,6 +14861,106 @@ services:
         );
         assert_eq!(wizard.quick_start_entries[1].agent_id, "claude");
         assert!(!wizard.quick_start_entries[1].codex_fast_mode);
+    }
+
+    #[test]
+    fn configure_existing_branch_wizard_with_sessions_loads_branch_live_sessions() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let cache = VersionCache::new();
+        let repo_path = PathBuf::from("/tmp/repo");
+        let worktree_path = repo_path.join("wt-feature-test");
+        let branch = "feature/test";
+        let now = Utc::now();
+
+        let mut persisted =
+            AgentSession::new(worktree_path.to_str().unwrap(), branch, AgentId::Codex);
+        persisted.id = "agent-1".to_string();
+        persisted.model = Some("gpt-5.3-codex".to_string());
+        persisted.reasoning_level = Some("high".to_string());
+        persisted.tool_version = Some("latest".to_string());
+        persisted.agent_session_id = Some("sess-live".to_string());
+        persisted.skip_permissions = true;
+        persisted.codex_fast_mode = true;
+        persisted.updated_at = now;
+        persisted.created_at = now;
+        persisted.last_activity_at = now;
+        persisted.save(dir.path()).expect("persist live session");
+
+        let detected = vec![detected_agent(AgentId::Codex, Some("0.5.1"))];
+        let (mut wizard, _) = prepare_wizard_startup(repo_path.as_path(), None, detected, &cache);
+        let mut model = test_model();
+        model.sessions = vec![crate::model::SessionTab {
+            id: "agent-1".to_string(),
+            name: "Codex".to_string(),
+            tab_type: SessionTabType::Agent {
+                agent_id: "codex".to_string(),
+                color: crate::model::AgentColor::Cyan,
+            },
+            vt: crate::model::VtState::new(24, 80),
+            created_at: std::time::Instant::now(),
+        }];
+        model.active_session = 0;
+
+        configure_existing_branch_wizard_with_sessions(
+            &mut wizard,
+            &model,
+            &worktree_path,
+            dir.path(),
+            branch,
+        );
+
+        assert_eq!(wizard.live_session_entries.len(), 1);
+        assert_eq!(wizard.live_session_entries[0].session_id, "agent-1");
+        assert_eq!(wizard.live_session_entries[0].name, "Codex");
+    }
+
+    #[test]
+    fn wizard_select_focus_existing_session_switches_active_session_without_launching() {
+        let mut model = test_model();
+        model.sessions = vec![
+            crate::model::SessionTab {
+                id: "shell-0".to_string(),
+                name: "Shell: feature/test".to_string(),
+                tab_type: SessionTabType::Shell,
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+            crate::model::SessionTab {
+                id: "agent-1".to_string(),
+                name: "Codex".to_string(),
+                tab_type: SessionTabType::Agent {
+                    agent_id: "codex".to_string(),
+                    color: crate::model::AgentColor::Cyan,
+                },
+                vt: crate::model::VtState::new(24, 80),
+                created_at: std::time::Instant::now(),
+            },
+        ];
+        model.active_session = 0;
+        model.active_focus = FocusPane::BranchDetail;
+        model.active_layer = ActiveLayer::Management;
+        model.wizard = Some(screens::wizard::WizardState {
+            step: screens::wizard::WizardStep::FocusExistingSession,
+            live_session_entries: vec![screens::wizard::LiveSessionEntry {
+                session_id: "agent-1".to_string(),
+                kind: "Agent".to_string(),
+                name: "Codex".to_string(),
+                detail: Some("gpt-5.3-codex · high".to_string()),
+                active: false,
+            }],
+            ..screens::wizard::WizardState::default()
+        });
+
+        update(
+            &mut model,
+            Message::Wizard(screens::wizard::WizardMessage::Select),
+        );
+
+        assert!(model.wizard.is_none());
+        assert_eq!(model.active_layer, ActiveLayer::Main);
+        assert_eq!(model.active_session, 1);
+        assert_eq!(model.active_focus, FocusPane::Terminal);
+        assert!(model.pending_launch_config.is_none());
     }
 
     #[test]
