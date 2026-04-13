@@ -1,26 +1,29 @@
----
-description: Drive SPEC design from intake to planning-ready using DDD methodology
+description: Compatibility alias for the visible SPEC design entrypoint
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
-# SPEC Design Command
+SPEC Design Command (Compatibility Alias)
+========================================
 
-Drive SPEC design with DDD methodology. Runs preflight search, one-question-at-a-time interview, domain discovery, SPEC registration, and clarification.
+Legacy command alias. Prefer `/gwt:gwt-design-spec` for visible SPEC design work.
 
-## Usage
+Usage
+-----
 
 ```text
 /gwt:gwt-spec-design [args]
 ```
 
-## Steps
+Steps
+-----
 
-1. Load `.claude/skills/gwt-spec-design/SKILL.md` and follow the workflow.
-2. Run preflight search to check for existing SPECs and Issues before creating new ones.
-3. Conduct the design interview and produce a planning-ready SPEC.
+1. Load `.claude/skills/gwt-design-spec/SKILL.md` and follow the visible workflow.
+2. Reuse the owner SPEC when one already exists.
+3. Produce a planning-ready SPEC for the next planning step.
 
-## Examples
+Examples
+--------
 
 ```text
 /gwt:gwt-spec-design この機能を設計したい

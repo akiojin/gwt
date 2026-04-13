@@ -1,6 +1,6 @@
 ---
 name: gwt-pr
-description: "Use proactively after implementation work to create, check, or fix PRs. Auto-detects mode from branch PR state: no PR creates one, open PR pushes updates, CI failures/conflicts/reviews triggers fix mode. Triggers: 'create PR', 'check PR', 'fix CI', 'PR status'."
+description: "Use when a legacy prompt or internal handoff refers to gwt-pr. Prefer gwt-manage-pr as the visible PR lifecycle entrypoint."
 ---
 
 # gwt-pr — Unified PR Lifecycle Manager
@@ -8,6 +8,8 @@ description: "Use proactively after implementation work to create, check, or fix
 ## Overview
 
 Single skill for the full PR lifecycle: create, check status, and fix blockers. Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user.
+
+Visible owner: `gwt-manage-pr`.
 
 Canonical agent-facing surface is `gwt pr ...` / `gwt actions ...` for PR inspection, create/update, and fix flows. The current implementation may still use GitHub REST / `gh` internally as transport, while GraphQL remains the transport for unresolved review threads and thread reply/resolve.
 

@@ -1,26 +1,29 @@
----
-description: Implement code using test-first TDD methodology
+description: Compatibility alias for the visible build entrypoint
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
-# Build Command
+Build Command (Compatibility Alias)
+==================================
 
-Implement code using test-first TDD methodology. Works in two modes: SPEC mode (driven by tasks.md with full progress tracking) and standalone mode (user-provided task, no SPEC artifacts needed).
+Legacy command alias. Prefer `/gwt:gwt-build-spec` for visible implementation work and `/gwt:gwt-fix-issue` when the request starts from an existing GitHub Issue.
 
-## Usage
+Usage
+-----
 
 ```text
 /gwt:gwt-spec-build [SPEC-ID or task description]
 ```
 
-## Steps
+Steps
+-----
 
-1. Load `.claude/skills/gwt-spec-build/SKILL.md` and follow the workflow.
-2. In SPEC mode, read tasks.md and execute tasks in order with progress tracking.
-3. In standalone mode, implement the user-provided task with TDD.
+1. Load `.claude/skills/gwt-build-spec/SKILL.md` and follow the visible workflow.
+2. Prefer SPEC mode when a SPEC exists.
+3. Use standalone mode only when the task was explicitly approved without a SPEC.
 
-## Examples
+Examples
+--------
 
 ```text
 /gwt:gwt-spec-build SPEC-5

@@ -1,27 +1,30 @@
----
-description: Unified GitHub PR lifecycle manager for creation, status checks, and fixes
+description: Compatibility alias for the visible PR lifecycle entrypoint
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
-# PR Command
+PR Command (Compatibility Alias)
+===============================
 
-Unified GitHub PR lifecycle manager. Auto-detects mode: creates PRs when none exist, pushes to open PRs, checks PR status, and fixes CI failures/merge conflicts/reviewer comments.
+Legacy command alias. Prefer `/gwt:gwt-manage-pr` for visible PR lifecycle work.
 
-## Usage
+Usage
+-----
 
 ```text
 /gwt:gwt-pr [action or context]
 ```
 
-## Steps
+Steps
+-----
 
-1. Load `.claude/skills/gwt-pr/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-manage-pr/SKILL.md` and follow the visible workflow.
 2. Ensure GitHub auth is healthy; `gwt pr current` should succeed before deeper PR actions.
 3. Auto-detect the appropriate action based on current branch and PR state.
 4. If the current PR is conflicting or behind, prefer the fix path over push-only.
 
-## Examples
+Examples
+--------
 
 ```text
 /gwt:gwt-pr

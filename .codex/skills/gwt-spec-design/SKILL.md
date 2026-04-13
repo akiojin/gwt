@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-design
-description: "MUST invoke before any feat/refactor implementation when the decision to create or update a SPEC has already been made. Runs DDD intake, domain discovery, SPEC registration, and clarification. Triggers: 'design', 'create a spec', 'clarify spec', 'SPEC登録'. For rough ideas or pre-SPEC discussion, use gwt-spec-brainstorm instead."
+description: "Use when a legacy prompt or internal handoff refers to gwt-spec-design. Prefer gwt-design-spec as the visible SPEC design entrypoint."
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 argument-hint: "[rough idea or request | --deepen SPEC-N]"
 ---
@@ -10,6 +10,8 @@ argument-hint: "[rough idea or request | --deepen SPEC-N]"
 Unified design skill that takes a rough idea through domain discovery to a
 planning-ready SPEC. Absorbs brainstorm, register, clarify, and deepen into a
 single five-phase pipeline.
+
+Visible owner: `gwt-design-spec`.
 
 ## Standalone usage
 
@@ -113,9 +115,9 @@ Routing rules:
 | Path | Action |
 |---|---|
 | EXISTING-SPEC | Skip to Phase 4 (clarify the owning SPEC) |
-| EXISTING-ISSUE | Hand off to `gwt-issue-resolve` |
+| EXISTING-ISSUE | Hand off to `gwt-fix-issue` |
 | NEW-SPEC | Continue to Phase 2 |
-| ISSUE | Hand off to `gwt-issue-register` |
+| ISSUE | Hand off to `gwt-register-issue` |
 | TOO-BROAD-SPLIT-FIRST | Ask user to pick first slice, restart Phase 1 |
 | NO-ACTION | End with documented rationale (no SPEC or Issue needed) |
 
@@ -174,7 +176,7 @@ Also apply the SPEC vs Issue decision:
 | One-off chore | -- | Yes |
 
 SPEC scope is determined by feature cohesion, not task count.
-Implementation phasing is handled by gwt-spec-plan.
+Implementation phasing is handled by `gwt-plan-spec`.
 
 ### DDD output
 
@@ -390,7 +392,7 @@ for the user.
 On completion of Phase 4 (or Phase 5), suggest:
 
 ```text
-SPEC-<id> is planning-ready. Run `gwt-spec-plan` to generate plan.md and
+SPEC-<id> is planning-ready. Run `gwt-plan-spec` to generate plan.md and
 supporting artifacts.
 ```
 

@@ -25,7 +25,7 @@
 - If a clear open Issue already tracks the request, do not create a new item.
   Switch to resolve mode and continue there.
 - If a clear SPEC already owns the scope, do not create a new item.
-  Switch to `gwt-spec-ops` and continue there.
+  Switch to the visible SPEC flow and continue there.
 - If the search returns plausible candidates but no single clear owner, stop and present
   the top 1-3 candidates instead of creating a new item.
 - Report the result with `Chosen Path: EXISTING` and continue with the owning workflow.
@@ -48,8 +48,8 @@
 - cross-cutting or multi-subsystem changes
 - non-trivial technical or product tradeoffs
 
-When the need for a SPEC is clear, do not create a plain Issue first. Create the SPEC
-through `gwt-spec-register` and continue through `gwt-spec-ops`. Only create a plain
+When the need for a SPEC is clear, do not create a plain Issue first. Create or deepen
+the SPEC through `gwt-design-spec`, then continue through the visible SPEC flow. Only create a plain
 Issue too when the user explicitly asks for separate GitHub tracking.
 
 ### Step 6: Create the plain Issue when needed
@@ -91,7 +91,7 @@ Issue too when the user explicitly asks for separate GitHub tracking.
   generic issue handling.
 - Treat Issue-body spec sections only as legacy migration hints; do not treat the Issue
   body as the current SPEC source of truth.
-- Hand off to `gwt-spec-ops` with the SPEC ID and current context.
+- Hand off to the visible SPEC flow with the SPEC ID and current context.
 
 ### Step 5: Direct-fix vs spec-needed decision
 
@@ -114,14 +114,13 @@ Issue too when the user explicitly asks for separate GitHub tracking.
 - Use `gwt-issue-search` before creating or updating any SPEC.
 - Also search local `specs/` via `spec_artifact.py --repo . --list-all`.
 - Search with at least 2 semantic queries derived from the Issue.
-- If a canonical existing SPEC is found, update that destination and continue with
-  `gwt-spec-ops`.
-- If no suitable SPEC exists, create a new local SPEC directory through
-  `gwt-spec-register`.
+- If a canonical existing SPEC is found, update that destination and continue with the
+  visible SPEC flow.
+- If no suitable SPEC exists, create or deepen the owner SPEC through `gwt-design-spec`.
 - Do not "convert the Issue into the SPEC"; the Issue remains an Issue and the SPEC
   remains a local artifact set.
-- After the target SPEC exists, continue with `gwt-spec-ops`, which owns
-  clarify/plan/tasks/analyze and then implementation.
+- After the target SPEC exists, continue with the visible SPEC flow, which owns
+  design, planning, and implementation sequencing.
 
 ### Step 8: Produce Issue Analysis Report
 
@@ -149,5 +148,5 @@ or unblocked.
 
 - Direct-fix path: apply the fix, summarize diffs and tests, then update the issue and
   PR linkage.
-- SPEC path: pass the resolved SPEC ID and context into `gwt-spec-ops`, then let that
-  workflow continue end-to-end.
+- SPEC path: pass the resolved SPEC ID and context into the visible SPEC flow, then let
+  that workflow continue end-to-end.

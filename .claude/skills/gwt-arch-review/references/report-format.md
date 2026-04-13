@@ -81,7 +81,7 @@ Priority-ordered, actionable proposals that bundle related findings.
 - **Addresses**: [C1], [H2], [M4]
 - **Estimated effort**: small / medium / large
 - **Approach**: <1-3 sentences describing the recommended approach>
-- **Next step**: Create improvement SPEC via `gwt-spec-design`
+- **Next step**: Create improvement SPEC via `gwt-design-spec`
 
 ### Proposal 2: <title>
 
@@ -92,8 +92,8 @@ Priority-ordered, actionable proposals that bundle related findings.
 To act on this review:
 
 1. Select the top 1-3 improvement proposals based on current priorities
-2. Create improvement SPECs for selected proposals using `gwt-spec-design`
-3. Implement through the standard `gwt-spec-plan` → `gwt-spec-build` pipeline
+2. Create improvement SPECs for selected proposals using `gwt-design-spec`
+3. Implement through the standard `gwt-plan-spec` → `gwt-build-spec` pipeline
 4. Run `gwt-arch-review` again after implementation to verify improvement
 5. Repeat weekly or bi-weekly to maintain architectural health
 
@@ -142,7 +142,7 @@ Each proposal should:
 - Have a clear scope boundary (what is included and excluded)
 - Suggest an approach, not just "fix it"
 - Estimate effort honestly (small = hours, medium = days, large = week+)
-- Reference `gwt-spec-design` as the entry point for creating the improvement SPEC
+- Reference `gwt-design-spec` as the entry point for creating the improvement SPEC
 
 ## Report Anti-patterns
 
@@ -152,5 +152,5 @@ Avoid these:
 - **Academic critique**: Pointing out theoretical violations without practical impact
 - **Vague findings**: "Code quality could be improved" without specifics
 - **Missing evidence**: "This module is too coupled" without showing the coupling
-- **Prescriptive solutions**: Designing the full solution in the report (that's `gwt-spec-design`'s job)
+- **Prescriptive solutions**: Designing the full solution in the report (that's `gwt-design-spec`'s job)
 - **Scope creep**: Reviewing test quality, CI config, documentation quality — stay focused on architecture

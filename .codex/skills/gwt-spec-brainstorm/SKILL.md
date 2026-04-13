@@ -195,10 +195,10 @@ Reason: <one sentence>
 
 | Path | Handoff |
 |---|---|
-| NEW-SPEC | → `gwt-spec-design` (pass Intake Memo; design skips Phase 1) |
-| UPDATE-SPEC | Update the owner SPEC artifact set in one batch (`spec` required, `tasks` / `plan` when the discussion changed them), then use `gwt-spec-design --deepen` only if more design work remains |
-| ISSUE | → `gwt-issue` |
-| CODE-FIX | → `gwt-spec-build` standalone (pass dependency chain as task context) |
+| NEW-SPEC | → `gwt-design-spec` (pass Intake Memo; design skips Phase 1) |
+| UPDATE-SPEC | Update the owner SPEC artifact set in one batch (`spec` required, `tasks` / `plan` when the discussion changed them), then use `gwt-design-spec --deepen` only if more design work remains |
+| ISSUE | → `gwt-register-issue` |
+| CODE-FIX | → `gwt-build-spec` standalone (pass dependency chain as task context) |
 | LESSON | → Write directly to `tasks/lessons.md` |
 | NO-ACTION | → End with documented rationale |
 
@@ -232,14 +232,14 @@ Reason: <one sentence>
 
 ```
 gwt-spec-brainstorm (this skill)
-  ├─ NEW-SPEC → gwt-spec-design (Phase 2+, Intake Memo handed off)
-  ├─ UPDATE-SPEC → owner SPEC updated in one batch, then optionally gwt-spec-design --deepen
-  ├─ ISSUE → gwt-issue
-  ├─ CODE-FIX → gwt-spec-build (standalone)
+  ├─ NEW-SPEC → gwt-design-spec (Phase 2+, Intake Memo handed off)
+  ├─ UPDATE-SPEC → owner SPEC updated in one batch, then optionally gwt-design-spec --deepen
+  ├─ ISSUE → gwt-register-issue
+  ├─ CODE-FIX → gwt-build-spec (standalone)
   ├─ LESSON → tasks/lessons.md
   └─ NO-ACTION → end
 
-gwt-spec-build can invoke this skill when:
+gwt-build-spec can invoke this skill when:
   - Implementation reveals a spec-implementation mismatch
   - A dependency chain emerges that wasn't in tasks.md
   - The user questions an assumption during implementation

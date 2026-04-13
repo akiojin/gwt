@@ -107,9 +107,9 @@ After enough signal:
 | Duplicate Check | Chosen Path | Action |
 |---|---|---|
 | EXISTING-SPEC | EXISTING-SPEC | Skip to Phase 4 (clarify owning SPEC) |
-| EXISTING-ISSUE | EXISTING-ISSUE | Hand off to `gwt-issue-resolve` |
+| EXISTING-ISSUE | EXISTING-ISSUE | Hand off to `gwt-fix-issue` |
 | CLEAN | NEW-SPEC | Continue to Phase 2 (domain discovery) |
-| CLEAN | ISSUE | Hand off to `gwt-issue-register` |
+| CLEAN | ISSUE | Hand off to `gwt-register-issue` |
 | AMBIGUOUS | -- | Present candidates to user, ask to disambiguate |
 | -- | TOO-BROAD-SPLIT-FIRST | Decompose, ask user for first slice |
 

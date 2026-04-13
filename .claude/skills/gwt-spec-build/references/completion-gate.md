@@ -71,7 +71,8 @@ If any reconciliation check fails:
 
 1. Do NOT proceed to PR.
 2. Do NOT declare completion.
-3. Route back to `gwt-spec-ops` to repair the artifact set.
+3. Route back to `gwt-design-spec` to repair the artifact set, then re-run
+   `gwt-plan-spec` if the planning artifacts changed.
 4. After repair, re-run the completion gate.
 
 ### Verification failure (both modes)

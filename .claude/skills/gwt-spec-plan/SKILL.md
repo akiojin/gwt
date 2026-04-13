@@ -1,6 +1,6 @@
 ---
 name: gwt-spec-plan
-description: "MUST invoke after spec.md is ready and before implementation begins. Use proactively when a SPEC exists but has no plan.md or tasks.md. Generates SDD architecture, plan.md, tasks.md, and runs CLEAR/AUTO-FIXABLE/NEEDS-DECISION quality gate. Triggers: 'plan this spec', 'generate tasks'."
+description: "Use when a legacy prompt or internal handoff refers to gwt-spec-plan. Prefer gwt-plan-spec as the visible SPEC planning entrypoint."
 ---
 
 # gwt-spec-plan
@@ -9,6 +9,8 @@ Unified planning skill that translates a clarified `spec.md` into implementation
 artifacts through four sequential phases: technical context, architecture design,
 task decomposition, and quality gate.
 
+Visible owner: `gwt-plan-spec`.
+
 Absorbs the responsibilities of `gwt-spec-plan`, `gwt-spec-tasks`, and `gwt-spec-analyze`.
 
 ## Invocation
@@ -16,12 +18,12 @@ Absorbs the responsibilities of `gwt-spec-plan`, `gwt-spec-tasks`, and `gwt-spec
 - **With SPEC:** `gwt-plan SPEC-<id>` — full pipeline from spec.md to quality gate
 - **Lightweight:** `gwt-spec-plan` without a SPEC — produce a plan.md and tasks.md in the
   current working context (no spec.md required, skip traceability checks)
-- **Standalone:** works independently of `gwt-spec-ops`
+- **Standalone:** works independently of the visible SPEC flow owner
 
 ## Prerequisites
 
-- If `spec.md` has critical `[NEEDS CLARIFICATION]` markers, use `gwt-spec-design` first.
-- If the target SPEC does not exist, use `gwt-spec-design` to create it first.
+- If `spec.md` has critical `[NEEDS CLARIFICATION]` markers, use `gwt-design-spec` first.
+- If the target SPEC does not exist, use `gwt-design-spec` to create it first.
 - If planning artifacts already exist but are stale, update them — do not recreate blindly.
 
 ## Required inputs
@@ -158,23 +160,23 @@ Blocking items:
 - A2. <traceability gap>
 
 Next:
-- gwt-build (on CLEAR)
+- gwt-build-spec (on CLEAR)
 - self-repair and rerun (on AUTO-FIXABLE)
 - ask user for decision (on NEEDS-DECISION)
 ```
 
 **Decision rule:**
 
-- **CLEAR** — implementation may proceed through `gwt-spec-build`
+- **CLEAR** — implementation may proceed through `gwt-build-spec`
 - **AUTO-FIXABLE** — repair the artifact set in-place and rerun the quality gate
 - **NEEDS-DECISION** — report points to the exact user decision or unresolved ambiguity
 
 **Boundary:** CLEAR means artifacts are ready for execution. It does not mean the SPEC is
-complete — completion requires post-implementation reconciliation in `gwt-spec-build`.
+complete — completion requires post-implementation reconciliation in `gwt-build-spec`.
 
 ## Chain suggestion
 
-On `CLEAR` verdict, suggest proceeding to `gwt-spec-build` for implementation.
+On `CLEAR` verdict, suggest proceeding to `gwt-build-spec` for implementation.
 
 ## Lightweight mode
 

@@ -488,6 +488,30 @@ mod tests {
             .collect();
         assert!(dirs.contains(&"gwt-pr"), "missing gwt-pr skill dir");
         assert!(
+            dirs.contains(&"gwt-fix-issue"),
+            "missing gwt-fix-issue skill dir"
+        );
+        assert!(
+            dirs.contains(&"gwt-register-issue"),
+            "missing gwt-register-issue skill dir"
+        );
+        assert!(
+            dirs.contains(&"gwt-design-spec"),
+            "missing gwt-design-spec skill dir"
+        );
+        assert!(
+            dirs.contains(&"gwt-plan-spec"),
+            "missing gwt-plan-spec skill dir"
+        );
+        assert!(
+            dirs.contains(&"gwt-build-spec"),
+            "missing gwt-build-spec skill dir"
+        );
+        assert!(
+            dirs.contains(&"gwt-manage-pr"),
+            "missing gwt-manage-pr skill dir"
+        );
+        assert!(
             dirs.contains(&"gwt-spec-brainstorm"),
             "missing gwt-spec-brainstorm skill dir"
         );
@@ -515,6 +539,30 @@ mod tests {
             })
             .collect();
         assert!(files.contains(&"gwt-pr.md"), "missing gwt-pr.md command");
+        assert!(
+            files.contains(&"gwt-fix-issue.md"),
+            "missing gwt-fix-issue.md command"
+        );
+        assert!(
+            files.contains(&"gwt-register-issue.md"),
+            "missing gwt-register-issue.md command"
+        );
+        assert!(
+            files.contains(&"gwt-design-spec.md"),
+            "missing gwt-design-spec.md command"
+        );
+        assert!(
+            files.contains(&"gwt-plan-spec.md"),
+            "missing gwt-plan-spec.md command"
+        );
+        assert!(
+            files.contains(&"gwt-build-spec.md"),
+            "missing gwt-build-spec.md command"
+        );
+        assert!(
+            files.contains(&"gwt-manage-pr.md"),
+            "missing gwt-manage-pr.md command"
+        );
         assert!(
             files.contains(&"gwt-spec-brainstorm.md"),
             "missing gwt-spec-brainstorm.md command"
@@ -653,6 +701,16 @@ mod tests {
                 !issue_skill.contains("Before posting with `gh issue comment`"),
                 "unexpected direct gh issue comment guidance in {relative}"
             );
+            assert!(
+                issue_skill.contains("gwt-register-issue")
+                    && issue_skill.contains("gwt-fix-issue")
+                    && issue_skill.contains("gwt-design-spec"),
+                "expected visible task entrypoint guidance in {relative}"
+            );
+            assert!(
+                !issue_skill.contains("gwt-spec-ops") && !issue_skill.contains("gwt-spec-register"),
+                "unexpected stale internal SPEC routing name in {relative}"
+            );
         }
 
         for relative in [
@@ -682,6 +740,12 @@ mod tests {
             assert!(
                 !brainstorm_skill.contains("gh issue list --label gwt-spec --state open"),
                 "unexpected direct gh issue list guidance in {relative}"
+            );
+            assert!(
+                brainstorm_skill.contains("`gwt-design-spec`")
+                    && brainstorm_skill.contains("`gwt-register-issue`")
+                    && brainstorm_skill.contains("`gwt-build-spec`"),
+                "expected brainstorm skill to hand off through visible task entrypoints in {relative}"
             );
         }
 
@@ -757,6 +821,10 @@ mod tests {
             assert!(
                 pr_skill.contains("gwt actions logs"),
                 "expected canonical gwt actions log guidance in {relative}"
+            );
+            assert!(
+                pr_skill.contains("Visible owner: `gwt-manage-pr`"),
+                "expected visible PR owner note in {relative}"
             );
             assert!(
                 !pr_skill.contains("Fallback: `gh pr create"),
@@ -906,6 +974,43 @@ mod tests {
     }
 
     #[test]
+    fn public_task_entrypoints_are_documented() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for needle in [
+            "gwt-register-issue",
+            "gwt-fix-issue",
+            "gwt-design-spec",
+            "gwt-plan-spec",
+            "gwt-build-spec",
+            "gwt-manage-pr",
+            "Compatibility Aliases",
+        ] {
+            assert!(
+                agents.contains(needle),
+                "expected AGENTS.md to document {needle}"
+            );
+        }
+
+        for relative in [
+            ".claude/commands/gwt-issue.md",
+            ".claude/commands/gwt-spec-design.md",
+            ".claude/commands/gwt-spec-plan.md",
+            ".claude/commands/gwt-spec-build.md",
+            ".claude/commands/gwt-pr.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("Compatibility Alias"),
+                "expected compatibility alias note in {relative}"
+            );
+        }
+    }
+
+    #[test]
     fn gwt_spec_skills_require_user_language_outputs() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
 
@@ -976,9 +1081,12 @@ mod tests {
 
         // Verify all distribution targets exist
         assert!(wt.join(".claude/skills/gwt-pr/SKILL.md").exists());
+        assert!(wt.join(".claude/skills/gwt-fix-issue/SKILL.md").exists());
         assert!(wt.join(".codex/skills/gwt-pr/SKILL.md").exists());
+        assert!(wt.join(".codex/skills/gwt-fix-issue/SKILL.md").exists());
         assert!(!wt.join(".agents/skills/gwt-pr/SKILL.md").exists());
         assert!(wt.join(".claude/commands/gwt-pr.md").exists());
+        assert!(wt.join(".claude/commands/gwt-fix-issue.md").exists());
         assert!(
             !wt.join(".claude/hooks/scripts/gwt-forward-hook.mjs")
                 .exists(),

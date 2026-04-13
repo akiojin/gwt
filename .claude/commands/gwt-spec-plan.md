@@ -1,26 +1,29 @@
----
-description: Plan implementation with SDD methodology from spec.md to tasks.md
+description: Compatibility alias for the visible SPEC planning entrypoint
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
-# SPEC Planning Command
+SPEC Planning Command (Compatibility Alias)
+==========================================
 
-Translate spec.md into SDD architecture, plan.md, tasks.md, and quality gate. Produces research.md, data-model.md, quickstart.md, and contracts.
+Legacy command alias. Prefer `/gwt:gwt-plan-spec` for visible SPEC planning work.
 
-## Usage
+Usage
+-----
 
 ```text
 /gwt:gwt-spec-plan [SPEC-ID]
 ```
 
-## Steps
+Steps
+-----
 
-1. Load `.claude/skills/gwt-spec-plan/SKILL.md` and follow the workflow.
+1. Load `.claude/skills/gwt-plan-spec/SKILL.md` and follow the visible workflow.
 2. Read the target SPEC's spec.md and generate planning artifacts.
-3. Run the analysis gate to verify completeness before implementation.
+3. Resolve planning gate findings before implementation.
 
-## Examples
+Examples
+--------
 
 ```text
 /gwt:gwt-spec-plan SPEC-5

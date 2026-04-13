@@ -22,7 +22,7 @@ Perform a structured architectural review of any codebase and produce a prioriti
 Regular architectural review directly improves agent output quality. This skill closes the feedback loop:
 
 ```text
-gwt-spec-design → gwt-spec-plan → gwt-spec-build → gwt-arch-review
+gwt-design-spec → gwt-plan-spec → gwt-build-spec → gwt-arch-review
      ↑                                    |
      └────────────────────────────────────┘
 ```
@@ -227,7 +227,7 @@ Priority-ordered list of concrete improvements:
 1. **<proposal title>** — Addresses [C1], [H2]
    - Estimated effort: <small/medium/large>
    - Suggested approach: <1-2 sentences>
-   - Create SPEC via: `gwt-spec-design`
+   - Create SPEC via: `gwt-design-spec`
 
 2. ...
 
@@ -235,8 +235,8 @@ Priority-ordered list of concrete improvements:
 
 To act on these findings:
 1. Pick the top 1-3 proposals
-2. Use `gwt-spec-design` to create improvement SPECs
-3. Follow the normal gwt-spec-plan → gwt-spec-build pipeline
+2. Use `gwt-design-spec` to create improvement SPECs
+3. Follow the normal gwt-plan-spec → gwt-build-spec pipeline
 4. Run `gwt-arch-review` again after implementation to verify improvement
 ```
 

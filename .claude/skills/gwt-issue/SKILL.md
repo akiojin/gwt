@@ -1,11 +1,19 @@
 ---
 name: gwt-issue
-description: "Use proactively when user references a GitHub Issue or reports a bug. Auto-detects register mode (no Issue number) or resolve mode (Issue number/URL provided). Searches existing Issues before creating duplicates. Triggers: 'register issue', 'file a bug', 'fix issue #N', 'resolve issue'."
+description: "Use when a legacy prompt or internal handoff refers to gwt-issue. Prefer gwt-register-issue for new work intake and gwt-fix-issue for resolving an existing GitHub Issue."
 ---
 
 # gwt Issue
 
 Unified entrypoint for GitHub Issue registration and resolution.
+
+## Visibility
+
+This skill remains available as a compatibility alias. Prefer the visible task entrypoints:
+
+- `gwt-register-issue` for new work intake
+- `gwt-fix-issue` for an existing Issue number or URL
+- `gwt-design-spec` / `gwt-plan-spec` / `gwt-build-spec` for visible SPEC work
 
 ## Mode Detection
 
@@ -15,13 +23,13 @@ Unified entrypoint for GitHub Issue registration and resolution.
 - **Resolve mode:** Issue number or URL provided. The user wants an existing Issue
   progressed, not merely classified.
 
-If the target SPEC is already known, use `gwt-spec-ops` instead.
+If the target SPEC is already known, use the visible SPEC flow instead.
 
 ## Hard Routing Rules
 
 - Do not call `gh issue create` manually before this skill completes duplicate search
   and ISSUE vs SPEC selection.
-- Do not jump to `gwt-spec-register` before duplicate search completes.
+- Do not jump to `gwt-design-spec` before duplicate search completes.
 - Do not create both a plain Issue and a SPEC for the same request.
 - A local SPEC directory is not a GitHub Issue. When a SPEC is needed, create or reuse
   the local SPEC as the source of truth; treat any Issue as an optional related record.
@@ -46,7 +54,7 @@ Do not skip duplicate search because the request "sounds new".
 ## Duplicate Handling
 
 - If an open plain Issue clearly matches, switch to resolve mode and continue there.
-- If an existing SPEC clearly owns the scope, switch to `gwt-spec-ops` and continue.
+- If an existing SPEC clearly owns the scope, switch to the visible SPEC flow and continue there.
 - If the search returns plausible candidates but no single clear owner, stop and present
   the top 1-3 candidates instead of creating a new item.
 - Do not create a fresh Issue "just in case" when the duplicate check is inconclusive.
@@ -69,8 +77,9 @@ Create a **new local SPEC directory** when the request includes any of:
 - cross-cutting or multi-subsystem changes
 - non-trivial technical or product tradeoffs
 
-When the need for a SPEC is clear, do not create a plain Issue first. Create the SPEC
-through `gwt-spec-register` and continue through `gwt-spec-ops`.
+When the need for a SPEC is clear, do not create a plain Issue first. Create or deepen
+the SPEC through `gwt-design-spec`, then continue through `gwt-plan-spec` and
+`gwt-build-spec` when the artifact state is ready.
 
 ## Title Rules for Plain Issues
 
@@ -157,8 +166,8 @@ surface fails with an auth error, stop and ask the user to refresh GitHub authen
 Use the decision rules above.
 
 - Plain Issue: create directly with `gwt issue create --title ... -f ...`.
-- New SPEC: create through `gwt-spec-register` (local directory), then continue through
-  `gwt-spec-ops`.
+- New SPEC: create or deepen through `gwt-design-spec`, then continue through the visible
+  SPEC flow.
 
 ### 6. Create the plain Issue when needed
 
@@ -218,7 +227,7 @@ Accept an issue number or full URL. Validate that the issue exists and is access
   generic issue handling.
 - Treat Issue-body spec sections only as legacy migration hints; do not treat the Issue
   body as the current SPEC source of truth.
-- Hand off to `gwt-spec-ops` with the SPEC ID and current context.
+- Hand off to the visible SPEC flow with the SPEC ID and current context.
 
 ### 5. Direct-fix vs spec-needed decision
 
@@ -239,13 +248,12 @@ Accept an issue number or full URL. Validate that the issue exists and is access
 - Use `gwt-issue-search` before creating or updating any SPEC.
 - Also search local `specs/` via `spec_artifact.py --repo . --list-all`.
 - Search with at least 2 semantic queries derived from the Issue.
-- If a canonical existing SPEC is found, update that destination and continue with
-  `gwt-spec-ops`.
-- If no suitable SPEC exists, create a new local SPEC directory through
-  `gwt-spec-register`.
+- If a canonical existing SPEC is found, update that destination and continue with the
+  visible SPEC flow.
+- If no suitable SPEC exists, create or deepen the owner SPEC through `gwt-design-spec`.
 - Do not "convert the Issue into the SPEC"; the Issue remains an Issue and the SPEC
   remains a local artifact set.
-- After the target SPEC exists, continue with `gwt-spec-ops`.
+- After the target SPEC exists, continue with the visible SPEC flow.
 
 ### 8. Post progress comments to the Issue
 
@@ -268,8 +276,8 @@ Post updates at least when starting work, after meaningful progress, and when bl
 
 - Direct-fix path: apply the fix, summarize diffs and tests, then update the issue and
   PR linkage.
-- SPEC path: pass the resolved SPEC ID and context into `gwt-spec-ops`, then let that
-  workflow continue end-to-end.
+- SPEC path: pass the resolved SPEC ID and context into the visible SPEC flow, then let
+  that workflow continue end-to-end.
 
 ---
 

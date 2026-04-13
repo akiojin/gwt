@@ -135,7 +135,7 @@ touches multiple BCs, consider:
 | One-off chore | -- | Yes |
 
 SPEC scope is determined by feature cohesion, not task count.
-Implementation phasing is handled by gwt-spec-plan.
+Implementation phasing is handled by `gwt-plan-spec`.
 
 ### When to split a SPEC
 

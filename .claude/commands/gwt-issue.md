@@ -1,26 +1,30 @@
----
-description: Unified GitHub Issue lifecycle manager for registration and resolution
+description: Compatibility alias for the visible issue registration and issue resolution entrypoints
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
-# Issue Command
+Issue Command (Compatibility Alias)
+==================================
 
-Unified GitHub Issue lifecycle manager. Auto-detects mode: no Issue number means register mode (search first, then create Issue or SPEC); Issue number/URL means resolve mode (analyze, decide direct fix vs SPEC path, continue toward resolution).
+Legacy command alias. Prefer `/gwt:gwt-register-issue` for new work intake and `/gwt:gwt-fix-issue` for an existing Issue number or URL.
 
-## Usage
+Usage
+-----
 
 ```text
 /gwt:gwt-issue [issue number, URL, or description]
 ```
 
-## Steps
+Steps
+-----
 
 1. Load `.claude/skills/gwt-issue/SKILL.md` and follow the workflow.
-2. If an Issue number or URL is provided, enter resolve mode.
-3. If a description is provided, search for duplicates first, then register a new Issue.
+2. If an Issue number or URL is provided, prefer `.claude/skills/gwt-fix-issue/SKILL.md`.
+3. If a description is provided, prefer `.claude/skills/gwt-register-issue/SKILL.md`.
+4. Continue with the selected visible workflow.
 
-## Examples
+Examples
+--------
 
 ```text
 /gwt:gwt-issue バグ報告: ターミナルリサイズ時にクラッシュ

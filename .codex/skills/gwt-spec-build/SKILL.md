@@ -1,11 +1,13 @@
 ---
 name: gwt-spec-build
-description: "MUST invoke for all implementation work that changes observable behavior. Use proactively when coding begins — both SPEC-driven (tasks.md) and standalone. Enforces TDD Red-Green-Refactor loop. Triggers: 'implement', 'build', 'start coding', 'TDD'."
+description: "Use when a legacy prompt or internal handoff refers to gwt-spec-build. Prefer gwt-build-spec for visible implementation work and gwt-fix-issue when the request starts from an existing GitHub Issue."
 ---
 
 # gwt-spec-build
 
 Implement code using strict TDD (Red-Green-Refactor) methodology. Operates in two modes:
+
+Visible owner: `gwt-build-spec`.
 
 - **SPEC mode**: driven by an existing SPEC directory with `tasks.md`, full progress tracking
 - **Standalone mode**: user provides the task directly, TDD loop enforced, no SPEC artifacts needed
@@ -107,15 +109,15 @@ In SPEC mode, also verify:
 
 - Implementation matches `spec.md` acceptance scenarios
 - No scope creep beyond `tasks.md`
-- If a failure indicates a spec gap (not a code bug), route back to `gwt-spec-design`
+- If a failure indicates a spec gap (not a code bug), route back to `gwt-design-spec`
 
 ## Phase 4: PR Flow
 
-Handle PR operations autonomously using the `gwt-pr` skill:
+Handle PR operations autonomously using the `gwt-manage-pr` skill:
 
-- If there is no active PR for the branch, or prior PRs are already merged, use `gwt-pr` to create one.
-- If the current PR has CI failures, conflicts, or review blockers, use `gwt-pr` to fix.
-- Let `gwt-pr` handle routine merge/push/fix loops.
+- If there is no active PR for the branch, or prior PRs are already merged, use `gwt-manage-pr` to create one.
+- If the current PR has CI failures, conflicts, or review blockers, use `gwt-manage-pr` to fix.
+- Let `gwt-manage-pr` handle routine merge/push/fix loops.
 
 Do not create a PR until Phase 3 verification passes.
 
@@ -131,7 +133,7 @@ Required checks:
 - `checklists/acceptance.md` reflects actual accepted behavior
 - `checklists/tdd.md` reflects actual verification evidence
 - `progress.md` entries do not claim completion unsupported by code
-- If artifacts disagree, return to `gwt-spec-design` — do not proceed to PR
+- If artifacts disagree, return to `gwt-design-spec` — do not proceed to PR
 
 Update execution tracking:
 
@@ -148,7 +150,7 @@ Update execution tracking:
 
 ### Chain suggestion
 
-On completion, suggest `gwt-arch-review` for code review if available, or proceed to `gwt-pr` if not already done.
+On completion, suggest `gwt-arch-review` for code review if available, or proceed to `gwt-manage-pr` if not already done.
 
 ## Stop conditions
 
@@ -176,8 +178,8 @@ Verification:
 - <command/result>
 
 Next:
-- `gwt-pr` (create/update PR)
+- `gwt-manage-pr` (create/update PR)
 - `gwt-arch-review` (code review)
-- return to `gwt-spec-design` (artifact repair)
+- return to `gwt-design-spec` (artifact repair)
 - ask user for decision
 ```
