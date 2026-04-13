@@ -15,6 +15,7 @@ use gwt_voice::{NoOpVoiceBackend, Qwen3AsrRecorder, VoiceBackend, VoiceSession};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
+use crate::discussion_resume::ResumePromptSessionState;
 use crate::input::voice::VoiceInputState;
 use crate::screens::branches::{BranchDetailLoadResult, BranchesState};
 use crate::screens::confirm::ConfirmState;
@@ -1879,6 +1880,8 @@ pub struct Model {
     pub(crate) branch_detail_docker_snapshotter: Option<BranchDetailDockerSnapshotter>,
     /// Service selection overlay state.
     pub(crate) service_select: Option<ServiceSelectState>,
+    /// Discussion resume proposal overlay.
+    pub(crate) discussion_resume: Option<crate::screens::discussion_resume::DiscussionResumeState>,
     /// Port conflict resolution overlay state.
     pub(crate) port_select: Option<PortSelectState>,
     /// Confirmation dialog state.
@@ -1893,6 +1896,8 @@ pub struct Model {
     pub(crate) merge_state_events: Option<MergeStateChannel>,
     /// Pending session conversion awaiting confirmation.
     pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
+    /// Per-session state machine for unfinished discussion resume prompts.
+    pub(crate) discussion_resume_sessions: HashMap<String, ResumePromptSessionState>,
     /// Launch config built from completed wizard, ready for PTY spawn.
     pub(crate) pending_launch_config: Option<gwt_agent::LaunchConfig>,
     /// Voice input state.
@@ -2006,6 +2011,7 @@ impl Model {
             #[cfg(test)]
             branch_detail_docker_snapshotter: None,
             service_select: None,
+            discussion_resume: None,
             port_select: None,
             confirm: ConfirmState::default(),
             cleanup_confirm: crate::screens::cleanup_confirm::CleanupConfirmState::default(),
@@ -2013,6 +2019,7 @@ impl Model {
             cleanup_events: None,
             merge_state_events: None,
             pending_session_conversion: None,
+            discussion_resume_sessions: HashMap::new(),
             pending_launch_config: None,
             voice: VoiceInputState::default(),
             voice_runtime: VoiceRuntimeState::default(),

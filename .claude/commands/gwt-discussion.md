@@ -23,6 +23,7 @@ mid-implementation investigation.
 4. Discuss one question at a time with selection UI first. In Codex, use `request_user_input` when that UI is available.
 5. After each answer, update `Discussion TODO`, re-rank unresolved high-impact unknowns, and ask the next highest-impact question before exiting.
 6. Finish with `Action Delta` and `Action Bundle` only after the high-impact unknowns are resolved or intentionally deferred.
+7. If managed hooks surface an unfinished discussion prompt, use `.gwt/discussion.md` as the source of truth and choose `Resume discussion`, `Park proposal`, or `Dismiss for now`.
 
 ## Examples
 

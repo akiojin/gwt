@@ -7,6 +7,7 @@ pub mod app;
 pub(crate) mod branch_cleanup;
 pub mod cli;
 pub(crate) mod custom_agents;
+pub(crate) mod discussion_resume;
 pub mod event;
 pub mod ime_probe;
 pub mod index_worker;

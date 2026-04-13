@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-13 — test: 通知経路が再入する helper では pending PTY queue の観測点を誤らない
+
+### 事象
+
+`handle_discussion_resume_message_with_resume_queues_prompt_input` のテストで、
+resume prompt を `pending_pty_inputs` に積んだ直後に通知を出した結果、
+通知側の `update()` 再入で queue が即時 drain され、`queued prompt` assertion
+が失敗した。
+
+### 原因
+
+- `crates/gwt-tui/src/app.rs` の helper は `push_input_to_session()` のあとに
+  `apply_notification()` を呼んでいた。
+- `apply_notification()` は内部で `update()` を呼び、`update()` の末尾で
+  `drain_pending_pty_inputs()` が走るため、helper 単体テストの観測点として
+  `pending_pty_inputs` が不安定だった。
+
+### 再発防止策
+
+1. PTY 入力投入と通知発火を同じ helper で行う場合は、`update()` 再入による
+   queue drain の有無を先に確認してからテストを書く。
+2. helper 単体で pending queue を観測したい場合は、通知より後に入力を積むか、
+   queue ではなく配信先を観測する。
+3. TUI テストで「積まれたはずの入力」が見えないときは、実装バグより先に
+   `apply_notification()` などの nested update を疑う。
+
 ## 2026-04-13 — fix: Issue / SPEC cache と index は repo 単位の exact cache を唯一の入力にする
 
 ### 事象

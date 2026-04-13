@@ -54,12 +54,23 @@ pub struct Session {
 
 /// Lightweight runtime state updated by hook events while the PTY is alive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingDiscussionResume {
+    pub proposal_label: String,
+    pub proposal_title: String,
+    #[serde(default)]
+    pub next_question: Option<String>,
+}
+
+/// Lightweight runtime state updated by hook events while the PTY is alive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRuntimeState {
     pub status: AgentStatus,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     #[serde(default)]
     pub source_event: Option<String>,
+    #[serde(default)]
+    pub pending_discussion: Option<PendingDiscussionResume>,
 }
 
 impl Session {
@@ -143,6 +154,7 @@ impl SessionRuntimeState {
             updated_at: now,
             last_activity_at: now,
             source_event: None,
+            pending_discussion: None,
         }
     }
 

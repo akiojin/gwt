@@ -60,6 +60,25 @@ Mirror structure for `.gwt/discussion.md`:
 Promote an item from `Discussion TODO` into `Action Delta` only after the
 high-impact unknown behind it has been resolved.
 
+## Resume hooks
+
+Managed hook settings in `.claude/settings.local.json` and `.codex/hooks.json`
+may surface unfinished discussion candidates from `.gwt/discussion.md`.
+
+Use this contract:
+
+- Treat a proposal marked `[active]` with a non-empty `Next Question` as
+  resumable.
+- Prefer `SessionStart` to surface the resume prompt.
+- If the runtime does not emit `SessionStart` before the first turn, arm a
+  fallback from `UserPromptSubmit` and surface it after the next `Stop`.
+- Offer exactly `Resume discussion`, `Park proposal`, and `Dismiss for now`.
+- `Resume discussion` continues `gwt-discussion` before other work proceeds.
+- `Park proposal` changes the matching proposal in `.gwt/discussion.md` from
+  `[active]` to `[parked]`.
+- `Dismiss for now` suppresses the prompt only for the current agent session. A
+  later session may surface it again.
+
 ## Platform question tool
 
 Use the platform's selection-style question tool instead of naming a single API

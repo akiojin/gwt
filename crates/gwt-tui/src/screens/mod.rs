@@ -4,6 +4,7 @@ pub mod branches;
 pub mod cleanup_confirm;
 pub mod cleanup_progress;
 pub mod confirm;
+pub mod discussion_resume;
 pub mod docker_progress;
 pub mod error;
 pub mod git_view;

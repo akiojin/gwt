@@ -736,6 +736,20 @@ mod tests {
                 "expected discussion skill to define Discussion TODO scratch state in {relative}"
             );
             assert!(
+                discussion_skill.contains(".claude/settings.local.json")
+                    && discussion_skill.contains(".codex/hooks.json")
+                    && discussion_skill.contains("SessionStart")
+                    && discussion_skill.contains("UserPromptSubmit")
+                    && discussion_skill.contains("Stop"),
+                "expected discussion skill to describe managed hook resume timing in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("Resume discussion")
+                    && discussion_skill.contains("Park proposal")
+                    && discussion_skill.contains("Dismiss for now"),
+                "expected discussion skill to define the resume prompt choices in {relative}"
+            );
+            assert!(
                 !discussion_skill.contains("gh issue list --label gwt-spec --state open"),
                 "unexpected direct gh issue list guidance in {relative}"
             );
@@ -787,6 +801,13 @@ mod tests {
                 discussion_command.contains("Action Bundle")
                     || discussion_command.contains("Discussion TODO"),
                 "expected discussion command to mention discussion artifacts in {relative}"
+            );
+            assert!(
+                discussion_command.contains(".gwt/discussion.md")
+                    && discussion_command.contains("Resume discussion")
+                    && discussion_command.contains("Park proposal")
+                    && discussion_command.contains("Dismiss for now"),
+                "expected discussion command to describe the resume prompt contract in {relative}"
             );
         }
 

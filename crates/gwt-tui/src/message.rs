@@ -106,6 +106,8 @@ pub enum Message {
     DockerProgress(DockerProgressMessage),
     /// Service selection overlay message.
     ServiceSelect(ServiceSelectMessage),
+    /// Discussion resume overlay message.
+    DiscussionResume(crate::screens::discussion_resume::DiscussionResumeMessage),
     /// Port selection overlay message.
     PortSelect(PortSelectMessage),
     /// Confirmation dialog message.
@@ -182,6 +184,9 @@ mod tests {
         let _ = Message::Wizard(WizardMessage::MoveUp);
         let _ = Message::DockerProgress(DockerProgressMessage::Advance);
         let _ = Message::ServiceSelect(ServiceSelectMessage::MoveUp);
+        let _ = Message::DiscussionResume(
+            crate::screens::discussion_resume::DiscussionResumeMessage::MoveUp,
+        );
         let _ = Message::PortSelect(PortSelectMessage::MoveUp);
         let _ = Message::Confirm(ConfirmMessage::Toggle);
         let _ = Message::Voice(VoiceInputMessage::StartRecording);
