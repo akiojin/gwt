@@ -3239,9 +3239,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
                     KeyCode::Char('[') => Some(SettingsMessage::PrevCategory),
                     KeyCode::Char(']') => Some(SettingsMessage::NextCategory),
-                    KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        Some(SettingsMessage::Save)
-                    }
                     KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         Some(SettingsMessage::PrevCategory)
                     }
@@ -9685,17 +9682,18 @@ fn generic_management_hint_text(
 
 fn settings_list_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ sel  ↵ edit  Sp tog  [] cat  S save  C-g Tab  Esc t  ?".to_string()
+        "↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  ?".to_string()
     } else {
-        "↑↓:select  Enter:edit  Space:toggle  []:sub-tab  Shift+S:save  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:apply  Space:toggle  []:sub-tab  Ctrl+G, Tab:focus  Esc:term  ?:help"
+            .to_string()
     }
 }
 
 fn settings_edit_hint_text(compact: bool) -> String {
     if compact {
-        "↵ save  ⌫ del  Esc cancel  ?".to_string()
+        "↵ apply  ⌫ del  Esc cancel  ?".to_string()
     } else {
-        "Enter:save  Backspace:delete  Esc:cancel  ?:help".to_string()
+        "Enter:apply  Backspace:delete  Esc:cancel  ?:help".to_string()
     }
 }
 
@@ -21261,6 +21259,22 @@ services:
             model.settings.category,
             screens::settings::SettingsCategory::General
         );
+    }
+
+    #[test]
+    fn route_key_to_management_settings_shift_s_is_noop() {
+        with_temp_home(|_home| {
+            let mut model = test_model();
+            model.management_tab = ManagementTab::Settings;
+            model.active_focus = FocusPane::TabContent;
+            model.settings.category = screens::settings::SettingsCategory::Voice;
+            model.settings.load_category_fields();
+            model.settings.fields[0].value = "/nonexistent/model".to_string();
+
+            route_key_to_management(&mut model, key(KeyCode::Char('S'), KeyModifiers::SHIFT));
+
+            assert!(model.settings.save_error.is_none());
+        });
     }
 
     #[test]

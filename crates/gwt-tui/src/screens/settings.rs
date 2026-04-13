@@ -748,6 +748,14 @@ fn finish_custom_agent_edit(state: &mut SettingsState) {
     });
 }
 
+fn persist_settings_change(state: &mut SettingsState) {
+    if let Err(e) = save_settings_to_config(state) {
+        state.save_error = Some(e);
+    } else {
+        state.save_error = None;
+    }
+}
+
 /// Update settings state in response to a message.
 pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
     match msg {
@@ -782,6 +790,7 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
                 if let Some(field) = state.fields.get(state.selected) {
                     if field.field_type == FieldType::Bool {
                         toggle_bool_field(&mut state.fields[state.selected]);
+                        persist_settings_change(state);
                     } else {
                         state.edit_buffer = field.value.clone();
                         state.editing = true;
@@ -800,6 +809,7 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
                 }
                 state.editing = false;
                 state.edit_buffer.clear();
+                persist_settings_change(state);
             }
         }
         SettingsMessage::CancelEdit => {
@@ -820,15 +830,12 @@ pub fn update(state: &mut SettingsState, msg: SettingsMessage) {
             if !state.editing {
                 if let Some(field) = state.fields.get_mut(state.selected) {
                     toggle_bool_field(field);
+                    persist_settings_change(state);
                 }
             }
         }
         SettingsMessage::Save => {
-            if let Err(e) = save_settings_to_config(state) {
-                state.save_error = Some(e);
-            } else {
-                state.save_error = None;
-            }
+            persist_settings_change(state);
         }
     }
 }
@@ -942,11 +949,11 @@ fn render_fields(state: &SettingsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let hints = if state.editing {
-        " Enter: save | Esc: cancel"
+        " Enter: apply | Esc: cancel"
     } else if state.category == SettingsCategory::CustomAgents {
         " Enter: cycle/edit/action | [/]: category"
     } else {
-        " Enter: edit | Space: toggle bool | [/]: category"
+        " Enter: edit/apply | Space: toggle bool | [/]: category"
     };
 
     let block = Block::default().title(format!("{}{}", state.category.label(), hints));
@@ -987,6 +994,17 @@ mod tests {
     fn voice_state_with_fields() -> SettingsState {
         let mut state = SettingsState::default();
         state.category = SettingsCategory::Voice;
+        state.load_category_fields();
+        state
+    }
+
+    fn state_with_category_and_path(
+        category: SettingsCategory,
+        config_path: &Path,
+    ) -> SettingsState {
+        let mut state = SettingsState::default();
+        state.category = category;
+        state.config_path_override = Some(config_path.to_path_buf());
         state.load_category_fields();
         state
     }
@@ -1133,6 +1151,23 @@ mod tests {
     }
 
     #[test]
+    fn end_edit_persists_agent_field_without_explicit_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        Settings::default().save(&config_path).unwrap();
+
+        let mut state = state_with_category_and_path(SettingsCategory::Agent, &config_path);
+        update(&mut state, SettingsMessage::StartEdit);
+        state.edit_buffer = "codex".to_string();
+
+        update(&mut state, SettingsMessage::EndEdit);
+
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert_eq!(loaded.agent.default_agent.as_deref(), Some("codex"));
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
     fn cancel_edit_discards() {
         let mut state = state_with_fields();
         let original = state.fields[0].value.clone();
@@ -1194,6 +1229,45 @@ mod tests {
 
         update(&mut state, SettingsMessage::ToggleBool);
         assert_eq!(state.fields[2].value, "true");
+    }
+
+    #[test]
+    fn toggle_bool_persists_voice_config_without_explicit_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let model_dir = dir.path().join("model");
+        std::fs::create_dir(&model_dir).unwrap();
+
+        let mut settings = Settings::default();
+        settings.voice.model_path = Some(model_dir.clone());
+        settings.save(&config_path).unwrap();
+
+        let mut state = state_with_category_and_path(SettingsCategory::Voice, &config_path);
+        state.selected = 4;
+
+        update(&mut state, SettingsMessage::ToggleBool);
+
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert!(loaded.voice.enabled);
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
+    fn end_edit_auto_save_surfaces_validation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        Settings::default().save(&config_path).unwrap();
+
+        let mut state = state_with_category_and_path(SettingsCategory::Voice, &config_path);
+        state.selected = 0;
+        update(&mut state, SettingsMessage::StartEdit);
+        state.edit_buffer = "/nonexistent/model".to_string();
+
+        update(&mut state, SettingsMessage::EndEdit);
+
+        assert!(state.save_error.is_some());
+        let loaded = Settings::load_from_path(&config_path).unwrap();
+        assert!(loaded.voice.model_path.is_none());
     }
 
     #[test]
