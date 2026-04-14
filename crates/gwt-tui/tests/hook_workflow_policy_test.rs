@@ -164,15 +164,41 @@ fn allows_read_only_tools_without_owner() {
 }
 
 #[test]
-fn blocks_mutating_tools_when_owner_is_unknown() {
+fn allows_worktree_internal_edit_without_owner() {
+    let wt = root();
+    let event = event(
+        "Edit",
+        json!({ "file_path": format!("{}/src/lib.rs", wt.display()), "old_string": "x", "new_string": "y" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "worktree-internal edits must be allowed without owner"
+    );
+}
+
+#[test]
+fn allows_worktree_internal_edit_with_relative_path() {
     let event = event(
         "Edit",
         json!({ "file_path": "src/lib.rs", "old_string": "x", "new_string": "y" }),
     );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "relative worktree-internal edits must be allowed without owner"
+    );
+}
+
+#[test]
+fn blocks_edit_outside_worktree_without_owner() {
+    let event = event(
+        "Edit",
+        json!({ "file_path": "/outside/project/src/lib.rs", "old_string": "x", "new_string": "y" }),
+    );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("unknown owner must block edits");
+        .expect("edit outside worktree must block without owner");
     assert!(decision.reason.contains("owner"));
-    assert!(decision.stop_reason.contains("gwt-discussion"));
 }
 
 #[test]
@@ -199,48 +225,39 @@ fn allows_mutation_for_plain_issue_owner() {
 }
 
 #[test]
-fn blocks_spec_owner_without_plan() {
-    let event = event(
-        "Write",
-        json!({ "file_path": "src/lib.rs", "content": "fn x() {}\n" }),
-    );
+fn blocks_spec_owner_without_plan_on_external_op() {
+    let event = event("Bash", json!({ "command": "git push" }));
     let decision = evaluate(
         &event,
         workflow_policy::WorkflowContext::spec_issue(1935, false, true),
     )
-    .expect("spec without plan must block");
+    .expect("spec without plan must block external ops");
     assert!(decision.reason.contains("plan"));
     assert!(decision.stop_reason.contains("gwt-plan-spec"));
 }
 
 #[test]
-fn blocks_spec_owner_without_tasks() {
-    let event = event(
-        "Write",
-        json!({ "file_path": "src/lib.rs", "content": "fn x() {}\n" }),
-    );
+fn blocks_spec_owner_without_tasks_on_external_op() {
+    let event = event("Bash", json!({ "command": "git push" }));
     let decision = evaluate(
         &event,
         workflow_policy::WorkflowContext::spec_issue(1935, true, false),
     )
-    .expect("spec without tasks must block");
+    .expect("spec without tasks must block external ops");
     assert!(decision.reason.contains("tasks"));
     assert!(decision.stop_reason.contains("gwt-plan-spec"));
 }
 
 #[test]
 fn allows_spec_owner_when_plan_and_tasks_exist() {
-    let event = event(
-        "Write",
-        json!({ "file_path": "src/lib.rs", "content": "fn x() {}\n" }),
-    );
+    let event = event("Bash", json!({ "command": "git push origin main" }));
     let decision = evaluate(
         &event,
         workflow_policy::WorkflowContext::spec_issue(1935, true, true),
     );
     assert!(
         decision.is_none(),
-        "ready spec owner should allow implementation"
+        "ready spec owner should allow external ops"
     );
 }
 
@@ -281,10 +298,87 @@ fn allows_worktree_rm_bash_without_owner() {
 }
 
 #[test]
-fn blocks_non_file_op_mutating_bash_even_without_owner() {
+fn allows_cargo_fmt_without_owner() {
     let event = event("Bash", json!({ "command": "cargo fmt" }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "cargo fmt is worktree-internal and must be allowed"
+    );
+}
+
+#[test]
+fn allows_git_commit_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git add . && git commit -m 'chore: release'" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "git add/commit are worktree-internal and must be allowed"
+    );
+}
+
+#[test]
+fn blocks_git_push_without_owner() {
+    let event = event("Bash", json!({ "command": "git push origin main" }));
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("non-file-op mutating bash command must block");
+        .expect("git push must block without owner");
+    assert!(decision.reason.contains("owner"));
+}
+
+#[test]
+fn allows_git_push_with_session_bypass() {
+    let event = event("Bash", json!({ "command": "git push origin main" }));
+    let decision = evaluate(
+        &event,
+        workflow_policy::WorkflowContext::with_bypass(gwt_agent::types::WorkflowBypass::Release),
+    );
+    assert!(decision.is_none(), "session bypass must allow git push");
+}
+
+#[test]
+fn allows_git_push_with_chore_bypass() {
+    let event = event("Bash", json!({ "command": "git push" }));
+    let decision = evaluate(
+        &event,
+        workflow_policy::WorkflowContext::with_bypass(gwt_agent::types::WorkflowBypass::Chore),
+    );
+    assert!(decision.is_none(), "chore bypass must allow git push");
+}
+
+#[test]
+fn allows_sed_in_place_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "sed -i 's/old/new/' Cargo.toml" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "sed -i is worktree-internal and must be allowed"
+    );
+}
+
+#[test]
+fn allows_shell_redirect_without_owner() {
+    let event = event("Bash", json!({ "command": "echo '1.0.0' > version.txt" }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "shell redirects are worktree-internal and must be allowed"
+    );
+}
+
+#[test]
+fn blocks_git_push_in_chained_command() {
+    let event = event(
+        "Bash",
+        json!({ "command": "cargo fmt && git push origin main" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("chained command with git push must block");
     assert!(decision.reason.contains("owner"));
 }
 
@@ -315,13 +409,10 @@ fn evaluate_resolves_spec_owner_from_session_cache() {
         let session_id = save_session(&repo_path, "feature/workflow", Some(1935));
         std::env::set_var(GWT_SESSION_ID_ENV, session_id);
 
-        let event = event(
-            "Write",
-            json!({ "file_path": "src/lib.rs", "content": "fn x() {}\n" }),
-        );
+        let event = event("Bash", json!({ "command": "git push" }));
         let decision =
             workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
-        let decision = decision.expect("missing plan must block");
+        let decision = decision.expect("missing plan must block external ops");
         assert!(decision.reason.contains("plan"));
     });
 }

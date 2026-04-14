@@ -7,7 +7,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget};
+use crate::types::{
+    AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass,
+};
 
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
@@ -44,6 +46,8 @@ pub struct Session {
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
     pub linked_issue_number: Option<u64>,
+    #[serde(default)]
+    pub workflow_bypass: Option<WorkflowBypass>,
     #[serde(default)]
     pub launch_command: String,
     #[serde(default)]
@@ -100,6 +104,7 @@ impl Session {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
+            workflow_bypass: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
             created_at: now,
@@ -291,6 +296,7 @@ mod tests {
             session.docker_lifecycle_intent,
             DockerLifecycleIntent::Connect
         );
+        assert!(session.workflow_bypass.is_none());
     }
 
     #[test]
@@ -338,6 +344,7 @@ mod tests {
         session.runtime_target = LaunchRuntimeTarget::Docker;
         session.docker_service = Some("web".into());
         session.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
+        session.workflow_bypass = Some(WorkflowBypass::Release);
         session.launch_command = "codex".into();
         session.launch_args = vec![
             "--no-alt-screen".into(),
@@ -377,6 +384,7 @@ mod tests {
                 "--last".to_string()
             ]
         );
+        assert_eq!(loaded.workflow_bypass, Some(WorkflowBypass::Release));
         assert_eq!(loaded.display_name, "Gemini CLI");
     }
 
@@ -437,6 +445,7 @@ mod tests {
         );
         assert!(loaded.launch_command.is_empty());
         assert!(loaded.launch_args.is_empty());
+        assert!(loaded.workflow_bypass.is_none());
     }
 
     #[test]
