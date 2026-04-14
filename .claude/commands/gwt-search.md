@@ -6,7 +6,7 @@ allowed-tools: Read, Glob, Grep, Bash
 
 # Search Command
 
-Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB vector embeddings. Use as mandatory preflight before creating new SPECs or Issues.
+Unified semantic search over SPEC Issues, GitHub Issues, and project source files using ChromaDB vector embeddings. Use as mandatory preflight before creating new SPECs or Issues.
 
 ## Usage
 

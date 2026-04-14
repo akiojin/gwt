@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,33 @@ class AutoBuildFallbackTests(unittest.TestCase):
             "fn debounce_events() {}\n"
         )
         (root / "README.md").write_text("# project\n")
+
+    def _write_cached_issue(
+        self,
+        cache_root: Path,
+        number: int,
+        title: str,
+        body: str,
+        labels,
+    ) -> None:
+        issue = cache_root / str(number)
+        issue.mkdir(parents=True, exist_ok=True)
+        (issue / "meta.json").write_text(
+            json.dumps(
+                {
+                    "number": number,
+                    "title": title,
+                    "labels": labels,
+                    "state": "open",
+                    "updated_at": "2026-04-14T00:00:00Z",
+                    "comment_ids": [],
+                }
+            )
+        )
+        (issue / "body.md").write_text(body)
+        sections = issue / "sections"
+        sections.mkdir(exist_ok=True)
+        (sections / "spec.md").write_text(body)
 
     def test_search_files_auto_builds_when_index_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,35 +145,92 @@ class AutoBuildFallbackTests(unittest.TestCase):
     def test_search_specs_auto_builds_when_index_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
-            (root / "specs" / "SPEC-1").mkdir(parents=True)
-            (root / "specs" / "SPEC-1" / "spec.md").write_text(
-                "# Test SPEC\nWatcher debounce semantics.\n"
+            root.mkdir()
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
+            self._write_cached_issue(
+                cache_root,
+                1939,
+                "gwt-spec: Semantic search platform",
+                "# Semantic search platform\nWatcher debounce semantics.\n",
+                ["gwt-spec", "phase/review"],
             )
-            (root / "specs" / "SPEC-1" / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "id": "1",
-                        "title": "Test SPEC",
-                        "status": "open",
-                        "phase": "draft",
-                    }
-                )
+            self._write_cached_issue(
+                cache_root,
+                2000,
+                "Plain issue",
+                "# Plain issue\nWatcher noise that must not appear in spec search.\n",
+                ["bug"],
             )
 
             db_root = Path(tmp) / "index_root"
-            result = runner.action_search_v2(
-                action="search-specs",
-                repo_hash="abc1234567890def",
-                worktree_hash="111122223333ffff",
-                project_root=str(root),
-                query="watcher",
-                n_results=5,
-                no_auto_build=False,
-                db_root=db_root,
-            )
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                result = runner.action_search_v2(
+                    action="search-specs",
+                    repo_hash="abc1234567890def",
+                    worktree_hash="111122223333ffff",
+                    project_root=str(root),
+                    query="watcher debounce",
+                    n_results=5,
+                    no_auto_build=False,
+                    db_root=db_root,
+                )
 
             self.assertTrue(result["ok"], result)
             self.assertIn("specResults", result)
+            self.assertEqual(len(result["specResults"]), 1, result["specResults"])
+            self.assertEqual(result["specResults"][0]["spec_id"], "1939")
+            self.assertEqual(
+                result["specResults"][0]["title"],
+                "gwt-spec: Semantic search platform",
+            )
+
+    def test_search_specs_refreshes_existing_index_from_issue_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
+            self._write_cached_issue(
+                cache_root,
+                1939,
+                "gwt-spec: Semantic search platform",
+                "# Semantic search platform\nWatcher debounce semantics.\n",
+                ["gwt-spec", "phase/review"],
+            )
+
+            db_root = Path(tmp) / "index_root"
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                initial = runner.action_search_v2(
+                    action="search-specs",
+                    repo_hash="abc1234567890def",
+                    worktree_hash="111122223333ffff",
+                    project_root=str(root),
+                    query="watcher debounce",
+                    n_results=5,
+                    no_auto_build=False,
+                    db_root=db_root,
+                )
+
+                self.assertTrue(initial["ok"], initial)
+                self.assertEqual(initial["specResults"][0]["spec_id"], "1939")
+
+                spec_path = cache_root / "1939" / "sections" / "spec.md"
+                spec_path.write_text(
+                    "# Semantic search platform\nIssue cache refresh contract.\n"
+                )
+                refreshed = runner.action_search_v2(
+                    action="search-specs",
+                    repo_hash="abc1234567890def",
+                    worktree_hash="111122223333ffff",
+                    project_root=str(root),
+                    query="issue cache refresh contract",
+                    n_results=5,
+                    no_auto_build=False,
+                    db_root=db_root,
+                )
+
+            self.assertTrue(refreshed["ok"], refreshed)
+            self.assertEqual(len(refreshed["specResults"]), 1, refreshed["specResults"])
+            self.assertEqual(refreshed["specResults"][0]["spec_id"], "1939")
 
 
 if __name__ == "__main__":
