@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook runtime-state PostToolUse",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook runtime-state PostToolUse",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook runtime-state PreToolUse",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook runtime-state PreToolUse",
             "type": "command"
           }
         ],
@@ -24,7 +24,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook workflow-policy",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook workflow-policy",
             "type": "command"
           }
         ],
@@ -35,7 +35,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook runtime-state SessionStart",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook runtime-state SessionStart",
             "type": "command"
           }
         ],
@@ -44,7 +44,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook coordination-event SessionStart",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook coordination-event SessionStart",
             "type": "command"
           }
         ],
@@ -55,7 +55,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook runtime-state Stop",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook runtime-state Stop",
             "type": "command"
           }
         ],
@@ -64,7 +64,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook coordination-event Stop",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook coordination-event Stop",
             "type": "command"
           }
         ],
@@ -75,7 +75,7 @@
       {
         "hooks": [
           {
-            "command": "'/Users/akiojin/Workbench/gwt/feature/update-skills/target/debug/gwt-tui' hook runtime-state UserPromptSubmit",
+            "command": "'/Users/akiojin/Workbench/gwt/develop/target/debug/gwt-tui' hook runtime-state UserPromptSubmit",
             "type": "command"
           }
         ],
